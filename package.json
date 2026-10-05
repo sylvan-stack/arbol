@@ -1,0 +1,10 @@
+{
+  "name": "@sylvan-stack/arbol",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Arbol 2: the rewrite of Arbol, the local macOS application for working with several coding agents at once.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sylvan-stack/arbol.git"
+  }
+}
