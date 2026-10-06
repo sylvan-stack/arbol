@@ -2,7 +2,7 @@
 
 Arbol 2: the rewrite of Arbol, the local macOS application for working with several coding agents at once.
 
-The shared Driver conformance runner is implemented in [`conformance/`](conformance/README.md), starting with C31 and the `info` portion of C32 (SYL-77). The application itself remains a scaffold.
+The shared Driver conformance runner is implemented in [`conformance/`](conformance/README.md), with C31, the `info` portion of C32 (SYL-77), and the local Subscription portions of C1 and C40 (SYL-78). The application itself remains a scaffold.
 
 | | |
 |---|---|

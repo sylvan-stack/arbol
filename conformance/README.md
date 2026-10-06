@@ -1,6 +1,6 @@
 # Driver conformance
 
-One command tests every Driver through its command line, using that Driver's `dev stand-in` instead of the vendor tool. It imports no Driver code and uses temporary homes, no account, network, Keychain or quota. C31 is implemented; C32 currently covers `info` only. Other scenarios are added with their implementation tasks.
+One command tests every Driver through its command line, using that Driver's `dev stand-in` instead of the vendor tool. It imports no Driver code and uses temporary homes, no account, network, Keychain or quota. C1 covers families, create, list and relabel; C40 covers unsigned model requests, checks and usage. C31 is implemented; C32 covers `info` only. The report names what remains pending in partial scenarios. Other scenarios are added with their implementation tasks.
 
 Use Node.js 24 (`nvm use`), run `npm ci` and `npm run build`, and build the Driver being checked. Then:
 

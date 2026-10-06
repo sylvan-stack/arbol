@@ -19,12 +19,14 @@ test('runner.shared-scenarios checks a second Driver protocol without Driver imp
   assert.equal(await runSuite(command, selectScenarios(), { write: line => reports.push(line) }), 0);
   assert.match(reports.join('\n'), /PASS C31/);
   assert.match(reports.join('\n'), /PASS C32.*info only/);
-  assert.equal(reports.at(-1), '2/2 scenarios passed.');
+  assert.match(reports.join('\n'), /PASS C1.*removal pending/);
+  assert.match(reports.join('\n'), /PASS C40.*run refusals pending/);
+  assert.equal(reports.at(-1), '4/4 scenarios passed.');
 });
 
 test('runner.isolation gives each scenario a clean home, settings, time scale and working folder', async () => {
   const homes: string[] = [];
-  const selected = selectScenarios().map(scenario => ({ ...scenario, async run(fixture: ScenarioHome) {
+  const selected = selectScenarios('C31,C32').map(scenario => ({ ...scenario, async run(fixture: ScenarioHome) {
     homes.push(fixture.home);
     assert.equal((await stat(fixture.home)).mode & 0o777, 0o700);
     assert.equal(fixture.env.ARBOL_TEST_TIME_SCALE, '100');
@@ -50,7 +52,7 @@ test('runner.isolation gives each scenario a clean home, settings, time scale an
 test('runner.failure reports expected and received, continues, and cleans both homes', async () => {
   const homes: string[] = [];
   const reports: string[] = [];
-  const selected = selectScenarios().map(scenario => ({ ...scenario, async run(home: ScenarioHome) {
+  const selected = selectScenarios('C31,C32').map(scenario => ({ ...scenario, async run(home: ScenarioHome) {
     homes.push(home.home); await scenario.run(home);
   } }));
   assert.equal(await runSuite([...command, '--fixture=wrong'], selected, { write: line => reports.push(line) }), 1);
@@ -125,7 +127,8 @@ test('runner.cancellation stops the active invocation and removes its home', asy
 test('runner.selection runs only requested, known scenarios', () => {
   assert.deepEqual(selectScenarios('C32').map(s => s.id), ['C32']);
   assert.deepEqual(selectScenarios('C32,C31 C31').map(s => s.id), ['C31', 'C32']);
-  for (const ids of ['', 'C1', 'C31,C99']) assert.throws(() => selectScenarios(ids));
+  assert.deepEqual(selectScenarios('C1,C40').map(s => s.id), ['C1', 'C40']);
+  for (const ids of ['', 'C2', 'C31,C99']) assert.throws(() => selectScenarios(ids));
 });
 
 test('runner.cli exposes the program, selection and meaningful failure statuses', async () => {
@@ -135,7 +138,7 @@ test('runner.cli exposes the program, selection and meaningful failure statuses'
   assert.equal(passed.status, 0); assert.match(passed.stdout, /1\/1 scenarios passed/); assert.doesNotMatch(passed.stdout, /C32/);
   const failed = await invoke([process.execPath, cli], ['--driver', driver, '--only', 'C32'], options);
   assert.equal(failed.status, 1); assert.match(failed.stdout, /FAIL C32[\s\S]*Expected: 1[\s\S]*Received: 99/);
-  for (const args of [[], ['--driver', driver, '--only', 'C1'], ['--driver', 'missing-driver'], ['--unknown'], ['--driver', driver, '--driver', driver]]) {
+  for (const args of [[], ['--driver', driver, '--only', 'C2'], ['--driver', 'missing-driver'], ['--unknown'], ['--driver', driver, '--driver', driver]]) {
     const refused = await invoke([process.execPath, cli], args, options);
     assert.equal(refused.status, 2); assert.match(refused.stderr, /Usage: arbol-conformance/); assert.equal(refused.stdout, '');
   }
