@@ -217,7 +217,7 @@ export const c8: Scenario = { id: 'C8', title: 'Clean environments for subscript
   await signIn(home, 'anthropic'); await home.call(['subscriptions', 'check', 'anthropic']); await home.call(['subscriptions', 'models', 'anthropic']);
   for (const received of await home.received()) { equal('No inherited selectors', received.checks.injectedVariablesAbsent, true); if (received.arguments[0] !== '--version') equal('Both homes private', received.checks.privateHome, true); }
 } };
-export const c39: Scenario = { id: 'C39', title: 'Two accounts of one family stay independent', scope: 'independent login, homes and sign-out; conversation reuse pending', covers: ['DRV-1.2 (subscriptions)'], async run(home) {
+export const c39: Scenario = { id: 'C39', title: 'Two accounts of one family stay independent', scope: 'independent login, homes and sign-out; conversation separation covered by C14', covers: ['DRV-1.2 (subscriptions)'], async run(home) {
   await home.part('success'); home.env.ARBOL_TEST_TIME_SCALE = '10';
   const family = text('Vendor family', (await families(home)).find(f => f.auth === 'vendor_login')?.id);
   const created = await home.json(['subscriptions', 'create', '--family', family, '--label', 'Second', '--id', 'second']); equal('Creation exit', created.process.status, 0);

@@ -30,7 +30,7 @@ export async function signed(home: ScenarioHome): Promise<string> {
 }
 const start = (home: ScenarioHome, id: string, message = 'answer', extra: string[] = []) => home.call(['run', '--subscription', id, ...extra, message]);
 const calls = async (home: ScenarioHome) => (await home.received()).filter(record => record.arguments.includes('--input-format') && record.stage !== 'input');
-export const c10: Scenario = { id: 'C10', title: 'Fresh run and request defaults', scope: 'fresh runs, whole blocks, options, defaults and unreadable settings; history pending C14',
+export const c10: Scenario = { id: 'C10', title: 'Fresh run and request defaults', scope: 'fresh runs, whole blocks, options, defaults and unreadable settings; history covered by C14',
   covers: ['DRV-2.1', 'DRV-2.3', 'DRV-2.4', 'DRV-0.2', 'DRV-0.16'], async run(home) {
     const id = await signed(home);
     const records = stream(await start(home, id, 'answer', ['--label', 'exchange=41']));
@@ -52,7 +52,7 @@ export const c10: Scenario = { id: 'C10', title: 'Fresh run and request defaults
     const settings = join(home.home, '.arbol', 'arbol-' + String(info.result.driver) + '-driver.json'); await writeFile(settings, '{');
     const refused = stream(await start(home, id), 'failed'); equal('Unreadable settings only final', refused.length, 1); equal('Settings refusal', refused[0]!.error.code, 'invalid_input');
   } };
-export const c11: Scenario = { id: 'C11', title: 'Text before and after a shell call', scope: 'live block ordering and call pairing; history mapping pending C14', covers: ['DRV-2.5', 'DRV-2.6', 'DRV-3.19 (events)'], async run(home) {
+export const c11: Scenario = { id: 'C11', title: 'Text before and after a shell call', scope: 'live block ordering and call pairing; history mapping covered by C14', covers: ['DRV-2.5', 'DRV-2.6', 'DRV-3.19 (events)'], async run(home) {
   const id = await signed(home); const records = stream(await start(home, id, 'answer', ['--tools', 'all', '--cwd', home.home]));
   const begun = records.findIndex(event => event.type === 'tool_started'); const ended = records.findIndex(event => event.type === 'tool_finished');
   check('Text before call', records.findIndex(event => event.type === 'text') < begun, 'text before tool_started', records);
