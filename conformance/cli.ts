@@ -1,7 +1,8 @@
 import { resolveCommand } from './command.js';
 import { runSuite, selectScenarios } from './runner.js';
+import { scenarios } from './scenarios/index.js';
 
-const usage = 'Usage: arbol-conformance --driver <command> [--only <scenario ids>]\nAvailable: C31, C32 (info only). Quote commands with fixed arguments and paths with spaces.\nExit status: 0 passed; 1 scenario failed; 2 invalid input or stopped.';
+const usage = `Usage: arbol-conformance --driver <command> [--only <scenario ids>]\nAvailable: ${scenarios.map(scenario => scenario.id).join(', ')}. Quote commands with fixed arguments and paths with spaces.\nExit status: 0 passed; 1 scenario failed; 2 invalid input or stopped.`;
 
 export async function main(args: string[]): Promise<number> {
   const cancellation = new AbortController();

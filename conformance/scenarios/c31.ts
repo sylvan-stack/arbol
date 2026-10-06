@@ -21,7 +21,7 @@ export const c31: Scenario = {
         const found = text('Old tool version', tool.version);
         check('Old version is below the support boundary', versionOrder(found, needed) < 0, `a version below ${needed}`, found);
       }
-      const failure = await home.json(['run', 'Answer with the single word: ready']);
+      const failure = await home.json(['dev', 'probe']);
       equal(`${part}: refused operation exit status`, failure.process.status, 1);
       const error = object(`${part}: typed error`, failure.result.error);
       equal(`${part}: error code`, error.code, part === 'missing' ? 'tool_missing' : 'tool_unsupported');

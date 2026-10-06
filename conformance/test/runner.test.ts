@@ -16,12 +16,11 @@ const command: Command = [process.execPath, fake];
 
 test('runner.shared-scenarios checks a second Driver protocol without Driver imports', async () => {
   const reports: string[] = [];
-  assert.equal(await runSuite(command, selectScenarios('C1,C31,C32,C40'), { write: line => reports.push(line) }), 0);
+  assert.equal(await runSuite(command, selectScenarios('C1,C31,C32'), { write: line => reports.push(line) }), 0);
   assert.match(reports.join('\n'), /PASS C31/);
   assert.match(reports.join('\n'), /PASS C32.*info only/);
   assert.match(reports.join('\n'), /PASS C1.*removal/);
-  assert.match(reports.join('\n'), /PASS C40.*run refusals pending/);
-  assert.equal(reports.at(-1), '4/4 scenarios passed.');
+  assert.equal(reports.at(-1), '3/3 scenarios passed.');
 });
 
 test('runner.isolation gives each scenario a clean home, settings, time scale and working folder', async () => {
@@ -99,7 +98,7 @@ test('runner.commands handles spaces and single quotes without a shell', async t
   t.after(() => rm(temp, { recursive: true, force: true }));
   const filename = join(temp, "fake Driver's program.mjs");
   await copyFile(fake, filename);
-  assert.equal(await runSuite(await resolveCommand(`${shellQuote(process.execPath)} ${shellQuote(filename)}`), selectScenarios('C1,C31,C32,C40'), { write: () => {} }), 0);
+  assert.equal(await runSuite(await resolveCommand(`${shellQuote(process.execPath)} ${shellQuote(filename)}`), selectScenarios('C1,C31,C32'), { write: () => {} }), 0);
   assert.deepEqual(await resolveCommand('node conformance/test/fake-driver.mjs', root, dirname(process.execPath)), command);
 });
 

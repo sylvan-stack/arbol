@@ -1,10 +1,11 @@
 import { check, equal, object } from '../check.js';
 import type { Scenario } from './types.js';
+import { stream, runRefusals } from './runs.js';
 
 export const c40: Scenario = {
   id: 'C40', title: 'Subscription refusals before starting the tool',
-  scope: 'unsigned models, check and usage; attention-state recovery in C4; run refusals pending',
-  covers: ['DRV-1.11 (unsigned models, check and usage)'],
+  scope: 'unsigned models, check, usage and runs; folders, duplicate ID, models and effort',
+  covers: ['DRV-1.11', 'DRV-2.2'],
   async run(home) {
     const reply = await home.call(['subscriptions', 'list']);
     equal('List exit status', reply.status, 0);
@@ -22,7 +23,10 @@ export const c40: Scenario = {
       equal('Usage exit status', usage.process.status, 0);
       equal('Usage outcome', usage.result.outcome, 'needs_sign_in');
       equal('No numeric windows for unsigned usage', usage.result.windows, []);
+      const run = stream(await home.call(['run', '--subscription', String(subscription.id), 'answer']), 'failed');
+      equal('Unsigned run one final', run.length, 1); equal('Unsigned run error', object('Error', run[0]!.error).code, 'not_signed_in');
     }
     equal('The vendor tool is never started', await home.received(), []);
+    await runRefusals(home);
   },
 };
