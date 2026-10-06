@@ -96,7 +96,7 @@ export const c20: Scenario = { id: 'C20', title: 'Large tool results are cut', s
     check('Whole UTF-8 characters', !JSON.stringify(result.result).includes('�'), 'valid UTF-8', result.result);
   }
 } };
-export const c33: Scenario = { id: 'C33', title: 'Run input and active records', scope: 'no control, stdin request, malformed control and runs list; questions and runs stop pending', covers: ['DRV-2.25', 'DRV-2.27', 'DRV-2.28', 'DRV-6.7'], async run(home) {
+export const c33: Scenario = { id: 'C33', title: 'Run input and active records', scope: 'no control, stdin request, malformed control, runs list and runs stop; question refusal pending SYL-84', covers: ['DRV-2.25', 'DRV-2.26', 'DRV-2.27', 'DRV-2.28', 'DRV-6.7', 'DRV-6.8'], async run(home) {
   const id = await signed(home); stream(await start(home, id));
   const active = home.start(['run', '--subscription', id, '--run-id', 'visible-run', '--control', 'hold']);
   try {
@@ -110,6 +110,13 @@ export const c33: Scenario = { id: 'C33', title: 'Run input and active records',
   try { request.send({ subscriptionId: id, history: [], tools: 'none', input: { role: 'user', text: 'stdin' } }); request.child.stdin.end(); stream(await request.done); }
   finally { await request.dispose(); }
   equal('No ended runs listed', JSON.parse((await home.call(['runs', 'list'])).stdout), []);
+  await home.part('stopping'); const stoppable = home.start(['run', '--subscription', id, '--run-id', 'stop-from-peer', 'answer']);
+  try {
+    for (let n = 0; n < 100; n++) { if (stoppable.lines.some((event: any) => event.type === 'started')) break; await delay(10); }
+    check('Run started before peer stop', stoppable.lines.some((event: any) => event.type === 'started'), 'started event', stoppable.lines);
+    const stopped = await home.call(['runs', 'stop', 'stop-from-peer']); equal('Peer stop exit', stopped.status, 0); equal('Peer stop output', stopped.stdout, '');
+    stream(await stoppable.done, 'cancelled'); equal('Final emitted before stop returns', stoppable.lines.at(-1) && (stoppable.lines.at(-1) as any).type, 'finished');
+  } finally { await stoppable.dispose(); }
 } };
 export const c42: Scenario = { id: 'C42', title: 'Failure preserves output and unfinished calls', scope: 'unexpected exit with output and known usage; no retry', covers: ['DRV-2.8', 'DRV-2.9', 'DRV-2.10'], async run(home) {
   const id = await signed(home); const records = stream(await start(home, id), 'failed'); const final = records.at(-1)!;
