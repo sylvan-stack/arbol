@@ -49,6 +49,7 @@ if (args[0] === 'dev' && args[1] === 'stand-in') {
       break;
     }
     case 'check': case 'models': result = fail('not_signed_in'); break;
+    case 'remove': await writeFile(file, JSON.stringify(subscriptions.filter(item => item.id !== args[2]))); process.exit(0); break;
     case 'usage': result = { outcome: 'needs_sign_in', windows: [], fetchedAt: new Date().toISOString() }; break;
   }
   process.stdout.write(JSON.stringify(result) + '\n');

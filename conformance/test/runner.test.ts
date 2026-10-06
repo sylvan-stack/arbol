@@ -16,10 +16,10 @@ const command: Command = [process.execPath, fake];
 
 test('runner.shared-scenarios checks a second Driver protocol without Driver imports', async () => {
   const reports: string[] = [];
-  assert.equal(await runSuite(command, selectScenarios(), { write: line => reports.push(line) }), 0);
+  assert.equal(await runSuite(command, selectScenarios('C1,C31,C32,C40'), { write: line => reports.push(line) }), 0);
   assert.match(reports.join('\n'), /PASS C31/);
   assert.match(reports.join('\n'), /PASS C32.*info only/);
-  assert.match(reports.join('\n'), /PASS C1.*removal pending/);
+  assert.match(reports.join('\n'), /PASS C1.*removal/);
   assert.match(reports.join('\n'), /PASS C40.*run refusals pending/);
   assert.equal(reports.at(-1), '4/4 scenarios passed.');
 });
@@ -99,7 +99,7 @@ test('runner.commands handles spaces and single quotes without a shell', async t
   t.after(() => rm(temp, { recursive: true, force: true }));
   const filename = join(temp, "fake Driver's program.mjs");
   await copyFile(fake, filename);
-  assert.equal(await runSuite(await resolveCommand(`${shellQuote(process.execPath)} ${shellQuote(filename)}`), selectScenarios(), { write: () => {} }), 0);
+  assert.equal(await runSuite(await resolveCommand(`${shellQuote(process.execPath)} ${shellQuote(filename)}`), selectScenarios('C1,C31,C32,C40'), { write: () => {} }), 0);
   assert.deepEqual(await resolveCommand('node conformance/test/fake-driver.mjs', root, dirname(process.execPath)), command);
 });
 
@@ -128,7 +128,7 @@ test('runner.selection runs only requested, known scenarios', () => {
   assert.deepEqual(selectScenarios('C32').map(s => s.id), ['C32']);
   assert.deepEqual(selectScenarios('C32,C31 C31').map(s => s.id), ['C31', 'C32']);
   assert.deepEqual(selectScenarios('C1,C40').map(s => s.id), ['C1', 'C40']);
-  for (const ids of ['', 'C2', 'C31,C99']) assert.throws(() => selectScenarios(ids));
+  for (const ids of ['', 'C9', 'C31,C99']) assert.throws(() => selectScenarios(ids));
 });
 
 test('runner.cli exposes the program, selection and meaningful failure statuses', async () => {
@@ -138,7 +138,7 @@ test('runner.cli exposes the program, selection and meaningful failure statuses'
   assert.equal(passed.status, 0); assert.match(passed.stdout, /1\/1 scenarios passed/); assert.doesNotMatch(passed.stdout, /C32/);
   const failed = await invoke([process.execPath, cli], ['--driver', driver, '--only', 'C32'], options);
   assert.equal(failed.status, 1); assert.match(failed.stdout, /FAIL C32[\s\S]*Expected: 1[\s\S]*Received: 99/);
-  for (const args of [[], ['--driver', driver, '--only', 'C2'], ['--driver', 'missing-driver'], ['--unknown'], ['--driver', driver, '--driver', driver]]) {
+  for (const args of [[], ['--driver', driver, '--only', 'C9'], ['--driver', 'missing-driver'], ['--unknown'], ['--driver', driver, '--driver', driver]]) {
     const refused = await invoke([process.execPath, cli], args, options);
     assert.equal(refused.status, 2); assert.match(refused.stderr, /Usage: arbol-conformance/); assert.equal(refused.stdout, '');
   }

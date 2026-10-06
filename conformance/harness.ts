@@ -6,6 +6,7 @@ import { shellQuote } from './command.js';
 import { invoke } from './process.js';
 import type { Command } from './command.js';
 import type { ProcessResult } from './process.js';
+import { startInteraction } from './interaction.js';
 
 export interface Received {
   scenario: string;
@@ -52,6 +53,11 @@ export class ScenarioHome {
 
   call(args: string[]): Promise<ProcessResult> {
     return invoke(this.command, args, { cwd: this.home, env: this.env, timeoutMs: this.timeoutMs, ...(this.signal ? { signal: this.signal } : {}) });
+  }
+  start(args: string[]) { return startInteraction(this.command, args, { cwd: this.home, env: this.env, timeoutMs: this.timeoutMs }); }
+
+  async settings(value: Record<string, unknown>): Promise<void> {
+    for (const driver of ['claude', 'codex']) await writeFile(join(this.home, '.arbol', `arbol-${driver}-driver.json`), JSON.stringify({ toolPath: this.toolPath, ...value }), { mode: 0o600 });
   }
 
   async json(args: string[]): Promise<{ process: ProcessResult; result: Record<string, unknown> }> {

@@ -2,7 +2,7 @@ import { check, equal, object, text } from '../check.js';
 import type { Scenario } from './types.js';
 
 export const c1: Scenario = {
-  id: 'C1', title: 'Local Subscription records', scope: 'families, create, list and relabel; removal pending',
+  id: 'C1', title: 'Local Subscription records', scope: 'families, create, list, relabel and removal',
   covers: ['DRV-1.1 (families, create, list and relabel)', 'DRV-1.14 (list)', 'DRV-1.15', 'DRV-1.23 (create and update)'],
   async run(home) {
     const familyReply = await home.call(['subscriptions', 'families']);
@@ -49,6 +49,10 @@ export const c1: Scenario = {
       const explicit = await home.json(['subscriptions', 'create', '--family', id, '--label', 'Named account', '--id', `${id}-work`]);
       equal('Explicit creation succeeds', explicit.process.status, 0);
       equal('Explicit identifier', explicit.result.id, `${id}-work`);
+      const removed = await home.call(['subscriptions', 'remove', `${id}-work`]);
+      equal('Removal exit status', removed.status, 0);
+      equal('Removal returns no document', removed.stdout, '');
+      equal('Removed account is absent', (await listed()).some(item => item.id === `${id}-work`), false);
     }
     equal('Local commands never start the vendor tool', await home.received(), []);
   },

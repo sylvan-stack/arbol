@@ -3,7 +3,7 @@ import type { Scenario } from './types.js';
 
 export const c40: Scenario = {
   id: 'C40', title: 'Subscription refusals before starting the tool',
-  scope: 'unsigned models, check and usage; attention-state check and run refusals pending',
+  scope: 'unsigned models, check and usage; attention-state recovery in C4; run refusals pending',
   covers: ['DRV-1.11 (unsigned models, check and usage)'],
   async run(home) {
     const reply = await home.call(['subscriptions', 'list']);
