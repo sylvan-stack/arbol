@@ -2,7 +2,7 @@
 
 Arbol 2: the rewrite of Arbol, the local macOS application for working with several coding agents at once.
 
-This repository is an empty scaffold created on 2026-10-05. No implementation exists yet.
+The shared Driver conformance runner is implemented in [`conformance/`](conformance/README.md), starting with C31 and the `info` portion of C32 (SYL-77). The application itself remains a scaffold.
 
 | | |
 |---|---|
