@@ -4,6 +4,8 @@ Arbol 2: the rewrite of Arbol, the local macOS application for working with seve
 
 The shared Driver conformance runner is implemented in [`conformance/`](conformance/README.md), with C31, the `info` portion of C32 (SYL-77), and the local Subscription portions of C1 and C40 (SYL-78). The application itself remains a scaffold.
 
+The [`arbol-builds` tool](builds/README.md) builds components into numbered folders, runs their checks, lists and withdraws Builds, prunes older files on command, and writes standalone component launchers (SYL-76). Install it with `npm run install:builds` using Node.js 24 or later. The Drivers' own build descriptions and first Builds are separate tasks.
+
 | | |
 |---|---|
 | Package | `@sylvan-stack/arbol` 2.0.0 |

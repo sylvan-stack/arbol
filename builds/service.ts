@@ -1,20 +1,24 @@
 import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, writeSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { description } from './config.js';
 import type { Locations } from './config.js';
 import { buildPattern, defaultRecord, executableEntry, numberedFolders, readRecords, runnable } from './records.js';
 import type { BuildRecord } from './records.js';
+import { withMutationLock } from './mutation.js';
 
 function atomicWrite(path: string, contents: string, mode = 0o600): void {
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   try { writeFileSync(temporary, contents, { mode, flag: 'wx' }); renameSync(temporary, path); }
   finally { rmSync(temporary, { force: true }); }
 }
-export function saveRecord(folder: string, record: BuildRecord): void {
+function saveUnlocked(folder: string, record: BuildRecord): void {
   atomicWrite(join(folder, 'build.json'), JSON.stringify(record, null, 2) + '\n');
+}
+export function saveRecord(folder: string, record: BuildRecord): void {
+  withMutationLock(dirname(folder), () => saveUnlocked(folder, record));
 }
 export function reserve(registry: string, component: string): { folder: string; build: string } {
   const root = join(registry, component);
@@ -121,25 +125,29 @@ export function showBuild(registry: string, component: string, number?: string):
   return record;
 }
 export function withdrawBuild(registry: string, component: string, number: string, reason: string): BuildRecord {
-  const record = showBuild(registry, component, number);
-  if (record.status !== 'working' || !runnable(registry, record)) throw new Error('Only a working, unpruned Build can be withdrawn.');
-  record.status = 'withdrawn';
-  record.withdrawn = { at: new Date().toISOString(), reason };
-  saveRecord(join(registry, component, number), record);
-  return record;
+  return withMutationLock(join(registry, component), () => {
+    const record = showBuild(registry, component, number);
+    if (record.status !== 'working' || !runnable(registry, record)) throw new Error('Only a working, unpruned Build can be withdrawn.');
+    record.status = 'withdrawn';
+    record.withdrawn = { at: new Date().toISOString(), reason };
+    saveUnlocked(join(registry, component, number), record);
+    return record;
+  });
 }
 export function pruneBuilds(registry: string, component: string, keep: number): { component: string; pruned: string[] } {
-  const working = readRecords(registry, component).filter(record => record.status === 'working' && !record.prunedAt);
-  const selected = defaultRecord(registry, working)?.build;
-  const pruned: string[] = [];
-  for (const record of working.slice(keep)) {
-    if (record.build === selected) continue;
-    const folder = join(registry, component, record.build);
-    // Mark unavailable before removing files: a partial prune cannot be launched.
-    record.prunedAt = new Date().toISOString();
-    saveRecord(folder, record);
-    for (const item of readdirSync(folder)) if (item !== 'build.json' && item !== 'build.log') rmSync(join(folder, item), { recursive: true, force: true });
-    pruned.push(record.build);
-  }
-  return { component, pruned };
+  return withMutationLock(join(registry, component), () => {
+    const working = readRecords(registry, component).filter(record => record.status === 'working' && !record.prunedAt);
+    const selected = defaultRecord(registry, working)?.build;
+    const pruned: string[] = [];
+    for (const record of working.slice(keep)) {
+      if (record.build === selected) continue;
+      const folder = join(registry, component, record.build);
+      // Mark unavailable before removing files: a partial prune cannot be launched.
+      record.prunedAt = new Date().toISOString();
+      saveUnlocked(folder, record);
+      for (const item of readdirSync(folder)) if (item !== 'build.json' && item !== 'build.log') rmSync(join(folder, item), { recursive: true, force: true });
+      pruned.push(record.build);
+    }
+    return { component, pruned };
+  });
 }

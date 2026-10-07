@@ -1,4 +1,4 @@
-import { copyFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { locations } from './config.js';
@@ -11,10 +11,11 @@ export function install(args: string[]): { bin: string; program: string } {
   const bin = resolve(values.get('--bin-dir') ?? locations().bin);
   const library = join(bin, '.arbol-builds');
   mkdirSync(library, { recursive: true });
-  for (const name of ['cli', 'config', 'records', 'service']) copyFileSync(join(import.meta.dirname, `${name}.js`), join(library, `${name}.js`));
+  for (const name of ['cli', 'config', 'records', 'service', 'mutation']) copyFileSync(join(import.meta.dirname, `${name}.js`), join(library, `${name}.js`));
   writeFileSync(join(library, 'package.json'), '{"type":"module"}\n');
   const program = join(bin, 'arbol-builds');
   writeFileSync(program, `#!/usr/bin/env node\nimport { main } from ${JSON.stringify(pathToFileURL(join(library, 'cli.js')).href)};\nprocess.exitCode = await main(process.argv.slice(2));\n`, { mode: 0o755 });
+  chmodSync(program, 0o755);
   return { bin, program };
 }
 try { process.stdout.write(JSON.stringify(install(process.argv.slice(2))) + '\n'); }

@@ -6,6 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import type { TestContext } from 'node:test';
+import { pathToFileURL } from 'node:url';
 import { reserve } from '../service.js';
 import type { BuildDescription } from '../config.js';
 import type { BuildRecord } from '../records.js';
@@ -111,6 +112,51 @@ test('builds.concurrent invocations never reserve the same number', async t => {
   assert.equal(JSON.parse(f.launch().stdout).build, '4');
 });
 
+test('builds.concurrent-mutations serialises record writers and excludes killed reservations from later changes', async t => {
+  const f = fixture(t); f.build();
+  const componentFolder = join(f.registry, f.component);
+  const module = pathToFileURL(join(root, 'dist/builds/mutation.js')).href;
+  const worker = join(f.home, 'writer.mjs');
+  writeFileSync(worker, `import { withMutationLock } from ${JSON.stringify(module)};
+import { readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+const folder = process.argv[2]; const counter = join(folder, 'counter.json');
+const sleep = new Int32Array(new SharedArrayBuffer(4));
+for(let i=0; i<20; i++) withMutationLock(folder, () => {
+  const n = Number(readFileSync(counter, 'utf8'));
+  Atomics.wait(sleep,0,0,2);
+  writeFileSync(counter, String(n+1));
+});`);
+  writeFileSync(join(componentFolder, 'counter.json'), '0');
+  const writers = Array.from({length:4}, () => spawn(process.execPath, [worker, componentFolder], {env}));
+  for (const writer of writers) t.after(() => { if (writer.exitCode === null && writer.signalCode === null) writer.kill('SIGKILL'); });
+  const results = await Promise.all(writers.map(finished));
+  assert.ok(results.every(result => result.code === 0));
+  assert.equal(readFileSync(join(componentFolder, 'counter.json'), 'utf8'), '80');
+  writeFileSync(worker, `import { withMutationLock } from ${JSON.stringify(module)};
+withMutationLock(process.argv[2], () => { process.stdout.write('held\\n'); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,60000); });`);
+  const killed = spawn(process.execPath, [worker, componentFolder], {env});
+  const ended = finished(killed); await waitForOutput(killed); killed.kill('SIGKILL'); await ended;
+  assert.equal(f.call('withdraw', `${f.component}@1`, '--reason', 'after killed writer').status, 0);
+  assert.equal(f.launch(['-v', '1']).status, 0);
+});
+
+test('builds.concurrent-prune and withdrawal preserve a complete serial outcome', async t => {
+  const f = fixture(t); f.build(); f.build(); f.build();
+  const run = (args: string[]) => {
+    const child = spawn(process.execPath, [cli, ...args, '--registry-dir', f.registry], {env});
+    let text = ''; child.stdout.on('data', data => {text += String(data);});
+    return finished(child).then(result => {assert.equal(result.code,0,text); return JSON.parse(text);});
+  };
+  const [prune] = await Promise.all([
+    run(['prune',f.component,'--keep','1']),
+    run(['withdraw',`${f.component}@3`,'--reason','concurrent withdrawal']),
+  ]);
+  if (prune.pruned.includes('2')) assert.equal(f.launch().status, 1);
+  else { assert.deepEqual(prune.pruned,['1']); assert.equal(JSON.parse(f.launch().stdout).build,'2'); }
+  assert.equal(f.launch(['-v','3']).status,0);
+});
+
 test('builds.source records package, repository, branch, commit and uncommitted changes', t => {
   const f = fixture(t); const commit = f.git('rev-parse', 'HEAD');
   const first = f.build();
@@ -198,6 +244,10 @@ test('builds.launch-refusal lists runnable Builds and consumes -v only in first 
     const result = f.launch(args); assert.equal(result.status, 1); assert.deepEqual(JSON.parse(result.stdout).error.available, ['1']);
   }
   assert.deepEqual(JSON.parse(f.launch(['run', '-v', '2', '', 'a b', 'a\'b']).stdout).args, ['run', '-v', '2', '', 'a b', "a'b"]);
+  const path = join(f.registry, f.component, '2/build.json');
+  const building = JSON.parse(readFileSync(path, 'utf8')); building.status = 'building';
+  writeFileSync(path, JSON.stringify(building));
+  assert.equal(f.launch(['-v', '2']).status, 1);
 });
 
 test('builds.streams preserves standard input, output, errors, working folder, environment and exit status', t => {
@@ -269,6 +319,7 @@ test('builds.invalid-description and CLI input refuse without reserving a number
   const f = fixture(t);
   for (const args of [[], ['unknown'], ['build'], ['show', 'sample@01'], ['prune', 'sample'], ['withdraw', 'sample@1'], ['build', '../outside'], ['list', 'sample@1'], ['list', '--repo', f.repo], ['list', '--registry-dir'], ['list', '--unknown'], ['list', '--bin-dir=a', '--bin-dir=b']]) assert.equal(f.call(...args).status, 1);
   for (const patch of [{entry: '../outside'}, {build: []}, {checks: []}, {dataFormat: 0}, {checks: [{name:'same', command:'true'}, {name:'same', command:'true'}]}]) {
+    f.configure({entry:'program.mjs', build:['node build.mjs'], checks:[{name:'sample-check', command:'node check.mjs'}], dataFormat:1});
     f.configure(patch); assert.equal(f.call('build', f.component, '--repo', f.repo).status, 1); assert.ok(!existsSync(f.registry));
   }
 });
@@ -278,6 +329,8 @@ test('builds.install installs an independent tool that can create a standalone c
   const result = spawnSync(process.execPath, [installer, `--bin-dir=${f.bin}`], {env: {...env, HOME: f.home}, encoding: 'utf8'});
   assert.equal(result.status, 0, result.stdout + result.stderr);
   const installed = join(f.bin, 'arbol-builds');
+  chmodSync(installed, 0o600);
+  assert.equal(spawnSync(process.execPath, [installer, `--bin-dir=${f.bin}`], {env, encoding:'utf8'}).status, 0);
   const build = spawnSync(installed, ['--registry-dir', f.registry, 'build', f.component, '--repo', f.repo, '--bin-dir', f.bin], {env, encoding:'utf8'});
   assert.equal(build.status, 0, build.stdout + build.stderr);
   assert.equal(JSON.parse(f.launch().stdout).build, '1');
