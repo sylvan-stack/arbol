@@ -6,13 +6,17 @@ import { tmpdir } from 'node:os';
 import { commandWords, resolveCommand, shellQuote } from '../command.js';
 import { ScenarioHome } from '../harness.js';
 import { invoke } from '../process.js';
-import { runSuite, selectScenarios } from '../runner.js';
+import { runSuite, selectScenarios as registryScenarios } from '../runner.js';
+import { checkDriverInfo } from '../scenarios/c32.js';
 import type { Command } from '../command.js';
 
 const root = resolve(import.meta.dirname, '../../..');
 const fake = join(root, 'conformance/test/fake-driver.mjs');
 const cli = join(root, 'conformance/bin/arbol-conformance.mjs');
 const command: Command = [process.execPath, fake];
+// The synthetic second Driver exercises runner mechanics and identity, not inference.
+const selectScenarios = (ids: string) => registryScenarios(ids).map(scenario => scenario.id === 'C32'
+  ? { ...scenario, scope: 'info only for runner self-tests', run: checkDriverInfo } : scenario);
 
 test('runner.shared-scenarios checks a second Driver protocol without Driver imports', async () => {
   const reports: string[] = [];

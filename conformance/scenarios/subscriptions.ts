@@ -160,26 +160,28 @@ export const c4: Scenario = { id: 'C4', title: 'Rejected credentials and recover
     } finally { await gateway?.dispose(); }
   }
 } };
-export const c5: Scenario = { id: 'C5', title: 'Sign-out and removal while a run uses the account', scope: 'run-record refusal and forced stop with a synthetic run owner; real run lifecycle pending', covers: ['DRV-1.12 (run records)'], async run(home) {
-  const root = await state(home); await home.part('success'); home.env.ARBOL_TEST_TIME_SCALE = '10';
+export const c5: Scenario = { id: 'C5', title: 'Sign-out and removal while a real run uses the account', scope: 'live run refusal, forced cancellation, shell cleanup and account removal', covers: ['DRV-1.12'], async run(home) {
+  const root = await state(home); home.env.ARBOL_TEST_TIME_SCALE = '10';
   const id = text('Vendor family', (await families(home)).find(f => f.auth === 'vendor_login')?.id);
-  const runs = join(root, 'runs'); await import('node:fs/promises').then(fs => fs.mkdir(runs, { recursive: true }));
   for (const operation of ['sign-out', 'remove']) {
-    await signIn(home, id);
-    const path = join(runs, 'fixture-run.json'); const stopped = join(home.home, 'stopped');
-    await rm(stopped, { force: true });
-    const worker = spawn(process.execPath, ['-e', `const fs=require('node:fs'); process.on('SIGTERM',()=>{fs.rmSync(process.argv[1],{force:true});fs.writeFileSync(process.argv[2],'stopped');process.exit(0)});fs.writeFileSync(process.argv[3],'ready');setInterval(()=>{},1000);`, path, stopped, join(home.home, 'ready')], { env: home.env, stdio: 'ignore' });
+    await home.part('success'); await signIn(home, id); await home.part('hold');
+    const active = home.start(['run', '--subscription', id, '--tools', 'all', '--cwd', home.home, '--control', 'answer']);
     try {
-      for (let n = 0; n < 200; n++) { if (await stat(join(home.home, 'ready')).then(() => true).catch(() => false)) break; await delay(10); }
-      const owner = await exec('/bin/ps', ['-p', String(worker.pid), '-o', 'lstart='], { env: { PATH: '/usr/bin:/bin', LC_ALL: 'C', TZ: 'UTC' } });
-      await writeFile(path, JSON.stringify({ runId: 'fixture-run', subscriptionId: id, startedAt: new Date().toISOString(), owner: { pid: worker.pid, startedAt: new Date(Date.parse(owner.stdout.trim() + ' UTC')).toISOString() } }));
-      const refused = await home.json(['subscriptions', operation, id]); equal('Busy refusal', object('Error', refused.result.error).code, 'in_use'); equal('Busy refusal exit', refused.process.status, 1);
+      const deadline = performance.now() + 5000;
+      while (!active.lines.some((event: any) => event.type === 'started')) { check('Run starts', performance.now() < deadline, 'within five seconds', active.lines); await delay(10); }
+      const refused = await home.json(['subscriptions', operation, id]); equal('Busy refusal', object('Error', refused.result.error).code, 'in_use'); equal('Busy exit', refused.process.status, 1);
       equal('Refusal retains login', (await subscription(home, id)).state, 'signed_in');
       const forced = await home.call(['subscriptions', operation, id, '--force']); equal('Forced exit', forced.status, 0);
-      equal('Run stopped before change completes', await readFile(stopped, 'utf8'), 'stopped');
+      stream(await active.done, 'cancelled');
+      equal('Run record removed', await readdir(join(root, 'runs')), []);
+      equal('Run folder removed', await readdir(join(root, 'tmp')), []);
+      const seen = (await home.received()).filter(record => record.stage === 'input').at(-1)!;
+      for (const pid of [seen.checks.toolPid, seen.checks.backgroundPid]) if (typeof pid === 'number') {
+        equal('Tool and shell leftovers ended', await exec('/bin/ps', ['-p', String(pid), '-o', 'stat=']).then(reply => !reply.stdout.trim().startsWith('Z')).catch(() => false), false);
+      }
       equal('Credential removed', (await subscription(home, id)).state, 'signed_out');
       if (operation === 'remove') equal('Home removed', await stat(join(root, 'subscriptions', id, 'home')).then(() => false).catch(() => true), true);
-    } finally { worker.kill('SIGKILL'); await rm(join(home.home, 'ready'), { force: true }); }
+    } finally { await active.dispose(); }
   }
 } };
 export const c6: Scenario = { id: 'C6', title: 'Cancelling and killing a pending sign-in', scope: 'signal cancellation, dead-owner recovery and orphaned login child', covers: ['DRV-1.24', 'DRV-1.25', 'DRV-0.8'], async run(home) {
@@ -200,13 +202,22 @@ export const c6: Scenario = { id: 'C6', title: 'Cancelling and killing a pending
     } finally { await pending.dispose(); }
   }
 } };
-export const c7: Scenario = { id: 'C7', title: 'Credentials stay out of Driver data and output', scope: 'key sign-in/check/usage/catalog and tool-owned login; run output pending', covers: ['DRV-0.3 (subscriptions)', 'DRV-1.3 (subscriptions)', 'DRV-1.8'], async run(home) {
+export const c7: Scenario = { id: 'C7', title: 'Credentials stay out of Driver data and output', scope: 'subscription operations, streamed text/thinking, tools, errors, stderr, text output and tool-owned login', covers: ['DRV-0.3', 'DRV-1.3', 'DRV-1.8'], async run(home) {
   const root = await state(home); await home.part('success'); home.env.ARBOL_TEST_TIME_SCALE = '10';
   const gateway = await gatewayFixture(home); const outputs: string[] = [];
   try {
     const signed = await signIn(home, 'zai'); outputs.push(signed.result.stdout, signed.result.stderr);
     for (const command of ['check', 'usage', 'models']) { const result = await home.call(['subscriptions', command, 'zai']); outputs.push(result.stdout, result.stderr); }
     const vendor = await signIn(home, 'anthropic'); outputs.push(vendor.result.stdout, vendor.result.stderr);
+    for (const part of ['plain', 'failed', 'stderr']) {
+      await home.part(part); await home.settings(gateway.settings);
+      const result = await home.call(['run', '--subscription', 'zai', 'answer']);
+      stream(result, part === 'plain' ? 'completed' : 'failed'); outputs.push(result.stdout, result.stderr);
+      if (part === 'plain') {
+        const text = await home.call(['run', '--subscription', 'zai', '--output', 'text', 'answer']);
+        equal('Text run completes', text.status, 0); outputs.push(text.stdout, text.stderr);
+      }
+    }
     for (const path of await files(root)) {
       const content = await readFile(path, 'utf8'); check('No gateway key in state', !content.includes(key), 'no key value', path);
       if (!path.includes('/home/')) check('No copied vendor credential', !content.includes('fixture-vendor-secret'), 'credential only in vendor home', path);
@@ -215,11 +226,12 @@ export const c7: Scenario = { id: 'C7', title: 'Credentials stay out of Driver d
     for (const output of outputs) check('No credential in outputs or arguments', !output.includes(key) && !output.includes('fixture-vendor-secret'), 'no credential values', 'output checked');
   } finally { await gateway.dispose(); }
 } };
-export const c8: Scenario = { id: 'C8', title: 'Clean environments for subscription children', scope: 'sign-in, status and catalog children; run children pending', covers: ['DRV-0.5 (subscriptions)'], async run(home) {
+export const c8: Scenario = { id: 'C8', title: 'Clean environments for every tool child', scope: 'sign-in, status, catalog and inference children', covers: ['DRV-0.5'], async run(home) {
   await home.part('success'); home.env.ARBOL_TEST_TIME_SCALE = '10';
   Object.assign(home.env, { ANTHROPIC_API_KEY: key, CLAUDECODE: '1', CLAUDE_SESSION_ID: key, OPENAI_API_KEY: key, CODEX_HOME: '/wrong-home' });
   await signIn(home, 'anthropic'); await home.call(['subscriptions', 'check', 'anthropic']); await home.call(['subscriptions', 'models', 'anthropic']);
-  for (const received of await home.received()) { equal('No inherited selectors', received.checks.injectedVariablesAbsent, true); if (received.arguments[0] !== '--version') equal('Both homes private', received.checks.privateHome, true); }
+  stream(await home.call(['run', '--subscription', 'anthropic', 'answer']));
+  for (const received of (await home.received()).filter(record => record.stage !== 'input')) { equal('No inherited selectors', received.checks.injectedVariablesAbsent, true); if (received.arguments[0] !== '--version' && !received.arguments.includes('--input-format')) equal('Both homes private', received.checks.privateHome, true); }
 } };
 export const c39: Scenario = { id: 'C39', title: 'Two accounts of one family stay independent', scope: 'independent login, homes and sign-out; conversation separation covered by C14', covers: ['DRV-1.2 (subscriptions)'], async run(home) {
   await home.part('success'); home.env.ARBOL_TEST_TIME_SCALE = '10';
