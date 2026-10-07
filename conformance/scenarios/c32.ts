@@ -1,6 +1,6 @@
 import { join } from 'node:path';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { check, equal, text } from '../check.js';
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { check, equal, object, text } from '../check.js';
 import { inspectInfo, versionOrder, versionRecords } from './info.js';
 import type { Scenario } from './types.js';
 import type { ScenarioHome } from '../harness.js';
@@ -13,22 +13,43 @@ export const c32: Scenario = {
     await checkDriverInfo(home);
     const id = await signed(home);
     const info = await home.json(['info']), root = text('State directory', info.result.stateDirectory);
+    const codex = info.result.driver === 'codex';
+    const catalog = await home.json(['subscriptions', 'models', id]);
+    const models = (catalog.result.models as unknown[]).map(value => object('Catalog model', value));
+    const model = codex ? text('Model with low effort', models.find(value => Array.isArray(value.efforts) && value.efforts.includes('low'))?.id) : 'sonnet';
+    const textModel = codex ? text('Text model', models.at(-1)?.id) : 'haiku';
     const system = join(home.home, 'system'), request = join(home.home, 'request.json'), extra = join(home.home, 'extra');
     await mkdir(extra); await writeFile(system, 'Caller system prompt.');
     await writeFile(request, JSON.stringify({ subscriptionId: id, tools: 'none', history: [], input: { role: 'user', text: 'ready' } }));
-    const args = ['run', '--state-dir', root, '--request', request, '--subscription', id, '--model', 'sonnet', '--effort', 'low',
+    const args = ['run', '--state-dir', root, '--request', request, '--subscription', id, '--model', model, '--effort', 'low',
       '--system-prompt-file', system, '--cwd', home.home, '--add-dir', extra, '--add-dir=' + home.home,
       '--tools', 'all', '--chat-session', 'cli-chat', '--run-id', 'cli-run', '--output', 'events', '--label', 'one=1', '--label=two=2', 'ready'];
     const events = stream(await home.call(args)); equal('Run build matches info', events[0]!.driverBuild, info.result.build);
     equal('Repeated labels', events[0]!.labels, { one: '1', two: '2' });
     const input = (await home.received()).filter(record => record.stage === 'input').at(-1)!;
-    equal('Prompt file delivered', input.arguments[input.arguments.indexOf('--append-system-prompt') + 1], 'Caller system prompt.');
-    equal('Model option delivered', input.arguments[input.arguments.indexOf('--model') + 1], 'sonnet');
-    equal('Effort option delivered', input.arguments[input.arguments.indexOf('--effort') + 1], 'low');
-    equal('Repeated directories delivered', input.arguments.filter(value => value === '--add-dir').length, 2);
+    if (codex) {
+      const thread = (await home.received()).find(record => record.stage === 'request' && object('Thread request', record.request).method === 'thread/start')!;
+      const parameters = object('Thread params', object('Thread request', thread.request).params);
+      const turn = object('Turn params', object('Turn request', input.request).params);
+      equal('Prompt file delivered', parameters.developerInstructions, 'Caller system prompt.');
+      equal('Model option delivered to thread', parameters.model, model); equal('Model option delivered to turn', turn.model, model);
+      equal('Effort option delivered', turn.effort, 'low');
+      equal('Working directory delivered', parameters.cwd, home.home);
+      equal('Repeated directories accepted in unrestricted run', parameters.sandbox, 'danger-full-access');
+      equal('Run identifier option delivered', events[0]!.runId, 'cli-run');
+      equal('Chat session selects durable vendor conversation', parameters.ephemeral === true, false);
+      const mapDirectory = join(root, 'subscriptions', id, 'chats');
+      const mapped = await Promise.all((await readdir(mapDirectory)).filter(file => file.endsWith('.json')).map(async file => JSON.parse(await readFile(join(mapDirectory, file), 'utf8'))));
+      equal('Chat session option is mapped', mapped.map(entry => entry.chatSessionId), ['cli-chat']);
+    } else {
+      equal('Prompt file delivered', input.arguments[input.arguments.indexOf('--append-system-prompt') + 1], 'Caller system prompt.');
+      equal('Model option delivered', input.arguments[input.arguments.indexOf('--model') + 1], 'sonnet');
+      equal('Effort option delivered', input.arguments[input.arguments.indexOf('--effort') + 1], 'low');
+      equal('Repeated directories delivered', input.arguments.filter(value => value === '--add-dir').length, 2);
+    }
     const stdin = home.start(['run', '--request', '-', '--subscription', id]);
     try { stdin.send(JSON.parse(await readFile(request, 'utf8'))); stream(await stdin.done); } finally { await stdin.dispose(); }
-    const output = await home.call(['run', '--subscription=' + id, '--model=haiku', '--tools=none', '--output=text', 'ready']);
+    const output = await home.call(['run', '--subscription=' + id, '--model=' + textModel, '--tools=none', '--output=text', 'ready']);
     equal('Text exit', output.status, 0); equal('Plain text result', output.stdout, 'ready');
     const tier = stream(await home.call(['run', '--subscription', id, '--service-tier', 'unsupported-tier', 'ready']), 'failed');
     equal('Unavailable tier is typed', tier.at(-1)!.error.code, 'invalid_input');
@@ -44,7 +65,7 @@ export const c32: Scenario = {
       equal('Command accepted: ' + command.join(' '), (await home.call(command)).status, 0);
     }
     const imported = await home.json(['subscriptions', 'import', 'unknown', '--from', request]);
-    check('Import frame accepted', ['not_found', 'invalid_input'].includes((imported.result.error as any).code), 'typed import refusal', imported.result);
+    check('Import frame accepted', ['not_found', 'invalid_input', ...(codex ? ['unsupported'] : [])].includes((imported.result.error as any).code), 'typed import refusal', imported.result);
     for (const command of ['build-check', 'live-check']) {
       const refused = await home.json(['dev', command]); equal('Absent test account refused', refused.process.status, 1);
       equal('Absent test account code', (refused.result.error as any).code, 'not_found');

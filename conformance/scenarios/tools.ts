@@ -110,7 +110,19 @@ export const c35: Scenario = { id: 'C35', title: 'Tools and completed background
 export const c36: Scenario = { id: 'C36', title: 'Questions and their answers', scope: 'concurrent questions, reversed answers, multiple labels, duplicate, invalid and withdrawn answers, decline and cancellation',
   covers: ['DRV-3.26', 'DRV-3.27', 'DRV-3.28', 'DRV-3.29'], async run(home) {
     const id = await signed(home); const info = await home.json(['info']);
-    if (info.result.driver === 'codex') { const records = stream(await home.call(runArgs(home, id))); equal('Codex carries no questions', records.filter(event => event.type === 'ask_opened').length, 0); return; }
+    if (info.result.driver === 'codex') {
+      const records = stream(await home.call(runArgs(home, id)));
+      equal('Codex carries no questions', records.filter(event => event.type === 'ask_opened' || event.type === 'ask_closed').length, 0);
+      equal('Every unsupported question gives notice', records.filter(event => event.type === 'notice' && event.code === 'unexpected_request').length, 2);
+      const responses = (await home.received()).filter(record => record.stage === 'response');
+      equal('Both questions settled', responses.length, 2);
+      for (const response of responses) {
+        const error = object('Unsupported question error', object('Question response', response.request).error);
+        equal('Codex question refusal', error.code, -32601);
+        check('Question refusal explains why', typeof error.message === 'string' && /not supported|unsupported/i.test(error.message), 'unsupported question message', error);
+      }
+      return;
+    }
     const active = home.start([...runArgs(home, id), '--control']);
     try {
       await wait('Three questions open', () => active.lines.filter((event: any) => event.type === 'ask_opened').length === 3);

@@ -1,4 +1,4 @@
-import { readFile, writeFile, readdir, stat, rm } from 'node:fs/promises';
+import { readFile, writeFile, readdir, stat, rm, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -145,8 +145,16 @@ export const c2: Scenario = { id: 'C2', title: 'Sign-in steps, replacement and e
     } finally { if (service) await keychain(['delete-generic-password', '-s', service, '-a', 'zai']); await gateway.dispose(); }
   }
 } };
-export const c3: Scenario = { id: 'C3', title: 'Refusing a malformed Keychain key', scope: 'store_secret, invalid Unicode, deletion and isolated Keychain service', covers: ['DRV-1.4', 'DRV-1.26'], async run(home) {
-  const family = (await families(home)).find(value => value.auth === 'key'); if (!family) return;
+export const c3: Scenario = { id: 'C3', title: 'Refusing a malformed Keychain key', scope: 'store_secret, invalid Unicode, deletion and isolated Keychain service; typed refusal where no key family is offered', covers: ['DRV-1.4', 'DRV-1.26'], async run(home) {
+  const family = (await families(home)).find(value => value.auth === 'key');
+  if (!family) {
+    const before = (await home.received()).length;
+    const refused = await home.json(['subscriptions', 'create', '--family', 'openai', '--label', 'Unsupported key', '--id', 'key-not-offered']);
+    equal('Unavailable key family exit', refused.process.status, 1);
+    equal('Unavailable key family refusal', object('Unavailable key family error', refused.result.error).code, 'invalid_input');
+    equal('Unavailable key family starts no vendor', (await home.received()).length, before);
+    return;
+  }
   const id = text('Family id', family.id); const pending = home.start(['subscriptions', 'sign-in', id]); let service: string | undefined;
   try {
     const step = await pending.step('store_secret'); const item = object('Keychain item', step.keychain);
@@ -249,19 +257,38 @@ export async function checkSubscriptionCredentials(home: ScenarioHome, includeRu
   const root = await state(home); await home.part('success'); home.env.ARBOL_TEST_TIME_SCALE = '10';
   const allFamilies = await families(home);
   const gateway = allFamilies.some(f => f.id === 'zai') ? await gatewayFixture(home) : undefined; const outputs: string[] = [];
+  const codex = (await home.json(['info'])).result.driver === 'codex';
   try {
     for (const family of allFamilies) {
       const id = text('Family identifier', family.id);
       const signed = await signIn(home, id); outputs.push(signed.result.stdout, signed.result.stderr);
       for (const command of ['check', 'usage', 'models']) { const result = await home.call(['subscriptions', command, id]); equal('Subscription operation exit', result.status, 0); outputs.push(result.stdout, result.stderr); }
     }
+    if (includeRuns && codex) {
+      await mkdir(join(home.home, '.codex'), { mode: 0o700 });
+      await writeFile(join(home.home, '.codex/config.toml'), '[mcp_servers.fixture]\ncommand = "fixture-server"\n[mcp_servers.fixture.env]\nFIXTURE_TOKEN = "' + key + '"\n', { mode: 0o600 });
+    }
     if (includeRuns) for (const part of ['plain', 'failed', 'stderr']) {
       await home.part(part); if (gateway) await home.settings(gateway.settings);
       const id = text('Run family', allFamilies.find(f => f.auth === 'key')?.id ?? allFamilies[0]?.id);
-      const result = await home.call(['run', '--subscription', id, 'answer']);
-      stream(result, part === 'plain' ? 'completed' : 'failed'); outputs.push(result.stdout, result.stderr);
+      const extra = codex ? ['--tools', 'all', '--cwd', home.home] : [];
+      const result = await home.call(['run', '--subscription', id, ...extra, 'answer']);
+      const events = stream(result, part === 'plain' ? 'completed' : 'failed'); outputs.push(result.stdout, result.stderr);
+      if (codex) {
+        equal('Answer private literal scrubbed', events.find(event => event.type === 'text')!.text, 'answer [redacted]');
+        equal('Reasoning private literal scrubbed', events.find(event => event.type === 'thinking')!.text, 'thinking [redacted]');
+        equal('Split answer deltas scrubbed', events.filter(event => event.type === 'text_delta').map(event => event.text).join(''), 'answer [redacted]');
+        equal('Split reasoning deltas scrubbed', events.filter(event => event.type === 'thinking_delta').map(event => event.text).join(''), 'thinking [redacted]');
+        equal('Split tool deltas scrubbed', events.filter(event => event.type === 'tool_output_delta').map(event => event.text).join(''), 'output [redacted]');
+        equal('Shell private literal scrubbed', events.find(event => event.type === 'tool_started' && event.name === 'shell')!.input.command, 'echo [redacted]');
+        equal('Shell output private literal scrubbed', events.find(event => event.type === 'tool_finished' && event.callId === 'fixture-call')!.result.output, 'output [redacted]');
+        equal('Structured tool argument private literal scrubbed', events.find(event => event.type === 'tool_started' && event.name === 'mcpToolCall')!.input.arguments.private, '[redacted]');
+        equal('Structured tool result private literal scrubbed', events.find(event => event.type === 'tool_finished' && event.callId === 'credential-mcp')!.result.structuredContent.private, '[redacted]');
+        equal('Notice private literal scrubbed', events.find(event => event.type === 'notice')!.message, 'Private diagnostic [redacted]');
+        equal('Credential fixture actually emitted', (await home.received()).filter(record => record.stage === 'credential-output' && record.part === part).length, 1);
+      }
       if (part === 'plain') {
-        const text = await home.call(['run', '--subscription', id, '--output', 'text', 'answer']);
+        const text = await home.call(['run', '--subscription', id, ...extra, '--output', 'text', 'answer']);
         equal('Text run completes', text.status, 0); outputs.push(text.stdout, text.stderr);
       }
     }

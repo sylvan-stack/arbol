@@ -138,8 +138,14 @@ export const c33: Scenario = { id: 'C33', title: 'Run input and active records',
   await home.part('question'); const unhandled = stream(await start(home, id, 'answer', ['--tools', 'all', '--cwd', home.home]));
   equal('No caller ask', unhandled.filter(event => event.type === 'ask_opened').length, 0);
   const response = (await home.received()).find(record => record.stage === 'response')!;
-  equal('Unhandled ask declined', (response.checks.input as any).response.response.behavior, 'deny');
-  check('Decline explains no caller', /nobody.*answer/i.test((response.checks.input as any).response.response.message), 'nobody to answer', response);
+  if ((await home.json(['info'])).result.driver === 'codex') {
+    const refusal = object('Unsupported question error', object('Unsupported question response', response.request).error);
+    equal('Unhandled Codex question refused', refusal.code, -32601);
+    check('Decline explains unsupported question', typeof refusal.message === 'string' && /not supported|unsupported/i.test(refusal.message), 'unsupported question message', refusal);
+  } else {
+    equal('Unhandled ask declined', (response.checks.input as any).response.response.behavior, 'deny');
+    check('Decline explains no caller', /nobody.*answer/i.test((response.checks.input as any).response.response.message), 'nobody to answer', response);
+  }
   equal('Question tool not enabled', response.arguments.includes('--permission-prompt-tool'), false); await home.part('plain');
   const active = home.start(['run', '--subscription', id, '--run-id', 'visible-run', '--control', 'hold']);
   try {
