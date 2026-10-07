@@ -138,8 +138,54 @@ def append_history(history: list[dict[str, Any]], input: dict[str, Any], events:
         for event in events if event['type'] == 'text' and not event.get('parentCallId')]]
 
 
+async def claude_settings(fixture: Fixture) -> None:
+    file = fixture.home / '.arbol/arbol-claude-driver.json'
+    original = file.read_text()
+    common = json.loads(original)
+    known = {'baseUrl': 'http://localhost:1234/gateway', 'modelMap': {'haiku': 'test-small'},
+             'toolEnvironment': {'API_TIMEOUT_MS': '123'}}
+    try:
+        text = json.dumps({**common, 'subscriptions': {
+            'zai': {'settings': {**known, 'key': 'secret-sentinel'}},
+            'anthropic': {'settings': {'unknown': 'secret-sentinel'}}}})
+        file.write_text(text)
+        for language in ('typescript', 'python'):
+            raw = await fixture.call(language, ['subscriptions', 'list'])
+            records = json.loads(raw)
+            check(next(item for item in records if item['id'] == 'zai')['settings'] == known, 'Family settings changed')
+            check('secret-sentinel' not in raw, 'Unknown setting contents escaped')
+            check(file.read_text() == text, 'Reading settings rewrote the file')
+        invalid = [
+            {'baseUrl': 'ftp://secret-sentinel'},
+            {'baseUrl': 'https://user:secret-sentinel@example.invalid'},
+            {'modelMap': {'haiku': 2}}, {'modelMap': []},
+            {'toolEnvironment': {'ANTHROPIC_AUTH_TOKEN': 'secret-sentinel'}},
+            {'toolEnvironment': {'API_TIMEOUT_MS': 12}},
+            {'baseUrl': 'http://[invalid'},
+            {'baseUrl': 'http://example.invalid:65536'},
+            {'baseUrl': 'http://example.invalid:bad'},
+        ]
+        for settings in invalid:
+            text = json.dumps({**common, 'subscriptions': {'zai': {'settings': settings}}})
+            file.write_text(text)
+            for language in ('typescript', 'python'):
+                raw = await fixture.call(language, ['subscriptions', 'list'], expected=1)
+                check(json.loads(raw)['error']['code'] == 'invalid_input', 'Known family setting was not refused as invalid input')
+                check('secret-sentinel' not in raw, 'Invalid setting contents escaped')
+                check(file.read_text() == text, 'Invalid settings were rewritten')
+        file.write_text(json.dumps({**common, 'subscriptions': {'zai': {'settings': {'baseUrl': 'https://example.invalid/new'}}}}))
+        for language in ('typescript', 'python'):
+            records = await fixture.value(language, ['subscriptions', 'list'])
+            check(next(item for item in records if item['id'] == 'zai')['settings']['baseUrl'] == 'https://example.invalid/new', 'Settings were not read afresh')
+    finally:
+        file.write_text(original)
+
+
 async def exercise(fixture: Fixture, passed: list[str]) -> list[str]:
     fixture.prepare()
+    if fixture.driver == 'claude':
+        await claude_settings(fixture)
+        passed.append('settings.claude-bidirectional-validation-no-secret')
     family = 'anthropic' if fixture.driver == 'claude' else 'chatgpt'
     old_created = await fixture.value('typescript', ['subscriptions', 'create', '--family', family, '--label', 'Old language', '--id', 'from-ts'])
     new_list = await fixture.value('python', ['subscriptions', 'list'])
