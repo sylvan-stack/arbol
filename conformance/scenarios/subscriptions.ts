@@ -24,7 +24,12 @@ async function state(home: ScenarioHome): Promise<string> {
 async function signIn(home: ScenarioHome, id: string, byCode = false) {
   const interaction = home.start(['subscriptions', 'sign-in', id, ...(byCode ? ['--by-code'] : [])]);
   try {
-    if (byCode) { await interaction.step('enter_code'); interaction.send({ input: 'fixture-code' }); }
+    if (byCode) {
+      const family = (await subscription(home, id)).family;
+      if (family === 'chatgpt') {
+        const step = await interaction.step('open_url'); text('Device user code', step.userCode);
+      } else { await interaction.step('enter_code'); interaction.send({ input: 'fixture-code' }); }
+    }
     const done = await interaction.step('done');
     const result = await interaction.done; equal('Sign-in exit', result.status, 0);
     equal('Signed in', object('Done Subscription', done.subscription).state, 'signed_in');
@@ -92,6 +97,22 @@ export const c2: Scenario = { id: 'C2', title: 'Sign-in steps, replacement and e
     await home.part('success'); await signIn(home, id);
     const replaced = await first.step('failed'); equal('Replacement error', object('Error', replaced.error).code, 'in_use'); equal('Replaced exit', (await first.done).status, 1);
   } finally { await first.dispose(); }
+  if (id === 'chatgpt') {
+    equal('Create another login home', (await home.json(['subscriptions', 'create', '--family', id, '--label', 'Other login', '--id', 'login-other'])).process.status, 0);
+    await home.part('waiting'); const machine = home.start(['subscriptions', 'sign-in', id]);
+    try {
+      await machine.step('open_url'); await home.part('success'); await signIn(home, 'login-other');
+      const replaced = await machine.step('failed'); equal('Machine-wide replacement error', object('Error', replaced.error).code, 'in_use');
+      equal('Machine-wide replaced exit', (await machine.done).status, 1); equal('Replaced home signed out', (await subscription(home, id)).state, 'signed_out');
+    } finally { await machine.dispose(); }
+    await home.part('waiting'); const device = home.start(['subscriptions', 'sign-in', id, '--by-code']);
+    try {
+      const step = await device.step('open_url'); text('Device code', step.userCode);
+      await home.part('success'); await signIn(home, 'login-other');
+      equal('Device login is independent of machine login', (await subscription(home, id)).state, 'signing_in');
+      device.stop(); equal('Device cancellation exit', (await device.done).status, 2);
+    } finally { await device.dispose(); }
+  }
   await home.part('waiting'); home.env.ARBOL_TEST_TIME_SCALE = '100';
   const pending = home.start(['subscriptions', 'sign-in', id]);
   try {
@@ -139,7 +160,7 @@ export const c3: Scenario = { id: 'C3', title: 'Refusing a malformed Keychain ke
     equal('Failed state', (await subscription(home, id)).state, 'signed_out');
   } finally { await pending.dispose(); if (service) await keychain(['delete-generic-password', '-s', service, '-a', id]); }
 } };
-export const c4: Scenario = { id: 'C4', title: 'Rejected credentials and recovery', scope: 'check and run rejection, both families, and attention-state recovery', covers: ['DRV-1.7', 'DRV-4.7', 'DRV-1.11 (attention check)'], async run(home) {
+export async function checkSubscriptionRejection(home: ScenarioHome, includeRuns = false): Promise<void> {
   await home.part('success'); home.env.ARBOL_TEST_TIME_SCALE = '10';
   for (const family of await families(home)) {
     const id = text('Family id', family.id); let gateway: Awaited<ReturnType<typeof gatewayFixture>> | undefined;
@@ -154,12 +175,34 @@ export const c4: Scenario = { id: 'C4', title: 'Rejected credentials and recover
       equal('Refused catalog starts no tool', (await home.received()).length, before);
       if (gateway) gateway.mode('ok'); else await home.part('success');
       const recovered = await home.json(['subscriptions', 'check', id]); equal('Check recovers attention state', recovered.result.state, 'signed_in'); equal('Problem cleared', recovered.result.problem, undefined);
-      const events = stream(await home.call(['run', '--subscription', id, 'answer']), 'failed');
-      equal('Run rejected', events.at(-1)!.error.code, 'credential_rejected');
-      const marked = await subscription(home, id); equal('Run marks Subscription', marked.state, 'needs_attention'); equal('Run problem stored', marked.problem, events.at(-1)!.error);
+      if (includeRuns) {
+        const events = stream(await home.call(['run', '--subscription', id, 'answer']), 'failed');
+        equal('Run rejected', events.at(-1)!.error.code, 'credential_rejected');
+        const marked = await subscription(home, id); equal('Run marks Subscription', marked.state, 'needs_attention'); equal('Run problem stored', marked.problem, events.at(-1)!.error);
+      }
     } finally { await gateway?.dispose(); }
   }
-} };
+}
+export const c4: Scenario = { id: 'C4', title: 'Rejected credentials and recovery', scope: 'check and run rejection, all families, and attention-state recovery', covers: ['DRV-1.7', 'DRV-4.7', 'DRV-1.11 (attention check)'], run: home => checkSubscriptionRejection(home, true) };
+
+export async function checkSubscriptionRemoval(home: ScenarioHome): Promise<void> {
+  const root = await state(home); home.env.ARBOL_TEST_TIME_SCALE = '10';
+  const family = text('Vendor family', (await families(home)).find(f => f.auth === 'vendor_login')?.id);
+  for (const operation of ['sign-out', 'remove']) {
+    const id = operation === 'remove' ? 'removable' : family;
+    if (operation === 'remove') equal('Create removable account', (await home.json(['subscriptions', 'create', '--family', family, '--label', 'Removable', '--id', id])).process.status, 0);
+    await home.part('success'); await signIn(home, id);
+    const out = await home.call(['subscriptions', operation, id]); equal('Subscription operation exit', out.status, 0);
+    if (operation === 'sign-out') {
+      const record = object('Signed-out record', JSON.parse(out.stdout)); equal('Signed-out state', record.state, 'signed_out');
+      equal('Account removed', record.account, undefined); equal('Cached usage removed', record.lastUsage, undefined);
+    } else {
+      equal('Removal returns no document', out.stdout, '');
+      equal('Removed Subscription absent', (JSON.parse((await home.call(['subscriptions', 'list'])).stdout) as any[]).some(value => value.id === id), false);
+      equal('Home removed', await stat(join(root, 'subscriptions', id, 'home')).then(() => false).catch(() => true), true);
+    }
+  }
+}
 export const c5: Scenario = { id: 'C5', title: 'Sign-out and removal while a real run uses the account', scope: 'live run refusal, forced cancellation, shell cleanup and account removal', covers: ['DRV-1.12'], async run(home) {
   const root = await state(home); home.env.ARBOL_TEST_TIME_SCALE = '10';
   const id = text('Vendor family', (await families(home)).find(f => f.auth === 'vendor_login')?.id);
@@ -202,19 +245,23 @@ export const c6: Scenario = { id: 'C6', title: 'Cancelling and killing a pending
     } finally { await pending.dispose(); }
   }
 } };
-export const c7: Scenario = { id: 'C7', title: 'Credentials stay out of Driver data and output', scope: 'subscription operations, streamed text/thinking, tools, errors, stderr, text output and tool-owned login', covers: ['DRV-0.3', 'DRV-1.3', 'DRV-1.8'], async run(home) {
+export async function checkSubscriptionCredentials(home: ScenarioHome, includeRuns = false): Promise<void> {
   const root = await state(home); await home.part('success'); home.env.ARBOL_TEST_TIME_SCALE = '10';
-  const gateway = await gatewayFixture(home); const outputs: string[] = [];
+  const allFamilies = await families(home);
+  const gateway = allFamilies.some(f => f.id === 'zai') ? await gatewayFixture(home) : undefined; const outputs: string[] = [];
   try {
-    const signed = await signIn(home, 'zai'); outputs.push(signed.result.stdout, signed.result.stderr);
-    for (const command of ['check', 'usage', 'models']) { const result = await home.call(['subscriptions', command, 'zai']); outputs.push(result.stdout, result.stderr); }
-    const vendor = await signIn(home, 'anthropic'); outputs.push(vendor.result.stdout, vendor.result.stderr);
-    for (const part of ['plain', 'failed', 'stderr']) {
-      await home.part(part); await home.settings(gateway.settings);
-      const result = await home.call(['run', '--subscription', 'zai', 'answer']);
+    for (const family of allFamilies) {
+      const id = text('Family identifier', family.id);
+      const signed = await signIn(home, id); outputs.push(signed.result.stdout, signed.result.stderr);
+      for (const command of ['check', 'usage', 'models']) { const result = await home.call(['subscriptions', command, id]); equal('Subscription operation exit', result.status, 0); outputs.push(result.stdout, result.stderr); }
+    }
+    if (includeRuns) for (const part of ['plain', 'failed', 'stderr']) {
+      await home.part(part); if (gateway) await home.settings(gateway.settings);
+      const id = text('Run family', allFamilies.find(f => f.auth === 'key')?.id ?? allFamilies[0]?.id);
+      const result = await home.call(['run', '--subscription', id, 'answer']);
       stream(result, part === 'plain' ? 'completed' : 'failed'); outputs.push(result.stdout, result.stderr);
       if (part === 'plain') {
-        const text = await home.call(['run', '--subscription', 'zai', '--output', 'text', 'answer']);
+        const text = await home.call(['run', '--subscription', id, '--output', 'text', 'answer']);
         equal('Text run completes', text.status, 0); outputs.push(text.stdout, text.stderr);
       }
     }
@@ -224,15 +271,19 @@ export const c7: Scenario = { id: 'C7', title: 'Credentials stay out of Driver d
     }
     outputs.push(await readFile(join(home.tool, 'received.jsonl'), 'utf8'));
     for (const output of outputs) check('No credential in outputs or arguments', !output.includes(key) && !output.includes('fixture-vendor-secret'), 'no credential values', 'output checked');
-  } finally { await gateway.dispose(); }
-} };
-export const c8: Scenario = { id: 'C8', title: 'Clean environments for every tool child', scope: 'sign-in, status, catalog and inference children', covers: ['DRV-0.5'], async run(home) {
+  } finally { await gateway?.dispose(); }
+}
+export const c7: Scenario = { id: 'C7', title: 'Credentials stay out of Driver data and output', scope: 'subscription operations, streamed text/thinking, tools, errors, stderr, text output and tool-owned login', covers: ['DRV-0.3', 'DRV-1.3', 'DRV-1.8'], run: home => checkSubscriptionCredentials(home, true) };
+export async function checkSubscriptionEnvironments(home: ScenarioHome, includeRun = false): Promise<void> {
   await home.part('success'); home.env.ARBOL_TEST_TIME_SCALE = '10';
-  Object.assign(home.env, { ANTHROPIC_API_KEY: key, CLAUDECODE: '1', CLAUDE_SESSION_ID: key, OPENAI_API_KEY: key, CODEX_HOME: '/wrong-home' });
-  await signIn(home, 'anthropic'); await home.call(['subscriptions', 'check', 'anthropic']); await home.call(['subscriptions', 'models', 'anthropic']);
-  stream(await home.call(['run', '--subscription', 'anthropic', 'answer']));
+  Object.assign(home.env, { ANTHROPIC_API_KEY: key, CLAUDECODE: '1', CLAUDE_SESSION_ID: key, OPENAI_API_KEY: key, OPENAI_BASE_URL: 'http://127.0.0.1:9', CODEX_HOME: '/wrong-home', CODEX_API_KEY: key });
+  const id = text('Vendor family', (await families(home)).find(f => f.auth === 'vendor_login')?.id);
+  await signIn(home, id);
+  for (const command of ['check', 'usage', 'models']) equal('Subscription operation exit', (await home.call(['subscriptions', command, id])).status, 0);
+  if (includeRun) stream(await home.call(['run', '--subscription', id, 'answer']));
   for (const received of (await home.received()).filter(record => record.stage !== 'input')) { equal('No inherited selectors', received.checks.injectedVariablesAbsent, true); if (received.arguments[0] !== '--version' && !received.arguments.includes('--input-format')) equal('Both homes private', received.checks.privateHome, true); }
-} };
+}
+export const c8: Scenario = { id: 'C8', title: 'Clean environments for every tool child', scope: 'sign-in, status, catalog and inference children', covers: ['DRV-0.5'], run: home => checkSubscriptionEnvironments(home, true) };
 export const c39: Scenario = { id: 'C39', title: 'Two accounts of one family stay independent', scope: 'independent login, homes and sign-out; conversation separation covered by C14', covers: ['DRV-1.2 (subscriptions)'], async run(home) {
   await home.part('success'); home.env.ARBOL_TEST_TIME_SCALE = '10';
   const family = text('Vendor family', (await families(home)).find(f => f.auth === 'vendor_login')?.id);
@@ -242,7 +293,50 @@ export const c39: Scenario = { id: 'C39', title: 'Two accounts of one family sta
   await home.call(['subscriptions', 'sign-out', family]); equal('First is out', (await subscription(home, family)).state, 'signed_out');
   equal('Second still works', (await home.json(['subscriptions', 'check', 'second'])).result.state, 'signed_in');
 } };
-export const c41: Scenario = { id: 'C41', title: 'Usage, model catalogs and vendor account details', scope: 'all usage outcomes, cached reports, unknown fields, family fallback and account clearing; run-derived usage covered by C30', covers: ['DRV-1.16', 'DRV-1.17', 'DRV-1.18', 'DRV-1.19', 'DRV-1.22'], async run(home) {
+async function checkChatgptUsage(home: ScenarioHome): Promise<void> {
+  await home.part('success'); home.env.ARBOL_TEST_TIME_SCALE = '10';
+  const id = 'chatgpt';
+  equal('Unsigned usage', (await home.json(['subscriptions', 'usage', id])).result.outcome, 'needs_sign_in');
+  await signIn(home, id);
+  const account = object('Vendor account', (await subscription(home, id)).account);
+  equal('Vendor email', account.email, 'fixture@example.invalid'); equal('Vendor plan', account.plan, 'fixture');
+  const before = (await home.received()).length; await home.call(['subscriptions', 'list']);
+  equal('List does not poll', (await home.received()).length, before);
+  const catalog = await home.json(['subscriptions', 'models', id]); equal('Catalog exit', catalog.process.status, 0); equal('Catalog source', catalog.result.source, 'tool');
+  const catalogActivity = (await home.received()).slice(before).filter(value => value.stage === 'request' && value.checks.operation !== 'setup');
+  equal('Only catalog pages requested', catalogActivity.map(value => value.checks.operation), ['models', 'models']);
+  const models = (catalog.result.models as unknown[]).map(value => object('Model', value));
+  equal('Every model page read', models.map(value => value.id), ['gpt-6.1-sol', 'gpt-6-astra']);
+  equal('Vendor model label', models[0]?.label, 'GPT-6.1-Sol');
+  equal('Vendor effort words', models[0]?.efforts, ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+  equal('Default effort', models[0]?.defaultEffort, 'low'); equal('Service tiers', models[0]?.serviceTiers, ['priority']); equal('Default model', models[0]?.isDefault, true);
+  const beforeUsage = (await home.received()).length;
+  const usage = await home.json(['subscriptions', 'usage', id]); equal('Usage exit', usage.process.status, 0); equal('Usage outcome', usage.result.outcome, 'ok'); equal('Usage plan', usage.result.plan, 'fixture');
+  equal('Only requested usage', (await home.received()).slice(beforeUsage).filter(value => value.stage === 'request' && value.checks.operation !== 'setup').map(value => value.checks.operation), ['usage']);
+  const windows = (usage.result.windows as unknown[]).map(value => object('Window', value));
+  equal('Window kind follows duration', windows.map(value => value.kind), ['weekly', 'session']);
+  equal('Window labels', windows.map(value => value.label), ['Weekly window', '5-hour window']);
+  equal('Used percentage', windows[0]?.usedPercent, 25); equal('Weekly length', windows[0]?.windowMinutes, 10080);
+  equal('Vendor reset in UTC', windows[0]?.resetsAt, new Date(1791640848 * 1000).toISOString());
+  equal('Unknown reset absent', windows[1]?.resetsAt, undefined); equal('Exhausted window', windows[1]?.limitReached, true);
+  equal('Vendor details URL', usage.result.detailsUrl, 'https://chatgpt.com/codex/settings/usage');
+  equal('Good usage cached', (await subscription(home, id)).lastUsage, usage.result);
+  await home.part('unavailable'); const unavailable = await home.json(['subscriptions', 'usage', id]); equal('Unavailable usage', unavailable.result.outcome, 'unavailable');
+  equal('Unavailable windows empty', unavailable.result.windows, []); text('Unavailable reason', unavailable.result.message);
+  equal('Last good report preserved', (await subscription(home, id)).lastUsage, usage.result);
+  const fallback = await home.json(['subscriptions', 'models', id]); equal('Fallback source', fallback.result.source, 'builtin');
+  check('Fallback remains in ChatGPT family', Array.isArray(fallback.result.models) && fallback.result.models.length > 0 && fallback.result.models.every(value => text('Model', object('Model entry', value).id).startsWith('gpt-')), 'ChatGPT models', fallback.result.models);
+  await home.part('unknown-windows'); const unknown = await home.json(['subscriptions', 'usage', id]); equal('Unknown-window usage', unknown.result.outcome, 'ok');
+  const other = (unknown.result.windows as unknown[]).map(value => object('Window', value));
+  equal('Unknown length is absent', other[0]?.windowMinutes, undefined); equal('Unknown length kind', other[0]?.kind, 'other');
+  equal('Unknown reset is absent', other[0]?.resetsAt, undefined); equal('Other duration kind', other[1]?.kind, 'other'); equal('Other duration', other[1]?.windowMinutes, 1440);
+  await home.part('rejected'); equal('Rejected usage', (await home.json(['subscriptions', 'usage', id])).result.outcome, 'needs_sign_in');
+  const rejected = await subscription(home, id); equal('Rejected login needs attention', rejected.state, 'needs_attention'); equal('Rejected credential code', object('Problem', rejected.problem).code, 'credential_rejected');
+  await home.part('success'); equal('Recovery check', (await home.json(['subscriptions', 'check', id])).result.state, 'signed_in');
+  const out = await home.json(['subscriptions', 'sign-out', id]); equal('Sign-out exit', out.process.status, 0); equal('Account gone', out.result.account, undefined); equal('Cached usage gone', out.result.lastUsage, undefined);
+}
+export const c41: Scenario = { id: 'C41', title: 'Usage, model catalogs and vendor account details', scope: 'available usage outcomes, cached reports, unknown fields, family fallback and account clearing; run-derived usage covered by C30', covers: ['DRV-1.16', 'DRV-1.17', 'DRV-1.18', 'DRV-1.19', 'DRV-1.20', 'DRV-1.21', 'DRV-1.22'], async run(home) {
+  if ((await families(home)).some(value => value.id === 'chatgpt')) return checkChatgptUsage(home);
   await home.part('success'); home.env.ARBOL_TEST_TIME_SCALE = '10'; const gateway = await gatewayFixture(home);
   try {
     equal('Unsigned usage', (await home.json(['subscriptions', 'usage', 'zai'])).result.outcome, 'needs_sign_in');
