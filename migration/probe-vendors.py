@@ -117,16 +117,18 @@ def main(arguments: argparse.Namespace) -> int:
                     raise ValueError('The packaged Claude dev probe did not pass without inference')
                 record['checks'].append({'check': 'dev.probe', 'passed': True, 'record': probe})
             record['outcome'] = 'passed'
+        report['outcome'] = 'passed'
+    except Exception as error:
+        report['outcome'] = 'failed'
+        report['error'] = str(error)
+    finally:
         after = snapshot(owner)
         changed = sorted(key for key in before.keys() | after.keys() if before.get(key) != after.get(key))
         report['ownerConfigurationUnchanged'] = not changed
         if changed:
             report['changedOwnerMetadataPaths'] = changed
-            raise ValueError('Owner vendor configuration metadata changed during the no-prompt probes')
-        report['outcome'] = 'passed'
-    except Exception as error:
-        report['outcome'] = 'failed'
-        report['error'] = str(error)
+            report['outcome'] = 'failed'
+            report['error'] = 'Owner vendor configuration metadata changed during the no-prompt probes'
     Path(arguments.output).write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps({'outcome': report['outcome'], 'inferenceRequests': 0,
                       'evidence': arguments.output, **({'error': report['error']} if 'error' in report else {})}))

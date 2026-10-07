@@ -290,7 +290,8 @@ async def main(args: argparse.Namespace) -> int:
         'at': datetime.now(timezone.utc).isoformat(), 'runtime': await checked_output([args.python, '--version']),
         'node': await checked_output([str(NODE), '--version']), 'vendorRequests': 0, 'validationMode': args.mode, 'drivers': {}}
     try:
-        for driver in ('claude', 'codex'):
+        report['scope'] = args.drivers
+        for driver in args.drivers:
             candidate = Path(getattr(args, driver)).resolve()
             baseline_repo = Path(args.baseline).resolve() / f'arbol-{driver}-driver'
             with tempfile.TemporaryDirectory(prefix=f'syl95-mixed-{driver}-') as directory:
@@ -298,6 +299,12 @@ async def main(args: argparse.Namespace) -> int:
                 source = ROOT / f'arbol-{driver}-driver'
                 entry: dict[str, Any] = {'candidate': str(candidate), 'baselineCommit': await checked_output(['git', '-C', str(baseline_repo), 'rev-parse', 'HEAD']),
                     'sourceCommit': await checked_output(['git', '-C', str(source), 'rev-parse', 'HEAD']), 'checks': []}
+                manifest = candidate.parent.parent / 'package-manifest.json'
+                if manifest.is_file():
+                    packaged = json.loads(manifest.read_text())
+                    entry['artifactSource'] = packaged['source']
+                    entry['artifactPython'] = packaged['python']
+                    entry['manifestSha256'] = hashlib.sha256(manifest.read_bytes()).hexdigest()
                 report['drivers'][driver] = entry
                 try:
                     entry['checks'] = await exercise(fixture, entry['checks'])
@@ -322,4 +329,5 @@ if __name__ == '__main__':
     parser.add_argument('--python', default=sys.executable)
     parser.add_argument('--output', required=True)
     parser.add_argument('--mode', choices=['python-migration', 'baseline-harness-rehearsal'], default='python-migration')
+    parser.add_argument('--drivers', nargs='+', choices=['claude', 'codex'], default=['claude', 'codex'])
     raise SystemExit(asyncio.run(main(parser.parse_args())))
