@@ -8,12 +8,24 @@ const delay = async (ms: number): Promise<void> => new Promise(resolve => setTim
 export const c14: Scenario = { id: 'C14', title: 'Resume or rebuild the caller conversation', scope: 'continuity, reasons, history, map privacy, competing and failed runs',
   covers: ['DRV-2.11', 'DRV-2.12', 'DRV-2.13', 'DRV-2.34', 'DRV-2.35', 'DRV-6.11', 'DRV-6.12', 'DRV-6.14', 'DRV-6.15'], async run(home) {
     const subscriptionId = await signed(home); const info = await home.json(['info']); const state = text('State folder', info.result.stateDirectory);
+    const codex = info.result.driver === 'codex';
+    const savedFiles = async (folder: string): Promise<string[]> => {
+      const entries = await readdir(folder, { withFileTypes: true }).catch(error => {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error;
+      });
+      const paths: string[] = [];
+      for (const entry of entries) {
+        const path = join(folder, entry.name);
+        if (entry.isDirectory()) paths.push(...await savedFiles(path)); else if (entry.isFile()) paths.push(path);
+      }
+      return paths;
+    };
     const chatSessionId = 'opaque/../chat'; const key = createHash('sha256').update(chatSessionId).digest('hex');
     const mapPath = (id = subscriptionId) => join(state, 'subscriptions', id, 'chats', key + '.json');
     const map = async () => object('Chat map', JSON.parse(await readFile(mapPath(), 'utf8')));
     const image = { mediaType: 'image/png', data: 'aQ==' };
     const firstMessage = { type: 'message', role: 'user', text: 'history-user-secret', images: [image] };
-    const shell = { type: 'tool_call', name: 'shell', input: { command: 'printf history-shell-output', workingDirectory: '/ignored' },
+    const shell = { type: 'tool_call', name: 'shell', input: { command: 'printf history-shell-output', cwd: '/ignored' },
       ok: false, result: { output: 'history-shell-output', exitCode: 2 }, error: 'history-error' };
     const foreign = { type: 'tool_call', name: 'foreign_tool', input: { value: 'foreign-input' }, ok: true, result: { value: 'foreign-value' } };
     const base = { subscriptionId, chatSessionId, workingDirectory: home.home, tools: 'none', history: [] as object[],
@@ -35,6 +47,21 @@ export const c14: Scenario = { id: 'C14', title: 'Resume or rebuild the caller c
       const seen = await inputSeen(); equal('Native shell tool', seen.nativeShellCall, true);
       equal('Native failed result', seen.nativeShellResult, 'history-shell-output\nexit code: 2\nhistory-error'); equal('Native error flag', seen.nativeShellFailed, true);
       equal('Foreign tool and JSON result', seen.nativeForeignCall, true); equal('Earlier images', seen.historyImages, [image]);
+      if (codex) {
+        const received = await home.received(); const input = object('Codex turn request', received.filter(record => record.stage === 'input').at(-1)!.request);
+        const turn = object('Codex turn parameters', input.params);
+        const injections = received.filter(record => record.stage === 'request' && (record.request as any)?.method === 'thread/inject_items' &&
+          (record.request as any)?.params?.threadId === turn.threadId);
+        equal('One Codex native injection', injections.length, 1); const injection = injections[0]!;
+        check('Codex native injection precedes turn', received.indexOf(injection) < received.findLastIndex(record => record.stage === 'input'),
+          'thread/inject_items before turn/start', turn);
+        const items = (injection!.request as any).params.items as Record<string, any>[];
+        const call = items.find(item => item.type === 'function_call' && item.name === 'shell');
+        check('Codex shell has a made-up call identifier', typeof call?.call_id === 'string' && /^call_[a-zA-Z0-9]{24}$/.test(call.call_id), 'call_ and 24 letters/digits', call);
+        equal('Codex shell arguments', JSON.parse(call!.arguments), { command: 'printf history-shell-output', cwd: '/ignored' });
+        equal('Codex shell result follows call', items[items.indexOf(call!) + 1], { type: 'function_call_output', call_id: call!.call_id,
+          output: 'history-shell-output\nexit code: 2\nhistory-error' });
+      }
     };
     const first = await invoke(base, 'fresh'); const initial = await map(); equal('Map chat identifier', initial.chatSessionId, chatSessionId); equal('Map count', initial.messages, 2);
     equal('Map filename', (await readdir(join(state, 'subscriptions', subscriptionId, 'chats'))), [key + '.json']);
@@ -63,8 +90,12 @@ export const c14: Scenario = { id: 'C14', title: 'Resume or rebuild the caller c
     const otherFolder = join(home.home, 'other'); await mkdir(otherFolder);
     const moved = await invoke({ ...base, history, workingDirectory: otherFolder, input: { role: 'user', text: 'moved' } }, 'rebuilt', 'working_folder_changed');
     history = append(history, { text: 'moved' }, moved);
-    const current = await map(); const projects = join(state, 'subscriptions', subscriptionId, 'home', 'projects');
-    for (const folder of await readdir(projects)) await rm(join(projects, folder, String(current.conversation) + '.jsonl'), { force: true });
+    const current = await map(); const toolHome = join(state, 'subscriptions', subscriptionId, 'home'); const projects = join(toolHome, 'projects');
+    if (codex) {
+      for (const root of ['sessions', 'archived_sessions']) for (const file of await savedFiles(join(toolHome, root))) {
+        if (file.endsWith('-' + String(current.conversation) + '.jsonl')) await rm(file);
+      }
+    } else for (const folder of await readdir(projects)) await rm(join(projects, folder, String(current.conversation) + '.jsonl'), { force: true });
     const gone = await invoke({ ...base, history, workingDirectory: otherFolder, input: { role: 'user', text: 'gone' } }, 'rebuilt', 'conversation_gone');
     history = append(history, { text: 'gone' }, gone);
     const original = await map();
@@ -97,9 +128,17 @@ export const c14: Scenario = { id: 'C14', title: 'Resume or rebuild the caller c
     equal('Refused synthetic session uses text', refusedRebuild.filter(event => event.type === 'notice' && event.code === 'history_as_text').length, 1);
     const oneOff = await invoke({ ...base, history, workingDirectory: undefined, input: { role: 'user', text: 'one off' } }, 'rebuilt', 'no_chat_session');
     equal('One-off completed', oneOff.at(-1)!.outcome, 'completed');
-    const oneOffArgs = (await home.received()).filter(record => record.stage === 'input').at(-1)!.arguments;
-    const oneOffId = oneOffArgs[oneOffArgs.indexOf('--resume') + 1];
-    for (const folder of await readdir(projects)) equal('One-off synthetic file removed', await stat(join(projects, folder, oneOffId + '.jsonl')).then(() => false).catch(() => true), true);
+    const oneOffSeen = (await home.received()).filter(record => record.stage === 'input').at(-1)!;
+    if (codex) {
+      const params = (oneOffSeen.request as any).params; const records = await home.received();
+      const start = records.filter(record => (record.request as any)?.method === 'thread/start').at(-1)!;
+      equal('One-off thread is ephemeral', (start.request as any).params.ephemeral, true);
+      for (const root of ['sessions', 'archived_sessions']) equal('One-off has no saved rollout',
+        (await savedFiles(join(toolHome, root))).some(file => file.endsWith('-' + params.threadId + '.jsonl')), false);
+    } else {
+      const oneOffArgs = oneOffSeen.arguments; const oneOffId = oneOffArgs[oneOffArgs.indexOf('--resume') + 1];
+      for (const folder of await readdir(projects)) equal('One-off synthetic file removed', await stat(join(projects, folder, oneOffId + '.jsonl')).then(() => false).catch(() => true), true);
+    }
     equal('No temporary runs', await readdir(join(state, 'tmp')), []);
     await home.part('plain'); const id = 'other-login'; await home.json(['subscriptions', 'create', '--family', subscriptionId, '--label', 'Other', '--id', id]);
     await home.part('success'); equal('Other account signed in', (await home.call(['subscriptions', 'sign-in', id])).status, 0);
