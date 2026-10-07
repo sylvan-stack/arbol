@@ -14,5 +14,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["conformance/**/*.ts"]
+  "include": ["conformance/**/*.ts", "builds/**/*.ts"]
 }
