@@ -71,7 +71,8 @@ def main(arguments: argparse.Namespace) -> int:
     report: dict[str, Any] = {'issue': 'SYL-95', 'check': 'migration.packaged-python-no-prompt-probes',
                              'at': datetime.now(timezone.utc).isoformat(), 'inferenceRequests': 0, 'drivers': {}}
     try:
-        for driver in ('claude', 'codex'):
+        report['scope'] = arguments.drivers
+        for driver in arguments.drivers:
             entry = Path(getattr(arguments, driver)).resolve(strict=True)
             artifact = entry.parent.parent
             manifest = json.loads((artifact / 'package-manifest.json').read_text())
@@ -142,4 +143,5 @@ if __name__ == '__main__':
     parser.add_argument('--claude-state', required=True)
     parser.add_argument('--codex-state', required=True)
     parser.add_argument('--output', required=True)
+    parser.add_argument('--drivers', nargs='+', choices=['claude', 'codex'], default=['claude', 'codex'])
     raise SystemExit(main(parser.parse_args()))
