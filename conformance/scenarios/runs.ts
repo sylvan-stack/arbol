@@ -96,8 +96,14 @@ export const c20: Scenario = { id: 'C20', title: 'Large tool results are cut', s
     check('Whole UTF-8 characters', !JSON.stringify(result.result).includes('�'), 'valid UTF-8', result.result);
   }
 } };
-export const c33: Scenario = { id: 'C33', title: 'Run input and active records', scope: 'no control, stdin request, malformed control, runs list and runs stop; question refusal pending SYL-84', covers: ['DRV-2.25', 'DRV-2.26', 'DRV-2.27', 'DRV-2.28', 'DRV-6.7', 'DRV-6.8'], async run(home) {
+export const c33: Scenario = { id: 'C33', title: 'Run input and active records', scope: 'no control and unhandled question, stdin request, malformed control, runs list and runs stop', covers: ['DRV-2.25', 'DRV-2.26', 'DRV-2.27', 'DRV-2.28', 'DRV-3.30', 'DRV-6.7', 'DRV-6.8'], async run(home) {
   const id = await signed(home); stream(await start(home, id));
+  await home.part('question'); const unhandled = stream(await start(home, id, 'answer', ['--tools', 'all', '--cwd', home.home]));
+  equal('No caller ask', unhandled.filter(event => event.type === 'ask_opened').length, 0);
+  const response = (await home.received()).find(record => record.stage === 'response')!;
+  equal('Unhandled ask declined', (response.checks.input as any).response.response.behavior, 'deny');
+  check('Decline explains no caller', /nobody.*answer/i.test((response.checks.input as any).response.response.message), 'nobody to answer', response);
+  equal('Question tool not enabled', response.arguments.includes('--permission-prompt-tool'), false); await home.part('plain');
   const active = home.start(['run', '--subscription', id, '--run-id', 'visible-run', '--control', 'hold']);
   try {
     active.child.stdin.write('not-json\n'); active.send({ type: 'answer', askId: 'missing', answer: {} });
