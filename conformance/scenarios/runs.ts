@@ -29,7 +29,19 @@ export async function signed(home: ScenarioHome): Promise<string> {
   await home.part('plain'); return id;
 }
 const start = (home: ScenarioHome, id: string, message = 'answer', extra: string[] = []) => home.call(['run', '--subscription', id, ...extra, message]);
-const calls = async (home: ScenarioHome) => (await home.received()).filter(record => record.arguments.includes('--input-format') && record.stage !== 'input');
+const calls = async (home: ScenarioHome) => (await home.received()).filter(record =>
+  record.arguments.includes('--input-format') && record.stage !== 'input' ||
+  record.stage === 'request' && object('Codex request', record.request).method === 'thread/start');
+async function runModels(home: ScenarioHome, id: string): Promise<{ model: string; alternate: string; effort: string }> {
+  const catalog = await home.json(['subscriptions', 'models', id]);
+  check('Run catalog', Array.isArray(catalog.result.models), 'model array', catalog.result);
+  const models = catalog.result.models.map((model: unknown) => object('Run model', model));
+  const primary = models.find(model => Array.isArray(model.efforts) && model.efforts.includes('low'));
+  check('Low effort model', !!primary, 'a model advertising low effort', models);
+  const alternate = models.find(model => model.id !== primary.id && Array.isArray(model.efforts) && model.efforts.includes('high'));
+  check('Alternate high effort model', !!alternate, 'a second model advertising high effort', models);
+  return { model: text('Run model ID', primary.id), alternate: text('Alternate model ID', alternate.id), effort: 'low' };
+}
 export const c10: Scenario = { id: 'C10', title: 'Fresh run and request defaults', scope: 'fresh runs, whole blocks, options, defaults and unreadable settings; history covered by C14',
   covers: ['DRV-2.1', 'DRV-2.3', 'DRV-2.4', 'DRV-0.2', 'DRV-0.16'], async run(home) {
     const id = await signed(home);
@@ -39,15 +51,22 @@ export const c10: Scenario = { id: 'C10', title: 'Fresh run and request defaults
     for (const event of records) equal('Echoed labels', event.labels, { exchange: '41' });
     equal('Whole answer despite partial delta', records.filter(event => event.type === 'text').map(event => event.text), ['answer']);
     const info = await home.json(['info']); equal('Build identity', records[0]!.driverBuild, info.result.build);
-    await home.settings({ defaultSubscription: id, subscriptions: { [id]: { defaultModel: 'sonnet', defaultEffort: 'low' } } });
+    const options = await runModels(home, id);
+    await home.settings({ defaultSubscription: id, subscriptions: { [id]: { defaultModel: options.model, defaultEffort: options.effort } } });
     const defaults = stream(await home.call(['run', 'answer'])); equal('Default subscription', defaults[0]!.subscriptionId, id); equal('Default effort', defaults[0]!.effort, 'low');
-    const received = (await calls(home)).at(-1)!; check('Default model passed', received.arguments.includes('sonnet'), 'sonnet', received);
+    const received = (await calls(home)).at(-1)!;
+    equal('Default model passed', received.arguments.includes('--input-format') ? received.arguments[received.arguments.indexOf('--model') + 1] : object('Thread params', object('Thread request', received.request).params).model, options.model);
     const path = join(home.home, 'request.json');
     await writeFile(path, JSON.stringify({ subscriptionId: id, tools: 'none', history: [], input: { role: 'user', text: 'file message' },
-      model: 'opus', effort: 'high', systemPrompt: 'Keep this exact.\nSecond line.', labels: { source: 'file' } }));
-    stream(await home.call(['run', '--request', path, '--model', 'sonnet', '--effort', 'low', 'override']));
+      model: options.alternate, effort: 'high', systemPrompt: 'Keep this exact.\nSecond line.', labels: { source: 'file' } }));
+    stream(await home.call(['run', '--request', path, '--model', options.model, '--effort', options.effort, 'override']));
     const input = (await home.received()).filter(record => record.stage === 'input').at(-1)!;
-    equal('Option replaces message', object('Message', object('Input', input.checks.input).message).content, [{ type: 'text', text: 'override' }]);
+    const request = object('Input', input.checks.input);
+    if (request.method === 'turn/start') {
+      const content = object('Turn params', request.params).input;
+      check('Text input array', Array.isArray(content), 'Codex text input', request);
+      equal('Option replaces message', content.map(value => ({ type: object('Text input', value).type, text: object('Text input', value).text })), [{ type: 'text', text: 'override' }]);
+    } else equal('Option replaces message', object('Message', request.message).content, [{ type: 'text', text: 'override' }]);
     const before = await readFile(path, 'utf8'); stream(await home.call(['run', '--request', path])); equal('Request unchanged', await readFile(path, 'utf8'), before);
     const settings = join(home.home, '.arbol', 'arbol-' + String(info.result.driver) + '-driver.json'); await writeFile(settings, '{');
     const refused = stream(await start(home, id), 'failed'); equal('Unreadable settings only final', refused.length, 1); equal('Settings refusal', refused[0]!.error.code, 'invalid_input');
@@ -57,9 +76,12 @@ export const c11: Scenario = { id: 'C11', title: 'Text before and after a shell 
   const begun = records.findIndex(event => event.type === 'tool_started'); const ended = records.findIndex(event => event.type === 'tool_finished');
   check('Text before call', records.findIndex(event => event.type === 'text') < begun, 'text before tool_started', records);
   check('Text after call', records.findIndex((event, index) => index > ended && event.type === 'text') > ended, 'text after call', records);
-  equal('Normalized command', records[begun]!.name, 'shell'); equal('Command input', records[begun]!.input, { command: 'printf fixture-output' });
+  equal('Normalized command', records[begun]!.name, 'shell');
+  const input = object('Command input', records[begun]!.input); equal('Command input', input.command, 'printf fixture-output');
+  if ('cwd' in input) equal('Command directory', input.cwd, home.home);
   equal('One matching finish', records.filter(event => event.type === 'tool_finished' && event.callId === records[begun]!.callId).length, 1);
-  equal('Shell output', records[ended]!.result, { output: 'fixture-output' });
+  const result = object('Shell result', records[ended]!.result); equal('Shell output', result.output, 'fixture-output');
+  if ('exitCode' in result) equal('Shell exit code', result.exitCode, 0);
 } };
 export const c12: Scenario = { id: 'C12', title: 'Error flag under a success subtype', scope: 'vendor error result', covers: ['DRV-2.7'], async run(home) {
   const records = stream(await start(home, await signed(home)), 'failed'); equal('Failure code', records.at(-1)!.error.code, 'vendor_error');
@@ -82,8 +104,16 @@ export const c18: Scenario = { id: 'C18', title: 'Concurrent runs stay independe
 export const c19: Scenario = { id: 'C19', title: 'No tools and no leftover work folder', scope: 'no tools, no session persistence, fresh scratch cleanup', covers: ['DRV-2.20'], async run(home) {
   const records = stream(await start(home, await signed(home))); equal('One whole text', records.filter(event => event.type === 'text').length, 1);
   equal('No calls', records.filter(event => event.type === 'tool_started').length, 0);
-  const received = (await calls(home)).at(-1)!; check('Tools off', received.arguments.includes('--tools') && received.arguments[received.arguments.indexOf('--tools') + 1] === '', 'empty tool list', received);
-  check('No persistence', received.arguments.includes('--no-session-persistence'), '--no-session-persistence', received);
+  const received = (await calls(home)).at(-1)!;
+  if (received.arguments.includes('--input-format')) {
+    check('Tools off', received.arguments.includes('--tools') && received.arguments[received.arguments.indexOf('--tools') + 1] === '', 'empty tool list', received);
+    check('No persistence', received.arguments.includes('--no-session-persistence'), '--no-session-persistence', received);
+  } else {
+    const params = object('Thread params', object('Thread request', received.request).params);
+    equal('Read-only sandbox', params.sandbox, 'read-only'); equal('No permission escalation', params.approvalPolicy, 'never'); equal('No persistence', params.ephemeral, true);
+    const turn = (await home.received()).filter(record => record.stage === 'input').at(-1)!;
+    equal('Network off', object('Turn sandbox', object('Turn params', object('Turn request', turn.request).params).sandboxPolicy).networkAccess, false);
+  }
   equal('Work folder removed', await stat(received.workingDirectory).then(() => false).catch(() => true), true);
   const info = await home.json(['info']); equal('No temporary run folders', await readdir(join(String(info.result.stateDirectory), 'tmp')), []);
 } };
@@ -96,8 +126,15 @@ export const c20: Scenario = { id: 'C20', title: 'Large tool results are cut', s
     check('Whole UTF-8 characters', !JSON.stringify(result.result).includes('�'), 'valid UTF-8', result.result);
   }
 } };
-export const c33: Scenario = { id: 'C33', title: 'Run input and active records', scope: 'no control and unhandled question, stdin request, malformed control, runs list and runs stop', covers: ['DRV-2.25', 'DRV-2.26', 'DRV-2.27', 'DRV-2.28', 'DRV-3.30', 'DRV-6.7', 'DRV-6.8'], async run(home) {
+export async function checkRunWithoutControl(home: ScenarioHome): Promise<string> {
   const id = await signed(home); stream(await start(home, id));
+  const request = home.start(['run', '--request', '-']);
+  try { request.send({ subscriptionId: id, history: [], tools: 'none', input: { role: 'user', text: 'stdin' } }); request.child.stdin.end(); stream(await request.done); }
+  finally { await request.dispose(); }
+  return id;
+}
+export const c33: Scenario = { id: 'C33', title: 'Run input and active records', scope: 'no control and unhandled question, stdin request, malformed control, runs list and runs stop', covers: ['DRV-2.25', 'DRV-2.26', 'DRV-2.27', 'DRV-2.28', 'DRV-3.30', 'DRV-6.7', 'DRV-6.8'], async run(home) {
+  const id = await checkRunWithoutControl(home);
   await home.part('question'); const unhandled = stream(await start(home, id, 'answer', ['--tools', 'all', '--cwd', home.home]));
   equal('No caller ask', unhandled.filter(event => event.type === 'ask_opened').length, 0);
   const response = (await home.received()).find(record => record.stage === 'response')!;
@@ -112,9 +149,6 @@ export const c33: Scenario = { id: 'C33', title: 'Run input and active records',
     check('Active run listed', listed.some(r => r.runId === 'visible-run' && r.subscriptionId === id), 'visible-run', listed);
     const records = stream(await active.done); equal('Control refusals', records.filter(event => event.type === 'control_refused').length, 2);
   } finally { await active.dispose(); }
-  const request = home.start(['run', '--request', '-']);
-  try { request.send({ subscriptionId: id, history: [], tools: 'none', input: { role: 'user', text: 'stdin' } }); request.child.stdin.end(); stream(await request.done); }
-  finally { await request.dispose(); }
   equal('No ended runs listed', JSON.parse((await home.call(['runs', 'list'])).stdout), []);
   await home.part('stopping'); const stoppable = home.start(['run', '--subscription', id, '--run-id', 'stop-from-peer', 'answer']);
   try {
@@ -136,10 +170,11 @@ export const c43: Scenario = { id: 'C43', title: 'State failure has one final ev
 } };
 export async function runRefusals(home: ScenarioHome): Promise<void> {
   const id = await signed(home);
-  for (const args of [['--cwd', join(home.home, 'gone')], ['--model', 'unknown-model'], ['--model', 'haiku', '--effort', 'high'], ['--service-tier', 'fast']]) {
+  const options = await runModels(home, id);
+  for (const args of [['--cwd', join(home.home, 'gone')], ['--model', 'unknown-model'], ['--model', options.model, '--effort', 'unsupported-effort'], ['--service-tier', 'unsupported-tier']]) {
     const records = stream(await start(home, id, 'answer', args), 'failed'); equal('Only final refusal', records.length, 1); equal('Invalid request', records[0]!.error.code, 'invalid_input');
   }
-  await home.part('dropped-effort'); stream(await start(home, id, 'answer', ['--model', 'sonnet', '--effort', 'low']), 'failed');
+  await home.part('dropped-effort'); stream(await start(home, id, 'answer', ['--model', options.model, '--effort', options.effort]), 'failed');
   await home.part('plain'); const first = home.start(['run', '--subscription', id, '--run-id', 'same-id', 'hold']);
   try {
     for (let n = 0; n < 100; n++) { if (JSON.parse((await home.call(['runs', 'list'])).stdout).some((r: any) => r.runId === 'same-id')) break; await delay(10); }
