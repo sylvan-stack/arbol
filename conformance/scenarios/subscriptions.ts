@@ -6,6 +6,7 @@ import { createServer } from 'node:http';
 import { check, equal, object, text } from '../check.js';
 import type { Scenario } from './types.js';
 import type { ScenarioHome } from '../harness.js';
+import { stream } from './runs.js';
 const exec = promisify(execFile);
 const key = 'fixture-key-SECRET-781';
 const delay = async (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
@@ -138,7 +139,7 @@ export const c3: Scenario = { id: 'C3', title: 'Refusing a malformed Keychain ke
     equal('Failed state', (await subscription(home, id)).state, 'signed_out');
   } finally { await pending.dispose(); if (service) await keychain(['delete-generic-password', '-s', service, '-a', id]); }
 } };
-export const c4: Scenario = { id: 'C4', title: 'Rejected credentials and recovery', scope: 'check rejection and attention-state recovery; run rejection pending', covers: ['DRV-1.7 (check)', 'DRV-1.11 (attention check)'], async run(home) {
+export const c4: Scenario = { id: 'C4', title: 'Rejected credentials and recovery', scope: 'check and run rejection, both families, and attention-state recovery', covers: ['DRV-1.7', 'DRV-4.7', 'DRV-1.11 (attention check)'], async run(home) {
   await home.part('success'); home.env.ARBOL_TEST_TIME_SCALE = '10';
   for (const family of await families(home)) {
     const id = text('Family id', family.id); let gateway: Awaited<ReturnType<typeof gatewayFixture>> | undefined;
@@ -153,6 +154,9 @@ export const c4: Scenario = { id: 'C4', title: 'Rejected credentials and recover
       equal('Refused catalog starts no tool', (await home.received()).length, before);
       if (gateway) gateway.mode('ok'); else await home.part('success');
       const recovered = await home.json(['subscriptions', 'check', id]); equal('Check recovers attention state', recovered.result.state, 'signed_in'); equal('Problem cleared', recovered.result.problem, undefined);
+      const events = stream(await home.call(['run', '--subscription', id, 'answer']), 'failed');
+      equal('Run rejected', events.at(-1)!.error.code, 'credential_rejected');
+      const marked = await subscription(home, id); equal('Run marks Subscription', marked.state, 'needs_attention'); equal('Run problem stored', marked.problem, events.at(-1)!.error);
     } finally { await gateway?.dispose(); }
   }
 } };
@@ -226,7 +230,7 @@ export const c39: Scenario = { id: 'C39', title: 'Two accounts of one family sta
   await home.call(['subscriptions', 'sign-out', family]); equal('First is out', (await subscription(home, family)).state, 'signed_out');
   equal('Second still works', (await home.json(['subscriptions', 'check', 'second'])).result.state, 'signed_in');
 } };
-export const c41: Scenario = { id: 'C41', title: 'Usage, model catalogs and vendor account details', scope: 'all usage outcomes, cached reports, unknown fields, family fallback and account clearing; run-derived usage pending', covers: ['DRV-1.16', 'DRV-1.17', 'DRV-1.18', 'DRV-1.19', 'DRV-1.22'], async run(home) {
+export const c41: Scenario = { id: 'C41', title: 'Usage, model catalogs and vendor account details', scope: 'all usage outcomes, cached reports, unknown fields, family fallback and account clearing; run-derived usage covered by C30', covers: ['DRV-1.16', 'DRV-1.17', 'DRV-1.18', 'DRV-1.19', 'DRV-1.22'], async run(home) {
   await home.part('success'); home.env.ARBOL_TEST_TIME_SCALE = '10'; const gateway = await gatewayFixture(home);
   try {
     equal('Unsigned usage', (await home.json(['subscriptions', 'usage', 'zai'])).result.outcome, 'needs_sign_in');

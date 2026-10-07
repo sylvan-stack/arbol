@@ -22,7 +22,7 @@ export const c25: Scenario = { id: 'C25', title: 'Unexpected permission requests
   await home.part('missing-id'); const failed = stream(await home.call(runArgs(home, id)), 'failed'); equal('Malformed protocol fails', failed.at(-1)!.error.code, 'tool_unsupported');
   await home.part('plain'); stream(await home.call(runArgs(home, id)));
 } };
-export const c35: Scenario = { id: 'C35', title: 'Tools and completed background work', scope: 'all tools, refusal reason, shell shape, sub-agent attribution, three result parts and text output; idle-limit integration deferred to SYL-85',
+export const c35: Scenario = { id: 'C35', title: 'Tools and completed background work', scope: 'all tools, refusal reason, shell shape, sub-agent attribution, three result parts and text output; idle-limit integration covered by C29',
   covers: ['DRV-3.19', 'DRV-3.20', 'DRV-3.21', 'DRV-3.23', 'DRV-3.24', 'DRV-3.25', 'DRV-3.32'], async run(home) {
     const id = await signed(home); const records = stream(await home.call(runArgs(home, id)));
     equal('Refused call reason', records.find(event => event.type === 'tool_finished' && event.callId === 'refused')!.error, 'Claude refused this command.');
