@@ -177,7 +177,7 @@ test('builds.folder-alone launches a relocated Build after its source and tool l
   const result = f.launch(); assert.equal(result.status, 0, result.stderr); assert.equal(JSON.parse(result.stdout).build, '1');
 });
 
-test('builds.failed-check keeps its record and log, consumes its number and preserves the default', t => {
+test('builds.failed-check keeps its record and log, consumes its number, preserves the default and runs only when named', t => {
   const f = fixture(t); f.build();
   f.configure({ checks: [{ name: 'unavailable-account', kind: 'live', command: 'echo account-signed-out >&2; exit 1' }] });
   const result = f.call('build', f.component, '--repo', f.repo); assert.equal(result.status, 1);
@@ -186,6 +186,9 @@ test('builds.failed-check keeps its record and log, consumes its number and pres
   assert.deepEqual(record.checks, [{name: 'unavailable-account', passed: false}]);
   assert.match(readFileSync(join(f.registry, f.component, '2/build.log'), 'utf8'), /account-signed-out/);
   assert.equal(JSON.parse(f.launch().stdout).build, '1');
+  const named = f.launch(['-v', '2', 'text']); assert.equal(named.status, 0, named.stdout);
+  assert.deepEqual([JSON.parse(named.stdout).build, JSON.parse(named.stdout).args], ['2', ['text']]);
+  assert.equal(named.stderr, `${f.component}@2 is failed: check unavailable-account: Check failed; see build.log.\n`);
   f.configure({ checks: [{name: 'sample-check', command: 'node check.mjs'}] }); assert.equal(f.build().build, '3');
 });
 

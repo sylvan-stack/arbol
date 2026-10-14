@@ -89,6 +89,12 @@ export function runnable(registry: string, record: BuildRecord): boolean {
     && executableEntry(join(registry, record.component, record.build), record.entry) !== undefined;
 }
 
+// A Build named with -v: also a failed one whose program is there (BLD-D13). Never one still building.
+export function namedRunnable(registry: string, record: BuildRecord): boolean {
+  return runnable(registry, record) || (!record.prunedAt && record.status === 'failed'
+    && executableEntry(join(registry, record.component, record.build), record.entry) !== undefined);
+}
+
 export function defaultRecord(registry: string, records: BuildRecord[]): BuildRecord | undefined {
   return records.find(record => record.status === 'working' && runnable(registry, record));
 }
@@ -97,11 +103,11 @@ export function defaultRecord(registry: string, records: BuildRecord[]): BuildRe
 export function launch(registry: string, component: string, args: string[]): void {
   try {
     const records = readRecords(registry, component);
-    const available = records.filter(record => runnable(registry, record)).map(record => record.build);
+    const available = records.filter(record => namedRunnable(registry, record)).map(record => record.build);
     let selected: BuildRecord | undefined;
     if (args[0] === '-v') {
       const number = args[1];
-      if (number && buildPattern.test(number)) selected = records.find(record => record.build === number && runnable(registry, record));
+      if (number && buildPattern.test(number)) selected = records.find(record => record.build === number && namedRunnable(registry, record));
       args = args.slice(2);
     } else selected = defaultRecord(registry, records);
     if (!selected) {
@@ -111,6 +117,10 @@ export function launch(registry: string, component: string, args: string[]): voi
     }
     if (!process.execve) throw new Error('Launchers require Node.js 24 or later on a POSIX system.');
     if (selected.status === 'withdrawn') writeSync(2, `${component}@${selected.build} is withdrawn: ${selected.withdrawn!.reason}\n`);
+    if (selected.status === 'failed') {
+      const step = selected.failure ? `${selected.failure.stage} ${selected.failure.name}: ${selected.failure.message}` : 'see build.log';
+      writeSync(2, `${component}@${selected.build} is failed: ${step}\n`);
+    }
     const entry = executableEntry(join(registry, component, selected.build), selected.entry)!;
     process.execve(entry, [entry, ...args], process.env);
   } catch (error) {
