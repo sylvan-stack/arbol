@@ -1,0 +1,25 @@
+[project]
+name = "arbol"
+version = "2.0.0"
+description = "Arbol 2: the build tool arbol-builds and its launchers, and the shared Driver conformance runner."
+requires-python = "==3.14.8"
+dependencies = []
+
+[dependency-groups]
+dev = ["mypy==1.19.1", "ruff==0.14.14"]
+
+[tool.uv]
+package = false
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+mypy_path = ["src", "scripts"]
+files = ["src/arbol_builds", "tests", "scripts", "bin/builds_entry.py"]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]

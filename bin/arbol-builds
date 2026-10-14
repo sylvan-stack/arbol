@@ -1,0 +1,5 @@
+#!/bin/sh
+# arbol-builds from this checkout, with the checkout's development Python. Install it with
+# scripts/install_builds.py for use: the installed tool carries its own pinned Python (BLD-D15).
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+exec "$root/.venv/bin/python" -I -B "$root/bin/builds_entry.py" "$@"

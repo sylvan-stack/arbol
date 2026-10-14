@@ -1,0 +1,33 @@
+{
+  "date": "2026-10-14T22:16:58.332Z",
+  "platform": "darwin",
+  "arch": "arm64",
+  "pairs": 60,
+  "workingBuilds": 2,
+  "python": "/private/tmp/claude-501/-Users-msix-repos-sylvan-stack/15163eca-d930-44c8-a4ff-146b963e8c1c/scratchpad/install1/bin/.arbol-builds/runtime/3.14.8-d15291f940cf/python/bin/python3.14",
+  "launcherBytes": 9357,
+  "direct": {
+    "medianMs": 4.04,
+    "p95Ms": 5.03
+  },
+  "launched": {
+    "medianMs": 18.6,
+    "p95Ms": 20.26
+  },
+  "added": {
+    "medianMs": 14.46,
+    "p95Ms": 16.3
+  },
+  "node": {
+    "version": "v24.21.0",
+    "launcherBytes": 6519,
+    "launched": {
+      "medianMs": 26.9,
+      "p95Ms": 28.58
+    },
+    "added": {
+      "medianMs": 22.92,
+      "p95Ms": 24.73
+    }
+  }
+}

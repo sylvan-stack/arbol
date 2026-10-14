@@ -4,12 +4,11 @@
   "private": true,
   "type": "module",
   "engines": { "node": ">=24" },
-  "bin": { "arbol-conformance": "conformance/bin/arbol-conformance.mjs", "arbol-builds": "builds/bin/arbol-builds.mjs" },
+  "bin": { "arbol-conformance": "conformance/bin/arbol-conformance.mjs" },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node --test dist/conformance/test/*.test.js dist/builds/test/*.test.js",
-    "install:builds": "npm run build && node dist/builds/install.js",
+    "test": "npm run build && node --test dist/conformance/test/*.test.js",
     "conformance": "node conformance/bin/arbol-conformance.mjs"
   },
   "description": "Arbol 2: the rewrite of Arbol, the local macOS application for working with several coding agents at once.",
