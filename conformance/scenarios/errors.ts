@@ -71,6 +71,9 @@ export const c29: Scenario = { id: 'C29', title: 'Run clocks and waiting work', 
   // Codex explicitly refuses caller questions (C25); it cannot open one for an idle-clock check.
   for (const part of ['start', 'idle', 'call', 'background', 'heartbeat', 'idle-off', 'total', ...isCodex ? [] : ['question']]) {
     await home.part(part);
+    // Only the start part tests the fixed 60-second start limit. The others get 6 seconds to start, so that a busy
+    // machine starting the stand-in cannot reach that limit; request limits are not scaled.
+    home.env.ARBOL_TEST_TIME_SCALE = part === 'start' ? '100' : '10';
     const request = { subscriptionId: id, runId: 'clock-' + part, tools: 'all', history: [], workingDirectory: home.home, input: { role: 'user', text: 'answer' },
       limits: { idleSeconds: part === 'idle-off' ? 0 : 0.15, ...(part === 'total' ? { totalSeconds: 0.3 } : {}) } };
     const file = join(home.home, 'request.json'); await writeFile(file, JSON.stringify(request));
