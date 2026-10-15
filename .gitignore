@@ -11,3 +11,6 @@ coverage/
 __pycache__/
 .mypy_cache/
 .ruff_cache/
+
+# Results of tests, probes and checks stay on this machine (owner, 15 October 2026).
+builds/evidence/
