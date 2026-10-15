@@ -11,9 +11,9 @@ from .config import JS_SPACE, component_name, locations
 from .launcher import json_line, standard_descriptors, write_all
 from .service import Stop, build_component, list_builds, prune_builds, show_build, withdraw_build
 
-USAGE = ("arbol-builds build <component> [--repo <folder>] | list [<component>] | show <component>[@<build>] "
-         "| withdraw <component>@<build> --reason <text> | prune <component> --keep <n> "
-         "[--registry-dir <folder>] [--bin-dir <folder>]")
+USAGE = ("arbol-builds build <component> [--repo <folder>] [--root <identifier>] | list [<component>] "
+         "| show <component>[@<build>] | withdraw <component>@<build> --reason <text> | prune <component> --keep <n> "
+         "[--registry-dir <folder>] [--bin-dir <folder>]; a Trunk is the component arbol-trunk/<code name>")
 COMMANDS = ("build", "list", "show", "withdraw", "prune")
 SAFE_INTEGER = 2**53 - 1
 
@@ -63,13 +63,13 @@ def main(args: list[str]) -> int:
         if args == ["--help"]:
             output({"usage": USAGE})
             return 0
-        words, values = options(args, ["--registry-dir", "--bin-dir", "--repo", "--reason", "--keep"])
+        words, values = options(args, ["--registry-dir", "--bin-dir", "--repo", "--root", "--reason", "--keep"])
         command = words[0] if words else None
         target = words[1] if len(words) > 1 else None
         if len(words) > 2 or command not in COMMANDS or (command != "list" and not target):
             raise ValueError(USAGE)
         for key in values:
-            if ((key == "--repo" and command != "build") or (key == "--reason" and command != "withdraw")
+            if ((key in ("--repo", "--root") and command != "build") or (key == "--reason" and command != "withdraw")
                     or (key == "--keep" and command != "prune")):
                 raise ValueError(f"Option {key} does not apply to {command}.")
         paths = locations()
@@ -107,7 +107,7 @@ def main(args: list[str]) -> int:
 
             previous = {name: signal.signal(name, request) for name in (signal.SIGINT, signal.SIGTERM)}
             try:
-                record = build_component(component, paths, stop)
+                record = build_component(component, paths, stop, values.get("--root"))
             finally:
                 for name, handler in previous.items():
                     signal.signal(name, handler)

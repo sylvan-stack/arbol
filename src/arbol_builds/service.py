@@ -11,17 +11,22 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from .config import Locations, description
+from .config import Locations, default_repository, description
 from .launcher import (
     BUILD_PATTERN,
     LONE_SURROGATE,
+    ROOT_COMPONENTS,
+    TRUNKS,
     Record,
+    code_name,
     default_record,
     executable_entry,
     numbered_folders,
     plain,
     read_records,
+    root_identifier,
     runnable,
+    trunk,
 )
 from .mutation import make_dirs, with_mutation_lock
 
@@ -189,20 +194,35 @@ def command(text: str, repo: str, folder: str, number: str, log: int, stop: Stop
     return code == 0 and not stop.requested
 
 
-def build_component(component: str, paths: Locations, stop: Stop) -> Record:
-    repo = os.path.abspath(paths.repo or os.path.join(os.path.expanduser("~"), "repos/sylvan-stack", component))
+def build_component(component: str, paths: Locations, stop: Stop, root: str | None = None) -> Record:
+    # A Build of arbol or arbol-root is made for the one Root named with --root (RTM-D9); no other has a Root.
+    if component in ROOT_COMPONENTS and root is None:
+        raise ValueError(f"A Build of {component} is made for one Root: name it with --root <identifier>.")
+    if component not in ROOT_COMPONENTS and root is not None:
+        raise ValueError(f"A Build of {component} belongs to no Root: --root applies to arbol and arbol-root.")
+    if root is not None and not root_identifier(root):
+        raise ValueError("A Root identifier is one lower-case word of letters and digits.")
+    repo = os.path.abspath(paths.repo or default_repository(component))
     config, version, source = description(repo, component)
     folder, build = reserve(paths.registry, component)
     record: Record = {"component": component, "build": build, "packageVersion": version, "status": "building",
                       "startedAt": now(), "source": source, "entry": config["entry"], "checks": []}
-    for key in ("contract", "dataFormat"):
-        if key in config:
-            record[key] = int(config[key])  # a whole number, also when written 1.0
+    if root is not None:
+        record["root"] = root
+    # Whole numbers, also when written 1.0, in the order of BuildRecord.
+    if "contract" in config:
+        record["contract"] = int(config["contract"])
+    if "rootContracts" in config:
+        record["rootContracts"] = [int(number) for number in config["rootContracts"]]
+    if "dataFormat" in config:
+        record["dataFormat"] = int(config["dataFormat"])
     save_record(folder, record)
     log = os.open(os.path.join(folder, "build.log"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     stage, name = "launcher", "launcher"
     try:
-        write_launcher(paths.bin, paths.registry, component)
+        # The Trunks share the one launcher arbol-trunk, which no build writes (RCT-0).
+        if not trunk(component):
+            write_launcher(paths.bin, paths.registry, component)
         stage = "build"
         for index, text in enumerate(config["build"], 1):
             name = f"build-{index}"
@@ -235,17 +255,28 @@ def build_component(component: str, paths: Locations, stop: Stop) -> Record:
     return record
 
 
+def folders(path: str) -> list[str]:
+    try:
+        with os.scandir(path) as entries:
+            return [item.name for item in entries if item.is_dir(follow_symlinks=False)]
+    except FileNotFoundError:
+        return []
+
+
+def components_in(registry: str) -> list[str]:
+    """The components of the registry: its folders, and in builds/arbol-trunk/ the folder of each Trunk."""
+    names: list[str] = []
+    for name in folders(registry):
+        if name != TRUNKS:
+            names.append(name)
+            continue
+        names.extend(f"{TRUNKS}/{code}" for code in folders(os.path.join(registry, TRUNKS)) if code_name(code))
+    # In the order of JavaScript's sort: by UTF-16 code units.
+    return sorted(names, key=lambda name: name.encode("utf-16-be", "surrogatepass"))
+
+
 def list_builds(registry: str, component: str | None = None) -> list[Record]:
-    if component:
-        components = [component]
-    else:
-        try:
-            with os.scandir(registry) as entries:
-                # In the order of JavaScript's sort: by UTF-16 code units.
-                components = sorted((item.name for item in entries if item.is_dir(follow_symlinks=False)),
-                                    key=lambda name: name.encode("utf-16-be", "surrogatepass"))
-        except FileNotFoundError:
-            components = []
+    components = [component] if component else components_in(registry)
     listed: list[Record] = []
     for name in components:
         records = read_records(registry, name)

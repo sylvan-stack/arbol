@@ -6,7 +6,17 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any
 
-from .launcher import COMPONENT_PATTERN, entry_path, js_integer, positive, refuse_constant
+from .launcher import (
+    COMPONENT_PATTERN,
+    TRUNKS,
+    code_name,
+    entry_path,
+    js_integer,
+    positive,
+    refuse_constant,
+    root_contracts,
+    trunk,
+)
 
 KINDS = ("unit", "contract", "live")
 # The characters JavaScript's trim() removes, which decided what counted as blank in the Node.js tool.
@@ -27,9 +37,21 @@ def locations() -> Locations:
 
 
 def component_name(name: str) -> str:
-    if COMPONENT_PATTERN.fullmatch(name) is None:
+    if trunk(name):
+        if not code_name(name[len(TRUNKS) + 1:]):
+            raise ValueError("A Trunk is named arbol-trunk/<code name>: one lower-case word of 1 to 32 letters and "
+                             "digits that starts with a letter and is not run, settle or list.")
+    elif COMPONENT_PATTERN.fullmatch(name) is None or name == TRUNKS:
         raise ValueError("A component name must contain lower-case letters, digits and separating hyphens.")
     return name
+
+
+def default_repository(component: str) -> str:
+    """~/repos/sylvan-stack/<component>, and for a Trunk its folder trunks/<code name>/ in arbol-trunk."""
+    folder = os.path.join(os.path.expanduser("~"), "repos/sylvan-stack")
+    if trunk(component):
+        return os.path.join(folder, TRUNKS, "trunks", component[len(TRUNKS) + 1:])
+    return os.path.join(folder, component)
 
 
 def load_json(path: str) -> Any:
@@ -64,6 +86,11 @@ def description(repo: str, component: str) -> tuple[dict[str, Any], str, dict[st
     if component.endswith("-driver") and ("contract" not in config or "dataFormat" not in config or any(
             not any(check.get("kind") == kind for check in config["checks"]) for kind in KINDS)):
         raise ValueError("A Driver requires contract, dataFormat and unit, contract and live checks.")
+    if trunk(component) and ("contract" in config or not root_contracts(config.get("rootContracts"))):
+        raise ValueError("A Trunk requires rootContracts, the distinct positive whole numbers of the Root Contract "
+                         "versions it implements, and lists them in place of contract.")
+    if not trunk(component) and "rootContracts" in config:
+        raise ValueError("Only a Trunk lists rootContracts.")
     package = load_json(os.path.join(repo, "package.json"))
     version = package.get("version") if isinstance(package, dict) else None
     if not isinstance(version, str) or blank(version):

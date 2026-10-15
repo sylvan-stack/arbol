@@ -19,6 +19,13 @@ type Record = dict[str, Any]
 
 COMPONENT_PATTERN = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*")
 BUILD_PATTERN = re.compile(r"[1-9a-f][0-9a-f]*")
+# A Trunk is the component arbol-trunk/<code name>; arbol-trunk alone is the folder of the Trunks (RCT-0).
+TRUNKS = "arbol-trunk"
+CODE_NAME = re.compile(r"[a-z][a-z0-9]{0,31}")
+COMMAND_WORDS = ("run", "settle", "list")
+# The components whose Builds are made for one Root, and the form of a Root identifier (ARC-1, RCT-0).
+ROOT_COMPONENTS = ("arbol", "arbol-root")
+ROOT_PATTERN = re.compile(r"[a-z0-9]+")
 STATUSES = ("building", "failed", "working", "withdrawn")
 SAFE_INTEGER = 2**53 - 1
 # The ECMAScript date-time string format, which the records have always used (toISOString writes it).
@@ -92,6 +99,27 @@ def positive(value: object) -> bool:
     return isinstance(value, float) and value.is_integer() and 1 <= value <= SAFE_INTEGER
 
 
+def trunk(component: str) -> bool:
+    """Whether the component is a Trunk, arbol-trunk/<code name>."""
+    return component.startswith(TRUNKS + "/")
+
+
+def code_name(code: str) -> bool:
+    """A Trunk's code name: one lower-case word of 1 to 32 letters and digits that starts with a letter, and no
+    command word of the Root Contract (RCT-0)."""
+    return CODE_NAME.fullmatch(code) is not None and code not in COMMAND_WORDS
+
+
+def root_identifier(value: object) -> bool:
+    return isinstance(value, str) and ROOT_PATTERN.fullmatch(value) is not None
+
+
+def root_contracts(value: object) -> bool:
+    """The versions of the Root Contract a Trunk implements: a nonempty list of distinct positive whole numbers."""
+    return (isinstance(value, list) and bool(value) and all(positive(item) for item in value)
+            and len({int(item) for item in value}) == len(value))
+
+
 def valid_record(value: object, component: str, build: str) -> bool:
     if (not isinstance(value, dict) or value.get("component") != component or value.get("build") != build
             or BUILD_PATTERN.fullmatch(build) is None or not text(value.get("packageVersion"))
@@ -107,6 +135,11 @@ def valid_record(value: object, component: str, build: str) -> bool:
             for check in checks):
         return False
     if any(key in value and not positive(value[key]) for key in ("contract", "dataFormat")):
+        return False
+    # A Build of arbol or arbol-root names its Root, and a Trunk's Build the Root Contract versions it implements.
+    if ("root" in value or component in ROOT_COMPONENTS) and not root_identifier(value.get("root")):
+        return False
+    if ("rootContracts" in value or trunk(component)) and not root_contracts(value.get("rootContracts")):
         return False
     if any(key in value and not date(value[key]) for key in ("finishedAt", "prunedAt")):
         return False

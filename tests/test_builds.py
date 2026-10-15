@@ -1,11 +1,13 @@
-"""arbol-builds and its launchers (BLD-0.1 to 0.16): the checks named builds.* in BLD-0.
+"""arbol-builds and its launchers (BLD-0.1 to 0.17 and 0.21 to 0.23): the checks named builds.* in BLD-0.
 
-The same checks the TypeScript tool had, under the same names, and the checks of what the
-Python tool adds (BLD-D14, BLD-D15). Each one builds a small sample component in a fresh home
+The same checks the TypeScript tool had, under the same names, the checks of what the Python
+tool adds (BLD-D14, BLD-D15), and those of Builds made for a Root and of the Trunks (SYL-155).
+Each one builds a small sample component in a fresh home
 folder whose name holds a space and an apostrophe, and starts the tool and the launchers as
 programs. No vendor tool is involved.
 """
 
+import ast
 import json
 import os
 import resource
@@ -28,6 +30,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from arbol_builds import mutation  # noqa: E402
+from arbol_builds.config import component_name  # noqa: E402
 from arbol_builds.launcher import write_all  # noqa: E402
 from arbol_builds.service import LAUNCHER_MARK, reserve  # noqa: E402
 
@@ -172,6 +175,8 @@ class Fixture:
             Path(self.repo, name).write_text(text, encoding="utf-8")
         self.config: dict[str, Any] = {"component": component, "build": [BUILD], "entry": "program.py",
                                        "checks": [{"name": "sample-check", "command": CHECK}], "dataFormat": 1}
+        if component.startswith("arbol-trunk/"):
+            self.config["rootContracts"] = [1]
         self.configure()
         self.git("init", "-q", "-b", "main")
         self.git("add", ".")
@@ -200,8 +205,8 @@ class Fixture:
         return subprocess.run([PYTHON, "-I", "-B", ENTRY, "--registry-dir", self.registry, "--bin-dir", self.bin, *args],
                               cwd=self.home, env=self.env(), capture_output=True, timeout=120, check=False)
 
-    def build(self) -> dict[str, Any]:
-        result = self.call("build", self.component, "--repo", self.repo)
+    def build(self, *args: str) -> dict[str, Any]:
+        result = self.call("build", self.component, "--repo", self.repo, *args)
         self.test.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         record: dict[str, Any] = document(result)
         return record
@@ -877,6 +882,232 @@ class Builds(unittest.TestCase):
         launched = subprocess.run([*closed, os.path.join(f.bin, f.component), "--echo"], env=f.env(),
                                   capture_output=True, timeout=60, check=False)
         self.assertEqual([launched.returncode, launched.stderr], [0, b"diagnostic\n"])
+
+
+class Roots(unittest.TestCase):
+    """Builds made for a Root, and the Trunks as components of their own (SYL-155)."""
+
+    def test_builds_root_of_build(self) -> None:
+        """builds.root-of-build: a Build of arbol or arbol-root names the Root it was made for from the start of its
+        build, numbers count across Roots, and a build without --root, or with it for another component, is refused
+        before a number is reserved (BLD-0.17, ARC-1.12)."""
+        f = Fixture(self, "arbol-root")
+        # What the build commands find in the record while the Build is being made.
+        f.configure(build=[BUILD, 'cp "$ARBOL_BUILD_DIR/build.json" "$ARBOL_BUILD_DIR/record-at-start.json"'])
+        refused = f.call("build", f.component, "--repo", f.repo)
+        self.assertEqual([refused.returncode, document(refused)["error"]["code"]], [1, "builds_failed"])
+        self.assertIn("--root", document(refused)["error"]["message"])
+        self.assertFalse(os.path.exists(f.registry))
+        records = [f.build("--root", root) for root in ("sapling", "sapling", "second", "second")]
+        self.assertEqual([[record["build"], record["root"]] for record in records],
+                         [["1", "sapling"], ["2", "sapling"], ["3", "second"], ["4", "second"]])
+        for record in records:
+            started = json.loads(Path(f.path(record["build"], "record-at-start.json")).read_text())
+            self.assertEqual([started["status"], started["root"]], ["building", record["root"]])
+        self.assertEqual(list(records[0]), ["component", "build", "packageVersion", "status", "startedAt", "source",
+                                            "entry", "checks", "root", "dataFormat", "finishedAt"])
+        self.assertNotIn("root", json.loads(Path(f.repo, "arbol-build.json").read_text()))
+        # list and show print the Root.
+        self.assertEqual([[record["build"], record["root"]] for record in document(f.call("list", f.component))],
+                         [["4", "second"], ["3", "second"], ["2", "sapling"], ["1", "sapling"]])
+        self.assertEqual(document(f.call("show", f"{f.component}@2"))["root"], "sapling")
+        given = run_tool(f, "--root=third", "build", f.component, "--repo", f.repo, "--registry-dir", f.registry,
+                         "--bin-dir", f.bin)
+        self.assertEqual([document(given)["build"], document(given)["root"]], ["5", "third"])
+        for args in (["--root", "Sapling"], ["--root", "sap ling"], ["--root", "../sapling"], ["--root", "sapling/x"],
+                     ["--root", "säpling"], ["--root", "-x"], ["--root="], ["--root", "a", "--root", "b"]):
+            result = f.call("build", f.component, "--repo", f.repo, *args)
+            self.assertEqual([result.returncode, document(result)["error"]["code"]], [1, "builds_failed"], args)
+        for args in (["list", "--root", "sapling"], ["show", f.component, "--root", "sapling"],
+                     ["withdraw", f"{f.component}@1", "--reason", "x", "--root", "sapling"],
+                     ["prune", f.component, "--keep", "1", "--root", "sapling"]):
+            self.assertEqual(f.call(*args).returncode, 1, args)
+        self.assertEqual(sorted(name for name in os.listdir(f.path()) if not name.startswith(".")),
+                         ["1", "2", "3", "4", "5"])
+        # arbol is made for a Root too; every other component belongs to none.
+        f.configure(component="arbol")
+        self.assertEqual(f.call("build", "arbol", "--repo", f.repo).returncode, 1)
+        built = document(f.call("build", "arbol", "--repo", f.repo, "--root", "sapling"))
+        self.assertEqual([built["component"], built["build"], built["root"]], ["arbol", "1", "sapling"])
+        f.configure(component="sample")
+        other = f.call("build", "sample", "--repo", f.repo, "--root", "sapling")
+        self.assertEqual(other.returncode, 1)
+        self.assertIn("belongs to no Root", document(other)["error"]["message"])
+        self.assertFalse(os.path.exists(os.path.join(f.registry, "sample")))
+        # A record of arbol-root without its Root, or with one that is not an identifier, is damaged.
+        path = Path(f.path("4/build.json"))
+        original = json.loads(path.read_text())
+        for bad in ({key: value for key, value in original.items() if key != "root"}, {**original, "root": "Second"},
+                    {**original, "root": 7}, {**original, "root": ""}):
+            path.write_text(json.dumps(bad))
+            self.assertEqual([record["build"] for record in document(f.call("list", f.component))],
+                             ["5", "3", "2", "1"], bad)
+        path.write_text(json.dumps(original))
+        self.assertEqual(document(f.call("show", f"{f.component}@4"))["root"], "second")
+
+    def test_builds_trunk_components(self) -> None:
+        """builds.trunk-components: two Trunks, arbol-trunk/alpha and arbol-trunk/beta, are built from their folders
+        in arbol-trunk/trunks/, count separately, lie in folders of their own in the registry, get no launcher of
+        their own, and every command takes their names (BLD-0.22)."""
+        f = Fixture(self, "arbol-trunk/alpha")
+        trunks = os.path.join(f.home, "repos/sylvan-stack/arbol-trunk/trunks")
+        os.makedirs(trunks)
+        os.rename(f.repo, os.path.join(trunks, "alpha"))
+        # beef is a code name that also reads as a build number.
+        for code in ("beta", "beef"):
+            shutil.copytree(os.path.join(trunks, "alpha"), os.path.join(trunks, code), symlinks=True)
+            Path(trunks, code, "arbol-build.json").write_text(json.dumps({**f.config, "component": f"arbol-trunk/{code}"}))
+
+        def build(component: str, *args: str) -> dict[str, Any]:
+            result = run_tool(f, "build", component, "--registry-dir", f.registry, "--bin-dir", f.bin, *args)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            record: dict[str, Any] = document(result)
+            return record
+
+        order = ["alpha", "beta", "alpha", "beef", "alpha"]
+        records = [build(f"arbol-trunk/{code}") for code in order]
+        self.assertEqual([[record["component"], record["build"]] for record in records],
+                         [["arbol-trunk/alpha", "1"], ["arbol-trunk/beta", "1"], ["arbol-trunk/alpha", "2"],
+                          ["arbol-trunk/beef", "1"], ["arbol-trunk/alpha", "3"]])
+        for code, record in zip(order, records, strict=True):
+            self.assertEqual(record["source"]["repository"], os.path.join(trunks, code))
+        self.assertEqual(os.listdir(f.registry), ["arbol-trunk"])
+        self.assertEqual(sorted(os.listdir(os.path.join(f.registry, "arbol-trunk"))), ["alpha", "beef", "beta"])
+        self.assertEqual(sorted(name for name in os.listdir(f.path()) if not name.startswith(".")), ["1", "2", "3"])
+        self.assertTrue(os.path.isfile(os.path.join(f.registry, "arbol-trunk/beta/1/build.json")))
+        # The Trunks share the launcher arbol-trunk, which no build writes.
+        self.assertFalse(os.path.exists(f.bin))
+        listed = [[record["component"], record["build"], record["default"]] for record in document(f.call("list"))]
+        self.assertEqual(listed, [["arbol-trunk/alpha", "3", True], ["arbol-trunk/alpha", "2", False],
+                                  ["arbol-trunk/alpha", "1", False], ["arbol-trunk/beef", "1", True],
+                                  ["arbol-trunk/beta", "1", True]])
+        self.assertEqual([record["build"] for record in document(f.call("list", "arbol-trunk/beta"))], ["1"])
+        # A folder in builds/arbol-trunk/ whose name is no code name holds no Trunk.
+        record = json.loads(Path(f.path("1/build.json")).read_text())
+        for stray in ("Stray", "list"):
+            os.makedirs(os.path.join(f.registry, "arbol-trunk", stray, "1"))
+            Path(f.registry, "arbol-trunk", stray, "1/build.json").write_text(
+                json.dumps({**record, "component": f"arbol-trunk/{stray}"}))
+        self.assertEqual([[record["component"], record["build"], record["default"]]
+                          for record in document(f.call("list"))], listed)
+        for stray in ("Stray", "list"):
+            shutil.rmtree(os.path.join(f.registry, "arbol-trunk", stray))
+        self.assertEqual(document(f.call("show", "arbol-trunk/alpha"))["build"], "3")
+        self.assertEqual(document(f.call("show", "arbol-trunk/alpha@1"))["build"], "1")
+        withdrawn = f.call("withdraw", "arbol-trunk/alpha@3", "--reason", "bad answers")
+        self.assertEqual([withdrawn.returncode, document(withdrawn)["status"]], [0, "withdrawn"])
+        self.assertEqual(document(f.call("show", "arbol-trunk/alpha"))["build"], "2")
+        self.assertEqual(document(f.call("show", "arbol-trunk/beta"))["build"], "1")
+        self.assertEqual(document(f.call("prune", "arbol-trunk/alpha", "--keep", "1")),
+                         {"component": "arbol-trunk/alpha", "pruned": ["1"]})
+        self.assertEqual(document(f.call("show", "arbol-trunk/beef"))["build"], "1")
+        # --repo names another folder for one build.
+        elsewhere = os.path.join(f.home, "beta elsewhere")
+        shutil.copytree(os.path.join(trunks, "beta"), elsewhere, symlinks=True)
+        moved = build("arbol-trunk/beta", "--repo", elsewhere)
+        self.assertEqual([moved["build"], moved["source"]["repository"]], ["2", elsewhere])
+        names = ["arbol-trunk", "arbol-trunk/", "arbol-trunk/run", "arbol-trunk/settle", "arbol-trunk/list",
+                 "arbol-trunk/Alpha", "arbol-trunk/1alpha", "arbol-trunk/al-pha", "arbol-trunk/alpha/x",
+                 "arbol-trunk//alpha", "arbol-trunk/" + "a" * 33, "arbol-trunk/älpha"]
+        for name in names:
+            for args in (["build", name], ["show", name], ["list", name]):
+                result = f.call(*args)
+                self.assertEqual([result.returncode, document(result)["error"]["code"]], [1, "builds_failed"], args)
+        self.assertEqual(sorted(os.listdir(os.path.join(f.registry, "arbol-trunk"))), ["alpha", "beef", "beta"])
+        self.assertEqual(component_name("arbol-trunk/" + "a" * 32), "arbol-trunk/" + "a" * 32)
+        self.assertEqual(component_name("arbol-trunk/a1"), "arbol-trunk/a1")
+
+    def test_builds_trunk_root_contracts(self) -> None:
+        """builds.trunk-root-contracts: a Trunk's Build lists the Root Contract versions its description names and
+        no Root; a Trunk without rootContracts is refused before a number is reserved, and no other component lists
+        them (BLD-0.21)."""
+        f = Fixture(self, "arbol-trunk/alpha")
+        base = {key: value for key, value in f.config.items() if key != "rootContracts"}
+
+        def refused(config: dict[str, Any], *args: str) -> str:
+            Path(f.repo, "arbol-build.json").write_text(json.dumps(config))
+            result = f.call("build", f.component, "--repo", f.repo, *args)
+            self.assertEqual([result.returncode, document(result)["error"]["code"]], [1, "builds_failed"], config)
+            self.assertFalse(os.path.exists(f.registry), config)
+            return str(document(result)["error"]["message"])
+
+        self.assertIn("rootContracts", refused(base))
+        for value in ([], [0], [-1], [1.5], ["1"], [True], [None], [1, 1], [1, 1.0], 1, "1", True, None, {"1": 1}):
+            refused({**base, "rootContracts": value})
+        self.assertIn("in place of contract", refused({**base, "rootContracts": [1], "contract": 1}))
+        self.assertIn("belongs to no Root", refused({**base, "rootContracts": [1]}, "--root", "sapling"))
+        f.configure(rootContracts=[2, 1.0])
+        record = f.build()
+        self.assertEqual([record["rootContracts"], "root" in record], [[2, 1], False])
+        self.assertEqual(list(record), ["component", "build", "packageVersion", "status", "startedAt", "source",
+                                        "entry", "checks", "rootContracts", "dataFormat", "finishedAt"])
+        self.assertEqual(json.loads(Path(f.path("1/build.json")).read_text())["rootContracts"], [2, 1])
+        self.assertIn('\n  "rootContracts": [\n    2,\n    1\n  ],\n', Path(f.path("1/build.json")).read_text())
+        # list and show print the versions.
+        self.assertEqual(document(f.call("show", f.component))["rootContracts"], [2, 1])
+        self.assertEqual(document(f.call("list"))[0]["rootContracts"], [2, 1])
+        # A record of a Trunk without its versions, or with versions that are not, is damaged.
+        f.build()
+        path = Path(f.path("2/build.json"))
+        original = json.loads(path.read_text())
+        for bad in ({key: value for key, value in original.items() if key != "rootContracts"},
+                    {**original, "rootContracts": []}, {**original, "rootContracts": [0]},
+                    {**original, "rootContracts": "1"}, {**original, "rootContracts": [1, 1]}):
+            path.write_text(json.dumps(bad))
+            self.assertEqual([record["build"] for record in document(f.call("list", f.component))], ["1"], bad)
+        path.write_text(json.dumps(original))
+        self.assertEqual(document(f.call("show", f.component))["build"], "2")
+        # No other component lists them.
+        g = Fixture(self)
+        g.configure(rootContracts=[1])
+        result = g.call("build", g.component, "--repo", g.repo)
+        self.assertEqual([result.returncode, document(result)["error"]["message"]], [1, "Only a Trunk lists rootContracts."])
+        self.assertFalse(os.path.exists(g.registry))
+
+    def test_builds_outside_roots(self) -> None:
+        """builds.outside-roots: the registry, the launchers and arbol-builds lie outside every Root and hold no
+        Root's backend, UI code, migration script or table layout; a Build of arbol-root carries its own (BLD-0.23)."""
+        f = Fixture(self, "arbol-root")
+        Path(f.repo, "chat-tables.sql").write_text("CREATE TABLE sample_chats (id integer);\n")
+        f.configure(build=[BUILD, 'mkdir "$ARBOL_BUILD_DIR/layout" && cp chat-tables.sql "$ARBOL_BUILD_DIR/layout/"'])
+        for root in ("sapling", "second"):
+            result = run_tool(f, "build", f.component, "--repo", f.repo, "--root", root)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # The default registry, and nothing of a Root: no Root's folder and no settings.
+        state = os.path.join(f.home, "Library/Application Support/Arbol")
+        self.assertEqual(os.listdir(state), ["builds"])
+        self.assertFalse(os.path.exists(os.path.join(f.home, ".arbol")))
+        registry = os.path.join(state, "builds")
+        # One count of Builds for the component, not a folder for each Root.
+        self.assertEqual(os.listdir(registry), ["arbol-root"])
+        self.assertEqual(sorted(name for name in os.listdir(os.path.join(registry, "arbol-root"))
+                                if not name.startswith(".")), ["1", "2"])
+        # The table layout lies in each Build's own folder, and nowhere else.
+        layouts = sorted(os.path.relpath(os.path.join(folder, name), registry)
+                         for folder, _, names in os.walk(registry) for name in names if name.endswith(".sql"))
+        self.assertEqual(layouts, ["arbol-root/1/layout/chat-tables.sql", "arbol-root/2/layout/chat-tables.sql"])
+        # The one launcher serves every Root and holds nothing of one.
+        launcher = Path(f.home, ".local/bin", f.component).read_text()
+        for word in ("sapling", "'second'", '"second"', "CREATE TABLE", ".sql", "from arbol_builds", "import arbol_builds"):
+            self.assertNotIn(word, launcher)
+        # The tool is Python of the standard library alone, with no SQL.
+        package = ROOT / "src/arbol_builds"
+        modules = sorted(path for path in package.iterdir() if path.name != "__pycache__")
+        self.assertTrue(modules)
+        for path in modules:
+            self.assertEqual(path.suffix, ".py", path)
+            source = path.read_text(encoding="utf-8")
+            self.assertNotIn("create table", source.lower(), path)
+            self.assertNotIn(".sql", source, path)
+            for node in ast.walk(ast.parse(source)):
+                if isinstance(node, ast.Import):
+                    imported = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                    imported = [node.module]
+                else:
+                    continue
+                for name in imported:
+                    self.assertIn(name.split(".")[0], sys.stdlib_module_names, path)
 
 
 class Launchers(unittest.TestCase):
