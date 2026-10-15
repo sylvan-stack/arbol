@@ -7,7 +7,7 @@ import json
 import os
 import subprocess
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -69,7 +69,7 @@ def main(arguments: argparse.Namespace) -> int:
     owner = Path.home()
     before = snapshot(owner)
     report: dict[str, Any] = {'issue': 'SYL-95', 'check': 'migration.packaged-python-no-prompt-probes',
-                             'at': datetime.now(timezone.utc).isoformat(), 'inferenceRequests': 0, 'drivers': {}}
+                             'at': datetime.now(UTC).isoformat(), 'inferenceRequests': 0, 'drivers': {}}
     try:
         report['scope'] = arguments.drivers
         for driver in arguments.drivers:

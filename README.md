@@ -2,7 +2,7 @@
 
 Arbol 2: the rewrite of Arbol, the local macOS application for working with several coding agents at once.
 
-The shared Driver conformance runner is implemented in [`conformance/`](conformance/README.md), with C31, the `info` portion of C32 (SYL-77), and the local Subscription portions of C1 and C40 (SYL-78). The application itself remains a scaffold.
+The shared Driver conformance runner, all 38 scenarios of DRV-5, is in [`conformance/`](conformance/README.md). It is typed Python since SYL-166 and needs no Node.js. The application itself remains a scaffold.
 
 The [`arbol-builds` tool](builds/README.md) builds components into numbered folders, runs their checks, lists and withdraws Builds, prunes older files on command, and writes standalone component launchers (SYL-76). It is typed Python since SYL-165, with its own pinned Python. Install it with `uv sync --locked --group dev` and `uv run --no-sync python scripts/install_builds.py`. The Drivers' own build descriptions and first Builds are separate tasks.
 
