@@ -33,12 +33,14 @@ sys.path.insert(0, str(ROOT / "src"))
 from arbol_builds.cli import options  # noqa: E402
 from arbol_builds.config import locations  # noqa: E402
 from arbol_builds.launcher import json_line, write_all  # noqa: E402
-from arbol_builds.service import LAUNCHER_MARK, atomic_write, shebang, write_launcher  # noqa: E402
+from arbol_builds.service import LAUNCHER_MARK, SIGINT_LINE, atomic_write, shebang, write_launcher  # noqa: E402
 
 USAGE = "Usage: uv run --no-sync python scripts/install_builds.py [--bin-dir <folder>]"
 NODE_LAUNCH = re.compile(r'launch\(("(?:[^"\\\n]|\\.)*"), ("(?:[^"\\\n]|\\.)*"), process\.argv\.slice\(2\)\);')
 NODE_FILES = ("cli.js", "config.js", "records.js", "service.js", "mutation.js", "package.json")
 LAUNCHER_LIMIT = 1024 * 1024
+# A temporary file of service.atomic_write: <name>.<pid>.<uuid>.tmp.
+TEMPORARY = re.compile(r"(?P<name>[a-z][a-z0-9]*(?:-[a-z0-9]+)*)\.(?P<pid>[0-9]+)\.[0-9a-f-]{36}\.tmp")
 
 
 def probe(python: Path) -> str:
@@ -49,6 +51,33 @@ def probe(python: Path) -> str:
     except OSError:
         return ""
     return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def run_group(arguments: list[str]) -> None:
+    """Run a command in a process group of its own; when this install stops, the whole group is ended."""
+    child = subprocess.Popen(arguments, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                             start_new_session=True)
+    try:
+        _, errors = child.communicate()
+    except BaseException:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        child.wait()
+        raise
+    if child.returncode != 0:
+        raise ValueError(f"{arguments[0]} failed: {errors.decode('utf-8', 'replace').strip()}")
+
+
+def alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    return True
 
 
 def runtime_folder(library: Path) -> Path:
@@ -78,23 +107,24 @@ def runtime(library: Path) -> Path:
         finally:
             shutil.rmtree(unpacking, ignore_errors=True)
     # Bytecode is made here once, so that the tool and the launchers, started with -B, compile nothing.
-    subprocess.run([str(python), "-I", "-m", "compileall", "-q", "-j", "0", str(folder / "python/lib/python3.14")],
-                   check=True, capture_output=True)
+    run_group([str(python), "-I", "-m", "compileall", "-q", "-j", "0", str(folder / "python/lib/python3.14")])
     return python
 
 
 def install_package(library: Path, python: Path) -> None:
     staging = library / f".arbol_builds-{uuid.uuid4()}"
     shutil.copytree(ROOT / "src/arbol_builds", staging, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    package = library / "arbol_builds"
+    previous = library / f".arbol_builds-previous-{uuid.uuid4()}"
     try:
-        subprocess.run([str(python), "-I", "-m", "compileall", "-q", str(staging)], check=True, capture_output=True)
-        package = library / "arbol_builds"
-        previous = library / f".arbol_builds-previous-{uuid.uuid4()}"
+        run_group([str(python), "-I", "-m", "compileall", "-q", str(staging)])
         if package.exists():
             package.rename(previous)
         staging.rename(package)
         shutil.rmtree(previous, ignore_errors=True)
     finally:
+        if not package.exists() and previous.exists():
+            previous.rename(package)  # stopped between the two renames: the earlier package stays in use
         shutil.rmtree(staging, ignore_errors=True)
 
 
@@ -123,7 +153,7 @@ def served(path: Path) -> tuple[str, str] | None:
             registry, component = (ast.literal_eval(node) for node in call.args[0].args[:2])
         else:
             return None
-    except (ValueError, SyntaxError):
+    except Exception:  # anything that does not parse as a launcher's last line is not a launcher
         return None
     if component != path.name or not isinstance(registry, str) or not os.path.isabs(registry):
         return None
@@ -136,9 +166,10 @@ def install(args: list[str]) -> dict[str, object]:
         raise ValueError(USAGE)
     folder = Path(os.path.abspath(values.get("--bin-dir", locations().bin)))
     library = folder / ".arbol-builds"
+    interpreter = runtime_folder(library) / "python/bin/python3.14"
     try:
         # Checked before anything changes: the tool and the launchers must be able to name this Python.
-        first = shebang(str(runtime_folder(library) / "python/bin/python3.14"))
+        first = shebang(str(interpreter))
     except ValueError:
         raise ValueError(f"arbol-builds cannot be installed in {folder}: the programs it writes name their Python "
                          "in their first line, which cannot hold a space or a '#', nor a long path.") from None
@@ -148,12 +179,16 @@ def install(args: list[str]) -> dict[str, object]:
         fcntl.flock(lock, fcntl.LOCK_EX)
         for leftover in [*library.glob("runtime/.unpacking-*"), *library.glob(".arbol_builds-*")]:
             shutil.rmtree(leftover, ignore_errors=True)
-        for leftover in folder.glob("arbol-builds.*.tmp"):
-            leftover.unlink(missing_ok=True)
+        for leftover in folder.glob("*.tmp"):
+            # The program's, and a launcher's whose writer has ended; a build that runs now keeps its own.
+            temporary = TEMPORARY.fullmatch(leftover.name)
+            if temporary and not leftover.is_symlink() and (temporary["name"] == "arbol-builds"
+                                                            or not alive(int(temporary["pid"]))):
+                leftover.unlink(missing_ok=True)
         python = runtime(library)
         install_package(library, python)
         program = folder / "arbol-builds"
-        atomic_write(str(program), (f"{first}\nimport sys\nsys.path.insert(0, {str(library)!r})\n"
+        atomic_write(str(program), (f"{first}\n{SIGINT_LINE}\nsys.path.insert(0, {str(library)!r})\n"
                                     "from arbol_builds.cli import entry\nentry()\n").encode(), 0o755)
         os.chmod(program, 0o755)
         launchers: list[str] = []

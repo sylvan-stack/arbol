@@ -12,6 +12,7 @@ import re
 import select
 import signal
 import sys  # noqa: F401  (the line arbol-builds appends calls sys.exit)
+import time
 from typing import Any
 
 type Record = dict[str, Any]
@@ -23,7 +24,11 @@ SAFE_INTEGER = 2**53 - 1
 # The ECMAScript date-time string format, which the records have always used (toISOString writes it).
 # Digits are ASCII only, as in JavaScript.
 DATE = re.compile(r"([+-]\d{6}|\d{4})(?:-(\d{2})(?:-(\d{2}))?)?"
-                  r"(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(Z|[+-]\d{2}:\d{2})?)?", re.ASCII)
+                  r"(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?(Z|[+-]\d{2}:\d{2})?)?", re.ASCII)
+# JavaScript's TimeClip: a time lies within 8.64e15 milliseconds of 1970.
+TIME_LIMIT = 8_640_000_000_000_000
+# Python reads at most this many digits as an integer; a longer JSON number is read as JavaScript reads it.
+INTEGER_DIGITS = 4300
 LONE_SURROGATE = re.compile("[\ud800-\udfff]")
 
 
@@ -44,18 +49,38 @@ def text(value: object) -> bool:
     return isinstance(value, str) and value != ""
 
 
+def days_from_civil(year: int, month: int, day: int) -> int:
+    """Days from 1970-01-01 to a date of the proleptic Gregorian calendar (Howard Hinnant's algorithm)."""
+    year -= month <= 2
+    era = year // 400
+    of_era = year - era * 400
+    of_year = (153 * (month + (-3 if month > 2 else 9)) + 2) // 5 + day - 1
+    return era * 146097 + of_era * 365 + of_era // 4 - of_era // 100 + of_year - 719468
+
+
 def date(value: object) -> bool:
-    """A time in the ECMAScript date-time string format; other forms count as damaged (BLD-D15)."""
+    """A time in the ECMAScript date-time string format that Date.parse accepts; other forms count as damaged
+    (BLD-D15)."""
     match = DATE.fullmatch(value) if isinstance(value, str) else None
     if match is None:
         return False
-    year, month, day, hour, minute, second, zone = match.groups()
+    year, month, day, hour, minute, second, fraction, zone = match.groups()
     if year == "-000000" or (month and not 1 <= int(month) <= 12) or (day and not 1 <= int(day) <= 31):
         return False
     if hour is not None and (int(hour) > 24 or int(minute) > 59 or int(second or 0) > 59
-                             or (int(hour) == 24 and (int(minute) or int(second or 0)))):
+                             or (int(hour) == 24 and (int(minute) or int(second or 0) or int(fraction or 0)))):
         return False
-    return zone in (None, "Z") or (int(zone[1:3]) <= 23 and int(zone[4:6]) <= 59)
+    if zone not in (None, "Z") and (int(zone[1:3]) > 23 or int(zone[4:6]) > 59):
+        return False
+    milliseconds = (days_from_civil(int(year), int(month or 1), int(day or 1)) * 86_400_000
+                    + ((int(hour or 0) * 60 + int(minute or 0)) * 60 + int(second or 0)) * 1000
+                    + int((fraction or "")[:3].ljust(3, "0")))
+    if zone not in (None, "Z"):
+        offset = (int(zone[1:3]) * 60 + int(zone[4:6])) * 60_000
+        milliseconds += -offset if zone[0] == "+" else offset
+    elif zone is None and hour is not None:
+        milliseconds -= time.localtime().tm_gmtoff * 1000  # a date-time without an offset is local time
+    return abs(milliseconds) <= TIME_LIMIT
 
 
 def positive(value: object) -> bool:
@@ -102,6 +127,11 @@ def refuse_constant(name: str) -> object:
     raise ValueError(f"{name} is not JSON")
 
 
+def js_integer(text: str) -> int | float:
+    """A JSON integer; one longer than Python reads becomes a float, infinite when too large, as in JavaScript."""
+    return int(text) if len(text) <= INTEGER_DIGITS else float(text)
+
+
 def numbered_folders(folder: str) -> list[str]:
     try:
         with os.scandir(folder) as entries:
@@ -119,7 +149,7 @@ def read_records(registry: str, component: str) -> list[Record]:
         try:
             # Bytes that are not UTF-8 read as U+FFFD, as the Node.js tool read them.
             with open(os.path.join(folder, build, "build.json"), encoding="utf-8", errors="replace") as stream:
-                record: object = json.loads(stream.read(), parse_constant=refuse_constant)
+                record: object = json.loads(stream.read(), parse_constant=refuse_constant, parse_int=js_integer)
             if isinstance(record, dict) and valid_record(record, component, build):
                 records.append(record)
         except Exception:

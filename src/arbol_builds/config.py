@@ -6,7 +6,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any
 
-from .launcher import COMPONENT_PATTERN, entry_path, positive, refuse_constant
+from .launcher import COMPONENT_PATTERN, entry_path, js_integer, positive, refuse_constant
 
 KINDS = ("unit", "contract", "live")
 # The characters JavaScript's trim() removes, which decided what counted as blank in the Node.js tool.
@@ -33,8 +33,9 @@ def component_name(name: str) -> str:
 
 
 def load_json(path: str) -> Any:
-    with open(path, encoding="utf-8") as stream:
-        return json.loads(stream.read(), parse_constant=refuse_constant)
+    # Bytes that are not UTF-8 read as U+FFFD, as the Node.js tool read them.
+    with open(path, encoding="utf-8", errors="replace") as stream:
+        return json.loads(stream.read(), parse_constant=refuse_constant, parse_int=js_integer)
 
 
 def blank(value: object) -> bool:
@@ -69,8 +70,11 @@ def description(repo: str, component: str) -> tuple[dict[str, Any], str, dict[st
         raise ValueError("package.json must name the package version.")
 
     def git(*args: str) -> str:
-        return subprocess.run(["git", *args], cwd=repo, check=True, stdin=subprocess.DEVNULL, capture_output=True,
-                              encoding="utf-8", errors="replace").stdout.strip()
+        result = subprocess.run(["git", *args], cwd=repo, check=False, stdin=subprocess.DEVNULL, capture_output=True,
+                                encoding="utf-8", errors="replace")
+        if result.returncode != 0:
+            raise ValueError(f"Command failed: git {' '.join(args)}\n{result.stderr}")
+        return result.stdout.strip(JS_SPACE)
 
     source = {"repository": os.path.realpath(os.path.abspath(repo)), "branch": git("rev-parse", "--abbrev-ref", "HEAD"),
               "commit": git("rev-parse", "HEAD"), "uncommittedChanges": git("status", "--porcelain") != ""}

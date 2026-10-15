@@ -125,6 +125,13 @@ def raise_open_files_limit() -> None:
     if soft == hard:
         return
     low, high = soft, (1 << 20 if hard == resource.RLIM_INFINITY else hard)
+    if hard == resource.RLIM_INFINITY and soft > 1 << 20:
+        # Node's search, in unsigned arithmetic, ends at the hard limit when the soft one is above 2**20.
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+        except (OSError, ValueError):
+            pass
+        return
     if hard != resource.RLIM_INFINITY:
         low = high
     while True:
@@ -140,9 +147,10 @@ def raise_open_files_limit() -> None:
 
 def entry() -> None:
     """Start as Node.js started the earlier tool: standard streams open, SIGINT and SIGTERM unblocked."""
+    # Like the earlier tool, a Ctrl-C outside a build ends the program without a traceback, also one that was
+    # waiting while SIGINT was blocked.
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
     standard_descriptors()
     signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT, signal.SIGTERM})
     raise_open_files_limit()
-    # Like the earlier tool, a Ctrl-C outside a build ends the program without a traceback.
-    signal.signal(signal.SIGINT, signal.SIG_DFL)
     sys.exit(main(sys.argv[1:]))

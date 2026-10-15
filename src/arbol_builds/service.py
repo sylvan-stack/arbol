@@ -27,10 +27,13 @@ from .mutation import make_dirs, with_mutation_lock
 
 LAUNCHER_SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "launcher.py")
 LAUNCHER_MARK = "# arbol-builds launcher (BLD-0): written by arbol-builds, rewritten when it is installed again."
-# First, before anything else runs: a Ctrl-C while Python starts ends the launcher quietly, as it would end the
-# Build; a SIGINT the caller ignores stays ignored. _signal is built in, so nothing is imported for it.
-SIGINT_LINE = ("import _signal; _signal.getsignal(_signal.SIGINT) is _signal.default_int_handler "
-               "and _signal.signal(_signal.SIGINT, _signal.SIG_DFL)")
+# The first statement of the launcher and of the tool: from here on a Ctrl-C ends the program quietly, as it would
+# end the Build, and one that Python's start-up caught and printed is delivered again, so that it is not lost. A
+# SIGINT the caller ignores stays ignored. _signal and sys are built in, so nothing is imported for them. A Ctrl-C
+# while Python itself starts can still print "KeyboardInterrupt" (BLD-0, "Running a Build").
+SIGINT_LINE = ("import _signal, sys; _signal.getsignal(_signal.SIGINT) is _signal.default_int_handler "
+               "and _signal.signal(_signal.SIGINT, _signal.SIG_DFL); "
+               "isinstance(getattr(sys, 'last_exc', None), KeyboardInterrupt) and _signal.raise_signal(_signal.SIGINT)")
 # The kernel ends the interpreter path of a first line at a space or a "#".
 SHEBANG_STOPS = " \t\n#"
 SHEBANG_LIMIT = 500
