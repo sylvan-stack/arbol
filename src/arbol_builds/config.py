@@ -9,6 +9,9 @@ from typing import Any
 from .launcher import COMPONENT_PATTERN, entry_path, positive, refuse_constant
 
 KINDS = ("unit", "contract", "live")
+# The characters JavaScript's trim() removes, which decided what counted as blank in the Node.js tool.
+JS_SPACE = "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a" \
+    "\u2028\u2029\u202f\u205f\u3000\ufeff"
 
 
 @dataclass
@@ -35,7 +38,7 @@ def load_json(path: str) -> Any:
 
 
 def blank(value: object) -> bool:
-    return not isinstance(value, str) or value.strip() == ""
+    return not isinstance(value, str) or value.strip(JS_SPACE) == ""
 
 
 def description(repo: str, component: str) -> tuple[dict[str, Any], str, dict[str, Any]]:
@@ -62,12 +65,12 @@ def description(repo: str, component: str) -> tuple[dict[str, Any], str, dict[st
         raise ValueError("A Driver requires contract, dataFormat and unit, contract and live checks.")
     package = load_json(os.path.join(repo, "package.json"))
     version = package.get("version") if isinstance(package, dict) else None
-    if not isinstance(version, str) or not version.strip():
+    if not isinstance(version, str) or blank(version):
         raise ValueError("package.json must name the package version.")
 
     def git(*args: str) -> str:
-        return subprocess.run(["git", *args], cwd=repo, check=True, stdin=subprocess.DEVNULL,
-                              capture_output=True, text=True).stdout.strip()
+        return subprocess.run(["git", *args], cwd=repo, check=True, stdin=subprocess.DEVNULL, capture_output=True,
+                              encoding="utf-8", errors="replace").stdout.strip()
 
     source = {"repository": os.path.realpath(os.path.abspath(repo)), "branch": git("rev-parse", "--abbrev-ref", "HEAD"),
               "commit": git("rev-parse", "HEAD"), "uncommittedChanges": git("status", "--porcelain") != ""}

@@ -12,11 +12,27 @@ from datetime import UTC, datetime
 from typing import Any
 
 from .config import Locations, description
-from .launcher import BUILD_PATTERN, Record, default_record, executable_entry, numbered_folders, read_records, runnable
+from .launcher import (
+    BUILD_PATTERN,
+    LONE_SURROGATE,
+    Record,
+    default_record,
+    executable_entry,
+    numbered_folders,
+    plain,
+    read_records,
+    runnable,
+)
 from .mutation import make_dirs, with_mutation_lock
 
 LAUNCHER_SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "launcher.py")
 LAUNCHER_MARK = "# arbol-builds launcher (BLD-0): written by arbol-builds, rewritten when it is installed again."
+# First, before anything else runs: a Ctrl-C while Python starts ends the launcher quietly, as it would end the
+# Build; a SIGINT the caller ignores stays ignored. _signal is built in, so nothing is imported for it.
+SIGINT_LINE = ("import _signal; _signal.getsignal(_signal.SIGINT) is _signal.default_int_handler "
+               "and _signal.signal(_signal.SIGINT, _signal.SIG_DFL)")
+# The kernel ends the interpreter path of a first line at a space or a "#".
+SHEBANG_STOPS = " \t\n#"
 SHEBANG_LIMIT = 500
 STOP_SECONDS = 2.0
 
@@ -29,9 +45,9 @@ def now() -> str:
 def json_text(value: object, indent: int | None = None) -> bytes:
     """JSON as UTF-8. Text that is not valid Unicode is escaped, as JSON.stringify does."""
     if indent is None:
-        dumped = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        dumped = json.dumps(plain(value), ensure_ascii=False, separators=(",", ":"))
     else:
-        dumped = json.dumps(value, ensure_ascii=False, indent=indent)
+        dumped = json.dumps(plain(value), ensure_ascii=False, indent=indent)
     return dumped.encode("utf-8", "backslashreplace")
 
 
@@ -74,14 +90,21 @@ def reserve(registry: str, component: str) -> tuple[str, str]:
 
 def launcher_source(registry: str, component: str, python: str) -> bytes:
     """A launcher: the text of launcher.py, then the call that serves this component and registry."""
-    first = f"#!{python} -ISB"
-    if any(character.isspace() for character in python) or not os.path.isabs(python) or len(first) > SHEBANG_LIMIT:
-        raise ValueError(f"A launcher names its Python in its first line, which cannot hold {python}: "
-                         "the path must be absolute, without spaces and short.")
+    first = shebang(python)
     with open(LAUNCHER_SOURCE, encoding="utf-8") as stream:
         body = stream.read()
     call = f"sys.exit(launch({os.path.abspath(registry)!r}, {component!r}, sys.argv[1:]))"
-    return f"{first}\n{LAUNCHER_MARK}\n{body}\n{call}\n".encode("utf-8", "surrogateescape")
+    return f"{first}\n{LAUNCHER_MARK}\n{SIGINT_LINE}\n{body}\n{call}\n".encode("utf-8", "surrogateescape")
+
+
+def shebang(python: str) -> str:
+    """The first line that starts a program with this Python, or a refusal when the line cannot name it."""
+    first = f"#!{python} -ISB"
+    if (any(character.isspace() or character in SHEBANG_STOPS for character in python) or not os.path.isabs(python)
+            or len(first.encode("utf-8", "surrogateescape")) > SHEBANG_LIMIT):
+        raise ValueError(f"A program names its Python in its first line, which cannot hold {python}: "
+                         "the path must be absolute and short, without a space or a '#'.")
+    return first
 
 
 def write_launcher(bin_folder: str, registry: str, component: str, python: str | None = None) -> None:
@@ -111,8 +134,8 @@ class Stop:
 def signal_group(group: int, number: signal.Signals) -> None:
     try:
         os.killpg(group, number)
-    except ProcessLookupError:
-        pass
+    except (ProcessLookupError, PermissionError):
+        pass  # the group is gone; macOS says EPERM while its last member waits to be reaped
 
 
 def default_signals() -> None:
@@ -124,19 +147,24 @@ def default_signals() -> None:
             signal.signal(number, signal.SIG_DFL)
         except (OSError, ValueError):
             pass
+    signal.pthread_sigmask(signal.SIG_SETMASK, set())
 
 
 def command(text: str, repo: str, folder: str, number: str, log: int, stop: Stop) -> bool:
     """Run one build or check command in its own session, its output into the log."""
+    # Text that is not valid Unicode reaches the shell and the log as U+FFFD, as with the Node.js tool.
+    text = LONE_SURROGATE.sub("\ufffd", text)
+    os.write(log, f"\n$ {text}\n".encode())
     if stop.requested:
+        # Stopped before the command could start: logged as the Node.js tool logged it.
+        os.write(log, b"Exit: SIGTERM (stopped by caller)\n")
         return False
-    os.write(log, f"\n$ {text}\n".encode("utf-8", "backslashreplace"))
     env = {**os.environ, "ARBOL_BUILD_DIR": folder, "ARBOL_BUILD_NUMBER": number}
     try:
         child = subprocess.Popen(["/bin/sh", "-c", text], cwd=repo, env=env, stdin=subprocess.DEVNULL,
                                  stdout=log, stderr=log, start_new_session=True, preexec_fn=default_signals)
-    except OSError as error:
-        os.write(log, f"Command could not start: {error}\n".encode("utf-8", "backslashreplace"))
+    except (OSError, ValueError) as error:
+        os.write(log, f"Command could not start: {error}\n".encode("utf-8", "replace"))
         return False
     stop.group = child.pid
     if stop.requested:
@@ -166,7 +194,7 @@ def build_component(component: str, paths: Locations, stop: Stop) -> Record:
                       "startedAt": now(), "source": source, "entry": config["entry"], "checks": []}
     for key in ("contract", "dataFormat"):
         if key in config:
-            record[key] = config[key]
+            record[key] = int(config[key])  # a whole number, also when written 1.0
     save_record(folder, record)
     log = os.open(os.path.join(folder, "build.log"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     stage, name = "launcher", "launcher"
@@ -196,7 +224,7 @@ def build_component(component: str, paths: Locations, stop: Stop) -> Record:
     except Exception as error:
         record["status"] = "failed"
         record["failure"] = {"stage": stage, "name": name, "message": str(error)}
-        os.write(log, f"\nFAILED {stage} {name}: {error}\n".encode("utf-8", "backslashreplace"))
+        os.write(log, LONE_SURROGATE.sub("\ufffd", f"\nFAILED {stage} {name}: {error}\n").encode())
     finally:
         os.close(log)
         record["finishedAt"] = now()
@@ -210,7 +238,9 @@ def list_builds(registry: str, component: str | None = None) -> list[Record]:
     else:
         try:
             with os.scandir(registry) as entries:
-                components = sorted(item.name for item in entries if item.is_dir(follow_symlinks=False))
+                # In the order of JavaScript's sort: by UTF-16 code units.
+                components = sorted((item.name for item in entries if item.is_dir(follow_symlinks=False)),
+                                    key=lambda name: name.encode("utf-16-be", "surrogatepass"))
         except FileNotFoundError:
             components = []
     listed: list[Record] = []
@@ -246,6 +276,11 @@ def withdraw_build(registry: str, component: str, number: str, reason: str) -> R
     return with_mutation_lock(os.path.join(registry, component), change)
 
 
+def missing_only(function: Any, path: str, error: BaseException) -> None:
+    if not isinstance(error, FileNotFoundError):
+        raise error
+
+
 def prune_builds(registry: str, component: str, keep: int) -> dict[str, Any]:
     def change() -> dict[str, Any]:
         working = [record for record in read_records(registry, component)
@@ -263,8 +298,9 @@ def prune_builds(registry: str, component: str, keep: int) -> dict[str, Any]:
                 if item in ("build.json", "build.log"):
                     continue
                 path = os.path.join(folder, item)
+                # Only a file that is already gone is ignored, as with Node.js rm --force; any other failure stops.
                 if os.path.isdir(path) and not os.path.islink(path):
-                    shutil.rmtree(path, ignore_errors=True)
+                    shutil.rmtree(path, onexc=missing_only)
                 else:
                     try:
                         os.unlink(path)

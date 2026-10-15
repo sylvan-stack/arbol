@@ -8,6 +8,7 @@ programs. No vendor tool is involved.
 
 import json
 import os
+import resource
 import select
 import shutil
 import signal
@@ -15,17 +16,24 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
+import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+from arbol_builds import mutation  # noqa: E402
+from arbol_builds.launcher import write_all  # noqa: E402
 from arbol_builds.service import reserve  # noqa: E402
 
 PYTHON = sys.executable
 ENTRY = str(ROOT / "bin/builds_entry.py")
+TOOL = [PYTHON, "-I", "-B", ENTRY]
 INSTALLER = str(ROOT / "scripts/install_builds.py")
 ENV = {"PATH": "/usr/bin:/bin", "LANG": "en_US.UTF-8"}
 ARCHIVE_CACHE = Path.home() / ".cache/arbol-driver-build/python"
@@ -98,6 +106,11 @@ def bump():
         stream.write(str(number + 1))
 for _ in range(20):
     with_mutation_lock(folder, bump)
+"""
+SIGNALS = """import json, signal
+names = ("SIGHUP", "SIGINT", "SIGQUIT", "SIGTERM", "SIGUSR1")
+print(json.dumps({"ignored": [name for name in names if signal.getsignal(getattr(signal, name)) is signal.SIG_IGN],
+                  "blocked": sorted(number.name for number in signal.pthread_sigmask(signal.SIG_BLOCK, []))}))
 """
 HOLDER = f"""import sys, time
 sys.path.insert(0, {str(ROOT / "src")!r})
@@ -186,6 +199,37 @@ class Fixture:
 
     def path(self, *parts: str) -> str:
         return os.path.join(self.registry, self.component, *parts)
+
+
+def run_tool(f: Fixture, *args: str | bytes, cwd: str | None = None) -> Result:
+    """The tool started from the checkout with exactly these arguments."""
+    return subprocess.run([*TOOL, *args], cwd=cwd or f.home, env=f.env(), capture_output=True, timeout=120,
+                          check=False)
+
+
+def wait_until(condition: Callable[..., object], *args: Any, seconds: float = 10.0) -> None:
+    end = time.monotonic() + seconds
+    while not condition(*args):
+        if time.monotonic() > end:
+            raise AssertionError("The condition did not come true in time.")
+        time.sleep(0.01)
+
+
+def waiting(log: Path) -> bool:
+    """Whether the sample's long-running command has started: it prints a line "waiting" into the log."""
+    return log.exists() and "\nwaiting\n" in log.read_text()
+
+
+def alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def mode(path: str) -> int:
+    return stat.S_IMODE(os.stat(path).st_mode)
 
 
 def first_line(child: subprocess.Popen[bytes], seconds: float = 10.0) -> bytes:
@@ -322,6 +366,8 @@ class Builds(unittest.TestCase):
                          ["failed", "2", "unavailable-account"])
         self.assertEqual(record["checks"], [{"name": "unavailable-account", "passed": False}])
         self.assertIn("account-signed-out", Path(f.path("2/build.log")).read_text())
+        self.assertTrue(Path(f.path("2/build.log")).read_text().endswith(
+            "\nFAILED check unavailable-account: Check failed; see build.log.\n"))
         self.assertEqual(document(f.launch())["build"], "1")
         named = f.launch("-v", "2", "text")
         self.assertEqual(named.returncode, 0, named.stdout)
@@ -403,6 +449,7 @@ class Builds(unittest.TestCase):
             self.assertEqual(document(result)["error"]["code"], "build_unavailable")
         self.assertEqual(document(f.launch("run", "-v", "2", "", "a b", "a'b"))["args"],
                          ["run", "-v", "2", "", "a b", "a'b"])
+        self.assertEqual(document(f.launch("a", "b", "-v", "1"))["args"], ["a", "b", "-v", "1"])
         path = Path(f.path("2/build.json"))
         building = json.loads(path.read_text())
         building["status"] = "building"
@@ -443,10 +490,16 @@ class Builds(unittest.TestCase):
         original = path.read_text()
         for bad in ("{", "{}", original.replace('"build": "2"', '"build": "9"'),
                     original.replace('"entry": "program.py"', '"entry": "../../outside"'),
-                    original.replace('"dataFormat": 1', '"dataFormat": NaN')):
+                    original.replace('"dataFormat": 1', '"dataFormat": NaN'),
+                    original.replace('"dataFormat": 1', '"dataFormat": 1' + "0" * 399),
+                    json.dumps({**json.loads(original), "startedAt": "\uff12\uff10\uff12\uff16-10-15T00:00:00.000Z"})):
             path.write_text(bad)
             self.assertEqual(document(f.launch())["build"], "1")
             self.assertEqual(len(document(f.call("list"))), 1)
+        path.write_text(original.replace('"entry": "program.py"', '"entry": "program.py\\u0000"'))
+        self.assertEqual(document(f.launch())["build"], "1")
+        self.assertEqual(document(f.launch("-v", "2"))["error"]["available"], ["1"])
+        self.assertEqual([record["default"] for record in document(f.call("list"))], [False, True])
         path.unlink()
         self.assertEqual(document(f.launch())["build"], "1")
         path.write_text(original)
@@ -529,10 +582,7 @@ class Builds(unittest.TestCase):
         f.configure(build=["echo waiting; while true; do sleep 1; done"])
         child = f.spawn("build", f.component, "--repo", f.repo, "--registry-dir", f.registry, "--bin-dir", f.bin)
         log = Path(f.path("1/build.log"))
-        for _ in range(1000):
-            if log.exists() and "waiting" in log.read_text():
-                break
-            time.sleep(0.01)
+        wait_until(waiting, log)
         child.send_signal(signal.SIGTERM)
         output, _ = child.communicate(timeout=30)
         self.assertEqual(child.returncode, 1)
@@ -543,21 +593,245 @@ class Builds(unittest.TestCase):
         f.configure(build=[BUILD])
         self.assertEqual(f.build()["build"], "2")
 
+    def test_builds_prune_keeps_default(self) -> None:
+        """builds.prune-keeps-default keeps the default when the newest working Build has lost its program."""
+        f = Fixture(self)
+        for _ in range(4):
+            f.build()
+        os.chmod(f.path("4/program.py"), 0o600)
+        self.assertEqual(document(f.launch())["build"], "3")
+        self.assertEqual(document(f.call("prune", f.component, "--keep", "1"))["pruned"], ["2", "1"])
+        self.assertEqual(document(f.launch())["build"], "3")
+        refused = f.call("withdraw", f"{f.component}@1", "--reason", "already pruned")
+        self.assertEqual([refused.returncode, document(refused)["error"]["code"]], [1, "builds_failed"])
+
+    def test_builds_stopped_commands(self) -> None:
+        """builds.stopped-commands: SIGINT or SIGTERM stops the whole process group of the running command."""
+        f = Fixture(self)
+        f.configure(build=['sleep 300 & echo $! > "$ARBOL_BUILD_DIR/child"; echo waiting; wait'])
+        for number, build in ((signal.SIGINT, "1"), (signal.SIGTERM, "2")):
+            with self.subTest(signal=number.name):
+                child = f.spawn("build", f.component, "--repo", f.repo, "--registry-dir", f.registry,
+                                "--bin-dir", f.bin)
+                log = Path(f.path(build, "build.log"))
+                wait_until(waiting, log)
+                background = int(Path(f.path(build, "child")).read_text())
+                child.send_signal(number)
+                output, _ = child.communicate(timeout=30)
+                self.assertEqual(child.returncode, 1)
+                record = json.loads(output)
+                self.assertEqual([record["status"], record["failure"]["stage"]], ["failed", "build"])
+                self.assertIn("Exit: SIGTERM (stopped by caller)", log.read_text())
+                wait_until(lambda pid: not alive(pid), background)
+
+    def test_builds_stop_kills(self) -> None:
+        """builds.stop-kills: a command that ignores SIGTERM is killed two seconds after the build is stopped."""
+        f = Fixture(self)
+        f.configure(build=['trap "" TERM; echo waiting; while true; do sleep 1; done'])
+        child = f.spawn("build", f.component, "--repo", f.repo, "--registry-dir", f.registry, "--bin-dir", f.bin)
+        log = Path(f.path("1/build.log"))
+        wait_until(waiting, log)
+        stopped = time.monotonic()
+        child.send_signal(signal.SIGTERM)
+        output, _ = child.communicate(timeout=30)
+        self.assertGreaterEqual(time.monotonic() - stopped, 1.5)
+        self.assertEqual([child.returncode, json.loads(output)["status"]], [1, "failed"])
+        self.assertIn("Exit: SIGKILL (stopped by caller)", log.read_text())
+
+    def test_builds_writer_reservations(self) -> None:
+        """builds.writer-reservations: a live reservation in the earlier tool's form holds back record changes."""
+        f = Fixture(self)
+        f.build()
+        writers = Path(f.path(".writers"))
+        holder = subprocess.Popen(["/bin/sleep", "60"])
+        self.addCleanup(finish, holder)
+        reservation = writers / f"{holder.pid}-{uuid.uuid4()}.json"
+        reservation.write_text(json.dumps({"pid": holder.pid, "choosing": False, "ticket": "1"}, separators=(",", ":")))
+        withdraw = f.spawn("withdraw", f"{f.component}@1", "--reason", "after the writer", "--registry-dir", f.registry)
+        build = f.spawn("build", f.component, "--repo", f.repo, "--registry-dir", f.registry, "--bin-dir", f.bin)
+        time.sleep(1.5)
+        self.assertEqual([withdraw.poll(), build.poll()], [None, None])
+        self.assertEqual(json.loads(Path(f.path("1/build.json")).read_text())["status"], "working")
+        self.assertFalse(os.path.exists(f.path("2/build.json")))
+        holder.kill()
+        holder.wait()
+        for child in (withdraw, build):
+            output, errors = child.communicate(timeout=120)
+            self.assertEqual(child.returncode, 0, output + errors)
+        # The writer has ended: its reservation was removed.
+        self.assertFalse(reservation.exists())
+        self.assertEqual(document(f.call("show", f"{f.component}@1"))["status"], "withdrawn")
+        self.assertEqual(document(f.launch())["build"], "2")
+
+    def test_builds_busy(self) -> None:
+        """builds.busy: a change gives up when a live writer keeps its reservation past the limit."""
+        f = Fixture(self)
+        writers = Path(f.path(".writers"))
+        writers.mkdir(parents=True)
+        held = writers / f"{os.getpid()}-{uuid.uuid4()}.json"
+        held.write_text(json.dumps({"pid": os.getpid(), "choosing": False, "ticket": "1"}))
+        with mock.patch.object(mutation, "WAIT_SECONDS", 0.2), self.assertRaises(mutation.Busy):
+            mutation.with_mutation_lock(f.path(), lambda: None)
+        self.assertEqual(os.listdir(writers), [held.name])
+
+    def test_builds_failed_first_build(self) -> None:
+        """builds.failed-first-build writes the launcher, which runs the failed Build only when it is named."""
+        f = Fixture(self)
+        f.configure(checks=[{"name": "always-fails", "command": "exit 1"}])
+        self.assertEqual(f.call("build", f.component, "--repo", f.repo).returncode, 1)
+        refused = f.launch()
+        self.assertEqual([refused.returncode, document(refused)["error"]["available"]], [1, ["1"]])
+        named = f.launch("-v", "1")
+        self.assertEqual([named.returncode, document(named)["build"]], [0, "1"])
+        self.assertEqual(named.stderr, f"{f.component}@1 is failed: check always-fails: Check failed; see build.log.\n"
+                         .encode())
+
+    def test_builds_entry_outside(self) -> None:
+        """builds.entry-outside: an entry that leads out of the Build folder fails at the entry stage."""
+        f = Fixture(self)
+        f.configure(build=[f'ln -s "{PYTHON}" "$ARBOL_BUILD_DIR/program.py"'])
+        record = document(f.call("build", f.component, "--repo", f.repo))
+        self.assertEqual([record["status"], record["failure"]["stage"]], ["failed", "entry"])
+        self.assertEqual(document(f.launch("-v", "1"))["error"]["available"], [])
+
+    def test_builds_relative_paths(self) -> None:
+        """builds.relative-paths resolves a relative registry, bin folder and repository against the working folder."""
+        f = Fixture(self)
+        result = run_tool(f, "build", f.component, "--repo", "repository", "--registry-dir", "relative registry",
+                          "--bin-dir=relative-bin")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(document(result)["source"]["repository"], f.repo)
+        launcher = os.path.join(f.home, "relative-bin", f.component)
+        self.assertIn(repr(os.path.join(f.home, "relative registry")), Path(launcher).read_text())
+        started = subprocess.run([launcher], cwd="/", env=ENV, capture_output=True, timeout=60, check=False)
+        self.assertEqual(document(started)["build"], "1")
+
+    def test_builds_private_files(self) -> None:
+        """builds.private-files: registry folders are 0700, records and logs 0600, launchers 0755."""
+        f = Fixture(self)
+        f.build()
+        for folder in (f.registry, f.path(), f.path("1"), f.path(".writers")):
+            self.assertEqual(mode(folder), 0o700, folder)
+        for file in (f.path("1/build.json"), f.path("1/build.log")):
+            self.assertEqual(mode(file), 0o600, file)
+        self.assertEqual(mode(os.path.join(f.bin, f.component)), 0o755)
+
+    def test_builds_command_environment(self) -> None:
+        """builds.command-environment: commands read no input and start with every signal at its default,
+        none blocked, and the raised open-files limit, whatever the caller gave the tool."""
+        f = Fixture(self)
+        Path(f.repo, "signals.py").write_text(SIGNALS)
+        f.configure(build=[BUILD, 'cat > "$ARBOL_BUILD_DIR/input"', 'ulimit -n > "$ARBOL_BUILD_DIR/files"',
+                           f'"{PYTHON}" -I signals.py > "$ARBOL_BUILD_DIR/signals"'])
+
+        def restricted() -> None:
+            for number in (signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGUSR1):
+                signal.signal(number, signal.SIG_IGN)
+            signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR1, signal.SIGTERM})
+            resource.setrlimit(resource.RLIMIT_NOFILE, (256, resource.getrlimit(resource.RLIMIT_NOFILE)[1]))
+
+        result = subprocess.run([*TOOL, "--registry-dir", f.registry, "--bin-dir", f.bin, "build", f.component,
+                                 "--repo", f.repo], cwd=f.home, env=f.env(), input=b"caller data", capture_output=True,
+                                timeout=120, check=False, preexec_fn=restricted)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(Path(f.path("1/input")).read_bytes(), b"")
+        self.assertGreater(int(Path(f.path("1/files")).read_text()), 256)
+        self.assertEqual(json.loads(Path(f.path("1/signals")).read_text()), {"ignored": [], "blocked": []})
+
+    def test_builds_record_format(self) -> None:
+        """builds.record-format: records keep the earlier tool's form: key order, times to the millisecond,
+        whole numbers, two-space indentation in build.json and one line on standard output."""
+        f = Fixture(self)
+        f.configure(contract=1.0, dataFormat=2)
+        result = f.call("build", f.component, "--repo", f.repo)
+        self.assertEqual(result.stdout.count(b"\n"), 1)
+        record = document(result)
+        keys = ["component", "build", "packageVersion", "status", "startedAt", "source", "entry", "checks",
+                "contract", "dataFormat", "finishedAt"]
+        self.assertEqual(list(record), keys)
+        self.assertEqual(list(record["source"]), ["repository", "branch", "commit", "uncommittedChanges"])
+        for key in ("startedAt", "finishedAt"):
+            self.assertRegex(record[key], r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\Z")
+        text = Path(f.path("1/build.json")).read_text()
+        self.assertTrue(text.startswith(f'{{\n  "component": "{f.component}",\n  "build": "1",\n'))
+        self.assertIn('\n  "contract": 1,\n', text)
+        self.assertEqual(list(json.loads(text)), keys)
+        f.call("withdraw", f"{f.component}@1", "--reason", "format")
+        withdrawn = document(f.call("show", f"{f.component}@1"))
+        self.assertEqual([list(withdrawn), list(withdrawn["withdrawn"])], [[*keys, "withdrawn"], ["at", "reason"]])
+        self.assertEqual(list(document(f.call("list"))[0]), [*keys, "withdrawn", "default"])
+
+    def test_builds_list_order(self) -> None:
+        """builds.list-order lists components in name order, each newest first."""
+        f = Fixture(self)
+        f.build()
+        f.configure(component="alpha")
+        for _ in range(2):
+            self.assertEqual(f.call("build", "alpha", "--repo", f.repo).returncode, 0)
+        self.assertEqual([[record["component"], record["build"]] for record in document(f.call("list"))],
+                         [["alpha", "2"], ["alpha", "1"], [f.component, "1"]])
+
+    def test_builds_help(self) -> None:
+        """builds.help prints the usage only when --help is the whole command line."""
+        f = Fixture(self)
+        shown = run_tool(f, "--help")
+        self.assertEqual([shown.returncode, list(document(shown))], [0, ["usage"]])
+        self.assertTrue(document(shown)["usage"].startswith("arbol-builds build <component>"))
+        for args in (["--help", "list"], ["list", "--help"]):
+            refused = run_tool(f, *args)
+            self.assertEqual([refused.returncode, document(refused)["error"]["code"]], [1, "builds_failed"], args)
+
+    def test_builds_text(self) -> None:
+        """builds.text: blank means what JavaScript's trim() removes; a reason that is not UTF-8 keeps U+FFFD."""
+        f = Fixture(self)
+        f.configure(checks=[{"name": "\x1c", "command": CHECK}])
+        self.assertEqual(f.build()["checks"], [{"name": "\x1c", "passed": True}])
+        for build in (["\ufeff\u3000"], [BUILD, "\u2028"]):
+            f.configure(build=build)
+            self.assertEqual(f.call("build", f.component, "--repo", f.repo).returncode, 1, build)
+        self.assertEqual([name for name in os.listdir(f.path()) if not name.startswith(".")], ["1"])
+        self.assertEqual(f.call("withdraw", f"{f.component}@1", "--reason", "\ufeff\u00a0").returncode, 1)
+        result = run_tool(f, "withdraw", f"{f.component}@1", "--reason", b"caf\xe9 \xff", "--registry-dir", f.registry)
+        self.assertEqual(document(result)["withdrawn"]["reason"], "caf\ufffd \ufffd")
+        self.assertEqual(json.loads(Path(f.path("1/build.json")).read_text())["withdrawn"]["reason"],
+                         "caf\ufffd \ufffd")
+
+    def test_builds_closed_streams(self) -> None:
+        """builds.closed-streams: the tool and the launcher run with standard input and output closed,
+        as if they were /dev/null."""
+        f = Fixture(self)
+        closed = ["/bin/sh", "-c", 'exec "$@" <&- >&-', "sh"]
+        built = subprocess.run([*closed, *TOOL, "--registry-dir", f.registry, "--bin-dir", f.bin, "build", f.component,
+                                "--repo", f.repo], cwd=f.home, env=f.env(), capture_output=True, timeout=120, check=False)
+        self.assertEqual([built.returncode, built.stdout, built.stderr], [0, b"", b""])
+        self.assertEqual(json.loads(Path(f.path("1/build.json")).read_text())["status"], "working")
+        self.assertNotIn(b'"status"', Path(f.path("1/build.log")).read_bytes())
+        launched = subprocess.run([*closed, os.path.join(f.bin, f.component), "--echo"], env=f.env(),
+                                  capture_output=True, timeout=60, check=False)
+        self.assertEqual([launched.returncode, launched.stderr], [0, b"diagnostic\n"])
+
 
 class Launchers(unittest.TestCase):
     """What the Python launcher does where the Node.js launcher did not (BLD-D15)."""
 
     def test_builds_launcher_signals(self) -> None:
-        """builds.launcher-signals: the Build gets SIGPIPE at its default, as on a direct start."""
+        """builds.launcher-signals: the Build gets SIGPIPE and SIGXFSZ at their default, as on a direct start."""
         f = Fixture(self, "probe")
-        Path(f.repo, "probe.sh").write_text('#!/bin/sh\n(yes; echo "yes ended with $?" >&2) | head -1 > /dev/null\n')
+        Path(f.repo, "probe.sh").write_text('#!/bin/sh\n(yes; echo "yes ended with $?" >&2) | head -1 > /dev/null\n'
+                                            '(ulimit -f 0; printf x > "$(dirname "$0")/written")\n'
+                                            'echo "write ended with $?" >&2\n')
         f.configure(build=['cp probe.sh "$ARBOL_BUILD_DIR/probe.sh"; chmod +x "$ARBOL_BUILD_DIR/probe.sh"'],
                     entry="probe.sh", checks=[{"name": "present", "command": 'test -x "$ARBOL_BUILD_DIR/probe.sh"'}])
         f.build()
         direct = subprocess.run([f.path("1/probe.sh")], env=ENV, capture_output=True, timeout=30, check=False)
         launched = f.launch()
-        self.assertEqual(direct.stderr, b"yes ended with 141\n")
-        self.assertEqual(launched.stderr, direct.stderr)
+
+        def ended(result: Result) -> list[bytes]:
+            # The shell also reports the signal, with a process number that differs from run to run.
+            return [line for line in result.stderr.splitlines() if b" ended with " in line]
+
+        self.assertEqual(ended(direct), [b"yes ended with 141", b"write ended with 153"])
+        self.assertEqual(ended(launched), ended(direct))
 
     def test_builds_launcher_bytes(self) -> None:
         """builds.launcher-bytes: arguments and environment that are not UTF-8 reach the Build byte for byte."""
@@ -581,6 +855,28 @@ class Launchers(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(document(result)["error"]["code"], "launch_failed")
         self.assertIn("Exec format error", document(result)["error"]["message"])
+
+    def test_builds_nonblocking_output(self) -> None:
+        """builds.nonblocking-output: output reaches a pipe the caller left non-blocking in full."""
+        read_end, write_end = os.pipe()
+        os.set_blocking(write_end, False)
+        data = os.urandom(1 << 20)
+        received = bytearray()
+
+        def drain() -> None:
+            while chunk := os.read(read_end, 65536):
+                received.extend(chunk)
+                time.sleep(0.001)
+
+        reader = threading.Thread(target=drain)
+        reader.start()
+        try:
+            write_all(write_end, data)
+        finally:
+            os.close(write_end)
+            reader.join(timeout=60)
+            os.close(read_end)
+        self.assertEqual(bytes(received), data)
 
 
 @unittest.skipUnless((ARCHIVE_CACHE / "d15291f940cfecd2e54010d5e37d2e03aa192f076a65d26ab741372fff2dabfe.tar.gz").exists()
@@ -623,7 +919,8 @@ class Install(unittest.TestCase):
         self.assertEqual(self.install("word").returncode, 1)
 
     def test_builds_install_refreshes_launchers(self) -> None:
-        """builds.install-refreshes-launchers rewrites Node.js and Python launchers and leaves other files alone."""
+        """builds.install-refreshes-launchers rewrites Node.js and Python launchers, leaves other files alone,
+        and removes the earlier Node.js tool and the leftovers of a stopped install."""
         f = self.f
         f.build()
         registry = json.dumps(os.path.abspath(f.registry))
@@ -645,6 +942,20 @@ class Install(unittest.TestCase):
         # A Python launcher written by this tool is refreshed as well.
         shutil.copy2(os.path.join(f.bin, f.component), os.path.join(self.folder, "second"))
         Path(self.folder, "second").write_text(written.replace(repr(f.component), repr("second")))
+        # A link named after the component it serves is left as a link, and its target as it is.
+        outside = Path(f.home, "outside-third")
+        outside.write_text(written.replace(repr(f.component), repr("third")))
+        os.symlink(outside, os.path.join(self.folder, "third"))
+        library = Path(self.folder, ".arbol-builds")
+        library.mkdir()
+        old = ["cli.js", "service.js", "package.json"]
+        for name in old:
+            Path(library, name).write_text("// the earlier tool\n")
+        leftovers = [Path(library, f".arbol_builds-{uuid.uuid4()}"), Path(library, "runtime", f".unpacking-{uuid.uuid4()}")]
+        for leftover in leftovers:
+            leftover.mkdir(parents=True)
+        leftovers.append(Path(self.folder, f"arbol-builds.1.{uuid.uuid4()}.tmp"))
+        leftovers[-1].write_text("unfinished")
         result = self.install(f"--bin-dir={self.folder}")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(document(result)["launchers"], ["sample", "second"])
@@ -659,14 +970,19 @@ class Install(unittest.TestCase):
         for name, text in others.items():
             self.assertEqual(Path(self.folder, name).read_text(), text, name)
         self.assertTrue(os.path.islink(os.path.join(self.folder, "linked")))
+        self.assertTrue(os.path.islink(os.path.join(self.folder, "third")))
+        self.assertEqual(outside.read_text(), written.replace(repr(f.component), repr("third")))
+        for path in [*(library / name for name in old), *leftovers]:
+            self.assertFalse(path.exists(), path)
 
     def test_builds_install_refuses_spaces(self) -> None:
-        """builds.install-refuses-spaces: a folder whose path holds a space cannot name the Python in a first line."""
-        target = os.path.join(self.folder, "with space")
-        result = self.install(f"--bin-dir={target}")
-        self.assertEqual(result.returncode, 1)
-        self.assertEqual(document(result)["error"]["code"], "install_failed")
-        self.assertFalse(os.path.exists(target))
+        """builds.install-refuses-spaces: a folder whose path holds a space or a '#', or is too long, cannot name
+        the Python in a first line; nothing is created."""
+        for name in ("with space", "with#hash", "with\ttab", "a" * 200 + "/" + "b" * 200):
+            target = os.path.join(self.folder, name)
+            result = self.install(f"--bin-dir={target}")
+            self.assertEqual([result.returncode, document(result)["error"]["code"]], [1, "install_failed"], name)
+            self.assertEqual(os.listdir(self.folder), [], name)
 
 
 if __name__ == "__main__":

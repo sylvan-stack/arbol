@@ -16,8 +16,8 @@ from typing import Any
 
 WAIT_SECONDS = 30.0
 POLL_SECONDS = 0.01
-WRITER_NAME = re.compile(r"\d+-[0-9a-f-]+\.json")
-TICKET = re.compile(r"\d+")
+WRITER_NAME = re.compile(r"\d+-[0-9a-f-]+\.json", re.ASCII)
+TICKET = re.compile(r"\d+", re.ASCII)  # ASCII digits, as in JavaScript
 
 
 class Busy(Exception):
