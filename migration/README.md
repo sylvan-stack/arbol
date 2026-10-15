@@ -2,7 +2,7 @@
 
 These development checks implement SYL-95 without changing the shared Node build tool, launchers or conformance assertions. They are not a shared Driver runtime or a public library. Claude must pass the complete 38-scenario suite; Codex retains the five original scoped conformance groups and its unfinished feature tasks.
 
-The retained TypeScript baseline is Claude `89322877059cb0cdeb6f549d6338d3863adce710` and Codex `37daaf853ae1f4d5382a316b5c7da683b057dda1`. Keep separate checkouts at those commits, install their development dependencies and compile them with Node 24. The current Python artifacts have their own pinned CPython interpreter; baseline preparation requires Node and npm only.
+The retained TypeScript baseline is Claude `5ea45f2a04d7d8900547001159696114eeeb8e3f` and Codex `37daaf853ae1f4d5382a316b5c7da683b057dda1`. Keep separate checkouts at those commits, install their development dependencies and compile them with Node 24. The current Python artifacts have their own pinned CPython interpreter; baseline preparation requires Node and npm only.
 
 `generate-baseline.mjs <baseline-folder> <output-folder>` imports only the separately compiled baseline modules. It records source commits, 14 histories with incremental snapshots, Unicode/control/lone/split surrogate cases, decoded-image fingerprints, chat keys, Claude UTF-16 folder encoding, and the Keychain service formula. The committed copies are `tests/fixtures/migration-vectors.json` in each Driver. The Claude split-surrogate defect is explicitly corrected in the published DRV-6 migration amendment; the original result is retained alongside the canonical result. No other mismatch may be normalized away.
 
