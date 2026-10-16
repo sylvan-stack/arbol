@@ -7,7 +7,7 @@ uv run --no-sync python database/install_database_server.py
 ```
 
 ```bash
-uv run --no-sync python database/probe_database_server.py
+uv run --no-sync python database/probe_database_server.py [--restart]
 ```
 
 | File | What it does |
@@ -39,3 +39,4 @@ The probe's checks:
 | `listening` | The `postgres` of the data folder, from `/opt/homebrew/opt/postgresql@17/bin`, is the only program on the port, listens on `127.0.0.1` at that port and on nothing else, answers there, and answers on no other address of the Mac's interfaces, IPv4 or IPv6 |
 | `role` | The address with the password of the Keychain item connects as `arbol` to PostgreSQL 17; without a password it is refused; the role may log in and create databases, is not a superuser, may not create roles, replicate or bypass row security, and is a member of no role; it makes a database `arbol_probe_<random>` and removes it |
 | `data-folder` | The data folder lies on the Mac's internal disk, not on removable media or a container's virtual disk; its size and number of files are read by walking it, as Arbol reads any folder, and the free space of its volume is reported |
+| `launch-agent` | The launch agent runs `postgres` on the data folder, at login (`RunAtLoad`) and again whenever it ends (`KeepAlive`), is not disabled, and is the process launchd runs. With `--restart` the probe ends the server's process with PostgreSQL's fast shutdown and waits until launchd has started it again and it answers on 127.0.0.1, which stands in for a restart of the Mac |

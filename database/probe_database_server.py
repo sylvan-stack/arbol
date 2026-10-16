@@ -4,10 +4,12 @@ It checks that the programs of PostgreSQL 17 are found in a newly opened termina
 server, as the Root Contract's suite does (RCT-4), and that the installed server answers on 127.0.0.1 at the port
 of `~/.arbol/database.json` and on no other address of the Mac. With the password of the Keychain item it connects
 as the role of that address, sees that the role may log in and create databases and nothing more, and makes a
-database and removes it; it reads the size of the data folder and that it lies on the Mac's own disk. It prints a JSON report and leaves nothing behind. The password
+database and removes it; it reads the size of the data folder and that it lies on the Mac's own disk; and it sees
+that the launch agent runs the server and will start it at the next login. With `--restart` it also stops the
+server's process and waits for launchd to start it again, which stands in for a restart of the Mac. It prints a JSON report and leaves nothing behind. The password
 of the Keychain item is never printed.
 
-    uv run --no-sync python database/probe_database_server.py
+    uv run --no-sync python database/probe_database_server.py [--restart]
 
 It ends with the exit status 0 when every check passed and 1 when one failed.
 """
@@ -21,17 +23,32 @@ import os
 import plistlib
 import secrets
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from database_server import BIN, LSOF, MAJOR, PROGRAMS, SECURITY, SERVICE, Places, major_version, postmaster_pid, run
+from database_server import (
+    BIN,
+    LABEL,
+    LAUNCHCTL,
+    LSOF,
+    MAJOR,
+    PROGRAMS,
+    SECURITY,
+    SERVICE,
+    Places,
+    major_version,
+    postmaster_pid,
+    run,
+)
 
 MARKER = "@@arbol-probe"
 THROWAWAY_ROLE = "probe"
@@ -332,6 +349,71 @@ def check_data_folder(context: Context) -> Detail:
     return detail
 
 
+def launchd_service(context: Context) -> dict[str, str]:
+    """The top-level fields that `launchctl print` shows for the launch agent, or {} when it is not loaded."""
+    result = run([LAUNCHCTL, "print", f"gui/{os.getuid()}/{LABEL}"], context.places.home)
+    if result.returncode != 0:
+        return {}
+    fields: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        if line.startswith("\t") and not line.startswith("\t\t") and " = " in line:
+            key, value = line[1:].split(" = ", 1)
+            fields.setdefault(key, value)
+    return fields
+
+
+def ready_on_loopback(context: Context) -> bool:
+    return run([str(BIN / "pg_isready"), "--host", context.host or "127.0.0.1", "--port", str(context.port),
+                "--timeout", "2"], context.places.home, timeout=10).returncode == 0
+
+
+def check_launch_agent(context: Context) -> Detail:
+    """launchd runs the server from the launch agent, will start it at the next login, and starts it again."""
+    places = context.places
+    try:
+        with places.plist.open("rb") as file:
+            agent = plistlib.load(file)
+    except (OSError, plistlib.InvalidFileException) as problem:
+        raise Failed(f"the launch agent {places.plist} cannot be read: {problem}") from problem
+    expected = [str(BIN / "postgres"), "-D", str(places.data)]
+    disabled = run([LAUNCHCTL, "print-disabled", f"gui/{os.getuid()}"], places.home).stdout
+    service = launchd_service(context)
+    pid = postmaster_pid(places.data)
+    detail: Detail = {"plist": str(places.plist), "runAtLoad": agent.get("RunAtLoad"),
+                      "keepAlive": agent.get("KeepAlive"), "program": agent.get("ProgramArguments"),
+                      "disabled": f'"{LABEL}" => disabled' in disabled, "state": service.get("state"),
+                      "launchdPid": service.get("pid"), "serverPid": pid}
+    problems: list[str] = []
+    if agent.get("Label") != LABEL or agent.get("ProgramArguments") != expected:
+        problems.append(f"the launch agent does not run {' '.join(expected)}")
+    if agent.get("RunAtLoad") is not True or agent.get("KeepAlive") is not True:
+        problems.append("the launch agent does not start the server at login and again whenever it ends")
+    if detail["disabled"]:
+        problems.append("the launch agent is disabled, so it would not start at the next login")
+    if service.get("path") != str(places.plist) or service.get("state") != "running":
+        problems.append("launchd does not run the launch agent")
+    if pid is None or service.get("pid") != str(pid):
+        problems.append(f"the server's process {pid} is not the one launchd runs ({service.get('pid')})")
+    if problems:
+        raise Failed("; ".join(problems))
+    if not context.restart:
+        detail["restart"] = "not tried; run the probe with --restart"
+        return detail
+    assert pid is not None
+    started = time.monotonic()
+    os.kill(pid, signal.SIGINT)  # PostgreSQL's fast shutdown: the process ends as it would at a restart
+    while True:
+        time.sleep(0.5)
+        waited = time.monotonic() - started
+        now = launchd_service(context).get("pid")
+        server = postmaster_pid(places.data)
+        if now and now != str(pid) and server is not None and now == str(server) and ready_on_loopback(context):
+            detail["restart"] = {"stoppedPid": pid, "newPid": server, "seconds": round(waited, 1)}
+            return detail
+        if waited > 90:
+            raise Failed(f"launchd did not start the server again within 90 seconds after its process {pid} ended")
+
+
 CHECKS: list[tuple[str, Callable[[Context], Detail]]] = [
     ("programs", check_programs),
     ("throwaway-server", check_throwaway_server),
@@ -339,6 +421,7 @@ CHECKS: list[tuple[str, Callable[[Context], Detail]]] = [
     ("listening", check_listening),
     ("role", check_role),
     ("data-folder", check_data_folder),
+    ("launch-agent", check_launch_agent),
 ]
 
 
