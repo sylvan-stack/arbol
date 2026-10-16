@@ -1404,6 +1404,47 @@ class TrunkLauncher(unittest.TestCase):
         self.assertEqual(t.started("run", "--detach", "--cwd", t.home, "--request", "a b'c.json", m),
                          ["5", ["--root", "third", "run", "--detach", "--cwd", t.home, "--request", "a b'c.json", m]])
 
+    def test_builds_trunk_named_build(self) -> None:
+        """builds.trunk-named-build: -v names a Build of the Trunk, started only when it fits the Root; a withdrawn
+        one, and a failed one that has its program, start with a line on standard error; one still building,
+        pruned, failed without its program or unknown is refused (RCT-0.7, BLD-0 "Running a Build", BLD-D13)."""
+        t = Trunks(self)
+        t.root("sapling", 1, "2026-10-14T09:00:00.000Z")
+        t.build("trivial", "3", [1])
+        t.build("trivial", "4", [1, 2], "withdrawn")
+        failure = {"stage": "check", "name": "unit", "message": "Check failed; see build.log."}
+        t.build("trivial", "5", [1], "failed", failure=failure)
+        t.build("trivial", "6", [1], "failed", failure=failure)
+        os.remove(os.path.join(t.registry, "arbol-trunk/trivial/6/program.py"))
+        t.build("trivial", "7", [1], "building")
+        t.build("trivial", "8", [1], prunedAt="2026-10-16T11:00:00.000Z")
+        os.remove(os.path.join(t.registry, "arbol-trunk/trivial/8/program.py"))
+        t.build("trivial", "9", [2])
+        m = "What does build.sh do?"
+        self.assertEqual(t.started("run", m), ["3", ["--root", "sapling", "run", m]])
+        self.assertEqual(t.started("-v", "3", "run", m), ["3", ["--root", "sapling", "run", m]])
+        self.assertEqual(t.started("--root", "sapling", "trivial", "-v", "3", "run", m),
+                         ["3", ["--root", "sapling", "run", m]])
+        self.assertEqual(t.run("-v", "3", "run").stderr, b"")
+        withdrawn = t.run("-v", "4", "run", m)
+        self.assertEqual([document(withdrawn)["build"], withdrawn.stderr],
+                         ["4", b"arbol-trunk/trivial@4 is withdrawn: bad answers\n"])
+        failed = t.run("trivial", "-v", "5", "run", m)
+        self.assertEqual([document(failed)["build"], failed.stderr],
+                         ["5", b"arbol-trunk/trivial@5 is failed: check unit: Check failed; see build.log.\n"])
+        # Refused, with the Builds that can be run and fit: still building, pruned, without its program, unknown,
+        # not a build number, or not fitting the Root.
+        for number, why in (("7", "is still building"), ("8", "is pruned"), ("6", "has no program to run"),
+                            ("99", "is unknown"), ("01", "is not a build number"), ("A", "is not a build number"),
+                            ("", "is not a build number"), ("9", "does not fit the Root sapling")):
+            result = t.run("-v", number, "run", m)
+            self.assertEqual([result.returncode, result.stderr], [1, b""], number)
+            refusal = document(result)
+            self.assertEqual([refusal["error"]["code"], refusal["available"]], ["no_fit", ["5", "4", "3"]], number)
+            self.assertIn(why, refusal["error"]["message"], number)
+        # -v counts only right after the code name or in its place; anywhere else it is the Build's.
+        self.assertEqual(t.started("run", "-v", "9", m), ["3", ["--root", "sapling", "run", "-v", "9", m]])
+
     def test_builds_trunk_launcher_text(self) -> None:
         """builds.trunk-launcher-text: arbol-trunk is the text of launcher.py, roots.py and trunk_launcher.py
         without their imports from the package; no module redefines a name of one before it, and each finds
