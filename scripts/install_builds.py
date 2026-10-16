@@ -7,7 +7,8 @@ BLD-0, "Where the build tool and the launchers are", with BLD-D14 and BLD-D15. I
 from the checked archive, and the package arbol_builds, compiled. `<folder>/arbol-builds` starts
 the tool with that Python. Every launcher already in the folder, written by this tool or by the
 earlier Node.js tool, is written again with the current launcher code, for the same component
-and registry. Any other file there is left as it is.
+and registry; so is arbol-trunk, the launcher every Trunk shares. Any other file there is left
+as it is.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ from build_support import ROOT, archive, pin, target  # noqa: E402
 sys.path.insert(0, str(ROOT / "src"))
 from arbol_builds.cli import options  # noqa: E402
 from arbol_builds.config import locations  # noqa: E402
-from arbol_builds.launcher import json_line, write_all  # noqa: E402
+from arbol_builds.launcher import TRUNKS, json_line, write_all  # noqa: E402
 from arbol_builds.service import LAUNCHER_MARK, SIGINT_LINE, atomic_write, shebang, write_launcher  # noqa: E402
 
 USAGE = "Usage: uv run --no-sync python scripts/install_builds.py [--bin-dir <folder>]"
@@ -147,10 +148,18 @@ def served(path: Path) -> tuple[str, str] | None:
             registry, component = json.loads(match[1]), json.loads(match[2])
         elif text.startswith("#!") and text.split("\n", 2)[1:2] == [LAUNCHER_MARK]:
             call = ast.parse(last, mode="eval").body
-            if (not isinstance(call, ast.Call) or len(call.args) != 1 or not isinstance(call.args[0], ast.Call)
-                    or len(call.args[0].args) != 3):
+            if not isinstance(call, ast.Call) or len(call.args) != 1 or not isinstance(call.args[0], ast.Call):
                 return None
-            registry, component = (ast.literal_eval(node) for node in call.args[0].args[:2])
+            # launch(registry, component, argv) in a component's launcher, launch_trunk(registry, argv) in the
+            # launcher arbol-trunk, which every Trunk shares (RCT-0).
+            inner = call.args[0]
+            name = inner.func.id if isinstance(inner.func, ast.Name) else None
+            if name == "launch" and len(inner.args) == 3:
+                registry, component = (ast.literal_eval(node) for node in inner.args[:2])
+            elif name == "launch_trunk" and len(inner.args) == 2:
+                registry, component = ast.literal_eval(inner.args[0]), TRUNKS
+            else:
+                return None
         else:
             return None
     except Exception:  # anything that does not parse as a launcher's last line is not a launcher

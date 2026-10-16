@@ -1887,8 +1887,8 @@ class Install(unittest.TestCase):
         self.assertEqual(self.install("word").returncode, 1)
 
     def test_builds_install_refreshes_launchers(self) -> None:
-        """builds.install-refreshes-launchers rewrites Node.js and Python launchers, leaves other files alone,
-        and removes the earlier Node.js tool and the leftovers of a stopped install."""
+        """builds.install-refreshes-launchers rewrites Node.js and Python launchers, arbol-trunk among them, leaves
+        other files alone, and removes the earlier Node.js tool and the leftovers of a stopped install."""
         f = self.f
         f.build()
         registry = json.dumps(os.path.abspath(f.registry))
@@ -1904,7 +1904,14 @@ class Install(unittest.TestCase):
             "python-renamed": written,
             # Marked like a launcher, but its last line does not parse as one.
             "arbol-a": f"#!/x/python -ISB\n{LAUNCHER_MARK}\nsys.exit(launch({{[]: 1}}, \"arbol-a\", sys.argv[1:]))\n",
+            "arbol-b": f"#!/x/python -ISB\n{LAUNCHER_MARK}\nsys.exit(start({registry}, \"arbol-b\", sys.argv[1:]))\n",
+            "arbol-c": f"#!/x/python -ISB\n{LAUNCHER_MARK}\nsys.exit(launch_trunk({registry}, \"arbol-c\", []))\n",
+            # The Trunks' launcher under another name.
+            "trunks-renamed": f"#!/x/python -ISB\n{LAUNCHER_MARK}\nsys.exit(launch_trunk({registry}, sys.argv[1:]))\n",
         }
+        # The launcher arbol-trunk of an earlier install: only its last line, which names the registry, is kept.
+        Path(self.folder, "arbol-trunk").write_text(f"#!/x/python -ISB\n{LAUNCHER_MARK}\nprint('old')\n"
+                                                    f"sys.exit(launch_trunk({registry}, sys.argv[1:]))\n")
         for name, text in others.items():
             Path(self.folder, name).write_text(text)
         os.symlink(os.path.join(self.folder, "other-tool"), os.path.join(self.folder, "linked"))
@@ -1935,12 +1942,22 @@ class Install(unittest.TestCase):
         writing.write_text("being written")
         result = self.install(f"--bin-dir={self.folder}")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(document(result)["launchers"], ["sample", "second"])
+        self.assertEqual(document(result)["launchers"], ["arbol-trunk", "sample", "second"])
         python = document(result)["python"]
         for name in ("sample", "second"):
             text = Path(self.folder, name).read_text()
             self.assertEqual(text.split("\n", 1)[0], f"#!{python} -ISB")
             self.assertTrue(text.rstrip().endswith(f"launch({os.path.abspath(f.registry)!r}, {name!r}, sys.argv[1:]))"))
+        # arbol-trunk holds the current code for the same registry, and runs with the installed Python.
+        trunks = Path(self.folder, "arbol-trunk").read_text()
+        self.assertEqual(trunks.split("\n", 1)[0], f"#!{python} -ISB")
+        self.assertTrue(trunks.rstrip().endswith(f"launch_trunk({os.path.abspath(f.registry)!r}, sys.argv[1:]))"))
+        self.assertNotIn("print('old')", trunks)
+        self.assertIn("def launch_trunk(", trunks)
+        write_root(os.path.join(f.home, "Library/Application Support/Arbol/roots"), root_record("sapling"))
+        listed = subprocess.run([os.path.join(self.folder, "arbol-trunk"), "list"], env={**ENV, "HOME": f.home},
+                                capture_output=True, timeout=60, check=False)
+        self.assertEqual([listed.returncode, document(listed)], [0, {"root": "sapling", "rootContract": 1, "trunks": []}])
         started = subprocess.run([os.path.join(self.folder, f.component)], env=ENV, capture_output=True, timeout=60,
                                  check=False)
         self.assertEqual(document(started)["build"], "1")
