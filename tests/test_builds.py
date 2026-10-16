@@ -1568,6 +1568,56 @@ class TrunkLauncher(unittest.TestCase):
         self.assertIn("�", document(result)["error"]["message"])
         self.assertEqual(t.started("run", "m"), ["1", ["--root", "sapling", "run", "m"]])
 
+    def test_builds_trunk_no_fit(self) -> None:
+        """builds.trunk-no-fit: with no working Build of the Trunk that fits the Root, or a named one that does not
+        fit, arbol-trunk refuses with no_fit, and available lists the runnable Builds of that Trunk that fit, newest
+        first; it never takes a Build of another Trunk, whatever its number (RCT-0.9, BLD-0.22)."""
+        t = Trunks(self)
+        t.root("sapling", 1, "2026-10-14T09:00:00.000Z")
+        t.root("third", 2, "2026-10-13T09:00:00.000Z")
+
+        def no_fit(*args: str) -> tuple[list[str], str]:
+            result = t.run(*args)
+            self.assertEqual([result.returncode, result.stderr, result.stdout.count(b"\n")], [1, b"", 1], args)
+            refusal = document(result)
+            self.assertEqual([sorted(refusal), sorted(refusal["error"]), refusal["error"]["code"]],
+                             [["available", "error"], ["code", "message"], "no_fit"], args)
+            return list(refusal["available"]), str(refusal["error"]["message"])
+
+        # A Trunk the registry knows, whose folder holds no Build that can be read.
+        os.makedirs(os.path.join(t.registry, "arbol-trunk/trivial/1"))
+        Path(t.registry, "arbol-trunk/trivial/1/build.json").write_text("{")
+        self.assertEqual(no_fit("run", "m")[0], [])
+        t.build("trivial", "3", [2])
+        t.build("trivial", "4", [2, 3])
+        available, message = no_fit("run", "m")
+        self.assertEqual(available, [])
+        self.assertIn("No working Build of arbol-trunk/trivial fits the Root sapling", message)
+        self.assertIn("Root Contract version 1", message)
+        # Builds that fit and can be run when named, but none working: run refuses, and lists them.
+        t.build("trivial", "5", [1], "failed")
+        t.build("trivial", "6", [1, 3], "withdrawn")
+        t.build("trivial", "7", [1], "building")
+        t.build("trivial", "8", [1], prunedAt="2026-10-16T11:00:00.000Z")
+        os.remove(os.path.join(t.registry, "arbol-trunk/trivial/8/program.py"))
+        self.assertEqual(no_fit("run", "m")[0], ["6", "5"])
+        available, message = no_fit("-v", "3", "run", "m")
+        self.assertEqual(available, ["6", "5"])
+        self.assertIn("arbol-trunk/trivial@3 does not fit the Root sapling: it implements Root Contract versions 2, "
+                      "and the Root uses 1", message)
+        self.assertEqual(no_fit("--root", "third", "-v", "5", "run", "m")[0], ["4", "3"])
+        # Another Trunk with far higher numbers that fits: never a fallback for trivial, and the reverse.
+        t.build("advanced", "ff", [1])
+        self.assertEqual(no_fit("run", "m")[0], ["6", "5"])
+        self.assertEqual(no_fit("-v", "ff", "run", "m")[0], ["6", "5"])
+        self.assertEqual(no_fit("advanced", "-v", "6", "run", "m")[0], ["ff"])
+        self.assertEqual(t.started("advanced", "run", "m"), ["ff", ["--root", "sapling", "run", "m"]])
+        self.assertEqual(no_fit("--root", "third", "advanced", "run", "m")[0], [])
+        # A working Build that fits ends the refusal; the newest of them is started.
+        t.build("trivial", "2", [1])
+        self.assertEqual(t.started("run", "m"), ["2", ["--root", "sapling", "run", "m"]])
+        self.assertEqual(t.started("--root", "third", "run", "m"), ["4", ["--root", "third", "run", "m"]])
+
     def test_builds_trunk_launcher_text(self) -> None:
         """builds.trunk-launcher-text: arbol-trunk is the text of launcher.py, roots.py and trunk_launcher.py
         without their imports from the package; no module redefines a name of one before it, and each finds
