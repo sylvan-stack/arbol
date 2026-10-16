@@ -952,7 +952,7 @@ class Roots(unittest.TestCase):
     def test_builds_trunk_components(self) -> None:
         """builds.trunk-components: two Trunks, arbol-trunk/alpha and arbol-trunk/beta, are built from their folders
         in arbol-trunk/trunks/, count separately, lie in folders of their own in the registry, get no launcher of
-        their own, and every command takes their names (BLD-0.22)."""
+        their own but the shared arbol-trunk, and every command takes their names (BLD-0.22, BLD-0.16)."""
         f = Fixture(self, "arbol-trunk/alpha")
         trunks = os.path.join(f.home, "repos/sylvan-stack/arbol-trunk/trunks")
         os.makedirs(trunks)
@@ -979,8 +979,10 @@ class Roots(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(os.path.join(f.registry, "arbol-trunk"))), ["alpha", "beef", "beta"])
         self.assertEqual(sorted(name for name in os.listdir(f.path()) if not name.startswith(".")), ["1", "2", "3"])
         self.assertTrue(os.path.isfile(os.path.join(f.registry, "arbol-trunk/beta/1/build.json")))
-        # The Trunks share the launcher arbol-trunk, which no build writes.
-        self.assertFalse(os.path.exists(f.bin))
+        # The Trunks share the launcher arbol-trunk, which the build of any Trunk writes; none has one of its own.
+        self.assertEqual(os.listdir(f.bin), ["arbol-trunk"])
+        text = Path(f.bin, "arbol-trunk").read_text()
+        self.assertTrue(text.rstrip("\n").endswith(f"sys.exit(launch_trunk({f.registry!r}, sys.argv[1:]))"))
         listed = [[record["component"], record["build"], record["default"]] for record in document(f.call("list"))]
         self.assertEqual(listed, [["arbol-trunk/alpha", "3", True], ["arbol-trunk/alpha", "2", False],
                                   ["arbol-trunk/alpha", "1", False], ["arbol-trunk/beef", "1", True],

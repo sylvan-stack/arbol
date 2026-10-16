@@ -241,9 +241,8 @@ def build_component(component: str, paths: Locations, stop: Stop, root: str | No
     log = os.open(os.path.join(folder, "build.log"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     stage, name = "launcher", "launcher"
     try:
-        # The Trunks share the one launcher arbol-trunk, which no build writes (RCT-0).
-        if not trunk(component):
-            write_launcher(paths.bin, paths.registry, component)
+        # The Trunks share the one launcher arbol-trunk, which the build of any Trunk writes (RCT-0).
+        write_launcher(paths.bin, paths.registry, TRUNKS if trunk(component) else component)
         stage = "build"
         for index, text in enumerate(config["build"], 1):
             name = f"build-{index}"
