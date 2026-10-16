@@ -12,6 +12,7 @@ programs. No vendor tool is involved.
 import ast
 import json
 import os
+import re
 import resource
 import select
 import shutil
@@ -1452,7 +1453,8 @@ class TrunkLauncher(unittest.TestCase):
     def test_builds_trunk_pass_through(self) -> None:
         """builds.trunk-pass-through: through arbol-trunk the Build gets its arguments and environment byte for
         byte, the standard streams, the working folder, the process, the signals and the exit status unchanged, and
-        SIGPIPE and SIGXFSZ at their default, as through a component's launcher (RCT-0.8, BLD-0.9)."""
+        SIGPIPE and SIGXFSZ at their default; closed standard streams reach it as /dev/null, and a Ctrl-C during the
+        start is never lost, as through a component's launcher (RCT-0.8, BLD-0.9)."""
         t = Trunks(self)
         t.root("sapling", 1, "2026-10-14T09:00:00.000Z")
         t.build("trivial", "1", [1])
@@ -1508,6 +1510,38 @@ class TrunkLauncher(unittest.TestCase):
         direct = subprocess.run([script], env=ENV, capture_output=True, timeout=30, check=False)
         self.assertEqual(ended(direct), [b"yes ended with 141", b"write ended with 153"])
         self.assertEqual(ended(t.run("probe", "run")), ended(direct))
+        # Standard input and output that the caller closed reach the Build as /dev/null, and a refusal ends quietly.
+        closed = ["/bin/sh", "-c", 'exec "$@" <&- >&-', "sh"]
+        launched = subprocess.run([*closed, t.launcher, "--echo"], env=t.env(), capture_output=True, timeout=60,
+                                  check=False)
+        self.assertEqual([launched.returncode, launched.stderr], [0, b"diagnostic\n"])
+        refused = subprocess.run([*closed, t.launcher, "unknown", "run"], env=t.env(), capture_output=True,
+                                 timeout=60, check=False)
+        self.assertEqual([refused.returncode, refused.stdout, refused.stderr], [1, b"", b""])
+        # A Ctrl-C at any moment of the start ends the launcher by SIGINT, or reaches the Build; it is never lost,
+        # and no traceback points into the launcher's own lines. One while Python itself starts can print one at
+        # line 0, or stop Python with status 1, as BLD-0 says.
+        inside = re.compile(rb'File "' + re.escape(t.launcher.encode()) + rb'", line [1-9]')
+        pause = t.build("pause", "1", [1], entry="pause.sh")
+        script = os.path.join(t.registry, "arbol-trunk/pause/1", pause["entry"])
+        Path(script).write_text("#!/bin/sh\nexec sleep 5\n")
+        os.chmod(script, 0o755)
+        outcomes: dict[object, int] = {}
+        for attempt in range(100):
+            child = subprocess.Popen([t.launcher, "pause", "run"], env=t.env(), stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            self.addCleanup(finish, child)
+            time.sleep((attempt % 25) / 1000)
+            child.send_signal(signal.SIGINT)
+            try:
+                outcome: object = child.wait(timeout=4)
+            except subprocess.TimeoutExpired:
+                outcome = "lost"
+            assert child.stderr is not None
+            if inside.search(child.stderr.read()):
+                outcome = "traceback"
+            outcomes[outcome] = outcomes.get(outcome, 0) + 1
+        self.assertLessEqual(set(outcomes), {-signal.SIGINT, 1}, outcomes)
 
     def test_builds_trunk_refusals(self) -> None:
         """builds.trunk-refusals: arbol-trunk checks the call, then the Root, then the Trunk, and refuses in one
@@ -1844,6 +1878,11 @@ class TrunkLauncher(unittest.TestCase):
         for name in ("broken", "other", "missing", "folder", "file", "Upper", "säpling", "../roots/sapling",
                      "sapling/", "", "unknown"):
             self.assertIsNone(read_root(roots, name), name)
+        # Bytes that are not UTF-8 read as U+FFFD, as in the Build records; the record stays in use.
+        Path(roots, "bytes").mkdir()
+        Path(roots, "bytes", "root.json").write_bytes(json.dumps(root_record("bytes")).encode().replace(b"Bytes", b"B\xffytes"))
+        self.assertEqual(read_root(roots, "bytes"), root_record("bytes", name="B\ufffdytes"))
+        shutil.rmtree(os.path.join(roots, "bytes"))
         # Read again at each call: a record that is mended or damaged counts at once.
         write_root(roots, root_record("broken"))
         write_root(roots, "{", "sapling")
