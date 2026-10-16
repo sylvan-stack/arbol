@@ -8,7 +8,7 @@ left out, and the names it imports are those of the text before it.
 import json
 import os
 
-from .launcher import ROOT_PATTERN, Record, date, js_integer, positive, refuse_constant, root_identifier
+from .launcher import ROOT_PATTERN, Record, date, js_integer, milliseconds, positive, refuse_constant, root_identifier
 
 ROOT_STATES = ("preparing", "working", "failed")
 
@@ -48,3 +48,11 @@ def read_roots(folder: str) -> list[Record]:
     except OSError:
         return []
     return [record for name in names if (record := read_root(folder, name)) is not None]
+
+
+def current_root(records: list[Record]) -> Record | None:
+    """The Root created last among those in the state working (ARC-1, "The states of a Root and the current Root"),
+    worked out from the records at every call; of two created at the same millisecond, the one whose identifier sorts
+    last (BLD-D17). A Root that is preparing or failed is never current."""
+    return max((record for record in records if record["status"] == "working"),
+               key=lambda record: (milliseconds(record["createdAt"]), record["root"]), default=None)

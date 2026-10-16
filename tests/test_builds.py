@@ -32,7 +32,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from arbol_builds import mutation  # noqa: E402
 from arbol_builds.config import component_name  # noqa: E402
 from arbol_builds.launcher import write_all  # noqa: E402
-from arbol_builds.roots import read_root, read_roots, roots_folder  # noqa: E402
+from arbol_builds.roots import current_root, read_root, read_roots, roots_folder  # noqa: E402
 from arbol_builds.service import LAUNCHER_MARK, reserve  # noqa: E402
 
 PYTHON = sys.executable
@@ -1300,6 +1300,44 @@ class TrunkLauncher(unittest.TestCase):
         write_root(roots, "{", "sapling")
         self.assertEqual([record["root"] for record in read_roots(roots)], ["bare", "broken", "second", "third"])
         self.assertEqual(read_roots(os.path.join(home, "nowhere")), [])
+
+    def test_builds_current_root(self) -> None:
+        """builds.current-root: the current Root is the one created last among those in the state working, worked
+        out from the records at every call; a Root that is preparing or failed is never current (ARC-1, BLD-D17)."""
+        home = os.path.realpath(tempfile.mkdtemp(prefix="Arbol's roots "))
+        self.addCleanup(shutil.rmtree, home, True)
+        roots = os.path.join(home, "roots")
+
+        def current() -> str | None:
+            record = current_root(read_roots(roots))
+            return None if record is None else str(record["root"])
+
+        self.assertIsNone(current())
+        write_root(roots, root_record("sapling", created="2026-10-15T09:30:00.000Z"))
+        self.assertEqual(current(), "sapling")
+        # A newer Root in preparation changes nothing; once it is working, it is current.
+        write_root(roots, root_record("second", "preparing", created="2026-10-16T09:30:00.000Z"))
+        self.assertEqual(current(), "sapling")
+        write_root(roots, root_record("second", created="2026-10-16T09:30:00.000Z"))
+        self.assertEqual(current(), "second")
+        # Marking the newest failed makes the one before it current again.
+        write_root(roots, root_record("second", "failed", created="2026-10-16T09:30:00.000Z"))
+        self.assertEqual(current(), "sapling")
+        # Newest by the time itself, not by its text: 11:00 in UTC is later than 12:00 two hours east.
+        write_root(roots, root_record("east", created="2026-10-16T12:00:00.000+02:00"))
+        write_root(roots, root_record("utc", created="2026-10-16T11:00:00Z"))
+        self.assertEqual(current(), "utc")
+        # Of two created at the same millisecond, the one whose identifier sorts last.
+        write_root(roots, root_record("alpha", created="2026-10-16T13:00:00.000+02:00"))
+        self.assertEqual(current(), "utc")
+        write_root(roots, root_record("zulu", created="2026-10-16T11:00:00.000Z"))
+        self.assertEqual(current(), "zulu")
+        # A damaged record takes only its own Root out of use.
+        write_root(roots, "{", "zulu")
+        self.assertEqual(current(), "utc")
+        for name in ("utc", "alpha", "east", "sapling"):
+            write_root(roots, root_record(name, "preparing"))
+        self.assertIsNone(current())
 
 
 @unittest.skipUnless((ARCHIVE_CACHE / "d15291f940cfecd2e54010d5e37d2e03aa192f076a65d26ab741372fff2dabfe.tar.gz").exists()

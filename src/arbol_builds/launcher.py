@@ -68,26 +68,32 @@ def days_from_civil(year: int, month: int, day: int) -> int:
 def date(value: object) -> bool:
     """A time in the ECMAScript date-time string format that Date.parse accepts; other forms count as damaged
     (BLD-D15)."""
+    return milliseconds(value) is not None
+
+
+def milliseconds(value: object) -> int | None:
+    """The time Date.parse gives a text in the ECMAScript date-time string format, in milliseconds since 1970, or
+    None for a text in any other form."""
     match = DATE.fullmatch(value) if isinstance(value, str) else None
     if match is None:
-        return False
+        return None
     year, month, day, hour, minute, second, fraction, zone = match.groups()
     if year == "-000000" or (month and not 1 <= int(month) <= 12) or (day and not 1 <= int(day) <= 31):
-        return False
+        return None
     if hour is not None and (int(hour) > 24 or int(minute) > 59 or int(second or 0) > 59
                              or (int(hour) == 24 and (int(minute) or int(second or 0) or int(fraction or 0)))):
-        return False
+        return None
     if zone not in (None, "Z") and (int(zone[1:3]) > 23 or int(zone[4:6]) > 59):
-        return False
-    milliseconds = (days_from_civil(int(year), int(month or 1), int(day or 1)) * 86_400_000
-                    + ((int(hour or 0) * 60 + int(minute or 0)) * 60 + int(second or 0)) * 1000
-                    + int((fraction or "")[:3].ljust(3, "0")))
+        return None
+    total = (days_from_civil(int(year), int(month or 1), int(day or 1)) * 86_400_000
+             + ((int(hour or 0) * 60 + int(minute or 0)) * 60 + int(second or 0)) * 1000
+             + int((fraction or "")[:3].ljust(3, "0")))
     if zone not in (None, "Z"):
         offset = (int(zone[1:3]) * 60 + int(zone[4:6])) * 60_000
-        milliseconds += -offset if zone[0] == "+" else offset
+        total += -offset if zone[0] == "+" else offset
     elif zone is None and hour is not None:
-        milliseconds -= time.localtime().tm_gmtoff * 1000  # a date-time without an offset is local time
-    return abs(milliseconds) <= TIME_LIMIT
+        total -= time.localtime().tm_gmtoff * 1000  # a date-time without an offset is local time
+    return total if abs(total) <= TIME_LIMIT else None
 
 
 def positive(value: object) -> bool:
