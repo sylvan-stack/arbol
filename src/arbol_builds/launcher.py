@@ -1,7 +1,8 @@
 """The records of the registry, and the launcher of a component (BLD-0, "Running a Build").
 
 arbol-builds writes the text of this module, followed by one call of launch(), into the file
-named after each component: that file is the launcher (service.write_launcher). The module
+named after each component: that file is the launcher (service.write_launcher). The launcher
+arbol-trunk holds it too, before the text of roots.py and trunk_launcher.py. The module
 therefore uses the standard library only and imports nothing of this package. The tool imports
 the same functions, so the launcher and the tool judge a record in the same way.
 """
@@ -270,6 +271,19 @@ def standard_descriptors() -> None:
             os.set_inheritable(os.open(os.devnull, os.O_RDWR), True)
 
 
+def warning(component: str, record: Record) -> str | None:
+    """The line on standard error that says a Build named with -v is withdrawn, with the reason, or failed, with the
+    step that failed (BLD-D13); None for a working one."""
+    if record["status"] == "withdrawn":
+        return f"{component}@{record['build']} is withdrawn: {record['withdrawn']['reason']}\n"
+    if record["status"] == "failed":
+        failure = record.get("failure")
+        step = (f"{failure.get('stage')} {failure.get('name')}: {failure.get('message')}"
+                if isinstance(failure, dict) else "see build.log")
+        return f"{component}@{record['build']} is failed: {step}\n"
+    return None
+
+
 def launch(registry: str, component: str, args: list[str]) -> int:
     """Choose the Build and replace this process with its program; return a status only when it cannot."""
     standard_descriptors()
@@ -294,17 +308,10 @@ def launch(registry: str, component: str, args: list[str]) -> int:
                        f"Available Builds: {', '.join(available) or 'none'}.")
             write_all(1, json_line({"error": {"code": "build_unavailable", "message": message, "available": available}}))
             return 1
-        warning = None
-        if selected["status"] == "withdrawn":
-            warning = f"{component}@{selected['build']} is withdrawn: {selected['withdrawn']['reason']}\n"
-        if selected["status"] == "failed":
-            failure = selected.get("failure")
-            step = (f"{failure.get('stage')} {failure.get('name')}: {failure.get('message')}"
-                    if isinstance(failure, dict) else "see build.log")
-            warning = f"{component}@{selected['build']} is failed: {step}\n"
-        if warning is not None:
+        line = warning(component, selected)
+        if line is not None:
             try:
-                write_all(2, readable(warning))
+                write_all(2, readable(line))
             except OSError:
                 pass  # the warning is a courtesy; the Build starts without it
         entry = executable_entry(os.path.join(registry, component, selected["build"]), selected.get("entry"))

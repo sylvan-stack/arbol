@@ -33,7 +33,7 @@ from arbol_builds import mutation  # noqa: E402
 from arbol_builds.config import component_name  # noqa: E402
 from arbol_builds.launcher import write_all  # noqa: E402
 from arbol_builds.roots import current_root, read_root, read_roots, roots_folder  # noqa: E402
-from arbol_builds.service import LAUNCHER_MARK, reserve  # noqa: E402
+from arbol_builds.service import LAUNCHER_MARK, reserve, write_launcher  # noqa: E402
 
 PYTHON = sys.executable
 ENTRY = str(ROOT / "bin/builds_entry.py")
@@ -1251,8 +1251,144 @@ def write_root(roots: str, record: object, folder: str | None = None) -> None:
                                               encoding="utf-8")
 
 
+class Trunks:
+    """A home of the test's own with Roots and Trunk Builds made by hand, a registry, and the launcher arbol-trunk."""
+
+    def __init__(self, test: unittest.TestCase) -> None:
+        self.test = test
+        self.home = os.path.realpath(tempfile.mkdtemp(prefix="Arbol's trunks "))
+        test.addCleanup(shutil.rmtree, self.home, True)
+        self.registry = os.path.join(self.home, "registry")
+        self.bin = os.path.join(self.home, "bin")
+        self.roots = os.path.join(self.home, "Library/Application Support/Arbol/roots")
+        self.launcher = os.path.join(self.bin, "arbol-trunk")
+        write_launcher(self.bin, self.registry, "arbol-trunk")
+
+    def root(self, root: str, contract: int, created: str, status: str = "working") -> None:
+        write_root(self.roots, root_record(root, status, created, contract))
+
+    def build(self, code: str, number: str, contracts: list[int], status: str = "working",
+              **extra: Any) -> dict[str, Any]:
+        """A Build record of arbol-trunk/<code> with the sample program, as arbol-builds would have left it."""
+        folder = os.path.join(self.registry, "arbol-trunk", code, number)
+        os.makedirs(folder, exist_ok=True)
+        record: dict[str, Any] = {
+            "component": f"arbol-trunk/{code}", "build": number, "packageVersion": "1.0.0", "status": status,
+            "startedAt": "2026-10-16T09:00:00.000Z",
+            "source": {"repository": "/repos/arbol-trunk", "branch": "main", "commit": "0" * 40,
+                       "uncommittedChanges": False},
+            "entry": "program.py", "checks": [{"name": "unit", "passed": status in ("working", "withdrawn")}],
+            "rootContracts": contracts}
+        if status != "building":
+            record["finishedAt"] = "2026-10-16T09:01:00.000Z"
+        if status == "withdrawn":
+            record["withdrawn"] = {"at": "2026-10-16T10:00:00.000Z", "reason": "bad answers"}
+        record.update(extra)
+        Path(folder, "build.json").write_text(json.dumps(record, indent=2))
+        Path(folder, "program.py").write_text(PROGRAM)
+        os.chmod(os.path.join(folder, "program.py"), 0o755)
+        return record
+
+    def env(self, **extra: str) -> dict[str, str]:
+        return {**ENV, "HOME": self.home, **extra}
+
+    def run(self, *args: str, data: bytes = b"", marker: str = "caller") -> Result:
+        return subprocess.run([self.launcher, *args], cwd=self.home, env=self.env(MARKER=marker), input=data,
+                              capture_output=True, timeout=60, check=False)
+
+    def started(self, *args: str) -> list[object]:
+        """The Build the launcher started, and the arguments it handed it."""
+        result = self.run(*args)
+        self.test.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        started = document(result)
+        return [started["build"], started["args"]]
+
+
+def top_level_names(path: Path) -> tuple[dict[str, str], list[str]]:
+    """The names a module binds at its top level, each with what binds it, and the names it imports from this
+    package, which a launcher takes from the text before it."""
+    bound: dict[str, str] = {}
+    relative: list[str] = []
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+            bound[node.name] = "definition"
+        elif isinstance(node, ast.Assign):
+            bound.update((target.id, "definition") for target in node.targets if isinstance(target, ast.Name))
+        elif isinstance(node, (ast.AnnAssign, ast.TypeAlias)):
+            target = node.target if isinstance(node, ast.AnnAssign) else node.name
+            if isinstance(target, ast.Name):
+                bound[target.id] = "definition"
+        elif isinstance(node, ast.Import):
+            bound.update((alias.asname or alias.name, f"import {alias.name}") for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+            bound.update((alias.asname or alias.name, f"from {node.module} import {alias.name}")
+                         for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            relative.extend(alias.name for alias in node.names)
+    return bound, relative
+
+
 class TrunkLauncher(unittest.TestCase):
     """The Roots as the launchers read them, and the launcher arbol-trunk (SYL-179; RCT-0.7 to 0.10, BLD-D17)."""
+
+    def test_builds_trunk_launch(self) -> None:
+        """builds.trunk-launch: arbol-trunk run takes the current Root and trivial, starts the newest working Build
+        whose rootContracts hold the Root's rootContract, and hands it --root <root> before the command, in RCT-0's
+        example: First Sapling and the second Root on version 1, a third Root on version 2, and Builds 3, 4 and 5 of
+        trivial with [1], [1, 2] and [2] (RCT-0.7, 0.8)."""
+        t = Trunks(self)
+        t.root("sapling", 1, "2026-10-14T09:00:00.000Z")
+        t.root("second", 1, "2026-10-15T09:00:00.000Z")
+        t.root("third", 2, "2026-10-16T09:00:00.000Z", "preparing")
+        for number, contracts in (("3", [1]), ("4", [1, 2]), ("5", [2])):
+            t.build("trivial", number, contracts)
+        message = "What does build.sh do?"
+        # The second Root is current: Build 4 is the newest that fits version 1.
+        self.assertEqual(t.started("run", message), ["4", ["--root", "second", "run", message]])
+        # Once the third Root is working, it is current, and Build 5 is the newest that fits version 2.
+        t.root("third", 2, "2026-10-16T09:00:00.000Z")
+        self.assertEqual(t.started("run", message), ["5", ["--root", "third", "run", message]])
+        # Build numbers of the Trunk alone decide: a newer Build that fits nothing of the Root is passed over.
+        t.build("trivial", "6", [3])
+        self.assertEqual(t.started("run", message)[0], "5")
+        # Only a working Build that has its program is chosen; withdrawn and failed ones only when named.
+        t.build("trivial", "7", [2], "withdrawn")
+        t.build("trivial", "8", [2], "failed")
+        t.build("trivial", "9", [2], "building")
+        t.build("trivial", "a", [2], prunedAt="2026-10-16T11:00:00.000Z")
+        os.remove(os.path.join(t.registry, "arbol-trunk/trivial/a/program.py"))
+        t.build("trivial", "b", [2])
+        os.chmod(os.path.join(t.registry, "arbol-trunk/trivial/b/program.py"), 0o600)
+        self.assertEqual(t.started("run", message)[0], "5")
+        # settle and any other command go to the Build with everything after them.
+        self.assertEqual(t.started("settle", "--exchange", "7f3a2c1e-4b5d-4e6f-8a9b-0c1d2e3f4a5b"),
+                         ["5", ["--root", "third", "settle", "--exchange", "7f3a2c1e-4b5d-4e6f-8a9b-0c1d2e3f4a5b"]])
+        self.assertEqual(t.started("--help"), ["5", ["--root", "third", "--help"]])
+
+    def test_builds_trunk_launcher_text(self) -> None:
+        """builds.trunk-launcher-text: arbol-trunk is the text of launcher.py, roots.py and trunk_launcher.py
+        without their imports from the package; no module redefines a name of one before it, and each finds
+        there every name it imports (BLD-D17)."""
+        package = ROOT / "src/arbol_builds"
+        seen: dict[str, str] = {}
+        for name in ("launcher.py", "roots.py", "trunk_launcher.py"):
+            bound, relative = top_level_names(package / name)
+            for imported in relative:
+                self.assertEqual(seen.get(imported), "definition", f"{name} imports {imported}")
+            for item, kind in bound.items():
+                if item in seen:
+                    self.assertTrue(kind == seen[item] and kind.startswith(("import ", "from ")),
+                                    f"{name} binds {item} again: {kind}, before {seen[item]}")
+                seen[item] = kind
+        t = Trunks(self)
+        text = Path(t.launcher).read_text(encoding="utf-8")
+        self.assertEqual(text.split("\n")[:2], [f"#!{PYTHON} -ISB", LAUNCHER_MARK])
+        self.assertTrue(text.rstrip("\n").endswith(f"sys.exit(launch_trunk({t.registry!r}, sys.argv[1:]))"))
+        imports = [line for line in text.split("\n") if line.lstrip().startswith(("from .", "import arbol_builds",
+                                                                                "from arbol_builds"))]
+        self.assertEqual(imports, [])
+        self.assertFalse("sapling" in text)
+        self.assertEqual(stat.S_IMODE(os.stat(t.launcher).st_mode), 0o755)
 
     def test_builds_root_records(self) -> None:
         """builds.root-records: the record of every Root is read from the home folder at each call, and a record

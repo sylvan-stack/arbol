@@ -1,5 +1,6 @@
 """Building, listing, withdrawing and pruning Builds, and writing the launchers (BLD-0)."""
 
+import ast
 import json
 import os
 import shutil
@@ -30,7 +31,10 @@ from .launcher import (
 )
 from .mutation import make_dirs, with_mutation_lock
 
-LAUNCHER_SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "launcher.py")
+PACKAGE = os.path.dirname(os.path.abspath(__file__))
+# A component's launcher holds the text of launcher.py; arbol-trunk, which every Trunk shares, holds the text of
+# these three, in this order (RCT-0, BLD-D17).
+TRUNK_MODULES = ("launcher.py", "roots.py", "trunk_launcher.py")
 LAUNCHER_MARK = "# arbol-builds launcher (BLD-0): written by arbol-builds, rewritten when it is installed again."
 # The first statement of the launcher and of the tool: from here on a Ctrl-C ends the program quietly, as it would
 # end the Build, and one that Python's start-up caught and printed is delivered again, so that it is not lost. A
@@ -96,12 +100,29 @@ def reserve(registry: str, component: str) -> tuple[str, str]:
             number += 1
 
 
+def module_text(name: str) -> str:
+    """A module of this package as a launcher holds it: without its imports from the package, since the text of the
+    modules before it in the launcher defines the names they import."""
+    with open(os.path.join(PACKAGE, name), encoding="utf-8") as stream:
+        source = stream.read()
+    lines = source.split("\n")
+    for node in reversed(ast.parse(source).body):
+        if isinstance(node, ast.ImportFrom) and node.level > 0:
+            del lines[node.lineno - 1:node.end_lineno]
+    return "\n".join(lines)
+
+
 def launcher_source(registry: str, component: str, python: str) -> bytes:
-    """A launcher: the text of launcher.py, then the call that serves this component and registry."""
+    """A launcher: the text of launcher.py, then the call that serves this component and registry. The launcher
+    arbol-trunk holds the text of launcher.py, roots.py and trunk_launcher.py, then the call that serves the
+    registry."""
     first = shebang(python)
-    with open(LAUNCHER_SOURCE, encoding="utf-8") as stream:
-        body = stream.read()
-    call = f"sys.exit(launch({os.path.abspath(registry)!r}, {component!r}, sys.argv[1:]))"
+    if component == TRUNKS:
+        body = "\n".join(module_text(name) for name in TRUNK_MODULES)
+        call = f"sys.exit(launch_trunk({os.path.abspath(registry)!r}, sys.argv[1:]))"
+    else:
+        body = module_text("launcher.py")
+        call = f"sys.exit(launch({os.path.abspath(registry)!r}, {component!r}, sys.argv[1:]))"
     return f"{first}\n{LAUNCHER_MARK}\n{SIGINT_LINE}\n{body}\n{call}\n".encode("utf-8", "surrogateescape")
 
 
