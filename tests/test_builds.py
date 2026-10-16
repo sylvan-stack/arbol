@@ -85,6 +85,9 @@ else:
     print(json.dumps({{"build": record["build"], "version": record["packageVersion"], "args": args,
                       "cwd": os.getcwd(), "marker": os.environ.get("MARKER"), "pid": os.getpid()}}))
 """
+# A Trunk's Build: the same program, which first sets aside the --root <root> that arbol-trunk hands it.
+TRUNK_PROGRAM = PROGRAM.replace('args = sys.argv[1:]\n', 'args = sys.argv[1:]\nlead = args[:2] if args[:1] == ["--root"] else []\n'
+                                'args = args[len(lead):]\n').replace('"args": args,', '"args": lead + args,')
 BUILDER = """import json, os, shutil
 folder = os.environ["ARBOL_BUILD_DIR"]
 shutil.copyfile("program.py", os.path.join(folder, "program.py"))
@@ -1285,7 +1288,7 @@ class Trunks:
             record["withdrawn"] = {"at": "2026-10-16T10:00:00.000Z", "reason": "bad answers"}
         record.update(extra)
         Path(folder, "build.json").write_text(json.dumps(record, indent=2))
-        Path(folder, "program.py").write_text(PROGRAM)
+        Path(folder, "program.py").write_text(TRUNK_PROGRAM)
         os.chmod(os.path.join(folder, "program.py"), 0o755)
         return record
 
@@ -1364,6 +1367,42 @@ class TrunkLauncher(unittest.TestCase):
         self.assertEqual(t.started("settle", "--exchange", "7f3a2c1e-4b5d-4e6f-8a9b-0c1d2e3f4a5b"),
                          ["5", ["--root", "third", "settle", "--exchange", "7f3a2c1e-4b5d-4e6f-8a9b-0c1d2e3f4a5b"]])
         self.assertEqual(t.started("--help"), ["5", ["--root", "third", "--help"]])
+
+    def test_builds_trunk_selection(self) -> None:
+        """builds.trunk-selection: --root counts only as the first argument and names the Root, a preparing or failed
+        one too; a code name names the Trunk; a second --root after the code name goes to the Build unchanged, for
+        the Build to refuse (RCT-0.7, 0.8)."""
+        t = Trunks(self)
+        t.root("sapling", 1, "2026-10-14T09:00:00.000Z")
+        t.root("second", 1, "2026-10-15T09:00:00.000Z")
+        t.root("third", 2, "2026-10-16T09:00:00.000Z")
+        t.root("fourth", 1, "2026-10-17T09:00:00.000Z", "preparing")
+        t.root("fifth", 2, "2026-10-13T09:00:00.000Z", "failed")
+        for number, contracts in (("3", [1]), ("4", [1, 2]), ("5", [2])):
+            t.build("trivial", number, contracts)
+        # A Trunk of its own, whose build numbers are higher: they are never compared with those of trivial.
+        t.build("advanced", "8e", [2])
+        t.build("advanced", "8f", [1])
+        m = "What does build.sh do?"
+        self.assertEqual(t.started("run", m), ["5", ["--root", "third", "run", m]])
+        self.assertEqual(t.started("--root", "sapling", "run", m), ["4", ["--root", "sapling", "run", m]])
+        self.assertEqual(t.started("--root", "second", "run", m), ["4", ["--root", "second", "run", m]])
+        self.assertEqual(t.started("--root", "sapling", "trivial", "run", m), ["4", ["--root", "sapling", "run", m]])
+        self.assertEqual(t.started("advanced", "run", m), ["8e", ["--root", "third", "run", m]])
+        self.assertEqual(t.started("--root", "sapling", "advanced", "run", m), ["8f", ["--root", "sapling", "run", m]])
+        # A Root that is not current is started when it is named, a preparing or a failed one too.
+        self.assertEqual(t.started("--root", "fourth", "run", m), ["4", ["--root", "fourth", "run", m]])
+        self.assertEqual(t.started("--root", "fifth", "advanced", "run", m), ["8e", ["--root", "fifth", "run", m]])
+        # --root anywhere else is the Build's: after the code name, after a first --root, after the command.
+        self.assertEqual(t.started("trivial", "--root", "sapling", "run", m),
+                         ["5", ["--root", "third", "--root", "sapling", "run", m]])
+        self.assertEqual(t.started("--root", "sapling", "--root", "third", "run", m),
+                         ["4", ["--root", "sapling", "--root", "third", "run", m]])
+        self.assertEqual(t.started("run", "--root", "sapling", m), ["5", ["--root", "third", "run", "--root", "sapling", m]])
+        self.assertEqual(t.started("--root=sapling", "run"), ["5", ["--root", "third", "--root=sapling", "run"]])
+        # Options of run reach the Build after the command, unchanged.
+        self.assertEqual(t.started("run", "--detach", "--cwd", t.home, "--request", "a b'c.json", m),
+                         ["5", ["--root", "third", "run", "--detach", "--cwd", t.home, "--request", "a b'c.json", m]])
 
     def test_builds_trunk_launcher_text(self) -> None:
         """builds.trunk-launcher-text: arbol-trunk is the text of launcher.py, roots.py and trunk_launcher.py
