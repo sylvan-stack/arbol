@@ -1,7 +1,9 @@
-"""arbol-builds and its launchers (BLD-0.1 to 0.17 and 0.21 to 0.23): the checks named builds.* in BLD-0.
+"""arbol-builds and its launchers (BLD-0.1 to 0.17 and 0.21 to 0.23), and the launcher arbol-trunk
+(RCT-0.7 to 0.10): the checks named builds.* in BLD-0 and RCT-0.
 
 The same checks the TypeScript tool had, under the same names, the checks of what the Python
-tool adds (BLD-D14, BLD-D15), and those of Builds made for a Root and of the Trunks (SYL-155).
+tool adds (BLD-D14, BLD-D15), those of Builds made for a Root and of the Trunks (SYL-155), and
+those of the Roots as the launchers read them and of the launcher arbol-trunk (SYL-179).
 Each one builds a small sample component in a fresh home
 folder whose name holds a space and an apostrophe, and starts the tool and the launchers as
 programs. No vendor tool is involved.
@@ -1735,6 +1737,46 @@ class TrunkLauncher(unittest.TestCase):
         chosen("list")
         chosen("trivial", "list")
         self.assertFalse([folder for folder, _, names in os.walk(t.registry) if "started" in names])
+
+    def test_builds_trunk_first_build(self) -> None:
+        """builds.trunk-first-build: the first build of a Trunk with arbol-builds writes arbol-trunk, which then
+        starts the Build that fits the Root, handing it --root, in a home of the test's own; a withdrawal made with
+        the tool counts at the next start (BLD-0.16, RCT-0.7, 0.8, 0.10)."""
+        f = Fixture(self, "arbol-trunk/sample")
+        launcher = os.path.join(f.bin, "arbol-trunk")
+        self.assertFalse(os.path.exists(launcher))
+        records = [f.build()]
+        self.assertTrue(os.access(launcher, os.X_OK))
+        for contracts in ([1, 2], [2]):
+            f.configure(rootContracts=contracts)
+            records.append(f.build())
+        self.assertEqual([[record["build"], record["rootContracts"]] for record in records],
+                         [["1", [1]], ["2", [1, 2]], ["3", [2]]])
+        self.assertEqual(os.listdir(f.bin), ["arbol-trunk"])
+        roots = os.path.join(f.home, "Library/Application Support/Arbol/roots")
+        write_root(roots, root_record("sapling", contract=1))
+        write_root(roots, root_record("third", "preparing", "2026-10-16T09:00:00.000Z", 2))
+
+        def trunk(*args: str) -> Result:
+            return subprocess.run([launcher, *args], cwd=f.home, env=f.env(MARKER="caller"), capture_output=True,
+                                  timeout=60, check=False)
+
+        m = "What does build.sh do?"
+        started = document(trunk("sample", "run", m))
+        self.assertEqual([started["build"], started["args"], started["cwd"], started["marker"]],
+                         ["2", ["--root", "sapling", "run", m], f.home, "caller"])
+        self.assertEqual(document(trunk("--root", "third", "sample", "run", m))["build"], "3")
+        listed = document(trunk("sample", "list"))
+        self.assertEqual([[build["build"], build["fits"], build["chosen"]] for build in listed["trunks"][0]["builds"]],
+                         [["3", False, False], ["2", True, True], ["1", True, False]])
+        # The Trivial Trunk is not built here, so a call that names no Trunk finds none.
+        self.assertEqual(document(trunk("run", m))["error"]["code"], "unknown_trunk")
+        # A Build withdrawn with the tool is passed over at the next start, and runs when named.
+        self.assertEqual(f.call("withdraw", "arbol-trunk/sample@2", "--reason", "bad answers").returncode, 0)
+        self.assertEqual(document(trunk("sample", "run", m))["build"], "1")
+        named = trunk("sample", "-v", "2", "run", m)
+        self.assertEqual([document(named)["build"], named.stderr],
+                         ["2", b"arbol-trunk/sample@2 is withdrawn: bad answers\n"])
 
     def test_builds_trunk_launcher_text(self) -> None:
         """builds.trunk-launcher-text: arbol-trunk is the text of launcher.py, roots.py and trunk_launcher.py
