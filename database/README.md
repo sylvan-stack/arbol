@@ -35,3 +35,5 @@ The probe's checks:
 |---|---|
 | `programs` | A newly opened terminal (a clean login shell) finds `initdb`, `pg_ctl`, `createdb`, `psql` and `pg_dump`, each of PostgreSQL 17 |
 | `throwaway-server` | `initdb` makes a server in a temporary folder that listens only on a socket in a short folder under `/tmp`, as the Root Contract's suite does (RCT-4); `createdb`, `psql` and `pg_dump` work on it; it is stopped and both folders are removed |
+| `settings` | `~/.arbol/database.json` holds the address and nothing else: a role, a host and a port, no password and no database |
+| `listening` | The `postgres` of the data folder, from `/opt/homebrew/opt/postgresql@17/bin`, is the only program on the port, listens on `127.0.0.1` at that port and on nothing else, answers there, and answers on no other address of the Mac's interfaces, IPv4 or IPv6 |

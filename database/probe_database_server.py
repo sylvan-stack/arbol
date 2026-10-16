@@ -1,7 +1,8 @@
 """The probe of Arbol's database server (ARC-0.25, SYL-156).
 
 It checks that the programs of PostgreSQL 17 are found in a newly opened terminal and can make a throwaway
-server, as the Root Contract's suite does (RCT-4). It prints a JSON report and leaves nothing behind. The password
+server, as the Root Contract's suite does (RCT-4), and that the installed server answers on 127.0.0.1 at the port
+of `~/.arbol/database.json` and on no other address of the Mac. It prints a JSON report and leaves nothing behind. The password
 of the Keychain item is never printed.
 
     uv run --no-sync python database/probe_database_server.py
@@ -15,6 +16,7 @@ import argparse
 import getpass
 import json
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -22,8 +24,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
-from database_server import LSOF, MAJOR, PROGRAMS, Places, major_version, postmaster_pid, run
+from database_server import BIN, LSOF, MAJOR, PROGRAMS, Places, major_version, postmaster_pid, run
 
 MARKER = "@@arbol-probe"
 THROWAWAY_ROLE = "probe"
@@ -37,6 +40,9 @@ class Context:
     places: Places
     restart: bool
     programs: dict[str, str] = field(default_factory=dict)
+    role: str = ""
+    host: str = ""
+    port: int = 0
 
 
 class Failed(Exception):
@@ -132,9 +138,92 @@ def check_throwaway_server(context: Context) -> Detail:
     return detail
 
 
+def check_settings(context: Context) -> Detail:
+    """`~/.arbol/database.json` holds the address and nothing else: a role, a host and a port (ARC-1)."""
+    path = context.places.settings
+    try:
+        settings = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as problem:
+        raise Failed(f"{path} cannot be read: {problem}") from problem
+    if not isinstance(settings, dict) or set(settings) != {"address"} or not isinstance(settings["address"], str):
+        raise Failed(f"{path} must hold only an address")
+    parts = urlsplit(settings["address"])
+    if (parts.scheme != "postgresql" or not parts.username or parts.password is not None or not parts.hostname
+            or not parts.port or parts.path not in ("", "/") or parts.query or parts.fragment):
+        raise Failed(f"{path} does not hold a role, a host and a port, and nothing else")
+    context.role, context.host, context.port = parts.username, parts.hostname, parts.port
+    return {"path": str(path), "address": settings["address"]}
+
+
+def interface_addresses(home: Path) -> list[str]:
+    """Every address of the Mac's network interfaces, IPv4 and IPv6, as `ifconfig` lists them."""
+    found: list[str] = []
+    for line in run(["/sbin/ifconfig"], home).stdout.splitlines():
+        words = line.split()
+        if len(words) >= 2 and words[0] in ("inet", "inet6"):
+            found.append(words[1])
+    return found
+
+
+def accepts(host: str, port: int) -> bool:
+    try:
+        family, kind, protocol, _, target = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)[0]
+        with socket.socket(family, kind, protocol) as connection:
+            connection.settimeout(2)
+            connection.connect(target)
+        return True
+    except OSError:
+        return False
+
+
+def check_listening(context: Context) -> Detail:
+    """The server of the data folder answers on 127.0.0.1 at the port and on no other address of the Mac."""
+    if context.host != "127.0.0.1" or not context.port:
+        raise Failed(f"the address names {context.host}:{context.port}, not 127.0.0.1")
+    places = context.places
+    home = places.home
+    pid = postmaster_pid(places.data)
+    if pid is None:
+        raise Failed(f"no server runs on {places.data}")
+    executable = run(["/bin/ps", "-o", "comm=", "-p", str(pid)], home).stdout.strip()
+    sockets = run([LSOF, "-nP", "-a", "-p", str(pid), "-i", "-FPn"], home).stdout.splitlines()
+    listens: list[str] = []
+    protocol = ""
+    for line in sockets:
+        if line.startswith("P"):
+            protocol = line[1:]
+        elif line.startswith("n"):
+            listens.append(f"{protocol} {line[1:]}")
+    holders = run([LSOF, "-nP", f"-iTCP:{context.port}", "-sTCP:LISTEN", "-t"], home).stdout.split()
+    others = [address for address in interface_addresses(home) if address != context.host]
+    answered_elsewhere = [address for address in others if accepts(address, context.port)]
+    ready = run([str(BIN / "pg_isready"), "--host", context.host, "--port", str(context.port), "--timeout", "5"],
+                home, timeout=15).returncode == 0
+    detail: Detail = {"pid": pid, "executable": executable, "listens": listens,
+                      "portHolders": [int(holder) for holder in holders],
+                      "otherAddressesTried": len(others), "answeredElsewhere": answered_elsewhere,
+                      "answersOnLoopback": accepts(context.host, context.port) and ready}
+    problems: list[str] = []
+    if executable != str(BIN / "postgres"):
+        problems.append(f"the process {pid} is {executable}, not {BIN / 'postgres'}")
+    if listens != [f"TCP {context.host}:{context.port}"]:
+        problems.append(f"the server listens on {listens}, not only on {context.host}:{context.port}")
+    if detail["portHolders"] != [pid]:
+        problems.append(f"port {context.port} is held by {detail['portHolders']}, not only by the server {pid}")
+    if answered_elsewhere:
+        problems.append(f"the port answers on other addresses of the Mac: {answered_elsewhere}")
+    if not detail["answersOnLoopback"]:
+        problems.append(f"the server does not answer on {context.host}:{context.port}")
+    if problems:
+        raise Failed("; ".join(problems))
+    return detail
+
+
 CHECKS: list[tuple[str, Callable[[Context], Detail]]] = [
     ("programs", check_programs),
     ("throwaway-server", check_throwaway_server),
+    ("settings", check_settings),
+    ("listening", check_listening),
 ]
 
 
