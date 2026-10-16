@@ -2,7 +2,9 @@
 
 It checks that the programs of PostgreSQL 17 are found in a newly opened terminal and can make a throwaway
 server, as the Root Contract's suite does (RCT-4), and that the installed server answers on 127.0.0.1 at the port
-of `~/.arbol/database.json` and on no other address of the Mac. It prints a JSON report and leaves nothing behind. The password
+of `~/.arbol/database.json` and on no other address of the Mac. With the password of the Keychain item it connects
+as the role of that address, sees that the role may log in and create databases and nothing more, and makes a
+database and removes it; it reads the size of the data folder and that it lies on the Mac's own disk. It prints a JSON report and leaves nothing behind. The password
 of the Keychain item is never printed.
 
     uv run --no-sync python database/probe_database_server.py
@@ -15,6 +17,9 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import os
+import plistlib
+import secrets
 import shutil
 import socket
 import subprocess
@@ -26,7 +31,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from database_server import BIN, LSOF, MAJOR, PROGRAMS, Places, major_version, postmaster_pid, run
+from database_server import BIN, LSOF, MAJOR, PROGRAMS, SECURITY, SERVICE, Places, major_version, postmaster_pid, run
 
 MARKER = "@@arbol-probe"
 THROWAWAY_ROLE = "probe"
@@ -219,11 +224,121 @@ def check_listening(context: Context) -> Detail:
     return detail
 
 
+def keychain_password(context: Context) -> str:
+    """The password of the Keychain item for the role of the address. Never printed."""
+    result = run([SECURITY, "find-generic-password", "-s", SERVICE, "-a", context.role, "-w"], context.places.home,
+                 timeout=10)
+    if result.returncode == 44:
+        raise Failed(f"the Keychain has no item {SERVICE} for the account {context.role}")
+    if result.returncode != 0:
+        raise Failed(f"reading the Keychain item {SERVICE} ended with {result.returncode}")
+    return result.stdout.rstrip("\n")
+
+
+def psql(context: Context, sql: str, password: str | None) -> tuple[int, str]:
+    """Runs one statement as the role of the address, over 127.0.0.1, with the password or with none at all."""
+    extra = {"PGCONNECT_TIMEOUT": "10", "PGPASSFILE": "/dev/null"}
+    if password is not None:
+        extra["PGPASSWORD"] = password
+    target = f"postgresql://{context.role}@{context.host}:{context.port}/postgres"
+    result = run([str(BIN / "psql"), "--no-psqlrc", "--tuples-only", "--no-align", "--field-separator", "|",
+                  "--set", "ON_ERROR_STOP=1", "--command", sql, target], context.places.home, timeout=30, extra=extra)
+    if result.returncode != 0:
+        first = (result.stderr.strip().splitlines() or [""])[0]
+        return result.returncode, first
+    return 0, result.stdout.strip()
+
+
+def check_role(context: Context) -> Detail:
+    """The address with the Keychain's password connects; the role may log in and create databases, nothing more."""
+    if not context.role or not context.port:
+        raise Failed("the address of database.json is not known")
+    password = keychain_password(context)
+    status, answer = psql(context, "select current_user, r.rolcanlogin, r.rolcreatedb, r.rolsuper, "
+                          "r.rolcreaterole, r.rolreplication, r.rolbypassrls, "
+                          "(select count(*) from pg_auth_members m where m.member = r.oid), "
+                          "current_setting('server_version') from pg_roles r where r.rolname = current_user",
+                          password)
+    if status != 0:
+        raise Failed(f"the address with the Keychain's password does not connect: {answer}")
+    fields = answer.split("|")
+    if len(fields) != 9:
+        raise Failed(f"unexpected answer about the role: {answer}")
+    user, login, createdb, superuser, createrole, replication, bypassrls, memberships, version = fields
+    without_status, without_answer = psql(context, "select 1", None)
+    detail: Detail = {"connectedAs": user, "serverVersion": version, "mayLogIn": login == "t",
+                      "mayCreateDatabases": createdb == "t", "superuser": superuser == "t",
+                      "mayCreateRoles": createrole == "t", "replication": replication == "t",
+                      "bypassesRowSecurity": bypassrls == "t", "memberOfRoles": int(memberships),
+                      "refusedWithoutPassword": without_status != 0}
+    problems: list[str] = []
+    if user != context.role:
+        problems.append(f"connected as {user}, not {context.role}")
+    if not version.startswith(f"{MAJOR}."):
+        problems.append(f"the server is version {version}, not {MAJOR}")
+    if not (detail["mayLogIn"] and detail["mayCreateDatabases"]):
+        problems.append("the role may not log in and create databases")
+    if detail["superuser"] or detail["mayCreateRoles"] or detail["replication"] or detail["bypassesRowSecurity"] \
+            or detail["memberOfRoles"]:
+        problems.append("the role may do more than log in and create databases")
+    if not detail["refusedWithoutPassword"]:
+        problems.append(f"the server let the role in without a password: {without_answer}")
+    name = f"arbol_probe_{secrets.token_hex(4)}"
+    made = removed = False
+    try:
+        status, answer = psql(context, f"create database {name}", password)
+        if status != 0:
+            problems.append(f"the role could not make a database: {answer}")
+        else:
+            made = psql(context, f"select count(*) from pg_database where datname = '{name}'", password) == (0, "1")
+    finally:
+        status, answer = psql(context, f"drop database if exists {name}", password)
+        removed = status == 0 and psql(context, f"select count(*) from pg_database where datname = '{name}'",
+                                       password) == (0, "0")
+    detail["databaseMade"] = made
+    detail["databaseRemoved"] = removed
+    if not (made and removed):
+        problems.append(f"the database {name} was not made and removed")
+    if problems:
+        raise Failed("; ".join(problems))
+    return detail
+
+
+def check_data_folder(context: Context) -> Detail:
+    """The data folder lies on the Mac's own disk, and its size can be read like that of any folder (ARC-0)."""
+    data = context.places.data
+    home = context.places.home
+    size = files = 0
+    for folder, _, names in os.walk(data):
+        for name in names:
+            try:
+                size += os.lstat(os.path.join(folder, name)).st_size
+                files += 1
+            except FileNotFoundError:
+                pass  # the server removed it meanwhile
+    lines = run(["/bin/df", "-Pk", str(data)], home).stdout.splitlines()
+    if len(lines) < 2:
+        raise Failed(f"df cannot tell where {data} lies")
+    device, _, _, available, _, mount = lines[1].split(None, 5)
+    info = run(["/usr/sbin/diskutil", "info", "-plist", device], home)
+    disk = plistlib.loads(info.stdout.encode("utf-8")) if info.returncode == 0 else {}
+    detail: Detail = {"path": str(data), "bytes": size, "files": files, "device": device, "mountPoint": mount,
+                      "internal": disk.get("Internal"), "removable": disk.get("RemovableMedia"),
+                      "fileSystem": disk.get("FilesystemType"), "freeBytes": int(available) * 1024}
+    if not files:
+        raise Failed(f"{data} holds no files")
+    if not device.startswith("/dev/disk") or detail["internal"] is not True or detail["removable"] is not False:
+        raise Failed(f"{data} does not lie on the Mac's own disk: {device} at {mount}")
+    return detail
+
+
 CHECKS: list[tuple[str, Callable[[Context], Detail]]] = [
     ("programs", check_programs),
     ("throwaway-server", check_throwaway_server),
     ("settings", check_settings),
     ("listening", check_listening),
+    ("role", check_role),
+    ("data-folder", check_data_folder),
 ]
 
 
