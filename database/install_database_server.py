@@ -1,8 +1,9 @@
 """The installation of Arbol's database server (ARC-0.25, ARC-D64, SYL-156).
 
 It makes the server's data folder with PostgreSQL 17's `initdb` and writes its settings: 127.0.0.1 at port 5433,
-the socket in a private folder beside the data folder, and a password for every connection over the network. It
-can be run again: a second run keeps the data folder and writes only what differs, keeping a copy of every file it
+the socket in a private folder beside the data folder, and a password for every connection over the network. Then
+it writes the launch agent that runs the server at login and starts it again whenever it ends, loads it, and waits
+until the server answers. It can be run again: a second run keeps the data folder and writes only what differs, keeping a copy of every file it
 replaces. It refuses a data folder that it did not make, and a port that another program holds.
 
     uv run --no-sync python database/install_database_server.py
@@ -15,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import plistlib
 import pwd
 import shutil
 import sys
@@ -26,6 +28,8 @@ from typing import Any
 from database_server import (
     BIN,
     HOST,
+    LABEL,
+    LAUNCHCTL,
     LSOF,
     MAJOR,
     PORT,
@@ -181,10 +185,69 @@ def make_data_folder(installation: Installation) -> Report:
             "copies": [copy for copy in (settings_copy, rules_copy) if copy]}
 
 
+def launch_agent(installation: Installation) -> str:
+    """The launch agent: `postgres` on the data folder, started at login and again whenever it ends."""
+    places = installation.places
+    return plistlib.dumps({
+        "Label": LABEL,
+        "ProgramArguments": [installation.program("postgres"), "-D", str(places.data)],
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "WorkingDirectory": str(places.folder),
+        "EnvironmentVariables": {"LANG": "C"},
+        "StandardOutPath": str(places.launchd_log),
+        "StandardErrorPath": str(places.launchd_log),
+    }).decode("utf-8")
+
+
+def answers(installation: Installation) -> bool:
+    places = installation.places
+    result = run([installation.program("pg_isready"), "--host", str(places.socket), "--port", str(PORT),
+                  "--timeout", "2"], places.home, timeout=10)
+    return result.returncode == 0
+
+
+def start_with_launchd(installation: Installation, settings_changed: bool) -> Report:
+    """Writes and loads the launch agent, or restarts the server when its settings changed, and waits for it."""
+    places = installation.places
+    service = f"gui/{os.getuid()}/{LABEL}"
+    places.plist.parent.mkdir(parents=True, exist_ok=True)
+    plist_copy = write_if_different(installation, places.plist, launch_agent(installation), 0o644)
+    loaded = run([LAUNCHCTL, "print", service], places.home).returncode == 0
+    action = "kept"
+    if loaded and plist_copy is not None:
+        run([LAUNCHCTL, "bootout", service], places.home, timeout=90)
+        loaded = False
+    if not loaded:
+        if postmaster_pid(places.data) is not None:
+            # A server that runs on the data folder outside the launch agent is stopped first.
+            run([installation.program("pg_ctl"), "--pgdata", str(places.data), "--mode", "fast", "--wait",
+                 "--timeout", "60", "stop"], places.home, timeout=90)
+        run([LAUNCHCTL, "enable", service], places.home)
+        result = run([LAUNCHCTL, "bootstrap", f"gui/{os.getuid()}", str(places.plist)], places.home)
+        if result.returncode != 0:
+            raise Refused("launchd_failed", f"launchctl bootstrap ended with {result.returncode}: "
+                                            f"{(result.stderr or result.stdout).strip()}")
+        action = "loaded"
+    elif settings_changed:
+        run([LAUNCHCTL, "kickstart", "-k", service], places.home, timeout=90)
+        action = "restarted"
+    deadline = time.monotonic() + 60
+    while not answers(installation):
+        if time.monotonic() > deadline:
+            raise Refused("server_not_answering", f"The server did not answer within 60 seconds; see "
+                                                  f"{places.launchd_log} and {places.data / 'log'}")
+        time.sleep(0.5)
+    return {"plist": str(places.plist), "label": LABEL, "action": action, "pid": postmaster_pid(places.data),
+            "copies": [plist_copy] if plist_copy else []}
+
+
 def install(installation: Installation) -> Report:
     report: Report = {"programs": check_programs(installation)}
     report["port"] = check_port(installation)
-    report["dataFolder"] = make_data_folder(installation)
+    folder = make_data_folder(installation)
+    report["dataFolder"] = folder
+    report["launchAgent"] = start_with_launchd(installation, folder["settingsChanged"] or folder["hostRulesChanged"])
     return report
 
 
