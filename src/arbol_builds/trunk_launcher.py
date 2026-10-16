@@ -29,6 +29,7 @@ from .launcher import (
 from .roots import current_root, read_root, read_roots, roots_folder
 
 DEFAULT_TRUNK = "trivial"
+LIST = "list"  # the one command the launcher answers itself
 
 
 class Refused(Exception):
@@ -71,6 +72,9 @@ def read_call(args: list[str]) -> Call:
     if not call.command:
         raise Refused("invalid_input", "No command: arbol-trunk [--root <root>] [<code name>] [-v <build>] "
                                        "<command> …, where the command is run, settle or list.")
+    if call.command[0] == LIST and (call.build is not None or len(call.command) > 1):
+        raise Refused("invalid_input", "list takes no -v and nothing after it: arbol-trunk [--root <root>] "
+                                       "[<code name>] list.")
     return call
 
 

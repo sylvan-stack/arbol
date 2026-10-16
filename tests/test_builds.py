@@ -1505,6 +1505,69 @@ class TrunkLauncher(unittest.TestCase):
         self.assertEqual(ended(direct), [b"yes ended with 141", b"write ended with 153"])
         self.assertEqual(ended(t.run("probe", "run")), ended(direct))
 
+    def test_builds_trunk_refusals(self) -> None:
+        """builds.trunk-refusals: arbol-trunk checks the call, then the Root, then the Trunk, and refuses in one
+        line with exit status 1: invalid_input without a command and for list after -v or with more after it;
+        unknown_root for a Root identifier that is not one, a Root without a readable record, and no Root named
+        while none is working, with a message that says which; unknown_trunk for a code name that is not one or
+        that the registry does not know (RCT-0.9, BLD-D17)."""
+        t = Trunks(self)
+        t.build("trivial", "1", [1])
+
+        def refused(*args: str) -> tuple[str, str]:
+            result = t.run(*args)
+            self.assertEqual([result.returncode, result.stderr, result.stdout.count(b"\n")], [1, b"", 1], args)
+            refusal = document(result)
+            self.assertEqual([sorted(refusal), sorted(refusal["error"]), refusal["available"]],
+                             [["available", "error"], ["code", "message"], []], args)
+            return str(refusal["error"]["code"]), str(refusal["error"]["message"])
+
+        # No Root at all, then only one in preparation and one that failed: there is no current Root.
+        self.assertEqual(refused("run", "m")[0], "unknown_root")
+        self.assertIn("none is working", refused("run", "m")[1])
+        t.root("fourth", 1, "2026-10-17T09:00:00.000Z", "preparing")
+        t.root("fifth", 1, "2026-10-13T09:00:00.000Z", "failed")
+        self.assertIn("none is working", refused("list")[1])
+        t.root("sapling", 1, "2026-10-14T09:00:00.000Z")
+        write_root(t.roots, "{", "broken")
+        # The call first: no command, and list after -v or with more after it.
+        for args in ([], ["--root"], ["--root", "sapling"], ["trivial"], ["-v", "1"], ["-v"],
+                     ["--root", "sapling", "trivial", "-v", "1"], ["--root", "Sapling"], ["unknown"]):
+            self.assertEqual(refused(*args), ("invalid_input", "No command: arbol-trunk [--root <root>] [<code name>] "
+                                                               "[-v <build>] <command> …, where the command is run, "
+                                                               "settle or list."), args)
+        for args in (["-v", "1", "list"], ["trivial", "-v", "1", "list"], ["list", "trivial"], ["list", "--root", "x"],
+                     ["--root", "nowhere", "list", "x"]):
+            code, message = refused(*args)
+            self.assertEqual(code, "invalid_input", args)
+            self.assertIn("list takes no -v and nothing after it", message, args)
+        # Then the Root.
+        for value in ("", "Sapling", "../sapling", "sap ling", "säpling", "-x", "sapling/", "sapling\n"):
+            code, message = refused("--root", value, "run", "m")
+            self.assertEqual(code, "unknown_root", value)
+            self.assertIn("is not a Root identifier", message, value)
+        for name in ("nowhere", "broken"):
+            code, message = refused("--root", name, "run", "m")
+            self.assertEqual(code, "unknown_root", name)
+            self.assertIn(f"There is no Root {name}: ", message)
+            self.assertIn(os.path.join(t.roots, name, "root.json"), message)
+        self.assertEqual(refused("--root", "nowhere", "unknown", "run", "m")[0], "unknown_root")
+        # Then the Trunk: a code name that is not one, or one with no folder in builds/arbol-trunk/.
+        os.makedirs(os.path.join(t.home, "elsewhere/1"))
+        os.symlink(os.path.join(t.home, "elsewhere"), os.path.join(t.registry, "arbol-trunk/linked"))
+        Path(t.registry, "arbol-trunk/plain").write_text("not a folder")
+        for code_name in ("unknown", "Trivial", "tri-vial", "a" * 33, "1trivial", "linked", "plain", "trïvial"):
+            code, message = refused(code_name, "run", "m")
+            self.assertEqual(code, "unknown_trunk", code_name)
+            self.assertIn("There is no Trunk", message, code_name)
+            self.assertEqual(refused("--root", "sapling", code_name, "list")[0], "unknown_trunk", code_name)
+        # Text that is not UTF-8 is shown as U+FFFD, and the refusal is still one line of JSON.
+        result = subprocess.run([t.launcher.encode(), b"--root", b"\xff", b"run"], env=t.env(), capture_output=True,
+                                timeout=60, check=False)
+        self.assertEqual([result.returncode, document(result)["error"]["code"]], [1, "unknown_root"])
+        self.assertIn("�", document(result)["error"]["message"])
+        self.assertEqual(t.started("run", "m"), ["1", ["--root", "sapling", "run", "m"]])
+
     def test_builds_trunk_launcher_text(self) -> None:
         """builds.trunk-launcher-text: arbol-trunk is the text of launcher.py, roots.py and trunk_launcher.py
         without their imports from the package; no module redefines a name of one before it, and each finds
