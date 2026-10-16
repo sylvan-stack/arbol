@@ -581,14 +581,16 @@ class Builds(unittest.TestCase):
         self.assertEqual(Path(state).read_text(), contents)
 
     def test_builds_paths(self) -> None:
-        """builds.paths uses default repository, registry and bin, or explicit paths with spaces and quotes."""
+        """builds.paths uses default repository, registry and bin, or explicit paths with spaces and quotes. The default
+        repository is the clone in ~/repos/sylvan-stack/readonly/, not the repository's own folder (BLD-D18)."""
         f = Fixture(self)
-        default_repo = os.path.join(f.home, "repos/sylvan-stack", f.component)
+        default_repo = os.path.join(f.home, "repos/sylvan-stack/readonly", f.component)
         os.makedirs(os.path.dirname(default_repo))
         os.rename(f.repo, default_repo)
         result = subprocess.run([PYTHON, "-I", "-B", ENTRY, "build", f.component], cwd=f.home, env=f.env(),
                                 capture_output=True, timeout=120, check=False)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(document(result)["source"]["repository"], os.path.realpath(default_repo))
         self.assertTrue(os.path.exists(os.path.join(f.home, "Library/Application Support/Arbol/builds",
                                                     f.component, "1/build.json")))
         launcher = os.path.join(f.home, ".local/bin", f.component)
@@ -957,7 +959,7 @@ class Roots(unittest.TestCase):
         in arbol-trunk/trunks/, count separately, lie in folders of their own in the registry, get no launcher of
         their own but the shared arbol-trunk, and every command takes their names (BLD-0.22, BLD-0.16)."""
         f = Fixture(self, "arbol-trunk/alpha")
-        trunks = os.path.join(f.home, "repos/sylvan-stack/arbol-trunk/trunks")
+        trunks = os.path.join(f.home, "repos/sylvan-stack/readonly/arbol-trunk/trunks")
         os.makedirs(trunks)
         os.rename(f.repo, os.path.join(trunks, "alpha"))
         # beef is a code name that also reads as a build number.

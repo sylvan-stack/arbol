@@ -2,6 +2,8 @@
 
 `arbol-builds` implements BLD-0 in `~/Artifacts/arbol/builds/00-builds-and-versions.md`. It belongs to this repository and is installed independently of the application or any numbered Build. It is typed Python that uses only the standard library (BLD-D15). Its code is in `src/arbol_builds/`, its checks in `tests/test_builds.py`.
 
+Install it from `~/repos/sylvan-stack/readonly/arbol`, the clone that always holds the last merged `main` (BLD-D18):
+
 ```sh
 uv sync --locked --group dev
 uv run --no-sync python scripts/install_builds.py
@@ -20,7 +22,7 @@ arbol-builds withdraw arbol-claude-driver@a --reason 'Fails with the updated ven
 arbol-builds prune arbol-claude-driver --keep 4
 ```
 
-The default repository is `~/repos/sylvan-stack/<component>`, and for a Trunk, the component `arbol-trunk/<code name>`, its folder `~/repos/sylvan-stack/arbol-trunk/trunks/<code name>/`. `build --repo <folder>` selects another checkout. `--registry-dir <folder>` selects another registry; the default is `~/Library/Application Support/Arbol/builds/`. `--bin-dir <folder>` selects where component launchers go; the default is `~/.local/bin`. Options work before or after the command, as `--name value` or `--name=value`.
+The default repository is `~/repos/sylvan-stack/readonly/<component>`, and for a Trunk, the component `arbol-trunk/<code name>`, its folder `~/repos/sylvan-stack/readonly/arbol-trunk/trunks/<code name>/`: the clones that always hold the last merged `main` and that nobody edits, never the repositories' own folders, which can hold unmerged edits or another branch (BLD-D18). `build --repo <folder>` selects another checkout. `--registry-dir <folder>` selects another registry; the default is `~/Library/Application Support/Arbol/builds/`. `--bin-dir <folder>` selects where component launchers go; the default is `~/.local/bin`. Options work before or after the command, as `--name value` or `--name=value`.
 
 A Build of `arbol` or `arbol-root` is made for one Root: `build --root <identifier>` names it, and the tool writes it as `root` into the record when the build starts, so the build commands and the checks find it there. The build is refused without `--root` for those two and with it for every other component, before a number is reserved. A Root identifier is one lower-case word of letters and digits; the tool does not check that the Root exists. A Trunk's code name is one lower-case word of 1 to 32 letters and digits that starts with a letter and is not `run`, `settle` or `list`. Each Trunk counts its Builds by itself in `builds/arbol-trunk/<code name>/`, and every command takes its name, as in `show arbol-trunk/trivial@4`. A Trunk gets no launcher of its own: the build of any Trunk writes the launcher `arbol-trunk`, which every Trunk shares (RCT-0, below). `arbol-builds` itself chooses nothing by the Root or the Root Contract versions; `list` and `show` print them.
 
