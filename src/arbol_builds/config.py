@@ -47,8 +47,9 @@ def component_name(name: str) -> str:
 
 
 def default_repository(component: str) -> str:
-    """~/repos/sylvan-stack/<component>, and for a Trunk its folder trunks/<code name>/ in arbol-trunk."""
-    folder = os.path.join(os.path.expanduser("~"), "repos/sylvan-stack")
+    """~/repos/sylvan-stack/readonly/<component>, and for a Trunk its folder trunks/<code name>/ in arbol-trunk: the
+    clones that always hold the last merged main, never the repositories' own folders (BLD-D18)."""
+    folder = os.path.join(os.path.expanduser("~"), "repos/sylvan-stack/readonly")
     if trunk(component):
         return os.path.join(folder, TRUNKS, "trunks", component[len(TRUNKS) + 1:])
     return os.path.join(folder, component)
