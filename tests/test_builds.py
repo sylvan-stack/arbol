@@ -32,6 +32,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from arbol_builds import mutation  # noqa: E402
 from arbol_builds.config import component_name  # noqa: E402
 from arbol_builds.launcher import write_all  # noqa: E402
+from arbol_builds.roots import read_root, read_roots, roots_folder  # noqa: E402
 from arbol_builds.service import LAUNCHER_MARK, reserve  # noqa: E402
 
 PYTHON = sys.executable
@@ -1233,6 +1234,72 @@ class Launchers(unittest.TestCase):
             reader.join(timeout=60)
             os.close(read_end)
         self.assertEqual(bytes(received), data)
+
+
+def root_record(root: str, status: str = "working", created: str = "2026-10-15T09:30:00.000Z",
+                contract: object = 1, **extra: Any) -> dict[str, Any]:
+    """A Root's record as ARC-1 gives it."""
+    return {"root": root, "name": root.title(), "status": status, "createdAt": created, "database": f"arbol_{root}",
+            "app": "1", "rootContract": contract, **extra}
+
+
+def write_root(roots: str, record: object, folder: str | None = None) -> None:
+    """root.json in the Root's folder, made by hand: a record, or the text given."""
+    name = folder or (record["root"] if isinstance(record, dict) else "")
+    os.makedirs(os.path.join(roots, name), exist_ok=True)
+    Path(roots, name, "root.json").write_text(record if isinstance(record, str) else json.dumps(record),
+                                              encoding="utf-8")
+
+
+class TrunkLauncher(unittest.TestCase):
+    """The Roots as the launchers read them, and the launcher arbol-trunk (SYL-179; RCT-0.7 to 0.10, BLD-D17)."""
+
+    def test_builds_root_records(self) -> None:
+        """builds.root-records: the record of every Root is read from the home folder at each call, and a record
+        that is missing or damaged takes only its own Root out of use (BLD-D17)."""
+        home = os.path.realpath(tempfile.mkdtemp(prefix="Arbol's roots "))
+        self.addCleanup(shutil.rmtree, home, True)
+        with mock.patch.dict(os.environ, {"HOME": home}):
+            roots = roots_folder()
+        self.assertEqual(roots, os.path.join(home, "Library/Application Support/Arbol/roots"))
+        self.assertEqual(read_roots(roots), [])
+        sapling = root_record("sapling")
+        second = root_record("second", "preparing", contract=1.0)
+        third = root_record("third", "failed", contract=2, failed={"at": "2026-10-16T08:00:00.000Z", "reason": "x"})
+        for record in (sapling, second, third):
+            write_root(roots, record)
+        # Only the four fields BLD-D17 names are read.
+        bare = {key: sapling[key] for key in ("root", "status", "createdAt", "rootContract")}
+        write_root(roots, {**bare, "root": "bare"})
+        damaged: list[tuple[str, object]] = [
+            ("broken", "{"), ("empty", "{}"), ("array", "[]"), ("nan", '{"root": "nan", "rootContract": NaN}'),
+            ("other", root_record("sapling")), ("state", root_record("state", "ready")),
+            ("unstated", {key: value for key, value in root_record("unstated").items() if key != "status"}),
+            ("time", root_record("time", created="16 October 2026")),
+            ("wide", root_record("wide", created="２０２６-10-15T00:00:00.000Z")),
+            ("zero", root_record("zero", contract=0)), ("true", root_record("true", contract=True)),
+            ("text", root_record("text", contract="1")), ("half", root_record("half", contract=1.5)),
+            ("none", {key: value for key, value in root_record("none").items() if key != "rootContract"}),
+        ]
+        for folder, given in damaged:
+            write_root(roots, given, folder)
+        # No record, a record that is a folder, and folders whose names are no Root identifier.
+        os.makedirs(os.path.join(roots, "missing"))
+        os.makedirs(os.path.join(roots, "folder/root.json"))
+        for name in ("Upper", "with-dash", "säpling", ".hidden"):
+            write_root(roots, root_record(name), name)
+        Path(roots, "file").write_text(json.dumps(root_record("file")))
+        self.assertEqual([record["root"] for record in read_roots(roots)], ["bare", "sapling", "second", "third"])
+        self.assertEqual(read_root(roots, "sapling"), sapling)
+        self.assertEqual(read_root(roots, "second"), second)
+        for name in ("broken", "other", "missing", "folder", "file", "Upper", "säpling", "../roots/sapling",
+                     "sapling/", "", "unknown"):
+            self.assertIsNone(read_root(roots, name), name)
+        # Read again at each call: a record that is mended or damaged counts at once.
+        write_root(roots, root_record("broken"))
+        write_root(roots, "{", "sapling")
+        self.assertEqual([record["root"] for record in read_roots(roots)], ["bare", "broken", "second", "third"])
+        self.assertEqual(read_roots(os.path.join(home, "nowhere")), [])
 
 
 @unittest.skipUnless((ARCHIVE_CACHE / "d15291f940cfecd2e54010d5e37d2e03aa192f076a65d26ab741372fff2dabfe.tar.gz").exists()
