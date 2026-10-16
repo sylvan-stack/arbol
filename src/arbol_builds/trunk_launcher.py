@@ -189,6 +189,9 @@ def launch_trunk(registry: str, args: list[str]) -> int:
         if not known_trunk(registry, code):
             raise Refused("unknown_trunk", f"There is no Trunk {shown(code)!r}: no Build of {TRUNKS}/{shown(code)} is "
                                            "in the registry.")
+        if call.command[0] == LIST:
+            write_all(1, json_line(trunk_list(registry, root, [code])))
+            return 0
         component = f"{TRUNKS}/{code}"
         selected = pick_build(registry, component, call.build, root)
         line = warning(component, selected)

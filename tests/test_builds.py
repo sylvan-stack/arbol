@@ -1678,6 +1678,62 @@ class TrunkLauncher(unittest.TestCase):
         shutil.rmtree(os.path.join(t.registry, "arbol-trunk"))
         self.assertEqual(listed("list"), {"root": "sapling", "rootContract": 1, "trunks": []})
 
+    def test_builds_trunk_list_chosen(self) -> None:
+        """builds.trunk-list-chosen: list marks as chosen the Build that run would start, for the current Root or the
+        one named; after a code name it lists that Trunk alone; it starts no Build (RCT-0.10)."""
+        t = Trunks(self)
+        t.root("sapling", 1, "2026-10-14T09:00:00.000Z")
+        t.root("second", 1, "2026-10-15T09:00:00.000Z")
+        t.root("third", 2, "2026-10-16T09:00:00.000Z", "preparing")
+        for number, contracts in (("3", [1]), ("4", [1, 2]), ("5", [2])):
+            t.build("trivial", number, contracts)
+        t.build("advanced", "8e", [2])
+        t.build("advanced", "8f", [1])
+        # Each Build's program would leave a mark if it were started.
+        for folder, _, names in os.walk(os.path.join(t.registry, "arbol-trunk")):
+            if "program.py" in names:
+                Path(folder, "program.py").write_text(f"#!/bin/sh\ntouch {json.dumps(os.path.join(folder, 'started'))}\n"
+                                                      'exec "$(dirname "$0")/real.py" "$@"\n')
+                Path(folder, "real.py").write_text(TRUNK_PROGRAM)
+                os.chmod(os.path.join(folder, "real.py"), 0o755)
+
+        def chosen(*args: str) -> dict[str, list[str]]:
+            result = t.run(*args)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return {trunk["trunk"]: [build["build"] for build in trunk["builds"] if build["chosen"]]
+                    for trunk in document(result)["trunks"]}
+
+        def run_starts(*args: str) -> str:
+            return str(t.started(*args)[0])
+
+        for root in (None, "sapling", "second", "third"):
+            prefix = [] if root is None else ["--root", root]
+            marked = chosen(*prefix, "list")
+            self.assertEqual(marked, {"trivial": ["5" if root == "third" else "4"],
+                                      "advanced": ["8e" if root == "third" else "8f"]}, root)
+            self.assertEqual(marked["trivial"], [run_starts(*prefix, "run", "m")])
+            self.assertEqual(marked["advanced"], [run_starts(*prefix, "advanced", "run", "m")])
+            # After a code name, that Trunk alone.
+            self.assertEqual(chosen(*prefix, "advanced", "list"), {"advanced": marked["advanced"]})
+            self.assertEqual(chosen(*prefix, "trivial", "list"), {"trivial": marked["trivial"]})
+        # When the newest is withdrawn, the one before it is chosen; when none fits, none is.
+        Path(t.registry, "arbol-trunk/trivial/4/build.json").write_text(json.dumps(
+            {**json.loads(Path(t.registry, "arbol-trunk/trivial/4/build.json").read_text()), "status": "withdrawn",
+             "withdrawn": {"at": "2026-10-16T12:00:00.000Z", "reason": "bad answers"}}))
+        self.assertEqual(chosen("--root", "sapling", "list"), {"trivial": ["3"], "advanced": ["8f"]})
+        self.assertEqual(chosen("--root", "third", "list"), {"trivial": ["5"], "advanced": ["8e"]})
+        shutil.rmtree(os.path.join(t.registry, "arbol-trunk/advanced/8e"))
+        self.assertEqual(chosen("--root", "third", "advanced", "list"), {"advanced": []})
+        # list started nothing: the only marks are those of the Builds run started above.
+        started = sorted(os.path.relpath(folder, t.registry) for folder, _, names
+                         in os.walk(os.path.join(t.registry, "arbol-trunk")) if "started" in names)
+        self.assertEqual(started, ["arbol-trunk/advanced/8f", "arbol-trunk/trivial/4", "arbol-trunk/trivial/5"])
+        for name in started:
+            os.remove(os.path.join(t.registry, name, "started"))
+        chosen("list")
+        chosen("trivial", "list")
+        self.assertFalse([folder for folder, _, names in os.walk(t.registry) if "started" in names])
+
     def test_builds_trunk_launcher_text(self) -> None:
         """builds.trunk-launcher-text: arbol-trunk is the text of launcher.py, roots.py and trunk_launcher.py
         without their imports from the package; no module redefines a name of one before it, and each finds
