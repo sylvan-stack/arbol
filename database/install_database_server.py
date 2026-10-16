@@ -3,8 +3,13 @@
 It makes the server's data folder with PostgreSQL 17's `initdb` and writes its settings: 127.0.0.1 at port 5433,
 the socket in a private folder beside the data folder, and a password for every connection over the network. Then
 it writes the launch agent that runs the server at login and starts it again whenever it ends, loads it, and waits
-until the server answers. It can be run again: a second run keeps the data folder and writes only what differs, keeping a copy of every file it
-replaces. It refuses a data folder that it did not make, and a port that another program holds.
+until the server answers. Last it makes the role `arbol`, which may log in and create databases and nothing more,
+with a password it makes up and stores in the Keychain item `com.sylvan-stack.arbol.database` without ever
+printing it; the server receives only the password's SCRAM verifier.
+
+It can be run again: a second run keeps the data folder and the password, and writes only what differs, keeping a
+copy of every file it replaces. It refuses a data folder that it did not make, and a port that another program
+holds.
 
     uv run --no-sync python database/install_database_server.py
 
@@ -14,10 +19,14 @@ It prints a JSON report and ends with the exit status 0, or 1 with `{"error": {"
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
+import hmac
 import json
 import os
 import plistlib
 import pwd
+import secrets
 import shutil
 import sys
 import time
@@ -33,9 +42,13 @@ from database_server import (
     LSOF,
     MAJOR,
     PORT,
+    ROLE,
+    SECURITY,
+    SERVICE,
     SETTINGS_MARK,
     SOCKET_PATH_LIMIT,
     Places,
+    address,
     major_version,
     postmaster_pid,
     run,
@@ -242,12 +255,74 @@ def start_with_launchd(installation: Installation, settings_changed: bool) -> Re
             "copies": [plist_copy] if plist_copy else []}
 
 
+def keychain_password(installation: Installation) -> str | None:
+    """The password of the Keychain item, or None when there is no such item. Never printed."""
+    result = run([SECURITY, "find-generic-password", "-s", SERVICE, "-a", ROLE, "-w"], installation.places.home,
+                 timeout=10)
+    if result.returncode == 44:
+        return None
+    if result.returncode != 0:
+        raise Refused("keychain_failed", f"Reading the Keychain item {SERVICE} ended with {result.returncode}")
+    return result.stdout.rstrip("\n")
+
+
+def store_new_password(installation: Installation) -> str:
+    """Makes up a password and stores it in the Keychain item, through standard input so no process list shows it."""
+    password = secrets.token_hex(32)
+    result = run([SECURITY, "-i"], installation.places.home, timeout=10,
+                 input_text=f"add-generic-password -s {SERVICE} -a {ROLE} -w {password}\n")
+    # The output of `security -i` may repeat the command, and with it the password: it is never shown.
+    if result.returncode != 0 or keychain_password(installation) != password:
+        raise Refused("keychain_failed", f"Storing the Keychain item {SERVICE} failed (exit status {result.returncode})")
+    return password
+
+
+def scram_verifier(password: str, iterations: int = 4096) -> str:
+    """The SCRAM-SHA-256 verifier PostgreSQL stores for a password (RFC 7677), made here so the server never sees it."""
+    salt = secrets.token_bytes(16)
+    salted = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    stored_key = hashlib.sha256(hmac.new(salted, b"Client Key", "sha256").digest()).digest()
+    server_key = hmac.new(salted, b"Server Key", "sha256").digest()
+
+    def encode(value: bytes) -> str:
+        return base64.b64encode(value).decode("ascii")
+
+    return f"SCRAM-SHA-256${iterations}:{encode(salt)}${encode(stored_key)}:{encode(server_key)}"
+
+
+def make_role(installation: Installation) -> Report:
+    """Makes the role, or brings it back to what it may do, with the password of the Keychain item."""
+    places = installation.places
+    password = keychain_password(installation)
+    state = "kept"
+    if password is None:
+        password = store_new_password(installation)
+        state = "made"
+    sql = (f"DO $$BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{ROLE}') THEN CREATE ROLE {ROLE}; "
+           "END IF; END$$;\n"
+           f"ALTER ROLE {ROLE} WITH LOGIN CREATEDB NOSUPERUSER NOCREATEROLE NOREPLICATION NOBYPASSRLS "
+           f"CONNECTION LIMIT -1 PASSWORD '{scram_verifier(password)}';\n")
+    result = run([installation.program("psql"), "--no-psqlrc", "--quiet", "--host", str(places.socket), "--port",
+                  str(PORT), "--username", installation.owner, "--dbname", "postgres", "--set", "ON_ERROR_STOP=1",
+                  "--file", "-"], places.home, input_text=sql, timeout=30)
+    if result.returncode != 0:
+        first = (result.stderr.strip().splitlines() or [""])[0]
+        raise Refused("role_failed", f"Making the role {ROLE} ended with {result.returncode}: {first}")
+    check = run([installation.program("psql"), "--no-psqlrc", "--tuples-only", "--no-align", "--command",
+                 "select current_user", f"{address()}/postgres"], places.home, timeout=30,
+                extra={"PGPASSWORD": password, "PGCONNECT_TIMEOUT": "10"})
+    if check.returncode != 0 or check.stdout.strip() != ROLE:
+        raise Refused("role_failed", f"The role {ROLE} cannot log in with the password of the Keychain item")
+    return {"role": ROLE, "keychainItem": SERVICE, "password": state, "logsIn": True}
+
+
 def install(installation: Installation) -> Report:
     report: Report = {"programs": check_programs(installation)}
     report["port"] = check_port(installation)
     folder = make_data_folder(installation)
     report["dataFolder"] = folder
     report["launchAgent"] = start_with_launchd(installation, folder["settingsChanged"] or folder["hostRulesChanged"])
+    report["role"] = make_role(installation)
     return report
 
 
