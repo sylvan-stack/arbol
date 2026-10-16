@@ -1,6 +1,10 @@
 # Arbol's database server
 
-Arbol 2 keeps its chats in a PostgreSQL server of its own on this Mac, installed directly and not in a container (ARC-0, "The database server"; ARC-D64). This folder holds the probe that checks it (SYL-156). Both use only Python's standard library and run on the repository's Python:
+Arbol 2 keeps its chats in a PostgreSQL server of its own on this Mac, installed directly and not in a container (ARC-0, "The database server"; ARC-D64). This folder holds its installation and the probe that checks it (SYL-156). Both use only Python's standard library and run on the repository's Python:
+
+```bash
+uv run --no-sync python database/install_database_server.py
+```
 
 ```bash
 uv run --no-sync python database/probe_database_server.py
@@ -8,8 +12,22 @@ uv run --no-sync python database/probe_database_server.py
 
 | File | What it does |
 |---|---|
+| `install_database_server.py` | Installs the server, or brings it back to what it should be; can be run again. Prints a JSON report, never the password. Exit status 0, or 1 with `{"error": {"code", "message"}}` when it refused |
 | `probe_database_server.py` | Checks the server and prints a JSON report; leaves nothing behind. Exit status 0 when every check passed, 1 when one failed |
 | `database_server.py` | The places, names and helpers the scripts share |
+
+What the installation makes, on PostgreSQL 17 of Homebrew (`/opt/homebrew/opt/postgresql@17/bin`):
+
+| What | Where |
+|---|---|
+| The data folder, made by `initdb` (UTF-8, builtin locale `C.UTF-8`, data checksums), with the server's log in `log/`, one file per weekday | `~/Library/Application Support/Arbol/database/data` |
+| The socket, for the installation alone, as the owner's account | `~/Library/Application Support/Arbol/database/socket` (mode 0700) |
+| Copies of every file a run replaced | `~/Library/Application Support/Arbol/database/backups` |
+| The launch agent `com.sylvan-stack.arbol.database`: `postgres` on the data folder, at login and again whenever it ends; its own output goes to `launchd.log` beside the data folder | `~/Library/LaunchAgents/com.sylvan-stack.arbol.database.plist` |
+| The server's address, 127.0.0.1 at port 5433 for the role `arbol`, and nothing else | `~/.arbol/database.json` |
+| The password of the role `arbol`, made up by the installation and never shown | the Keychain item `com.sylvan-stack.arbol.database`, account `arbol` |
+
+The role `arbol` may log in and create databases, and so remove the ones it made, and nothing more. Over 127.0.0.1 every role needs its password. Port 5432 is left to the container `arbol-postgres`, and Homebrew's own data folder `/opt/homebrew/var/postgresql@17` is not used. To stop the server: `launchctl bootout gui/$(id -u)/com.sylvan-stack.arbol.database`; to start it again, run the installation.
 
 The probe's checks:
 

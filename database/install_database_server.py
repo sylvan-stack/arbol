@@ -5,7 +5,8 @@ the socket in a private folder beside the data folder, and a password for every 
 it writes the launch agent that runs the server at login and starts it again whenever it ends, loads it, and waits
 until the server answers. Last it makes the role `arbol`, which may log in and create databases and nothing more,
 with a password it makes up and stores in the Keychain item `com.sylvan-stack.arbol.database` without ever
-printing it; the server receives only the password's SCRAM verifier.
+printing it; the server receives only the password's SCRAM verifier. It writes the server's address, and nothing
+else, to `~/.arbol/database.json` (ARC-1).
 
 It can be run again: a second run keeps the data folder and the password, and writes only what differs, keeping a
 copy of every file it replaces. It refuses a data folder that it did not make, and a port that another program
@@ -316,6 +317,16 @@ def make_role(installation: Installation) -> Report:
     return {"role": ROLE, "keychainItem": SERVICE, "password": state, "logsIn": True}
 
 
+def write_settings(installation: Installation) -> Report:
+    """Writes `~/.arbol/database.json` with the address and nothing else (ARC-1, ARC-D51)."""
+    places = installation.places
+    places.settings.parent.mkdir(parents=True, exist_ok=True)
+    copy = write_if_different(installation, places.settings, json.dumps({"address": address()}, indent=2) + "\n",
+                              0o644)
+    return {"path": str(places.settings), "address": address(), "changed": copy is not None,
+            "copies": [copy] if copy else []}
+
+
 def install(installation: Installation) -> Report:
     report: Report = {"programs": check_programs(installation)}
     report["port"] = check_port(installation)
@@ -323,6 +334,7 @@ def install(installation: Installation) -> Report:
     report["dataFolder"] = folder
     report["launchAgent"] = start_with_launchd(installation, folder["settingsChanged"] or folder["hostRulesChanged"])
     report["role"] = make_role(installation)
+    report["settings"] = write_settings(installation)
     return report
 
 
