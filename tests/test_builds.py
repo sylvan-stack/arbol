@@ -1445,6 +1445,66 @@ class TrunkLauncher(unittest.TestCase):
         # -v counts only right after the code name or in its place; anywhere else it is the Build's.
         self.assertEqual(t.started("run", "-v", "9", m), ["3", ["--root", "sapling", "run", "-v", "9", m]])
 
+    def test_builds_trunk_pass_through(self) -> None:
+        """builds.trunk-pass-through: through arbol-trunk the Build gets its arguments and environment byte for
+        byte, the standard streams, the working folder, the process, the signals and the exit status unchanged, and
+        SIGPIPE and SIGXFSZ at their default, as through a component's launcher (RCT-0.8, BLD-0.9)."""
+        t = Trunks(self)
+        t.root("sapling", 1, "2026-10-14T09:00:00.000Z")
+        t.build("trivial", "1", [1])
+        # Standard streams, working folder, environment and exit status.
+        data = "ñ\u0000data\nline two\n".encode()
+        echo = t.run("--echo", data=data)
+        self.assertEqual([echo.stdout, echo.stderr, echo.returncode], [data, b"diagnostic\n", 0])
+        result = document(t.run("run", "text", marker="custom"))
+        self.assertEqual([result["args"], result["cwd"], result["marker"]],
+                         [["--root", "sapling", "run", "text"], t.home, "custom"])
+        for code in (0, 1, 2, 7, 143):
+            self.assertEqual(t.run("--exit", str(code)).returncode, code)
+        # Arguments and environment that are not UTF-8, byte for byte.
+        arguments = [b"plain", b"caf\xe9", b"\xff\xfe-not-utf8", b"\xe2\x82\xac", b""]
+        raw = subprocess.run([t.launcher.encode(), b"--bytes", *arguments],
+                             env={**{key.encode(): value.encode() for key, value in t.env().items()},
+                                  b"PROBE": b"\xff\x80value"}, capture_output=True, timeout=60, check=False)
+        self.assertEqual(document(raw), {"args": [argument.hex() for argument in arguments],
+                                         "probe": b"\xff\x80value".hex()})
+        helper = os.path.join(t.home, "execve.py")
+        Path(helper).write_text(EXECVE)
+        environment = [b"PATH=/usr/bin:/bin", b"LANG=en_US.UTF-8", b"HOME=" + t.home.encode(), b"DUP=first",
+                       b"DUP=second", b"NOEQUALS", b"X=\xff\xfe"]
+
+        def environ(*words: bytes) -> list[bytes]:
+            started = subprocess.run([PYTHON, "-I", helper, *(word.hex() for word in [*words, b"--", *environment])],
+                                     capture_output=True, timeout=60, check=False)
+            self.assertEqual(started.returncode, 0, started.stderr)
+            return [bytes.fromhex(entry) for entry in document(started)
+                    if not bytes.fromhex(entry).startswith(b"__CF_USER_TEXT_ENCODING=")]
+
+        program = os.path.join(t.registry, "arbol-trunk/trivial/1/program.py").encode()
+        self.assertEqual(environ(t.launcher.encode(), b"--environ"), environment)
+        self.assertEqual(environ(program, b"--environ"), environment)
+        # The Build is the launcher's own process, and receives its signals.
+        for number in (signal.SIGINT, signal.SIGTERM):
+            child = subprocess.Popen([t.launcher, "--wait"], env=t.env(), stdout=subprocess.PIPE)
+            self.addCleanup(finish, child)
+            self.assertEqual(json.loads(first_line(child))["pid"], child.pid)
+            child.send_signal(number)
+            self.assertEqual(child.wait(timeout=10), 2 if number == signal.SIGINT else -signal.SIGTERM)
+        # SIGPIPE and SIGXFSZ at their default, as on a direct start.
+        probe = t.build("probe", "1", [1], entry="probe.sh")
+        script = os.path.join(t.registry, "arbol-trunk/probe/1", probe["entry"])
+        Path(script).write_text('#!/bin/sh\n(yes; echo "yes ended with $?" >&2) | head -1 > /dev/null\n'
+                                '(ulimit -f 0; printf x > "$(dirname "$0")/written")\n'
+                                'echo "write ended with $?" >&2\n')
+        os.chmod(script, 0o755)
+
+        def ended(result: Result) -> list[bytes]:
+            return [line for line in result.stderr.splitlines() if b" ended with " in line]
+
+        direct = subprocess.run([script], env=ENV, capture_output=True, timeout=30, check=False)
+        self.assertEqual(ended(direct), [b"yes ended with 141", b"write ended with 153"])
+        self.assertEqual(ended(t.run("probe", "run")), ended(direct))
+
     def test_builds_trunk_launcher_text(self) -> None:
         """builds.trunk-launcher-text: arbol-trunk is the text of launcher.py, roots.py and trunk_launcher.py
         without their imports from the package; no module redefines a name of one before it, and each finds
