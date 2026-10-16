@@ -1618,6 +1618,66 @@ class TrunkLauncher(unittest.TestCase):
         self.assertEqual(t.started("run", "m"), ["2", ["--root", "sapling", "run", "m"]])
         self.assertEqual(t.started("--root", "third", "run", "m"), ["4", ["--root", "third", "run", "m"]])
 
+    def test_builds_trunk_list(self) -> None:
+        """builds.trunk-list: arbol-trunk list prints, from the Root's record and the Build records alone, the Root,
+        its rootContract and every Trunk with default and its Builds, each with status, rootContracts, fits and
+        runnable, in RCT-0's example (RCT-0.10)."""
+        t = Trunks(self)
+        t.root("sapling", 1, "2026-10-14T09:00:00.000Z")
+        t.build("trivial", "3", [1])
+        t.build("trivial", "4", [1, 2])
+        t.build("advanced", "8f", [2])
+
+        def listed(*args: str) -> Any:
+            result = t.run(*args)
+            self.assertEqual([result.returncode, result.stderr, result.stdout.count(b"\n")], [0, b"", 1], args)
+            return document(result)
+
+        example = {"root": "sapling", "rootContract": 1, "trunks": [
+            {"trunk": "trivial", "default": True,
+             "builds": [{"build": "4", "status": "working", "rootContracts": [1, 2], "fits": True, "runnable": True,
+                         "chosen": True},
+                        {"build": "3", "status": "working", "rootContracts": [1], "fits": True, "runnable": True,
+                         "chosen": False}]},
+            {"trunk": "advanced", "default": False,
+             "builds": [{"build": "8f", "status": "working", "rootContracts": [2], "fits": False, "runnable": True,
+                         "chosen": False}]}]}
+        self.assertEqual(listed("list"), example)
+        self.assertEqual(listed("--root", "sapling", "list"), example)
+        # The same in the order of the keys of TrunkList, as one line.
+        self.assertTrue(t.run("list").stdout.startswith(b'{"root":"sapling","rootContract":1,"trunks":[{"trunk":'
+                                                        b'"trivial","default":true,"builds":[{"build":"4","status":'
+                                                        b'"working","rootContracts":[1,2],"fits":true,"runnable":true,'
+                                                        b'"chosen":true}'))
+        # Every status, and runnable as the launcher would judge a named Build; damaged records are left out.
+        t.root("third", 2, "2026-10-13T09:00:00.000Z", "failed")
+        t.build("beta", "1", [1], "failed")
+        t.build("beta", "2", [2], "withdrawn")
+        t.build("beta", "3", [2], "building")
+        t.build("beta", "4", [2.0], prunedAt="2026-10-16T11:00:00.000Z")  # type: ignore[list-item]
+        t.build("beta", "5", [1, 2])
+        os.chmod(os.path.join(t.registry, "arbol-trunk/beta/5/program.py"), 0o600)
+        os.makedirs(os.path.join(t.registry, "arbol-trunk/beta/6"))
+        Path(t.registry, "arbol-trunk/beta/6/build.json").write_text("{")
+        os.makedirs(os.path.join(t.registry, "arbol-trunk/empty"))
+        for stray in ("Stray", "list", ".hidden"):
+            os.makedirs(os.path.join(t.registry, "arbol-trunk", stray))
+        os.symlink(os.path.join(t.registry, "arbol-trunk/beta"), os.path.join(t.registry, "arbol-trunk/linked"))
+        third = listed("--root", "third", "list")
+        self.assertEqual([third["root"], third["rootContract"]], ["third", 2])
+        self.assertEqual([trunk["trunk"] for trunk in third["trunks"]], ["trivial", "advanced", "beta", "empty"])
+        self.assertEqual([trunk["default"] for trunk in third["trunks"]], [True, False, False, False])
+        beta = third["trunks"][2]["builds"]
+        self.assertEqual([[build["build"], build["status"], build["rootContracts"], build["fits"], build["runnable"]]
+                          for build in beta],
+                         [["5", "working", [1, 2], True, False], ["4", "working", [2], True, False],
+                          ["3", "building", [2], True, False], ["2", "withdrawn", [2], True, True],
+                          ["1", "failed", [1], False, True]])
+        self.assertEqual(third["trunks"][3], {"trunk": "empty", "default": False, "builds": []})
+        # A registry without Trunks lists none.
+        shutil.rmtree(os.path.join(t.registry, "arbol-trunk"))
+        self.assertEqual(listed("list"), {"root": "sapling", "rootContract": 1, "trunks": []})
+
     def test_builds_trunk_launcher_text(self) -> None:
         """builds.trunk-launcher-text: arbol-trunk is the text of launcher.py, roots.py and trunk_launcher.py
         without their imports from the package; no module redefines a name of one before it, and each finds

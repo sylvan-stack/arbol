@@ -147,6 +147,31 @@ def pick_build(registry: str, component: str, number: str | None, root: Record) 
     return named
 
 
+def trunks_in(registry: str) -> list[str]:
+    """The code names of the Trunks the registry knows, trivial first, then in the order of their names."""
+    try:
+        with os.scandir(os.path.join(registry, TRUNKS)) as entries:
+            codes = [entry.name for entry in entries
+                     if code_name(entry.name) and entry.is_dir(follow_symlinks=False)]
+    except OSError:
+        return []
+    return sorted(codes, key=lambda code: (code != DEFAULT_TRUNK, code))
+
+
+def trunk_list(registry: str, root: Record, codes: list[str]) -> dict[str, object]:
+    """TrunkList (RCT-0.10), from the Root's record and the Build records alone: the Root and its version, and each
+    Trunk with its Builds, newest first, marking the one run would start. No Build is started."""
+    trunks: list[dict[str, object]] = []
+    for code in codes:
+        records = read_records(registry, f"{TRUNKS}/{code}")
+        selected = chosen(registry, records, root)
+        trunks.append({"trunk": code, "default": code == DEFAULT_TRUNK, "builds": [
+            {"build": record["build"], "status": record["status"], "rootContracts": record["rootContracts"],
+             "fits": fits(record, root), "runnable": named_runnable(registry, record), "chosen": record is selected}
+            for record in records]})
+    return {"root": root["root"], "rootContract": root["rootContract"], "trunks": trunks}
+
+
 def launch_trunk(registry: str, args: list[str]) -> int:
     """Choose the Root, the Trunk and the Build, and replace this process with the Build's program, handing it
     --root <root> before the command; return a status only when it cannot."""
@@ -157,6 +182,9 @@ def launch_trunk(registry: str, args: list[str]) -> int:
     try:
         call = read_call(args)
         root = the_root(call.root)
+        if call.command[0] == LIST and call.trunk is None:
+            write_all(1, json_line(trunk_list(registry, root, trunks_in(registry))))
+            return 0
         code = call.trunk or DEFAULT_TRUNK
         if not known_trunk(registry, code):
             raise Refused("unknown_trunk", f"There is no Trunk {shown(code)!r}: no Build of {TRUNKS}/{shown(code)} is "
