@@ -199,6 +199,11 @@ async def run_c10(home: ScenarioHome) -> None:
     records = await request(home, subscriptionId="zai", model="glm-5.3-flash", effort="low")
     equal("Request overrides default", records[0]["subscriptionId"], "zai")
     equal("Explicit effort", records[0]["effort"], "low")
+    await options(home, "authoritative", delta="wrong provisional text", text="wrong original final",
+                  finalRewrite="Rewritten\u2028line\u2029paragraph")
+    records = await request(home)
+    equal("Native final hook is authoritative", [r["text"] for r in records if r["type"] == "text"],
+          ["Rewritten\u2028line\u2029paragraph"])
     settings = Path(home.home, ".arbol/arbol-pi-driver.json")
     settings.unlink()
     settings.mkdir()
@@ -426,6 +431,27 @@ async def run_c14(home: ScenarioHome) -> None:
 async def run_c15_c17(home: ScenarioHome) -> None:
     case = home.id
     await signed(home)
+    if case == "C15":
+        for part, stage, startup_values in (
+            ("credential-stop", "credential-export", {"credentialDelayMs": 10000}),
+            ("startup-stop", "session", {"startupHang": True}),
+        ):
+            await options(home, part, **startup_values)
+            active = active_run(home)
+            try:
+                async def reached(part: str = part, stage: str = stage) -> bool:
+                    return any(r["part"] == part and r["stage"] == stage for r in await home.received())
+                await wait_for("Startup phase reached", reached)
+                start = time.monotonic()
+                active.send({"type": "stop"})
+                startup_records = stream(await active.done, "cancelled")
+                check("Startup cancellation is prompt", time.monotonic() - start < 5, True, startup_records)
+                equal("Startup stop never submits a prompt",
+                      len([r for r in await native_inputs(home) if r["part"] == part]), 0)
+                for observed in [r for r in await home.received() if r["part"] == part and r["stage"] == stage]:
+                    await gone(observed["pid"])
+            finally:
+                await active.dispose()
     variants = ("text", "tool", "question", "child", "stubborn") if case == "C15" else (
         "normal", "SIGINT", "SIGTERM", "input", "output")
     for part in variants:
@@ -547,6 +573,11 @@ async def run_c20(home: ScenarioHome) -> None:
         equal("Large result flagged", end["truncated"], True)
         length = len(json.dumps(end["result"], ensure_ascii=False, separators=(",", ":")).encode())
         check("Public result bounded", length <= 200 * 1024, "<= 200 KiB", length)
+    await options(home, "rewritten", tool="result", toolRewrite=True, result="Authoritative tool result")
+    records = await request(home, tools="all", workingDirectory=home.home)
+    end = next(r for r in records if r["type"] == "tool_finished")
+    equal("Final tool snapshot replaces provisional output", end["result"],
+          {"content": [{"type": "text", "text": "Authoritative tool result"}]})
     return
 
 
@@ -567,7 +598,8 @@ async def run_c25(home: ScenarioHome) -> None:
 async def run_c26_c27_c28(home: ScenarioHome) -> None:
     case = home.id
     rows = [("auth", "credential_rejected"), ("rate", "rate_limited"), ("invalid", "invalid_input"),
-            ("unavailable", "vendor_unavailable"), ("malformed", "tool_failed"), ("eof", "tool_failed")]
+            ("unavailable", "vendor_unavailable"), ("malformed", "tool_failed"), ("huge", "tool_failed"),
+            ("eof", "tool_failed")]
     if case == "C27":
         rows = [("rate", "rate_limited")]
     elif case == "C28":
