@@ -1048,7 +1048,13 @@ async def run_c32(home: ScenarioHome) -> None:
     equal("One build inference", build.result["inferenceRequests"], 1)
     equal("Exactly one provider call", len(await native_inputs(home)), before + 1)
     equal("Build check disables tools", (await native_inputs(home))[-1]["checks"]["tools"], [])
-    live = await home.json(["dev", "live-check"])
+    previous_timeout = home.timeout_ms
+    try:
+        # This one command performs twelve actual native startup/cleanup cycles.
+        home.timeout_ms = max(previous_timeout, 60000)
+        live = await home.json(["dev", "live-check"])
+    finally:
+        home.timeout_ms = previous_timeout
     equal("Live orchestration passes synthetic native providers", live.process["status"], 0)
     equal("Both families each receive six qualification turns", live.result["inferenceRequests"], 12)
     state = Path(info["stateDirectory"])
