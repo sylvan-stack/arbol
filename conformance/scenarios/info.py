@@ -13,7 +13,7 @@ from ..js import JSObject
 def inspect_info(value: Any) -> tuple[JSObject, JSObject, str]:
     info = object_("info result", value)
     name = text("info Driver name", info["driver"])
-    check("Supported Driver identity", name in ("claude", "codex"), "claude or codex", name)
+    check("Supported Driver identity", name in ("claude", "codex", "pi"), "claude, codex or pi", name)
     tool = object_("info tool", info["tool"])
     equal("Vendor tool name", tool["name"], name)
     text("Oldest supported tool version", tool["oldestSupported"])

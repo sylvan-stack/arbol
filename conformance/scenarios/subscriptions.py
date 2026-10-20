@@ -1119,8 +1119,41 @@ async def check_chatgpt_usage(home: ScenarioHome) -> None:
 
 
 async def run_c41(home: ScenarioHome) -> None:
-    if any(value["id"] == "chatgpt" for value in await families(home)):
+    offered = await families(home)
+    if any(value["id"] == "chatgpt" for value in offered):
         await check_chatgpt_usage(home)
+        return
+    if [value["id"] for value in offered] == ["anthropic"]:
+        await home.part("success")
+        equal("Unsigned usage", (await home.json(["subscriptions", "usage", "anthropic"])).result["outcome"],
+              "needs_sign_in")
+        await sign_in(home, "anthropic")
+        account = object_("Vendor account", (await subscription(home, "anthropic"))["account"])
+        equal("Vendor plan", account["plan"], "fixture")
+        before = len(await home.received())
+        await home.call(["subscriptions", "list"])
+        equal("List does not poll", len(await home.received()), before)
+        equal("Usage unsupported before run",
+              (await home.json(["subscriptions", "usage", "anthropic"])).result["outcome"], "unsupported")
+        equal("Tool catalog source", (await home.json(["subscriptions", "models", "anthropic"])).result["source"],
+              "tool")
+        await home.part("unavailable")
+        fallback = await home.json(["subscriptions", "models", "anthropic"])
+        equal("Unavailable catalog marked builtin", fallback.result["source"], "builtin")
+        check("Fallback is nonempty", isinstance(fallback.result["models"], list) and bool(fallback.result["models"]),
+              "Anthropic models", fallback.result)
+        for model in array(fallback.result["models"], "map", "models"):
+            check("No retired model", not text("Model id", object_("Model", model)["id"]).startswith("glm"),
+                  "Anthropic model", model)
+        await home.part("success")
+        out = await home.json(["subscriptions", "sign-out", "anthropic"])
+        equal("Account gone", out.result["account"], UNDEFINED)
+        equal("Cached usage gone", out.result["lastUsage"], UNDEFINED)
+        before = len(await home.received())
+        for command in ("check", "usage", "models", "sign-in"):
+            stale = await home.json(["subscriptions", command, "zai"])
+            equal("Retired route refused", stale.result["error"]["code"], "invalid_input")
+        equal("Retired requests never reach native tool", len(await home.received()), before)
         return
     await home.part("success")
     home.env["ARBOL_TEST_TIME_SCALE"] = "10"

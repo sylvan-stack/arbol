@@ -148,7 +148,7 @@ async def check_driver_info(home: ScenarioHome) -> None:
         reply = await home.json(["--state-dir", state, "info"] if state is not None else ["info"])
         equal("info exit status", reply.process["status"], 0)
         info, tool, name = inspect_info(reply.result)
-        equal("Contract version", info["contract"], 1)
+        equal("Contract version", info["contract"], 2 if name in ("claude", "pi") else 1)
         version = text("Package version", info["version"])
         check("Package version format", re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][\w.-]+)?", version, re.ASCII) is not None,
               "a semantic package version", version)

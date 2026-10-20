@@ -52,19 +52,37 @@ async def run_suite(command: list[str], selected: list[Scenario], *, timeout_ms:
     passed = 0
     if signal_ is not None:
         await _signals()
+    native_pi = False
+    discovery = await ScenarioHome.create("identity", command, min(timeout_ms or 15000, 1500), signal_)
+    try:
+        await discovery.part("missing", missing=True)
+        identity = await discovery.json(["info"])
+        native_pi = identity.result.get("driver") == "pi"
+    except Exception:
+        # The selected scenarios report malformed/unavailable Drivers themselves.
+        pass
+    finally:
+        await discovery.dispose()
     for scenario in selected:
         fixture: ScenarioHome | None = None
+        scope = scenario.scope
         try:
             if signal_ is not None:
                 signal_.throw_if_aborted()
             fixture = await ScenarioHome.create(scenario.id, command, timeout_ms, signal_)
-            await scenario.run(fixture)
+            if native_pi:
+                from .scenarios.pi import SCOPES, prepare, run
+                scope = SCOPES.get(scenario.id, "unimplemented Pi variant")
+                await prepare(fixture)
+                await run(fixture)
+            else:
+                await scenario.run(fixture)
             await fixture.dispose()
             fixture = None
-            write(f"PASS {scenario.id} — {scenario.title} ({scenario.scope})")
+            write(f"PASS {scenario.id} — {scenario.title} ({scope})")
             passed += 1
         except Exception as error:
-            write(f"FAIL {scenario.id} — {scenario.title} ({scenario.scope})")
+            write(f"FAIL {scenario.id} — {scenario.title} ({scope})")
             write(f"  {message_of(error)}")
             if isinstance(error, Mismatch):
                 write(f"  Expected: {inspect(error.expected)}")
