@@ -1936,6 +1936,81 @@ class TrunkLauncher(unittest.TestCase):
 
 
 class Locking(unittest.TestCase):
+    def test_builds_prune_keeps_locked_builds_in_addition_to_the_newest_working_count(self) -> None:
+        """builds.locked-prune retains older marks and resumes ordinary pruning after unlock."""
+        f = Fixture(self)
+        for _ in range(4):
+            f.build()
+        for number in ("1", "3"):
+            self.assertEqual(f.call("lock", f"{f.component}@{number}").returncode, 0)
+        mark = json.loads(Path(f.path("1/build.json")).read_text())["lockedAt"]
+        self.assertEqual(document(f.call("prune", f.component, "--keep", "2"))["pruned"], ["2"])
+        for number in ("1", "3", "4"):
+            self.assertTrue(Path(f.path(number, "program.py")).is_file())
+            self.assertNotIn("prunedAt", json.loads(Path(f.path(number, "build.json")).read_text()))
+        self.assertEqual(json.loads(Path(f.path("1/build.json")).read_text())["lockedAt"], mark)
+        self.assertEqual(f.call("unlock", f"{f.component}@1").returncode, 0)
+        self.assertEqual(document(f.call("prune", f.component, "--keep", "2"))["pruned"], ["1"])
+        self.assertFalse(Path(f.path("1/program.py")).exists())
+        self.assertTrue(Path(f.path("1/build.json")).is_file())
+        self.assertTrue(Path(f.path("1/build.log")).is_file())
+        self.assertEqual(document(f.launch())["build"], "4")
+
+    def test_builds_lock_and_prune_in_separate_processes_have_both_serial_orders(self) -> None:
+        """builds.lock-prune-race: holding each first mutation proves both serialized outcomes."""
+        for first_operation in ("lock", "prune"):
+            with self.subTest(first=first_operation):
+                f = Fixture(self)
+                for _ in range(3):
+                    f.build()
+                worker = Path(f.home, "mutation.py")
+                worker.write_text("import json,sys\n"
+                                  f"sys.path.insert(0,{str(ROOT / 'src')!r})\n"
+                                  "from arbol_builds import service\n"
+                                  "registry,component,operation=sys.argv[1:]\n"
+                                  "original=service.save_unlocked\n"
+                                  "def held(folder,record):\n"
+                                  " if record['build']=='1':\n"
+                                  "  print('held',flush=True);sys.stdin.readline()\n"
+                                  " original(folder,record)\n"
+                                  "service.save_unlocked=held\n"
+                                  "result=(service.lock_build(registry,component,'1',True) if operation=='lock'"
+                                  " else service.prune_builds(registry,component,1))\n"
+                                  "print(json.dumps(result))\n")
+                first = subprocess.Popen([PYTHON, "-I", "-B", str(worker), f.registry, f.component, first_operation],
+                                         env=f.env(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                         stderr=subprocess.PIPE)
+                self.addCleanup(finish, first)
+                self.assertEqual(first_line(first), b"held\n")
+                args = (["prune", f.component, "--keep", "1"] if first_operation == "lock"
+                        else ["lock", f"{f.component}@1"])
+                second = f.spawn(*args, "--registry-dir", f.registry)
+                deadline = time.monotonic() + 10
+                writers = Path(f.path(".writers"))
+                while not list(writers.glob(f"{second.pid}-*.json")) and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(list(writers.glob(f"{second.pid}-*.json")))
+                self.assertIsNone(second.poll())
+                assert first.stdin is not None
+                first.stdin.write(b"go\n")
+                first.stdin.flush()
+                output, errors = first.communicate(timeout=30)
+                self.assertEqual(first.returncode, 0, output + errors)
+                output, errors = second.communicate(timeout=30)
+                record = json.loads(Path(f.path("1/build.json")).read_text())
+                if first_operation == "lock":
+                    self.assertEqual(second.returncode, 0, output + errors)
+                    self.assertEqual(json.loads(output)["pruned"], ["2"])
+                    self.assertIn("lockedAt", record)
+                    self.assertNotIn("prunedAt", record)
+                    self.assertTrue(Path(f.path("1/program.py")).is_file())
+                else:
+                    self.assertEqual(second.returncode, 1, output + errors)
+                    self.assertIn("pruned", json.loads(output)["error"]["message"])
+                    self.assertIn("prunedAt", record)
+                    self.assertNotIn("lockedAt", record)
+                    self.assertFalse(Path(f.path("1/program.py")).exists())
+
     def test_builds_in_flight_writes_preserve_a_lock_and_a_later_unlock(self) -> None:
         """builds.lock-building: stale lifecycle writes cannot undo a concurrent mark or its removal."""
         f = Fixture(self)

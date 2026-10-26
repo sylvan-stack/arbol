@@ -410,7 +410,7 @@ def prune_builds(registry: str, component: str, keep: int) -> dict[str, Any]:
         selected = default_record(registry, working)
         pruned: list[str] = []
         for record in working[keep:]:
-            if selected is not None and record["build"] == selected["build"]:
+            if record.get("lockedAt") or (selected is not None and record["build"] == selected["build"]):
                 continue
             folder = os.path.join(registry, component, record["build"])
             # Mark unavailable before removing files: a partly pruned Build cannot be started.
