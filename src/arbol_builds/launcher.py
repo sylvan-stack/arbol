@@ -284,6 +284,32 @@ def warning(component: str, record: Record) -> str | None:
     return None
 
 
+def record_start(folder: str) -> None:
+    """Best-effort last-start replacement, without a lock, retry or flush (BLD-0.24, BLD-D19).
+
+    Run before restoring SIGXFSZ: Python ignores it, so a file-size limit becomes a caught write error.
+    Only a complete timestamp replaces the old one, and only our own temporary file is removed.
+    """
+    stamp = time.time_ns()
+    temporary = os.path.join(folder, f"last-start.{os.getpid()}.{stamp}.tmp")
+    created = False
+    try:
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        created = True
+        with os.fdopen(fd, "wb") as stream:
+            value = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(stamp // 1_000_000_000))
+            stream.write(f"{value}.{stamp // 1_000_000 % 1000:03d}Z\n".encode("ascii"))
+        os.replace(temporary, os.path.join(folder, "last-start"))
+    except OSError:
+        pass  # start the Build even when its folder cannot record the start
+    finally:
+        if created:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+
 def launch(registry: str, component: str, args: list[str]) -> int:
     """Choose the Build and replace this process with its program; return a status only when it cannot."""
     standard_descriptors()
@@ -317,6 +343,7 @@ def launch(registry: str, component: str, args: list[str]) -> int:
         entry = executable_entry(os.path.join(registry, component, selected["build"]), selected.get("entry"))
         if entry is None:
             raise OSError(f"The program of {component}@{selected['build']} is no longer there.")
+        record_start(os.path.join(registry, component, selected["build"]))
         # Python ignores these two signals when it starts; a direct start would leave them at their default.
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
         signal.signal(signal.SIGXFSZ, signal.SIG_DFL)

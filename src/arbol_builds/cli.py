@@ -9,7 +9,7 @@ from types import FrameType
 
 from .config import JS_SPACE, component_name, locations
 from .launcher import json_line, standard_descriptors, write_all
-from .service import Stop, build_component, list_builds, prune_builds, show_build, withdraw_build
+from .service import Stop, build_component, build_details, list_builds, prune_builds, show_build, withdraw_build
 
 USAGE = ("arbol-builds build <component> [--repo <folder>] [--root <identifier>] | list [<component>] "
          "| show <component>[@<build>] | withdraw <component>@<build> --reason <text> | prune <component> --keep <n> "
@@ -88,7 +88,7 @@ def main(args: list[str]) -> int:
         if command == "list":
             output(list_builds(paths.registry, target))
         elif command == "show":
-            output(show_build(paths.registry, component, number))
+            output(build_details(paths.registry, show_build(paths.registry, component, number)))
         elif command == "withdraw":
             reason = values.get("--reason")
             if not number or reason is None or not reason.strip(JS_SPACE):

@@ -20,6 +20,7 @@ from .launcher import (
     named_runnable,
     read_records,
     readable,
+    record_start,
     root_identifier,
     runnable,
     standard_descriptors,
@@ -203,6 +204,7 @@ def launch_trunk(registry: str, args: list[str]) -> int:
         entry = executable_entry(os.path.join(registry, component, selected["build"]), selected.get("entry"))
         if entry is None:
             raise OSError(f"The program of {component}@{selected['build']} is no longer there.")
+        record_start(os.path.join(registry, component, selected["build"]))
         # Python ignores these two signals when it starts; a direct start would leave them at their default.
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
         signal.signal(signal.SIGXFSZ, signal.SIG_DFL)

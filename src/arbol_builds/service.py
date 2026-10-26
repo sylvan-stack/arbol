@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -301,9 +302,47 @@ def list_builds(registry: str, component: str | None = None) -> list[Record]:
     for name in components:
         records = read_records(registry, name)
         selected = default_record(registry, records)
-        listed.extend({**record, "default": selected is not None and record["build"] == selected["build"]}
+        listed.extend({**build_details(registry, record),
+                       "default": selected is not None and record["build"] == selected["build"]}
                       for record in records)
     return listed
+
+
+def last_start(folder: str) -> str | None:
+    """Read a regular last-start file, falling back to its modification time (BLD-0.24, BLD-D19)."""
+    path = os.path.join(folder, "last-start")
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    try:
+        # A replacement with a pipe or symlink must neither block inventory nor read another file.
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                return None
+            raw = stream.read(26)
+        value = raw.decode("ascii")
+        parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ\n")
+        canonical = parsed.isoformat(timespec="milliseconds") + "Z"
+        if raw == (canonical + "\n").encode("ascii"):
+            return canonical
+    except (OSError, ValueError):
+        pass
+    try:
+        return datetime.fromtimestamp(info.st_mtime, UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def build_details(registry: str, record: Record) -> Record:
+    """Derived inventory fields never become part of build.json."""
+    started = last_start(os.path.join(registry, record["component"], record["build"]))
+    return {**record, "lastStart": started,
+            "unusedSince": started or record.get("finishedAt") or record["startedAt"]}
 
 
 def show_build(registry: str, component: str, number: str | None = None) -> Record:
@@ -349,7 +388,7 @@ def prune_builds(registry: str, component: str, keep: int) -> dict[str, Any]:
             record["prunedAt"] = now()
             save_unlocked(folder, record)
             for item in os.listdir(folder):
-                if item in ("build.json", "build.log"):
+                if item in ("build.json", "build.log", "last-start"):
                     continue
                 path = os.path.join(folder, item)
                 # Only a file that is already gone is ignored, as with Node.js rm --force; any other failure stops.
