@@ -1343,6 +1343,63 @@ def top_level_names(path: Path) -> tuple[dict[str, str], list[str]]:
     return bound, relative
 
 
+class RootComponents(unittest.TestCase):
+    def fixture(self, component: str = "arbol-root") -> Fixture:
+        f = Fixture(self, component)
+        roots = os.path.join(f.home, "Library/Application Support/Arbol/roots")
+        write_root(roots, root_record("sapling", "working", "2026-10-16T09:00:00.000Z"))
+        write_root(roots, root_record("second", "working", "2026-10-16T10:00:00.000Z"))
+        return f
+
+    def test_builds_root_default_selects_only_that_root_in_the_arc_example(self) -> None:
+        """builds.root-default: Builds 5/6 for sapling and 7/8 for second choose 6 and 8, for both components."""
+        for component in ("arbol", "arbol-root"):
+            with self.subTest(component=component):
+                f = self.fixture(component)
+                os.makedirs(f.path("4"))  # consume the earlier numbers of ARC-1's example
+                records = [f.build("--root", root) for root in ("sapling", "sapling", "second", "second")]
+                self.assertEqual([r["build"] for r in records], ["5", "6", "7", "8"])
+                self.assertEqual(document(f.launch("--root", "sapling", "command"))["build"], "6")
+                self.assertEqual(document(f.launch("--root", "second", "command"))["build"], "8")
+                current = document(f.launch("command"))
+                self.assertEqual((current["build"], current["args"]), ("8", ["command"]))
+                self.assertEqual(document(f.launch())["args"], [])
+                Path(f.path("6/program.py")).unlink()
+                self.assertEqual(document(f.launch("--root", "sapling"))["build"], "5")
+                Path(f.path("5/program.py")).unlink()
+                refused = f.launch("--root", "sapling")
+                self.assertEqual(refused.returncode, 1)
+                self.assertEqual(document(refused)["error"]["code"], "build_unavailable")
+                self.assertIn(component, document(refused)["error"]["message"])
+                self.assertIn("sapling", document(refused)["error"]["message"])
+                self.assertEqual(document(refused)["error"]["available"], [])
+                self.assertEqual(document(f.launch())["build"], "8")
+
+    def test_builds_root_records_are_reread_and_only_working_roots_can_be_current(self) -> None:
+        """builds.root-refusals isolates damaged records and never substitutes another Root for an explicit one."""
+        f = self.fixture()
+        f.build("--root", "sapling")
+        f.build("--root", "second")
+        roots = os.path.join(f.home, "Library/Application Support/Arbol/roots")
+        write_root(roots, "{", "second")
+        self.assertEqual(document(f.launch())["build"], "1")
+        for args in (["--root", "second"], ["--root", "missing"], ["--root", "../sapling"], ["--root"]):
+            result = f.launch(*args)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(document(result)["error"]["code"], "unknown_root")
+            self.assertEqual(document(result)["error"]["available"], [])
+        write_root(roots, root_record("sapling", "failed", "2026-10-16T09:00:00.000Z"))
+        result = f.launch()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("none is working", document(result)["error"]["message"])
+        self.assertEqual(document(f.launch("--root", "sapling"))["build"], "1")
+        write_root(roots, root_record("second", "preparing", "2026-10-16T11:00:00.000Z"))
+        self.assertEqual(document(f.launch("--root", "second"))["build"], "2")
+        self.assertEqual(f.launch().returncode, 1)
+        write_root(roots, root_record("second", "working", "2026-10-16T11:00:00.000Z"))
+        self.assertEqual(document(f.launch())["build"], "2")
+
+
 class TrunkLauncher(unittest.TestCase):
     """The Roots as the launchers read them, and the launcher arbol-trunk (SYL-179; RCT-0.7 to 0.10, BLD-D17)."""
 
