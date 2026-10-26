@@ -1344,6 +1344,71 @@ def top_level_names(path: Path) -> tuple[dict[str, str], list[str]]:
 
 
 class PruningRoots(unittest.TestCase):
+    def test_builds_prune_roots_preserves_one_runnable_build_of_every_retained_root_in_any_state(self) -> None:
+        """builds.prune-roots: three retained Roots keep three working Builds despite --keep 1."""
+        for component in ("arbol", "arbol-root"):
+            with self.subTest(component=component):
+                f = Fixture(self, component)
+                roots = os.path.join(f.home, "Library/Application Support/Arbol/roots")
+                for name, state in (("sapling", "working"), ("second", "preparing"), ("third", "failed")):
+                    write_root(roots, root_record(name, state))
+                    f.build("--root", name)
+                    f.build("--root", name)
+                self.assertEqual(f.launch("-v", "1").returncode, 0)
+                activity = Path(f.path("1/last-start")).read_bytes()
+                log = Path(f.path("1/build.log")).read_bytes()
+                result = f.call("prune", component, "--keep", "1")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(document(result)["pruned"], ["5", "3", "1"])
+                for name, number in (("sapling", "2"), ("second", "4"), ("third", "6")):
+                    self.assertEqual(document(f.launch("--root", name))["build"], number)
+                self.assertEqual(Path(f.path("1/last-start")).read_bytes(), activity)
+                self.assertEqual(Path(f.path("1/build.log")).read_bytes(), log)
+                self.assertIn("prunedAt", json.loads(Path(f.path("1/build.json")).read_text()))
+                self.assertFalse(Path(f.path("1/program.py")).exists())
+                self.assertEqual(document(f.call("prune", component, "--keep", "1"))["pruned"], [])
+
+    def test_builds_prune_roots_keeps_damaged_root_identities_runnable_fallbacks_and_locked_builds(self) -> None:
+        """builds.prune-root-retention: missing records protect nothing; damaged records and locks still do."""
+        f = Fixture(self, "arbol-root")
+        roots = os.path.join(f.home, "Library/Application Support/Arbol/roots")
+        for name in ("removed", "sapling", "sapling", "second", "third"):
+            f.build("--root", name)
+        write_root(roots, "{", "sapling")
+        write_root(roots, root_record("another"), "second")
+        write_root(roots, root_record("third"))
+        Path(roots, "removed").mkdir()  # a folder without root.json is no longer retained
+        Path(f.path("3/program.py")).unlink()
+        result = f.call("prune", f.component, "--keep", "1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(document(result)["pruned"], ["3", "1"])
+        for number in ("2", "4", "5"):
+            self.assertTrue(Path(f.path(number, "program.py")).is_file())
+        self.assertEqual(f.call("lock", "arbol-root@2").returncode, 0)
+        for name in ("sapling", "second"):
+            Path(roots, name, "root.json").unlink()
+        self.assertEqual(document(f.call("prune", f.component, "--keep", "1"))["pruned"], ["4"])
+        self.assertTrue(Path(f.path("2/program.py")).is_file())
+        self.assertEqual(f.call("unlock", "arbol-root@2").returncode, 0)
+        self.assertEqual(document(f.call("prune", f.component, "--keep", "1"))["pruned"], ["2"])
+
+    def test_builds_prune_roots_refuses_an_unlistable_catalogue_before_changing_builds(self) -> None:
+        """builds.prune-root-catalogue-refusal: a listing failure is not an empty Root catalogue."""
+        f = Fixture(self, "arbol-root")
+        for _ in range(3):
+            f.build("--root", "sapling")
+        roots = Path(f.home, "Library/Application Support/Arbol/roots")
+        roots.parent.mkdir(parents=True)
+        roots.write_text("not a catalogue")
+        before = {path: path.read_bytes() for path in Path(f.path()).rglob("*") if path.is_file()}
+        result = f.call("prune", f.component, "--keep", "1")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(document(result)["error"]["code"], "builds_failed")
+        self.assertIn("Cannot list the retained Roots", document(result)["error"]["message"])
+        self.assertEqual({path: path.read_bytes() for path in Path(f.path()).rglob("*") if path.is_file()}, before)
+        roots.unlink()
+        self.assertEqual(document(f.call("prune", f.component, "--keep", "1"))["pruned"], ["2", "1"])
+
     def test_builds_prune_catalogue_keeps_retained_identities_even_when_records_cannot_be_used(self) -> None:
         """builds.prune-catalogue: every state and damaged/unreadable/nonregular entry retains its folder."""
         with tempfile.TemporaryDirectory() as home:
