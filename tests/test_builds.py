@@ -37,7 +37,7 @@ from arbol_builds import mutation  # noqa: E402
 from arbol_builds.config import component_name  # noqa: E402
 from arbol_builds.launcher import milliseconds, record_start, write_all  # noqa: E402
 from arbol_builds.roots import current_root, read_root, read_roots, roots_folder  # noqa: E402
-from arbol_builds.service import LAUNCHER_MARK, reserve, write_launcher  # noqa: E402
+from arbol_builds.service import LAUNCHER_MARK, last_start, reserve, write_launcher  # noqa: E402
 
 PYTHON = sys.executable
 ENTRY = str(ROOT / "bin/builds_entry.py")
@@ -2034,6 +2034,74 @@ class StartRecords(unittest.TestCase):
             self.assertEqual(f.started(*args)[0], number)
             self.timestamp(Path(f.registry, "arbol-trunk/trivial", number, "last-start"), before)
         self.assertFalse(Path(f.registry, "arbol-trunk/trivial/4/last-start").exists())
+
+    def test_builds_last_start_inventory(self) -> None:
+        """builds.last-start-inventory derives activity for old, started, withdrawn, pruned and building Builds."""
+        f = Fixture(self)
+        first = f.build()
+        folder = Path(f.path("1"))
+        original = (folder / "build.json").read_bytes()
+        for args in [("list",), ("show", "sample"), ("show", "sample@1")]:
+            value = document(f.call(*args))
+            row = value[0] if isinstance(value, list) else value
+            self.assertEqual([row["lastStart"], row["unusedSince"]], [None, first["finishedAt"]])
+        self.assertFalse((folder / "last-start").exists())
+        self.assertEqual((folder / "build.json").read_bytes(), original)
+        f.launch()
+        stamp = (folder / "last-start").read_text().strip()
+        for args in [("list", "sample"), ("show", "sample@1")]:
+            value = document(f.call(*args))
+            row = value[0] if isinstance(value, list) else value
+            self.assertEqual([row["lastStart"], row["unusedSince"]], [stamp, stamp])
+        f.build()
+        f.call("prune", "sample", "--keep", "1")
+        self.assertEqual(sorted(p.name for p in folder.iterdir()), ["build.json", "build.log", "last-start"])
+        self.assertEqual(document(f.call("show", "sample@1"))["lastStart"], stamp)
+        f.call("withdraw", "sample@2", "--reason", "test")
+        second_path = Path(f.path("2/build.json"))
+        second = json.loads(second_path.read_text())
+        for field in ("lastStart", "unusedSince"):
+            self.assertNotIn(field, second)
+        second["status"] = "building"
+        second.pop("finishedAt")
+        second_path.write_text(json.dumps(second))
+        self.assertEqual(document(f.call("show", "sample@2"))["unusedSince"], second["startedAt"])
+
+    def test_builds_last_start_fallback(self) -> None:
+        """builds.last-start-fallback handles unreadable/damaged files and ignores nonregular files without waiting."""
+        f = Fixture(self)
+        record = f.build()
+        path = Path(f.path("1/last-start"))
+        fallback = "2026-01-01T00:00:00.123Z"
+        timestamp = 1767225600.123
+        for content in (b"broken", b"\xff\xfe", b"2026-01-01T00:00:00.000Z\nextra",
+                        b"2026-02-30T00:00:00.000Z\n", b"2026-1-1T0:0:0.0Z\n"):
+            path.write_bytes(content)
+            os.utime(path, (timestamp, timestamp))
+            self.assertEqual(document(f.call("show", "sample@1"))["lastStart"], fallback)
+        path.write_text("2025-01-01T00:00:00.000Z\n")
+        os.utime(path, (timestamp, timestamp))
+        path.chmod(0)
+        try:
+            self.assertEqual(document(f.call("list"))[0]["lastStart"], fallback)
+        finally:
+            path.chmod(0o600)
+        path.unlink()
+        for kind in ("directory", "fifo", "symlink"):
+            if kind == "directory":
+                path.mkdir()
+            elif kind == "fifo":
+                os.mkfifo(path)
+            else:
+                path.symlink_to(path.parent / "build.json")
+            row = document(f.call("show", "sample@1"))
+            self.assertEqual([row["lastStart"], row["unusedSince"]], [None, record["finishedAt"]])
+            if kind == "directory":
+                path.rmdir()
+            else:
+                path.unlink()
+        with mock.patch("arbol_builds.service.os.lstat", side_effect=PermissionError):
+            self.assertIsNone(last_start(str(path.parent)))
 
 
 @unittest.skipUnless((ARCHIVE_CACHE / "d15291f940cfecd2e54010d5e37d2e03aa192f076a65d26ab741372fff2dabfe.tar.gz").exists()
