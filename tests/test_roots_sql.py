@@ -17,7 +17,7 @@ import test_roots  # noqa: E402
 from arbol_builds.launcher import open_use_guard  # noqa: E402
 from arbol_roots.database import Database, DatabaseError  # noqa: E402
 from arbol_roots.model import Places, Refused, save_record  # noqa: E402
-from arbol_roots.sql import databases, layout, selected_sql  # noqa: E402
+from arbol_roots.sql import databases, layout, migrate, selected_sql  # noqa: E402
 
 
 def image(paths: Places, number: str = "1", root: str = "sapling", older: str | None = None,
@@ -189,3 +189,87 @@ class Layout(unittest.TestCase):
             with self.assertRaisesRegex(DatabaseError, "60 seconds") as error:
                 database.file("arbol_sapling", self.folder / "layout/chat-tables.sql")
         self.assertTrue(error.exception.uncertain)
+
+
+class Migration(unittest.TestCase):
+    def setUp(self) -> None:
+        self.paths = test_roots.database_fixture(self)
+        self.record = {**test_roots.record("second"), "grewFrom":"sapling"}
+        for record in [test_roots.record(state="working"), self.record]:
+            (self.paths.roots / record["root"]).mkdir(parents=True)
+            save_record(self.paths, record)
+        self.folder = image(self.paths, root="second", older="sapling")
+        client = test_roots.DATABASE_STAND_IN.replace(
+            "'env': dict(os.environ)", "'env': dict(os.environ), 'cwd': os.getcwd(), 'mode': os.stat('.').st_mode & 511")
+        client = client.replace("time.sleep(config.get('delay', 0))", """
+migrating = kind == 'psql' and '--file' in sys.argv and sys.argv[sys.argv.index('--file')+1].endswith('migrate.sql')
+if migrating:
+    Path('private.copy').write_text('fictional copied rows')
+time.sleep(config.get('delay', 0))""")
+        client = client.replace("sys.exit(config.get('status', 0))",
+                                "sys.exit(config.get('migrationStatus', 0) if migrating else config.get('status', 0))")
+        Path(self.paths.psql).write_text(client)
+
+    def calls(self) -> list[dict[str, Any]]:
+        return [json.loads(line) for line in (self.paths.home / "calls.jsonl").read_text().splitlines()
+                if json.loads(line)["kind"] == "psql"]
+
+    def test_migration_recreates_then_runs_files_in_order_and_cleans_private_copies(self) -> None:
+        """roots.migrate"""
+        headers = {name:(self.paths.roots / name / "root.json").read_bytes() for name in ["sapling","second"]}
+        for _ in range(2):
+            reply = migrate(self.paths, "second")
+            self.assertEqual(reply, {"root":"second","rootBuild":"1",
+                                     "files":["chat-tables.sql","root-tables.sql","migrate.sql"]})
+        for name, original in headers.items():
+            self.assertEqual((self.paths.roots / name / "root.json").read_bytes(), original)
+        calls = self.calls()
+        self.assertEqual(len(calls), 10)
+        for offset in [0,5]:
+            group = calls[offset:offset+5]
+            self.assertEqual([c["args"][-1] for c in group[:2]],
+                             ['DROP DATABASE IF EXISTS "arbol_second"',
+                              'CREATE DATABASE "arbol_second" TEMPLATE template0 ENCODING \'UTF8\''])
+            self.assertEqual([Path(c["args"][c["args"].index("--file")+1]).name for c in group[2:]], reply["files"])
+            last = group[-1]
+            self.assertNotIn("--single-transaction", last["args"])
+            self.assertIn("from_database=arbol_sapling", last["args"])
+            self.assertIn("from_root=sapling", last["args"])
+            self.assertEqual(last["mode"], 0o700)
+            self.assertFalse(Path(last["cwd"]).exists())
+
+    def test_failed_migration_names_file_and_leaves_preparing_with_no_copy_directory(self) -> None:
+        """roots.migrate-failure"""
+        (self.paths.home / "psql.json").write_text(json.dumps({
+            "migrationStatus":3, "stderr":"psql:migrate.sql:35: ERROR: planted missing table"}))
+        before = (self.paths.roots / "second/root.json").read_bytes()
+        answer = test_roots.roots_command(self.paths, "migrate", "second")
+        self.assertEqual(answer.returncode, 1)
+        error = json.loads(answer.stdout)["error"]
+        self.assertIn("migrate.sql:35", error["message"])
+        self.assertIn("status 3", error["message"])
+        self.assertEqual((self.paths.roots / "second/root.json").read_bytes(), before)
+        self.assertFalse(Path(self.calls()[-1]["cwd"]).exists())
+
+    def test_nonpreparing_or_incomplete_input_never_reaches_psql(self) -> None:
+        """roots.migrate-refusal"""
+        for state in ["working", "failed"]:
+            value = {**self.record, "status":state}
+            if state == "failed":
+                value["failed"] = {"at":value["createdAt"],"reason":"private failure"}
+            save_record(self.paths, value)
+            with self.assertRaises(Refused):
+                migrate(self.paths, "second")
+        save_record(self.paths, self.record)
+        (self.folder / "layout/migrate.sql").unlink()
+        with self.assertRaises(Refused):
+            migrate(self.paths, "second")
+        self.assertFalse((self.paths.home / "calls.jsonl").exists())
+
+    def test_interrupted_file_runner_still_removes_its_private_directory(self) -> None:
+        """roots.migrate-interruption"""
+        with mock.patch.object(Database, "file", side_effect=[None,None,KeyboardInterrupt]) as calls:
+            with self.assertRaises(KeyboardInterrupt):
+                migrate(self.paths, "second")
+        self.assertFalse(calls.call_args.kwargs["cwd"].exists())
+        self.assertEqual(json.loads((self.paths.roots / "second/root.json").read_text())["status"], "preparing")

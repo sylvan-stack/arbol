@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import stat
+import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -115,4 +116,26 @@ def layout(paths: Places, root: str) -> dict[str, Any]:
             database = database_client(paths)
             for file in build.files.values():
                 database.file(target, file)
+            return {"root":root, "rootBuild":build.number, "files":list(build.files)}
+
+
+def migrate(paths: Places, root: str) -> dict[str, Any]:
+    with catalogue_lock(paths):
+        record = selected(paths, root)
+        if record["status"] != "preparing":
+            raise Refused("invalid_input", "Only a preparing Root can be migrated; nothing was changed.")
+        target, source = databases(paths, record)
+        with selected_sql(paths, record, migration=True) as build:
+            database = database_client(paths)
+            with tempfile.TemporaryDirectory(prefix="arbol-root-migration-") as temporary:
+                folder = Path(temporary)
+                if stat.S_IMODE(folder.stat().st_mode) != 0o700:
+                    raise Refused("operation_failed", "The migration's temporary directory must be private (0700).")
+                database.drop(target)
+                database.create(target)
+                for name in ["chat-tables.sql", "root-tables.sql"]:
+                    database.file(target, build.files[name])
+                if source is not None:
+                    database.file(target, build.files["migrate.sql"], single=False,
+                                  variables={"from_database":source, "from_root":record["grewFrom"]}, cwd=folder)
             return {"root":root, "rootBuild":build.number, "files":list(build.files)}
