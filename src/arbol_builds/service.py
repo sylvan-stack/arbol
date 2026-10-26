@@ -31,6 +31,7 @@ from .launcher import (
     trunk,
 )
 from .mutation import make_dirs, with_mutation_lock
+from .pruning import retained_roots
 from .root_launcher import root_default_record, select_root
 from .roots import current_root, read_roots, roots_folder
 
@@ -434,14 +435,37 @@ def missing_only(function: Any, path: str, error: BaseException) -> None:
         raise error
 
 
+def prune_protections(registry: str, component: str, working: list[Record]) -> set[str]:
+    """Extra retained defaults, in addition to newest-n and Locked Builds (BLD-D22)."""
+    selected = default_record(registry, working)
+    protected = {selected["build"]} if selected is not None else set()
+    if component in ROOT_COMPONENTS:
+        for root in retained_roots(roots_folder()):
+            found = root_default_record(registry, working, root)
+            if found is not None:
+                protected.add(found["build"])
+    elif trunk(component):
+        roots = retained_roots(roots_folder())
+        unresolved = [name for name, record in roots.items() if record is None]
+        if unresolved:
+            raise ValueError("Cannot prune " + component + ": retained Roots without readable valid root.json: "
+                             + ", ".join(unresolved) + ". Their Root Contract versions are unknown.")
+        versions = {record["rootContract"] for record in roots.values() if record is not None}
+        for version in versions:
+            found = default_record(registry, [record for record in working if version in record["rootContracts"]])
+            if found is not None:
+                protected.add(found["build"])
+    return protected
+
+
 def prune_builds(registry: str, component: str, keep: int) -> dict[str, Any]:
     def change() -> dict[str, Any]:
         working = [record for record in read_records(registry, component)
                    if record["status"] == "working" and not record.get("prunedAt")]
-        selected = default_record(registry, working)
+        protected = prune_protections(registry, component, working)
         pruned: list[str] = []
         for record in working[keep:]:
-            if record.get("lockedAt") or (selected is not None and record["build"] == selected["build"]):
+            if record.get("lockedAt") or record["build"] in protected:
                 continue
             folder = os.path.join(registry, component, record["build"])
             # Mark unavailable before removing files: a partly pruned Build cannot be started.
