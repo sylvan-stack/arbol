@@ -3,6 +3,7 @@
 import json
 import os
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,17 @@ from test_builds import TRUNK_PROGRAM, Fixture, document, finish, first_line
 
 from arbol_builds.launcher import open_use_guard
 from arbol_builds.unused import Usage
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+from unused_drill import drill  # noqa: E402
+
+
+class MixedRegistry(unittest.TestCase):
+    def test_real_cli_mixed_registry(self) -> None:
+        """builds.unused-drill"""
+        result = drill()
+        self.assertEqual(result['rounds'], 5)
+        self.assertTrue(result['activeGuardKeptFiles'])
 
 
 class UseGuards(unittest.TestCase):
@@ -82,6 +94,7 @@ class UseGuards(unittest.TestCase):
         self.assertEqual(place.read_text(), 'private broken metadata')
 
     def test_nonregular_guard_never_blocks_or_follows_another_file(self) -> None:
+        """builds.use-guard-nonregular"""
         f = Fixture(self)
         f.build()
         f.build()
@@ -128,6 +141,7 @@ class Settings(unittest.TestCase):
                         read_days(home)
 
     def test_nonregular_or_symlink_settings_refuse_without_blocking(self) -> None:
+        """builds.unused-settings-nonregular"""
         import tempfile
 
         from arbol_builds.unused import read_days
@@ -289,6 +303,7 @@ print(json.dumps(json.loads((home/'replies.json').read_text())[root]))
         self.assertEqual(query.call_args.kwargs['stdin'], subprocess.DEVNULL)
 
     def test_missing_catalogue_is_empty_but_unlistable_catalogue_refuses(self) -> None:
+        """builds.unused-catalogue"""
         from unittest import mock
         f = Fixture(self)
         self.assertEqual(self.snapshot(f).roots, {})
