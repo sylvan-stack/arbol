@@ -20,8 +20,9 @@ from .service import (
     withdraw_build,
 )
 
-USAGE = ("arbol-builds build <component> [--repo <folder>] [--root <identifier>] | list [<component>] "
-         "| show <component>[@<build>] | withdraw <component>@<build> --reason <text> "
+USAGE = ("arbol-builds build <component> [--repo <folder>] [--root <identifier>] "
+         "| list [<component>] [--root <identifier>] | show <component>[@<build>] [--root <identifier>] "
+         "| withdraw <component>@<build> --reason <text> "
          "| lock <component>@<build> | unlock <component>@<build> | prune <component> --keep <n> "
          "[--registry-dir <folder>] [--bin-dir <folder>]; a Trunk is the component arbol-trunk/<code name>")
 COMMANDS = ("build", "list", "show", "withdraw", "prune", "lock", "unlock")
@@ -79,7 +80,9 @@ def main(args: list[str]) -> int:
         if len(words) > 2 or command not in COMMANDS or (command != "list" and not target):
             raise ValueError(USAGE)
         for key in values:
-            if ((key in ("--repo", "--root") and command != "build") or (key == "--reason" and command != "withdraw")
+            if ((key == "--repo" and command != "build")
+                    or (key == "--root" and command not in ("build", "list", "show"))
+                    or (key == "--reason" and command != "withdraw")
                     or (key == "--keep" and command != "prune")):
                 raise ValueError(f"Option {key} does not apply to {command}.")
         paths = locations()
@@ -96,9 +99,9 @@ def main(args: list[str]) -> int:
         if rest or (number is not None and command not in ("show", "withdraw", "lock", "unlock")):
             raise ValueError("This command takes a component without a build number.")
         if command == "list":
-            output(list_builds(paths.registry, target))
+            output(list_builds(paths.registry, target, values.get("--root")))
         elif command == "show":
-            output(build_details(paths.registry, show_build(paths.registry, component, number)))
+            output(build_details(paths.registry, show_build(paths.registry, component, number, values.get("--root"))))
         elif command == "withdraw":
             reason = values.get("--reason")
             if not number or reason is None or not reason.strip(JS_SPACE):

@@ -31,6 +31,8 @@ from .launcher import (
     trunk,
 )
 from .mutation import make_dirs, with_mutation_lock
+from .root_launcher import root_default_record, select_root
+from .roots import current_root, read_roots, roots_folder
 
 PACKAGE = os.path.dirname(os.path.abspath(__file__))
 # A component's launcher holds the text of launcher.py; arbol-trunk, which every Trunk shares, holds the text of
@@ -312,12 +314,24 @@ def components_in(registry: str) -> list[str]:
     return sorted(names, key=lambda name: name.encode("utf-16-be", "surrogatepass"))
 
 
-def list_builds(registry: str, component: str | None = None) -> list[Record]:
+def list_builds(registry: str, component: str | None = None, root: str | None = None) -> list[Record]:
     components = [component] if component else components_in(registry)
+    selected_root: str | None = None
+    if root is not None:
+        if component is not None and component not in ROOT_COMPONENTS:
+            raise ValueError("--root applies to inventory of arbol and arbol-root, or to the whole registry.")
+        selected_root = select_root(root)["root"]
+    elif any(name in ROOT_COMPONENTS for name in components):
+        current = current_root(read_roots(roots_folder()))
+        if current is not None:
+            selected_root = current["root"]
     listed: list[Record] = []
     for name in components:
         records = read_records(registry, name)
-        selected = default_record(registry, records)
+        if name in ROOT_COMPONENTS:
+            selected = root_default_record(registry, records, selected_root) if selected_root is not None else None
+        else:
+            selected = default_record(registry, records)
         listed.extend({**build_details(registry, record),
                        "default": selected is not None and record["build"] == selected["build"]}
                       for record in records)
@@ -361,14 +375,27 @@ def build_details(registry: str, record: Record) -> Record:
             "unusedSince": started or record.get("finishedAt") or record["startedAt"]}
 
 
-def show_build(registry: str, component: str, number: str | None = None) -> Record:
+def show_build(registry: str, component: str, number: str | None = None, root: str | None = None) -> Record:
     if number is not None and BUILD_PATTERN.fullmatch(number) is None:
         raise ValueError("A build number is lower-case hexadecimal, without leading zero.")
+    if root is not None and component not in ROOT_COMPONENTS:
+        raise ValueError("--root applies only to arbol and arbol-root Builds.")
+    if root is not None and not root_identifier(root):
+        raise ValueError("A Root identifier is one lower-case word of letters and digits.")
     records = read_records(registry, component)
-    found = (default_record(registry, records) if number is None
-             else next((record for record in records if record["build"] == number), None))
+    selected_root: str | None = None
+    if number is not None:
+        found = next((record for record in records if record["build"] == number), None)
+        if found is not None and root is not None and root != found["root"]:
+            raise ValueError(f"Build {component}@{number} belongs to Root {found['root']}, but --root names {root}.")
+    elif component in ROOT_COMPONENTS:
+        selected_root = select_root(root)["root"]
+        found = root_default_record(registry, records, selected_root)
+    else:
+        found = default_record(registry, records)
     if found is None:
-        raise ValueError(f"No {'default' if number is None else number} Build of {component}.")
+        suffix = f" for Root {selected_root}" if selected_root is not None else ""
+        raise ValueError(f"No {'default' if number is None else number} Build of {component}{suffix}.")
     return found
 
 

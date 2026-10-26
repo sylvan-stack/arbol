@@ -1490,6 +1490,49 @@ class RootComponents(unittest.TestCase):
         self.assertNotIn("def select_root_build(", plain)
         self.assertNotIn("def select_root_build(", trunk)
 
+    def test_builds_root_inventory_agrees_with_launchers_and_keeps_other_defaults_global(self) -> None:
+        """builds.root-inventory: explicit/current defaults agree; named introspection outlives a Root record."""
+        f = self.fixture()
+        for root in ("sapling", "sapling", "second", "second"):
+            f.build("--root", root)
+        for root, expected in (("sapling", "2"), ("second", "4")):
+            listed = f.call("list", f.component, "--root", root)
+            self.assertEqual(listed.returncode, 0, listed.stdout + listed.stderr)
+            self.assertEqual([r["build"] for r in document(listed) if r["default"]], [expected])
+            shown = f.call("show", f.component, "--root", root)
+            self.assertEqual(shown.returncode, 0, shown.stdout + shown.stderr)
+            self.assertEqual(document(shown)["build"], expected)
+            self.assertEqual(document(f.launch("--root", root))["build"], expected)
+        self.assertEqual(document(f.call("show", f.component))["build"], "4")
+        self.assertEqual([r["build"] for r in document(f.call("list", f.component)) if r["default"]], ["4"])
+        self.assertEqual(document(f.call("show", f"{f.component}@1", "--root", "sapling"))["build"], "1")
+        mismatch = f.call("show", f"{f.component}@1", "--root", "second")
+        self.assertEqual(mismatch.returncode, 1)
+        self.assertIn("belongs to Root sapling", document(mismatch)["error"]["message"])
+        f.configure(component="sample")
+        built = f.call("build", "sample", "--repo", f.repo)
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+        listed = f.call("list", "--root", "sapling")
+        defaults = {(r["component"], r["build"]) for r in document(listed) if r["default"]}
+        self.assertEqual(defaults, {("arbol-root", "2"), ("sample", "1")})
+        for command in ("list", "show"):
+            self.assertEqual(f.call(command, "sample", "--root", "sapling").returncode, 1)
+        roots = os.path.join(f.home, "Library/Application Support/Arbol/roots")
+        Path(roots, "sapling/root.json").unlink()
+        # Named record introspection stays available after a Root is removed; a default selection does not.
+        self.assertEqual(document(f.call("show", f"{f.component}@1"))["build"], "1")
+        self.assertEqual(document(f.call("show", f"{f.component}@1", "--root", "sapling"))["build"], "1")
+        self.assertEqual(f.call("show", f.component, "--root", "sapling").returncode, 1)
+        self.assertEqual(f.call("list", "--root", "sapling").returncode, 1)
+        write_root(roots, root_record("second", "failed", "2026-10-16T10:00:00.000Z"))
+        listed = f.call("list")
+        self.assertEqual(listed.returncode, 0, listed.stdout + listed.stderr)
+        self.assertEqual([(r["component"], r["build"]) for r in document(listed) if r["default"]], [("sample", "1")])
+        no_current = f.call("show", f.component)
+        self.assertEqual(no_current.returncode, 1)
+        self.assertIn("none is working", document(no_current)["error"]["message"])
+        self.assertEqual(document(f.call("show", "sample"))["build"], "1")
+
 
 class TrunkLauncher(unittest.TestCase):
     """The Roots as the launchers read them, and the launcher arbol-trunk (SYL-179; RCT-0.7 to 0.10, BLD-D17)."""
