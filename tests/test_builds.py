@@ -1934,6 +1934,25 @@ class TrunkLauncher(unittest.TestCase):
         self.assertIsNone(current())
 
 
+class Locking(unittest.TestCase):
+    def test_builds_locked_record(self) -> None:
+        """builds.locked-record: a valid mark survives inventory; a damaged one cannot select a Build."""
+        f = Fixture(self)
+        record = f.build()
+        path = Path(f.path("1/build.json"))
+        stamp = "2026-10-26T14:00:00.123Z"
+        path.write_text(json.dumps({**record, "lockedAt": stamp}))
+        self.assertEqual(document(f.call("show", f"{f.component}@1"))["lockedAt"], stamp)
+        self.assertEqual(document(f.call("list", f.component))[0]["lockedAt"], stamp)
+        self.assertEqual(document(f.launch())["build"], "1")
+        for damaged in (None, True, 0, "bad", "2026-13-26T14:00:00.123Z"):
+            with self.subTest(mark=damaged):
+                path.write_text(json.dumps({**record, "lockedAt": damaged}))
+                self.assertEqual(f.call("show", f"{f.component}@1").returncode, 1)
+                self.assertEqual(document(f.call("list", f.component)), [])
+                self.assertEqual(f.launch().returncode, 1)
+
+
 class StartRecords(unittest.TestCase):
     """BLD-0.24: recording a launch is best effort, including named Builds and Trunks."""
 
