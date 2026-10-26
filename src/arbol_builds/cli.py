@@ -19,11 +19,12 @@ from .service import (
     show_build,
     withdraw_build,
 )
+from .unused import prune_unused
 
 USAGE = ("arbol-builds build <component> [--repo <folder>] [--root <identifier>] "
          "| list [<component>] [--root <identifier>] | show <component>[@<build>] [--root <identifier>] "
          "| withdraw <component>@<build> --reason <text> "
-         "| lock <component>@<build> | unlock <component>@<build> | prune <component> --keep <n> "
+         "| lock <component>@<build> | unlock <component>@<build> | prune <component> --keep <n> | prune --unused "
          "[--registry-dir <folder>] [--bin-dir <folder>]; a Trunk is the component arbol-trunk/<code name>")
 COMMANDS = ("build", "list", "show", "withdraw", "prune", "lock", "unlock")
 SAFE_INTEGER = 2**53 - 1
@@ -40,8 +41,8 @@ def resolved(path: str) -> str:
     return "/" + absolute.lstrip("/") if absolute.startswith("//") else absolute
 
 
-def options(args: list[str], allowed: list[str]) -> tuple[list[str], dict[str, str]]:
-    """Words in order, and options as --name value or --name=value, each at most once."""
+def options(args: list[str], allowed: list[str], flags: set[str] | None = None) -> tuple[list[str], dict[str, str]]:
+    """Words, value options and explicit boolean flags, each given at most once."""
     words: list[str] = []
     values: dict[str, str] = {}
     index = 0
@@ -54,6 +55,12 @@ def options(args: list[str], allowed: list[str]) -> tuple[list[str], dict[str, s
         key, equals, given = arg.partition("=")
         if key not in allowed or key in values:
             raise ValueError(f"Unknown or repeated option: {unicode_text(key)}.")
+        if flags is not None and key in flags:
+            if equals:
+                raise ValueError(f"Flag {key} takes no value.")
+            values[key] = "true"
+            index += 1
+            continue
         if equals:
             value: str | None = given
         else:
@@ -74,11 +81,15 @@ def main(args: list[str]) -> int:
         if args == ["--help"]:
             output({"usage": USAGE})
             return 0
-        words, values = options(args, ["--registry-dir", "--bin-dir", "--repo", "--root", "--reason", "--keep"])
+        words, values = options(args, ["--registry-dir", "--bin-dir", "--repo", "--root", "--reason", "--keep", "--unused"],
+                                 {"--unused"})
         command = words[0] if words else None
         target = words[1] if len(words) > 1 else None
-        if len(words) > 2 or command not in COMMANDS or (command != "list" and not target):
+        unused = command == "prune" and "--unused" in values
+        if len(words) > 2 or command not in COMMANDS or (command != "list" and not target and not unused):
             raise ValueError(USAGE)
+        if "--unused" in values and (command != "prune" or len(words) > 1 or "--keep" in values):
+            raise ValueError("--unused applies only to prune without a component or --keep.")
         for key in values:
             if ((key == "--repo" and command != "build")
                     or (key == "--root" and command not in ("build", "list", "show"))
@@ -111,6 +122,8 @@ def main(args: list[str]) -> int:
             if not number:
                 raise ValueError(f"{command} requires component@build.")
             output(lock_build(paths.registry, component, number, command == "lock"))
+        elif command == "prune" and unused:
+            output(prune_unused(paths))
         elif command == "prune":
             keep = values.get("--keep")
             if keep is None or re.fullmatch(r"[1-9][0-9]{0,15}", keep) is None or int(keep) > SAFE_INTEGER:
