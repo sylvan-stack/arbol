@@ -10,6 +10,7 @@ programs. No vendor tool is involved.
 """
 
 import ast
+import errno
 import json
 import os
 import re
@@ -34,7 +35,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from arbol_builds import mutation  # noqa: E402
 from arbol_builds.config import component_name  # noqa: E402
-from arbol_builds.launcher import write_all  # noqa: E402
+from arbol_builds.launcher import milliseconds, record_start, write_all  # noqa: E402
 from arbol_builds.roots import current_root, read_root, read_roots, roots_folder  # noqa: E402
 from arbol_builds.service import LAUNCHER_MARK, reserve, write_launcher  # noqa: E402
 
@@ -1929,6 +1930,110 @@ class TrunkLauncher(unittest.TestCase):
         for name in ("utc", "alpha", "east", "sapling"):
             write_root(roots, root_record(name, "preparing"))
         self.assertIsNone(current())
+
+
+class StartRecords(unittest.TestCase):
+    """BLD-0.24: recording a launch is best effort, including named Builds and Trunks."""
+
+    def timestamp(self, path: Path, before: int) -> str:
+        raw = path.read_text()
+        self.assertRegex(raw, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\n$")
+        value = milliseconds(raw.strip())
+        assert value is not None
+        self.assertLessEqual(before, value)
+        self.assertLessEqual(value, time.time_ns() // 1_000_000)
+        return raw
+
+    def test_builds_last_start(self) -> None:
+        """builds.last-start records default and named working, withdrawn and failed launches."""
+        f = Fixture(self)
+        for _ in range(3):
+            f.build()
+        f.call("withdraw", "sample@2", "--reason", "test withdrawal")
+        failed_path = Path(f.path("3/build.json"))
+        failed = json.loads(failed_path.read_text())
+        failed["status"] = "failed"
+        failed_path.write_text(json.dumps(failed))
+        for args, number in [((), "1"), (("-v", "1"), "1"), (("-v", "2"), "2"), (("-v", "3"), "3")]:
+            record = Path(f.path(number, "build.json"))
+            original = record.read_bytes()
+            before = time.time_ns() // 1_000_000
+            result = f.launch(*args)
+            self.assertEqual([result.returncode, document(result)["build"]], [0, number])
+            self.timestamp(Path(f.path(number, "last-start")), before)
+            self.assertEqual(record.read_bytes(), original)
+        self.assertEqual(list(Path(f.path("1")).glob("last-start.*.tmp")), [])
+
+    def test_builds_last_start_write_failure(self) -> None:
+        """builds.last-start-write-failure: read-only folder, directory target and file-size limit never stop a Build."""
+        f = Fixture(self)
+        f.build()
+        folder = Path(f.path("1"))
+        saved = folder / "last-start"
+        previous = b"2026-01-01T00:00:00.000Z\n"
+        saved.write_bytes(previous)
+        os.chmod(folder, 0o500)
+        try:
+            self.assertEqual(document(f.launch())["build"], "1")
+            self.assertEqual(saved.read_bytes(), previous)
+        finally:
+            os.chmod(folder, 0o700)
+
+        def no_file_bytes() -> None:
+            resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
+
+        result = subprocess.run([str(Path(f.bin, f.component))], env=f.env(), capture_output=True,
+                                preexec_fn=no_file_bytes, timeout=10, check=False)
+        self.assertEqual([result.returncode, document(result)["build"]], [0, "1"], result.stderr)
+        self.assertEqual(saved.read_bytes(), previous)
+        saved.unlink()
+        saved.mkdir()
+        self.assertEqual(document(f.launch())["build"], "1")
+        self.assertTrue(saved.is_dir())
+        self.assertEqual(list(folder.glob("last-start.*.tmp")), [])
+
+    def test_builds_last_start_disk_full(self) -> None:
+        """builds.last-start-disk-full keeps the prior time after an ENOSPC error or a failed replacement."""
+        with tempfile.TemporaryDirectory() as folder:
+            saved = Path(folder, "last-start")
+            saved.write_bytes(b"2026-01-01T00:00:00.000Z\n")
+            original = saved.read_bytes()
+            for call in ("os.open", "os.replace"):
+                with self.subTest(call=call), mock.patch("arbol_builds.launcher." + call,
+                                                       side_effect=OSError(errno.ENOSPC, "disk full")):
+                    record_start(folder)
+                self.assertEqual(saved.read_bytes(), original)
+                self.assertEqual(list(Path(folder).glob("last-start.*.tmp")), [])
+
+    def test_builds_last_start_refusal(self) -> None:
+        """builds.last-start-refusal leaves pruned/building Builds and inventory calls untouched."""
+        f = Fixture(self)
+        f.build()
+        path = Path(f.path("1/build.json"))
+        original = json.loads(path.read_text())
+        for patch in ({"status": "building"}, {"prunedAt": "2026-01-01T00:00:00.000Z"}):
+            path.write_text(json.dumps({**original, **patch}))
+            self.assertEqual(f.launch("-v", "1").returncode, 1)
+            self.assertFalse(Path(f.path("1/last-start")).exists())
+        f.call("list")
+        f.call("show", "sample@1")
+        self.assertFalse(Path(f.path("1/last-start")).exists())
+
+    def test_builds_trunk_last_start(self) -> None:
+        """builds.trunk-last-start records selected Trunk Builds; list and refused selections record nothing."""
+        f = Trunks(self)
+        f.root("sapling", 1, "2026-01-01T00:00:00.000Z")
+        for number, status in [("1", "working"), ("2", "withdrawn"), ("3", "failed"), ("4", "building")]:
+            f.build("trivial", number, [1], status)
+        self.assertEqual(f.run("list").returncode, 0)
+        self.assertEqual(f.run("trivial", "list").returncode, 0)
+        self.assertEqual(f.run("-v", "4", "run").returncode, 1)
+        self.assertEqual(list(Path(f.registry).rglob("last-start")), [])
+        for args, number in [(("run",), "1"), (("-v", "2", "run"), "2"), (("-v", "3", "settle", "x"), "3")]:
+            before = time.time_ns() // 1_000_000
+            self.assertEqual(f.started(*args)[0], number)
+            self.timestamp(Path(f.registry, "arbol-trunk/trivial", number, "last-start"), before)
+        self.assertFalse(Path(f.registry, "arbol-trunk/trivial/4/last-start").exists())
 
 
 @unittest.skipUnless((ARCHIVE_CACHE / "d15291f940cfecd2e54010d5e37d2e03aa192f076a65d26ab741372fff2dabfe.tar.gz").exists()
