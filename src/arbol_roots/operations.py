@@ -15,7 +15,17 @@ from arbol_builds.launcher import SAFE_INTEGER, Record, default_record, read_rec
 from arbol_builds.service import atomic_write, json_text, now
 
 from .database import Database, DatabaseError
-from .model import Places, Refused, catalogue, database_name, identifier, nonblank, save_record, validate_record
+from .model import (
+    Places,
+    Refused,
+    catalogue,
+    database_name,
+    identifier,
+    nonblank,
+    save_record,
+    selected,
+    validate_record,
+)
 
 
 @contextmanager
@@ -55,18 +65,28 @@ def contract_version(value: str) -> int:
 def create(paths: Places, root: str, options: dict[str, str]) -> Record:
     identifier(root)
     name = nonblank(options.get("--name"), "Display name")
-    version = contract_version(options.get("--root-contract", "1"))
+    version = contract_version(options["--root-contract"]) if "--root-contract" in options else None
     target_database = database_name(options.get("--database-name", default_database_name(root)))
-    if "--from" in options:
-        raise Refused("invalid_input", "Creation from another Root is not available in this development step.")
+    source_name = identifier(options["--from"]) if "--from" in options else None
+    if source_name == root:
+        raise Refused("invalid_input", "A Root cannot grow from itself.")
     with catalogue_lock(paths):
+        source = selected(paths, source_name) if source_name is not None else None
         if any(record.get("database") == target_database for record in catalogue(paths)):
             raise Refused("already_exists", "Another retained Root already names that database.")
         app = default_record(str(paths.registry), read_records(str(paths.registry), "arbol-app"))
         record: Record = {"root": root, "name": name, "status": "preparing", "createdAt": now(),
                           "database": target_database, "app": app["build"] if app is not None else "0",
-                          "rootContract": version}
+                          "rootContract": version if version is not None else source["rootContract"] if source else 1}
+        if source is not None:
+            record["grewFrom"] = source["root"]
         with Creation(paths, record) as attempt:
+            if source is not None:
+                settings = paths.settings / source["root"]
+                if os.path.lexists(settings):
+                    if not settings.is_dir():
+                        raise Refused("operation_failed", "The source Root's settings are not a directory.")
+                    shutil.copytree(settings, attempt.settings, symlinks=True, dirs_exist_ok=True)
             attempt.make_database(Database(paths))
             attempt.publish()
         return record

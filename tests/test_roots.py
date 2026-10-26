@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from arbol_builds.roots import current_root, read_roots  # noqa: E402
 from arbol_roots.database import Database, DatabaseError, environment  # noqa: E402
 from arbol_roots.model import Places, Refused, catalogue, places, save_record  # noqa: E402
-from arbol_roots.operations import Creation, catalogue_lock, default_database_name  # noqa: E402
+from arbol_roots.operations import Creation, catalogue_lock, create, default_database_name  # noqa: E402
 
 ENTRY = ROOT / "bin/roots_entry.py"
 ENV = {"PATH": "/usr/bin:/bin", "LANG": "en_US.UTF-8"}
@@ -85,6 +85,55 @@ def build_record(paths: Places, component: str, number: str, **extra: Any) -> di
 
 
 class Commands(unittest.TestCase):
+    def test_roots_create_from_records_lineage_inherits_or_overrides_contract_and_copies_settings_once(self) -> None:
+        """roots.create-from: source settings stay independent, opaque and unchanged, and no migration runs."""
+        paths = database_fixture(self)
+        first = roots_command(paths, "create", "sapling", "--name", "First", "--root-contract", "2")
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        source = paths.settings / "sapling"
+        (source / "arbol.json").write_text('{"brain":"private recipe"}\n')
+        (source / "nested").mkdir()
+        (source / "nested/opaque").write_bytes(b"opaque\x00settings")
+        (source / "linked").symlink_to("arbol.json")
+        before = (paths.roots / "sapling/root.json").read_bytes()
+        second = roots_command(paths, "create", "second", "--name", "Second", "--from", "sapling")
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        value = json.loads(second.stdout)
+        self.assertEqual((value["grewFrom"], value["rootContract"], value["status"]), ("sapling", 2, "preparing"))
+        target = paths.settings / "second"
+        self.assertEqual((target / "arbol.json").read_bytes(), (source / "arbol.json").read_bytes())
+        self.assertEqual((target / "nested/opaque").read_bytes(), b"opaque\x00settings")
+        self.assertTrue((target / "linked").is_symlink())
+        (source / "arbol.json").write_text("source changed later")
+        self.assertEqual((target / "arbol.json").read_text(), '{"brain":"private recipe"}\n')
+        self.assertEqual((paths.roots / "sapling/root.json").read_bytes(), before)
+        third = roots_command(paths, "create", "third", "--name", "Third", "--from", "sapling",
+                              "--root-contract", "1")
+        self.assertEqual(third.returncode, 0, third.stdout + third.stderr)
+        self.assertEqual(json.loads(third.stdout)["rootContract"], 1)
+        calls = [json.loads(line) for line in (paths.home / "calls.jsonl").read_text().splitlines()]
+        self.assertTrue(all(row["args"][-1].startswith("CREATE DATABASE ") for row in calls if row["kind"] == "psql"))
+
+    def test_roots_create_from_refuses_an_unknown_source_and_rolls_back_a_failed_settings_copy(self) -> None:
+        """roots.create-from-failure: missing sources and copying failures cannot damage the source or target."""
+        paths = database_fixture(self)
+        missing = roots_command(paths, "create", "second", "--name", "Second", "--from", "missing")
+        self.assertEqual(missing.returncode, 1)
+        self.assertEqual(json.loads(missing.stdout)["error"]["code"], "unknown_root")
+        self.assertFalse((paths.roots / "second").exists())
+        self.assertFalse((paths.home / "calls.jsonl").exists())
+        first = roots_command(paths, "create", "sapling", "--name", "First")
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        source = paths.settings / "sapling/arbol.json"
+        source.write_text("source settings")
+        with mock.patch("arbol_roots.operations.shutil.copytree", side_effect=PermissionError("private copy failure")):
+            with self.assertRaisesRegex(PermissionError, "private copy failure"):
+                create(paths, "second", {"--name": "Second", "--from": "sapling"})
+        self.assertEqual(source.read_text(), "source settings")
+        self.assertFalse((paths.roots / "second").exists())
+        self.assertFalse((paths.settings / "second").exists())
+        self.assertEqual((paths.home / "calls.jsonl").read_text().count('"kind": "psql"'), 1)
+
     def test_roots_create_writes_a_complete_preparing_record_settings_and_only_an_empty_database_command(self) -> None:
         """roots.create: private paths, App bootstrap, explicit version and App selection, with no Root script."""
         paths = database_fixture(self)
