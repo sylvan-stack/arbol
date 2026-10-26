@@ -827,8 +827,10 @@ class Builds(unittest.TestCase):
         self.assertEqual(list(json.loads(text)), keys)
         f.call("withdraw", f"{f.component}@1", "--reason", "format")
         withdrawn = document(f.call("show", f"{f.component}@1"))
-        self.assertEqual([list(withdrawn), list(withdrawn["withdrawn"])], [[*keys, "withdrawn"], ["at", "reason"]])
-        self.assertEqual(list(document(f.call("list"))[0]), [*keys, "withdrawn", "default"])
+        self.assertEqual(list(json.loads(Path(f.path("1/build.json")).read_text())), [*keys, "withdrawn"])
+        shown_keys = [*keys, "withdrawn", "lastStart", "unusedSince"]
+        self.assertEqual([list(withdrawn), list(withdrawn["withdrawn"])], [shown_keys, ["at", "reason"]])
+        self.assertEqual(list(document(f.call("list"))[0]), [*shown_keys, "default"])
 
     def test_builds_list_order(self) -> None:
         """builds.list-order lists components in name order, each newest first."""
