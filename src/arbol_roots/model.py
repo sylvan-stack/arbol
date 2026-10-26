@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from arbol_builds.config import JS_SPACE
-from arbol_builds.launcher import BUILD_PATTERN, Record, date, root_identifier
+from arbol_builds.launcher import BUILD_PATTERN, Record, date, milliseconds, root_identifier
 from arbol_builds.pruning import retained_roots
 from arbol_builds.roots import current_root, valid_root
 from arbol_builds.service import atomic_write, json_text
@@ -91,7 +91,17 @@ def validate_record(record: Record, *, complete: bool = False) -> None:
 
 def catalogue(paths: Places) -> list[Record]:
     """Use the shared header validator/current choice; unreadable records affect only their own Root."""
-    return [record for record in retained_roots(str(paths.roots)).values() if record is not None]
+    try:
+        return [record for record in retained_roots(str(paths.roots)).values() if record is not None]
+    except ValueError as error:
+        raise Refused("operation_failed", str(error)) from error
+
+
+def list_roots(paths: Places) -> list[Record]:
+    records = catalogue(paths)
+    current = current_root(records)
+    return [{**record, "current": current is not None and record["root"] == current["root"]}
+            for record in sorted(records, key=lambda item: (milliseconds(item["createdAt"]), item["root"]), reverse=True)]
 
 
 def selected(paths: Places, name: str | None) -> Record:

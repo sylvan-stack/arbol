@@ -11,6 +11,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+from arbol_builds.roots import current_root, read_roots  # noqa: E402
 from arbol_roots.model import Refused, catalogue, places, save_record  # noqa: E402
 
 ENTRY = ROOT / "bin/roots_entry.py"
@@ -27,6 +28,77 @@ def record(name: str = "sapling", state: str = "preparing", created: str = "2026
 
 
 class Catalogue(unittest.TestCase):
+    def test_roots_catalogue_agrees_with_launcher_headers_and_rereads_current_selection(self) -> None:
+        """roots.catalogue: creation order, ties and state changes use the launchers' current-Root rule."""
+        with tempfile.TemporaryDirectory() as home:
+            roots = Path(home, "selected-roots")
+
+            def put(value: dict[str, Any]) -> None:
+                path = roots / value["root"]
+                path.mkdir(parents=True, exist_ok=True)
+                (path / "root.json").write_text(json.dumps(value))
+
+            def call(*args: str, code: int = 0) -> Any:
+                result = subprocess.run([sys.executable, "-I", "-B", str(ENTRY), *args,
+                                         "--roots-dir", str(roots)], env={**ENV, "HOME": home},
+                                        capture_output=True, timeout=20, check=False)
+                self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                self.assertEqual(result.stderr, b"")
+                return json.loads(result.stdout)
+
+            put(record("sapling", "working"))
+            put(record("second", "preparing", "2026-10-26T11:00:00.000Z"))
+            put(record("third", "failed", "2026-10-26T12:00:00.000Z"))
+            put(record("alpha", "working", "2026-10-26T10:00:00.000Z"))
+            put(record("zulu", "working", "2026-10-26T10:00:00.000Z"))
+            listed = call("list")
+            self.assertEqual([row["root"] for row in listed], ["third", "second", "zulu", "alpha", "sapling"])
+            self.assertEqual([row["root"] for row in listed if row["current"]], ["zulu"])
+            self.assertEqual(call("show")["root"], "zulu")
+            self.assertEqual(call("show", "second")["status"], "preparing")
+            # The shared header, rather than an independent catalogue schema, selects current.
+            minimal = {"root": "minimal", "status": "working", "createdAt": "2026-10-26T13:00:00.000Z",
+                       "rootContract": 2, "future": "preserved"}
+            put(minimal)
+            self.assertEqual(call("show"), minimal)
+            shared = current_root(read_roots(str(roots)))
+            self.assertIsNotNone(shared)
+            assert shared is not None
+            self.assertEqual(call("show")["root"], shared["root"])
+            (roots / "minimal/root.json").write_text("{")
+            self.assertEqual(call("show")["root"], "zulu")
+            (roots / "zulu/root.json").unlink()
+            self.assertEqual(call("show")["root"], "alpha")
+            self.assertEqual(call("show", "minimal", code=1)["error"]["code"], "unknown_root")
+            self.assertFalse(Path(home, "Library").exists())
+            self.assertFalse(Path(home, ".arbol").exists())
+
+    def test_roots_catalogue_isolates_damaged_missing_and_nonregular_records_and_reports_listing_failure(self) -> None:
+        """roots.catalogue-damaged: a bad record affects one Root; an unavailable catalogue is not an empty list."""
+        with tempfile.TemporaryDirectory() as home:
+            roots = Path(home, "roots")
+
+            def call(*args: str, code: int = 0) -> Any:
+                result = subprocess.run([sys.executable, "-I", "-B", str(ENTRY), *args,
+                                         "--roots-dir", str(roots)], cwd=home, env={**ENV, "HOME": home},
+                                        capture_output=True, timeout=20, check=False)
+                self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                return json.loads(result.stdout)
+
+            self.assertEqual(call("list"), [])
+            self.assertEqual(call("show", code=1)["error"]["code"], "unknown_root")
+            roots.write_text("not a directory")
+            self.assertEqual(call("list", code=1)["error"]["code"], "operation_failed")
+            roots.unlink()
+            roots.mkdir()
+            for name in ("damaged", "missing", "pipe", "directory", "good"):
+                (roots / name).mkdir()
+            (roots / "damaged/root.json").write_text("{")
+            os.mkfifo(roots / "pipe/root.json")
+            (roots / "directory/root.json").mkdir()
+            (roots / "good/root.json").write_text(json.dumps(record("good")))
+            self.assertEqual([row["root"] for row in call("list")], ["good"])
+
     def test_roots_frame_has_json_help_and_refuses_bad_command_lines_without_side_effects(self) -> None:
         """roots.cli: command counts, identifiers and inapplicable options fail as JSON before any work."""
         with tempfile.TemporaryDirectory() as home:

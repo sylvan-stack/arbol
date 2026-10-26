@@ -5,7 +5,7 @@ import sys
 from arbol_builds.cli import options
 from arbol_builds.launcher import json_line, standard_descriptors, write_all
 
-from .model import Refused, identifier, places
+from .model import Refused, identifier, list_roots, places, selected
 
 USAGE = ("arbol-roots create <root> --name <text> [--from <root>] [--root-contract <version>] "
          "[--database-name <name>] | list | show [<root>] | ready <root> | fail <root> --reason <text> "
@@ -31,8 +31,16 @@ def main(args: list[str]) -> int:
                 raise Refused("invalid_input", f"Option {key} does not apply to {command}.")
         if arguments:
             identifier(arguments[0])
-        places(values)
-        raise Refused("invalid_input", f"The {command} command is not available in this development step.")
+        paths = places(values)
+        result: object
+        if command == "list":
+            result = list_roots(paths)
+        elif command == "show":
+            result = selected(paths, arguments[0] if arguments else None)
+        else:
+            raise Refused("invalid_input", f"The {command} command is not available in this development step.")
+        write_all(1, json_line(result))
+        return 0
     except Refused as error:
         write_all(1, json_line({"error": {"code": error.code, "message": str(error)}}))
     except ValueError as error:
