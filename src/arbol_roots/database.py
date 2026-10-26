@@ -5,7 +5,7 @@ import os
 import subprocess
 from urllib.parse import unquote, urlsplit
 
-from .model import Places, Refused, nonblank
+from .model import Places, Refused, database_name, nonblank
 
 SERVICE = "com.sylvan-stack.arbol.database"
 
@@ -63,6 +63,14 @@ class Database:
         self.paths = paths
         self.address, role = connection(paths)
         self.password = keychain_password(paths, role)
+
+    def create(self, name: str) -> None:
+        quoted = '"' + database_name(name).replace('"', '""') + '"'
+        self.run(f"CREATE DATABASE {quoted} TEMPLATE template0 ENCODING 'UTF8'", changing=True)
+
+    def drop(self, name: str) -> None:
+        quoted = '"' + database_name(name).replace('"', '""') + '"'
+        self.run(f"DROP DATABASE IF EXISTS {quoted}", changing=True)
 
     def run(self, sql: str, *, changing: bool = False) -> str:
         try:

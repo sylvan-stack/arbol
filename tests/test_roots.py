@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from arbol_builds.roots import current_root, read_roots  # noqa: E402
 from arbol_roots.database import Database, DatabaseError, environment  # noqa: E402
 from arbol_roots.model import Places, Refused, catalogue, places, save_record  # noqa: E402
+from arbol_roots.operations import Creation, catalogue_lock, default_database_name  # noqa: E402
 
 ENTRY = ROOT / "bin/roots_entry.py"
 ENV = {"PATH": "/usr/bin:/bin", "LANG": "en_US.UTF-8"}
@@ -58,7 +59,96 @@ class DatabaseAccess(unittest.TestCase):
             program.chmod(0o755)
             (home / (kind + ".json")).write_text(json.dumps(values))
         return replace(places({"--database-config": str(config), "--security": str(home / "security"),
-                               "--psql": str(home / "psql")}), home=home)
+                               "--psql": str(home / "psql"), "--roots-dir": str(home / "roots"),
+                               "--settings-dir": str(home / "settings")}), home=home)
+
+    def test_roots_database_commands_quote_names_use_a_pristine_template_and_never_force_drop(self) -> None:
+        """roots.database-ddl: one quoted identifier, template0 and UTF-8; DROP does not end other connections."""
+        paths = self.fixture()
+        database = Database(paths)
+        name = 'private;name"quoted'
+        database.create(name)
+        database.drop(name)
+        calls = [json.loads(line) for line in (paths.home / "calls.jsonl").read_text().splitlines()]
+        sql = [row["args"][-1] for row in calls if row["kind"] == "psql"]
+        self.assertEqual(sql, ['CREATE DATABASE "private;name""quoted" TEMPLATE template0 ENCODING \'UTF8\'',
+                               'DROP DATABASE IF EXISTS "private;name""quoted"'])
+        self.assertEqual(default_database_name("sapling"), "arbol_sapling")
+        first = default_database_name("a" * 100)
+        self.assertEqual(len(first), 63)
+        self.assertEqual(first, default_database_name("a" * 100))
+        self.assertNotEqual(first, default_database_name("a" * 99 + "b"))
+        before = (paths.home / "calls.jsonl").read_bytes()
+        for name in ("postgres", "template0", "template1", "", "x" * 64, "has\0nul"):
+            with self.subTest(name=name), self.assertRaises(Refused):
+                database.drop(name)
+        self.assertEqual((paths.home / "calls.jsonl").read_bytes(), before)
+
+    def test_roots_creation_compensation_removes_only_confirmed_new_work(self) -> None:
+        """roots.creation-rollback: a later local failure drops the confirmed database and both new folders."""
+        paths = self.fixture()
+        database = Database(paths)
+        with self.assertRaisesRegex(RuntimeError, "private local failure"):
+            with Creation(paths, record()) as attempt:
+                attempt.make_database(database)
+                raise RuntimeError("private local failure")
+        self.assertFalse((paths.roots / "sapling").exists())
+        self.assertFalse((paths.settings / "sapling").exists())
+        calls = [json.loads(line) for line in (paths.home / "calls.jsonl").read_text().splitlines()]
+        self.assertEqual([row["args"][-1].split()[0] for row in calls if row["kind"] == "psql"], ["CREATE", "DROP"])
+        (paths.roots / "sapling").mkdir()
+        (paths.roots / "sapling/untouched").write_text("keep")
+        with self.assertRaisesRegex(Refused, "already exists"):
+            with Creation(paths, record()):
+                self.fail("An existing target was accepted.")
+        self.assertEqual((paths.roots / "sapling/untouched").read_text(), "keep")
+        self.assertEqual((paths.home / "calls.jsonl").read_text().count('"kind": "psql"'), 2)
+        # An ordinary SQL refusal (including an already existing database) authorizes no DROP.
+        refused_paths = self.fixture()
+        refused_database = Database(refused_paths)
+        (refused_paths.home / "psql.json").write_text(json.dumps({"status": 3, "stderr": "database already exists"}))
+        with self.assertRaisesRegex(DatabaseError, "already exists"):
+            with Creation(refused_paths, record()) as attempt:
+                attempt.make_database(refused_database)
+        self.assertFalse((refused_paths.roots / "sapling").exists())
+        calls = [json.loads(line) for line in (refused_paths.home / "calls.jsonl").read_text().splitlines()]
+        self.assertEqual([row["args"][-1].split()[0] for row in calls if row["kind"] == "psql"], ["CREATE"])
+
+    def test_roots_creation_retains_a_recovery_receipt_for_uncertain_outcomes_or_failed_rollback(self) -> None:
+        """roots.creation-recovery: never drop a database after an uncertain CREATE or claim rollback succeeded."""
+        for uncertain in (False, True):
+            with self.subTest(uncertain=uncertain):
+                paths = self.fixture()
+                database = Database(paths)
+                if uncertain:
+                    (paths.home / "psql.json").write_text(json.dumps({"status": 2, "stderr": "lost connection"}))
+                with self.assertRaisesRegex(DatabaseError, "recovery files are kept"):
+                    with Creation(paths, record()) as attempt:
+                        attempt.make_database(database)
+                        (paths.home / "psql.json").write_text(json.dumps({"status": 3, "stderr": "drop refused"}))
+                        raise RuntimeError("private local failure")
+                self.assertTrue((paths.roots / "sapling/.creating.json").is_file())
+                self.assertFalse((paths.roots / "sapling/root.json").exists())
+                self.assertEqual(catalogue(paths), [])
+                calls = [json.loads(line) for line in (paths.home / "calls.jsonl").read_text().splitlines()]
+                self.assertEqual(len([row for row in calls if row["kind"] == "psql"]), 1 if uncertain else 2)
+
+    def test_roots_catalogue_mutations_exclude_another_process_and_release_the_lock(self) -> None:
+        """roots.catalogue-lock: another process is busy while held, then acquires after release."""
+        paths = self.fixture()
+        script = ("import json,sys\n" + f"sys.path.insert(0,{str(ROOT / 'src')!r})\n"
+                  "from arbol_roots.model import places,Refused\n"
+                  "from arbol_roots.operations import catalogue_lock\n"
+                  "try:\n"
+                  f" with catalogue_lock(places({{'--roots-dir': {str(paths.roots)!r}}})):\n"
+                  "  print('acquired')\n"
+                  "except Refused as e:\n"
+                  " print(e.code);sys.exit(1)\n")
+        with catalogue_lock(paths):
+            result = subprocess.run([sys.executable, "-I", "-c", script], capture_output=True, timeout=20, check=False)
+            self.assertEqual((result.returncode, result.stdout), (1, b"busy\n"))
+        result = subprocess.run([sys.executable, "-I", "-c", script], capture_output=True, timeout=20, check=False)
+        self.assertEqual((result.returncode, result.stdout), (0, b"acquired\n"))
 
     def test_roots_database_uses_maintenance_psql_keychain_account_and_only_the_declared_environment(self) -> None:
         """roots.database-access: no caller PG variables, Root database or password argument reaches psql."""
