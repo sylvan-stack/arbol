@@ -7,11 +7,13 @@ therefore uses the standard library only and imports nothing of this package. Th
 the same functions, so the launcher and the tool judge a record in the same way.
 """
 
+import fcntl
 import json
 import os
 import re
 import select
 import signal
+import stat
 import sys  # noqa: F401  (the line arbol-builds appends calls sys.exit)
 import time
 from typing import Any
@@ -310,6 +312,53 @@ def record_start(folder: str) -> None:
                 pass
 
 
+
+def open_use_guard(registry: str, component: str, number: str, *, exclusive: bool = False) -> int:
+    """An empty regular guard outside the image; never replace or unlink its inode."""
+    folder = os.path.join(registry, component, ".uses")
+    try:
+        os.mkdir(folder, 0o700)
+    except FileExistsError:
+        pass
+    directory = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fd = os.open(number, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=directory)
+    finally:
+        os.close(directory)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("The Build use guard is not a regular file.")
+        fcntl.flock(fd, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def hold_build_use(registry: str, component: str, number: str) -> int | None:
+    """Keep a nonblocking shared guard through exec; guard I/O cannot make a start fail."""
+    try:
+        fd = open_use_guard(registry, component, number)
+    except BlockingIOError:
+        raise OSError(f"Build {component}@{number} is being pruned; try it again.") from None
+    except OSError:
+        return None
+    try:
+        os.set_inheritable(fd, True)
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
+
+
+def close_build_use(fd: int | None) -> None:
+    if fd is not None:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
 def launch(registry: str, component: str, args: list[str]) -> int:
     """Choose the Build and replace this process with its program; return a status only when it cannot."""
     standard_descriptors()
@@ -317,6 +366,7 @@ def launch(registry: str, component: str, args: list[str]) -> int:
     # a SIGINT the caller ignores stays ignored. (The launcher's first lines do the same, earlier.)
     if signal.getsignal(signal.SIGINT) is signal.default_int_handler:
         signal.signal(signal.SIGINT, signal.SIG_DFL)
+    use_descriptor: int | None = None
     try:
         records = read_records(registry, component)
         available = [record["build"] for record in records if named_runnable(registry, record)]
@@ -343,6 +393,7 @@ def launch(registry: str, component: str, args: list[str]) -> int:
         entry = executable_entry(os.path.join(registry, component, selected["build"]), selected.get("entry"))
         if entry is None:
             raise OSError(f"The program of {component}@{selected['build']} is no longer there.")
+        use_descriptor = hold_build_use(registry, component, selected["build"])
         record_start(os.path.join(registry, component, selected["build"]))
         # Python ignores these two signals when it starts; a direct start would leave them at their default.
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
@@ -355,3 +406,5 @@ def launch(registry: str, component: str, args: list[str]) -> int:
         except OSError:
             pass
         return 1
+    finally:
+        close_build_use(use_descriptor)

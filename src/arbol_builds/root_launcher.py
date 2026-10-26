@@ -10,8 +10,10 @@ import signal
 from .launcher import (
     BUILD_PATTERN,
     Record,
+    close_build_use,
     default_record,
     executable_entry,
+    hold_build_use,
     json_line,
     named_runnable,
     read_records,
@@ -112,6 +114,7 @@ def launch_root(registry: str, component: str, args: list[str]) -> int:
     standard_descriptors()
     if signal.getsignal(signal.SIGINT) is signal.default_int_handler:
         signal.signal(signal.SIGINT, signal.SIG_DFL)
+    use_descriptor: int | None = None
     try:
         call = read_root_call(args)
         records = read_records(registry, component)
@@ -126,6 +129,7 @@ def launch_root(registry: str, component: str, args: list[str]) -> int:
         entry = executable_entry(folder, selected.get("entry"))
         if entry is None:
             raise OSError(f"The program of {component}@{selected['build']} is no longer there.")
+        use_descriptor = hold_build_use(registry, component, selected["build"])
         record_start(folder)
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
         signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
@@ -137,4 +141,6 @@ def launch_root(registry: str, component: str, args: list[str]) -> int:
             write_all(1, json_line({"error": {"code": "launch_failed", "message": str(error)}}))
         except OSError:
             pass
+    finally:
+        close_build_use(use_descriptor)
     return 1

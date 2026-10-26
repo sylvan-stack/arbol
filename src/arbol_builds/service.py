@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -24,6 +25,7 @@ from .launcher import (
     default_record,
     executable_entry,
     numbered_folders,
+    open_use_guard,
     plain,
     read_records,
     root_identifier,
@@ -458,32 +460,52 @@ def prune_protections(registry: str, component: str, working: list[Record]) -> s
     return protected
 
 
+
+def remove_build_payload(registry: str, record: Record, eligible: Callable[[], bool] | None = None) -> str:
+    """Called under the component reservation; active/unverifiable usage keeps every file and record."""
+    try:
+        descriptor = open_use_guard(registry, record["component"], record["build"], exclusive=True)
+    except BlockingIOError:
+        return "inUse"
+    except OSError:
+        return "unverifiable"
+    try:
+        if eligible is not None and not eligible():
+            return "recent"
+        folder = os.path.join(registry, record["component"], record["build"])
+        record["prunedAt"] = now()
+        save_unlocked(folder, record)
+        for item in os.listdir(folder):
+            if item in ("build.json", "build.log", "last-start"):
+                continue
+            path = os.path.join(folder, item)
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path, onexc=missing_only)
+            else:
+                try:
+                    os.unlink(path)
+                except FileNotFoundError:
+                    pass
+        return "pruned"
+    finally:
+        os.close(descriptor)
+
+
 def prune_builds(registry: str, component: str, keep: int) -> dict[str, Any]:
     def change() -> dict[str, Any]:
         working = [record for record in read_records(registry, component)
                    if record["status"] == "working" and not record.get("prunedAt")]
         protected = prune_protections(registry, component, working)
         pruned: list[str] = []
+        retained: dict[str, list[str]] = {}
         for record in working[keep:]:
             if record.get("lockedAt") or record["build"] in protected:
                 continue
-            folder = os.path.join(registry, component, record["build"])
-            # Mark unavailable before removing files: a partly pruned Build cannot be started.
-            record["prunedAt"] = now()
-            save_unlocked(folder, record)
-            for item in os.listdir(folder):
-                if item in ("build.json", "build.log", "last-start"):
-                    continue
-                path = os.path.join(folder, item)
-                # Only a file that is already gone is ignored, as with Node.js rm --force; any other failure stops.
-                if os.path.isdir(path) and not os.path.islink(path):
-                    shutil.rmtree(path, onexc=missing_only)
-                else:
-                    try:
-                        os.unlink(path)
-                    except FileNotFoundError:
-                        pass
-            pruned.append(record["build"])
-        return {"component": component, "pruned": pruned}
+            outcome = remove_build_payload(registry, record)
+            if outcome == "pruned":
+                pruned.append(record["build"])
+            elif outcome in ("inUse", "unverifiable"):
+                retained.setdefault(outcome, []).append(record["build"])
+        return {"component": component, "pruned": pruned, **retained}
 
     return with_mutation_lock(os.path.join(registry, component), change)
