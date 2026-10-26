@@ -3,12 +3,18 @@
 import json
 import math
 import os
+import re
 import stat
+import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .config import Locations
-from .launcher import js_integer, refuse_constant
+from .launcher import BUILD_PATTERN, Record, code_name, js_integer, milliseconds, read_records, refuse_constant
+from .pruning import retained_roots
+from .root_launcher import root_default_record
+from .roots import roots_folder
 from .service import components_in
 
 
@@ -42,3 +48,89 @@ def prune_unused(paths: Locations) -> list[dict[str, Any]]:
     if days is not None:
         raise ValueError('Configured unused removal is not implemented yet.')
     return [{'component':component, 'pruned':[]} for component in components_in(paths.registry)]
+
+
+UUID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\Z", re.ASCII)
+MANAGER_SECONDS = 30
+
+
+@dataclass(frozen=True)
+class Usage:
+    roots: dict[str, Record | None]
+    trunks: dict[str, set[str]]
+    unavailable: list[str]
+    roots_with_exchanges: list[str]
+
+
+def absolute_time(value: object) -> bool:
+    return isinstance(value, str) and milliseconds(value) is not None
+
+
+def listed_exchanges(value: object, root: str, manager: Record) -> list[Record]:
+    if (not isinstance(value, dict) or value.get("root") != root or value.get("rootBuild") != manager["build"]
+            or value.get("rootPackageVersion") != manager["packageVersion"]
+            or not isinstance(value.get("exchanges"), list) or value.get("unreadable") != []):
+        raise ValueError("The Root did not return a complete matching manager listing.")
+    result: list[Record] = []
+    for item in value["exchanges"]:
+        if (not isinstance(item, dict) or item.get("root") != root
+                or not isinstance(item.get("exchange"), str) or not UUID.fullmatch(item["exchange"])
+                or not isinstance(item.get("chat"), str) or not UUID.fullmatch(item["chat"])
+                or not isinstance(item.get("trunk"), str) or not code_name(item["trunk"])
+                or not isinstance(item.get("build"), str)
+                or not (item["build"] == "0" or BUILD_PATTERN.fullmatch(item["build"]))
+                or not isinstance(item.get("process"), dict) or not isinstance(item.get("signsOfLife"), dict)
+                or not isinstance(item.get("state"), str) or not item["state"]):
+            raise ValueError("An Exchange has unreadable protection fields.")
+        process, life = item["process"], item["signsOfLife"]
+        if (type(process.get("pid")) is not int or process["pid"] < 1
+                or not absolute_time(process.get("startedAt")) or type(process.get("alive")) is not bool
+                or type(life.get("heartbeat")) is not int or life["heartbeat"] < 0
+                or not isinstance(life.get("waitingFor"), str) or not life["waitingFor"]
+                or not absolute_time(life.get("since"))):
+            raise ValueError("An Exchange has unreadable process/signs-of-life fields.")
+        if "end" in item:
+            end = item["end"]
+            if (not isinstance(end, dict) or not isinstance(end.get("state"), str) or not end["state"]
+                    or not absolute_time(end.get("at"))):
+                raise ValueError("An Exchange has an unreadable end.")
+            if "error" in end and (not isinstance(end["error"], dict)
+                                  or not isinstance(end["error"].get("code"), str)
+                                  or not isinstance(end["error"].get("message"), str)):
+                raise ValueError("An Exchange has an unreadable end error.")
+        result.append(item)
+    return result
+
+
+def usage_snapshot(paths: Locations) -> Usage:
+    roots = retained_roots(roots_folder())
+    managers = read_records(paths.registry, "arbol-root") if roots else []
+    protected: dict[str, set[str]] = {}
+    unavailable: list[str] = []
+    active: list[str] = []
+    for name, record in roots.items():
+        manager = root_default_record(paths.registry, managers, name)
+        if record is None or manager is None:
+            unavailable.append(name)
+            continue
+        try:
+            answer = subprocess.run([os.path.join(paths.bin,"arbol-root"),"--root",name,"list"],
+                                    env={**os.environ,"PATH":os.path.abspath(paths.bin)+os.pathsep+
+                                         os.environ.get("PATH",os.defpath)},
+                                    stdin=subprocess.DEVNULL, capture_output=True, timeout=MANAGER_SECONDS, check=False)
+            if answer.returncode:
+                raise ValueError("The manager refused or failed.")
+            value = json.loads(answer.stdout.decode("utf-8"), parse_constant=refuse_constant, parse_int=js_integer)
+            entries = listed_exchanges(value,name,manager)
+        except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
+            unavailable.append(name)
+            continue
+        if entries:
+            active.append(name)
+        for entry in entries:
+            protected.setdefault("arbol-trunk/"+entry["trunk"],set()).add(entry["build"])
+    return Usage(roots,protected,unavailable,active)
+
+
+def shared_runtime(component: str) -> bool:
+    return component.endswith("-driver") or component == "arbol-classifier"

@@ -9,6 +9,7 @@ from pathlib import Path
 from test_builds import TRUNK_PROGRAM, Fixture, document, finish, first_line
 
 from arbol_builds.launcher import open_use_guard
+from arbol_builds.unused import Usage
 
 
 class UseGuards(unittest.TestCase):
@@ -183,3 +184,112 @@ class Settings(unittest.TestCase):
         settings.write_text('{"removeUnusedAfterDays":false}')
         self.assertEqual(f.call('prune','--unused').returncode, 1)
         self.assertEqual({str(p):p.read_bytes() for p in Path(f.registry).rglob('*') if p.is_file()}, before)
+
+
+class ManagerSnapshots(unittest.TestCase):
+    def prepare(self, names: tuple[str, ...] = ('sapling',)) -> Fixture:
+        import shlex
+        import sys
+        f = Fixture(self,'arbol-root')
+        replies = {}
+        for name in names:
+            place = Path(f.home,'Library/Application Support/Arbol/roots',name)
+            place.mkdir(parents=True)
+            (place / 'root.json').write_text(json.dumps({'root':name,'status':'preparing','rootContract':1,
+                                                        'createdAt':'2026-10-26T09:00:00.000Z'}))
+            built = f.build('--root',name)
+            replies[name] = {'root':name,'rootBuild':built['build'],'rootPackageVersion':'1.2.3',
+                             'exchanges':[],'unreadable':[]}
+        Path(f.home,'replies.json').write_text(json.dumps(replies))
+        script = Path(f.home,'manager.py')
+        script.write_text('''import json,os,sys
+from pathlib import Path
+home=Path(os.environ['HOME']); root=sys.argv[2]
+with (home/'manager-calls.jsonl').open('a') as out:
+    out.write(json.dumps({'args':sys.argv[1:],'path':os.environ['PATH']})+'\\n')
+print(json.dumps(json.loads((home/'replies.json').read_text())[root]))
+''')
+        launcher = Path(f.bin,'arbol-root')
+        launcher.write_text('#!/bin/sh\nexec '+shlex.quote(sys.executable)+' -I -B '+shlex.quote(str(script))+' "$@"\n')
+        launcher.chmod(0o755)
+        return f
+
+    def exchange(self, root: str = 'sapling') -> dict[str, object]:
+        return {'root':root,'exchange':'7f3a2c1e-4b5d-4e6f-8a9b-0c1d2e3f4a5b',
+                'chat':'c3d4e5f6-0718-4293-a4b5-c6d7e8f90a1b','trunk':'trivial','build':'1',
+                'process':{'pid':123,'startedAt':'2026-10-26T09:00:00.000Z','alive':False},'state':'unsaved',
+                'signsOfLife':{'heartbeat':4,'waitingFor':'database','since':'2026-10-26T09:00:00.000Z'}}
+
+    def snapshot(self, f: Fixture) -> Usage:
+        from unittest import mock
+
+        from arbol_builds.config import Locations
+        from arbol_builds.unused import usage_snapshot
+        with mock.patch.dict(os.environ,f.env()):
+            return usage_snapshot(Locations(f.registry,f.bin))
+
+    def test_all_retained_roots_are_queried_and_every_listed_trunk_build_is_protected(self) -> None:
+        """builds.unused-manager-snapshot"""
+        f = self.prepare(('sapling','second'))
+        path = Path(f.home,'replies.json')
+        replies = json.loads(path.read_text())
+        replies['sapling']['exchanges'] = [self.exchange()]
+        path.write_text(json.dumps(replies))
+        result = self.snapshot(f)
+        self.assertEqual(result.trunks, {'arbol-trunk/trivial':{'1'}})
+        self.assertEqual(result.unavailable, [])
+        self.assertEqual(result.roots_with_exchanges, ['sapling'])
+        self.assertEqual(set(result.roots), {'sapling','second'})
+        calls = [json.loads(line) for line in Path(f.home,'manager-calls.jsonl').read_text().splitlines()]
+        self.assertEqual([call['args'] for call in calls], [['--root','sapling','list'],['--root','second','list']])
+        self.assertTrue(all(call['path'].split(os.pathsep)[0]==f.bin for call in calls))
+
+    def test_damaged_root_or_absent_working_manager_is_unavailable_without_query(self) -> None:
+        """builds.unused-manager-missing"""
+        f = self.prepare()
+        root = Path(f.home,'Library/Application Support/Arbol/roots/sapling/root.json')
+        root.write_text('{bad}')
+        self.assertEqual(self.snapshot(f).unavailable, ['sapling'])
+        self.assertFalse(Path(f.home,'manager-calls.jsonl').exists())
+        root.write_text(json.dumps({'root':'sapling','status':'failed','rootContract':1,
+                                   'createdAt':'2026-10-26T09:00:00.000Z'}))
+        self.assertEqual(f.call('withdraw','arbol-root@1','--reason','private fixture').returncode, 0)
+        self.assertEqual(self.snapshot(f).unavailable, ['sapling'])
+        self.assertFalse(Path(f.home,'manager-calls.jsonl').exists())
+
+    def test_partial_wrong_identity_and_malformed_listing_or_exchange_is_unavailable(self) -> None:
+        """builds.unused-manager-invalid"""
+        f = self.prepare()
+        path = Path(f.home,'replies.json')
+        original = json.loads(path.read_text())['sapling']
+        variants = [{}, {**original,'root':'second'}, {**original,'rootBuild':'f'},
+                    {**original,'rootPackageVersion':'wrong'}, {**original,'unreadable':['damaged']},
+                    {**original,'exchanges':[{}]}, {**original,'exchanges':[{**self.exchange(),'trunk':'../x'}]},
+                    {**original,'exchanges':[{**self.exchange(),'trunk':None}]}]
+        for value in variants:
+            with self.subTest(value=value):
+                path.write_text(json.dumps({'sapling':value}))
+                result = self.snapshot(f)
+                self.assertEqual(result.unavailable, ['sapling'])
+                self.assertEqual(result.trunks, {})
+        Path(f.bin,'arbol-root').write_text('#!/bin/sh\necho \'{"error":{"code":"unknown_root"}}\'\nexit 1\n')
+        self.assertEqual(self.snapshot(f).unavailable, ['sapling'])
+        Path(f.bin,'arbol-root').unlink()
+        self.assertEqual(self.snapshot(f).unavailable, ['sapling'])
+
+    def test_timeout_is_bounded_and_never_exposes_raw_output(self) -> None:
+        """builds.unused-manager-timeout"""
+        from unittest import mock
+        f = self.prepare()
+        with mock.patch('arbol_builds.unused.subprocess.run',side_effect=subprocess.TimeoutExpired('fixture',30)) as query:
+            self.assertEqual(self.snapshot(f).unavailable, ['sapling'])
+        self.assertEqual(query.call_args.kwargs['timeout'], 30)
+        self.assertEqual(query.call_args.kwargs['stdin'], subprocess.DEVNULL)
+
+    def test_missing_catalogue_is_empty_but_unlistable_catalogue_refuses(self) -> None:
+        from unittest import mock
+        f = Fixture(self)
+        self.assertEqual(self.snapshot(f).roots, {})
+        with mock.patch('arbol_builds.pruning.os.scandir',side_effect=PermissionError('private fixture')):
+            with self.assertRaises(ValueError):
+                self.snapshot(f)
