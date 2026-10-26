@@ -11,6 +11,7 @@ import tempfile
 import time
 import unittest
 import uuid
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -551,6 +552,20 @@ class DatabaseAccess(unittest.TestCase):
                 calls = [json.loads(line) for line in (paths.home / "calls.jsonl").read_text().splitlines()]
                 self.assertEqual(len([row for row in calls if row["kind"] == "psql"]), 1 if uncertain else 2)
 
+    def test_roots_creation_cannot_redirect_publication_or_rollback_by_changing_its_record(self) -> None:
+        """roots.creation-identity: the confirmed database, never later mutable metadata, is the rollback target."""
+        paths = self.fixture()
+        with self.assertRaisesRegex(Refused, "identity cannot change"):
+            with Creation(paths, record()) as attempt:
+                attempt.make_database(Database(paths))
+                attempt.record["database"] = "some_other_database"
+                attempt.publish()
+        calls = [json.loads(line) for line in (paths.home / "calls.jsonl").read_text().splitlines()]
+        sql = [row["args"][-1] for row in calls if row["kind"] == "psql"]
+        self.assertEqual(sql[-1], 'DROP DATABASE IF EXISTS "arbol_sapling"')
+        self.assertFalse(any("some_other_database" in statement for statement in sql))
+        self.assertFalse((paths.roots / "sapling").exists())
+
     def test_roots_catalogue_mutations_exclude_another_process_and_release_the_lock(self) -> None:
         """roots.catalogue-lock: another process is busy while held, then acquires after release."""
         paths = self.fixture()
@@ -626,6 +641,37 @@ class DatabaseAccess(unittest.TestCase):
 
 
 class Catalogue(unittest.TestCase):
+    def test_roots_install_package_preserves_its_previous_version_on_compile_failure_or_interrupted_rename(self) -> None:
+        """roots.install-rollback: both global packages retain their earlier directory when staging cannot commit."""
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import install_builds
+
+        for name in ("arbol_builds", "arbol_roots"):
+            for interrupted in (False, True):
+                with self.subTest(package=name, interrupted=interrupted), tempfile.TemporaryDirectory() as temporary:
+                    library = Path(temporary)
+                    package = library / name
+                    package.mkdir()
+                    (package / "previous").write_text("previous version")
+                    renamed = Path.rename
+
+                    def rename(path: Path, target: str | os.PathLike[str], *, package_name: str = name,
+                               original: Callable[[Path, str | os.PathLike[str]], Path] = renamed) -> Path:
+                        if path.name.startswith("." + package_name + "-") and "-previous-" not in path.name:
+                            raise SystemExit("private interrupted rename")
+                        return original(path, target)
+
+                    if interrupted:
+                        with mock.patch.object(install_builds, "run_group"), mock.patch.object(Path, "rename", rename):
+                            with self.assertRaisesRegex(SystemExit, "interrupted rename"):
+                                install_builds.install_package(library, Path(sys.executable), name)
+                    else:
+                        with mock.patch.object(install_builds, "run_group", side_effect=ValueError("compile failure")):
+                            with self.assertRaisesRegex(ValueError, "compile failure"):
+                                install_builds.install_package(library, Path(sys.executable), name)
+                    self.assertEqual((package / "previous").read_text(), "previous version")
+                    self.assertEqual(list(library.iterdir()), [package])
+
     def test_roots_damaged_record_drill_passes_with_the_real_standalone_trunk_launcher(self) -> None:
         """roots.damaged-drill: list/ready and the standalone Trunk launcher isolate one damaged Root and reread repairs."""
         result = subprocess.run([sys.executable, "-I", "-B", str(ROOT / "scripts/roots_drill.py")],
