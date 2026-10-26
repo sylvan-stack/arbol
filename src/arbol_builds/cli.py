@@ -9,12 +9,22 @@ from types import FrameType
 
 from .config import JS_SPACE, component_name, locations
 from .launcher import json_line, standard_descriptors, write_all
-from .service import Stop, build_component, build_details, list_builds, prune_builds, show_build, withdraw_build
+from .service import (
+    Stop,
+    build_component,
+    build_details,
+    list_builds,
+    lock_build,
+    prune_builds,
+    show_build,
+    withdraw_build,
+)
 
 USAGE = ("arbol-builds build <component> [--repo <folder>] [--root <identifier>] | list [<component>] "
-         "| show <component>[@<build>] | withdraw <component>@<build> --reason <text> | prune <component> --keep <n> "
+         "| show <component>[@<build>] | withdraw <component>@<build> --reason <text> "
+         "| lock <component>@<build> | unlock <component>@<build> | prune <component> --keep <n> "
          "[--registry-dir <folder>] [--bin-dir <folder>]; a Trunk is the component arbol-trunk/<code name>")
-COMMANDS = ("build", "list", "show", "withdraw", "prune")
+COMMANDS = ("build", "list", "show", "withdraw", "prune", "lock", "unlock")
 SAFE_INTEGER = 2**53 - 1
 
 
@@ -83,7 +93,7 @@ def main(args: list[str]) -> int:
         component, number, rest = parts[0], (parts[1] if len(parts) > 1 else None), parts[2:]
         if target:
             component_name(component)
-        if rest or (number is not None and command not in ("show", "withdraw")):
+        if rest or (number is not None and command not in ("show", "withdraw", "lock", "unlock")):
             raise ValueError("This command takes a component without a build number.")
         if command == "list":
             output(list_builds(paths.registry, target))
@@ -94,6 +104,10 @@ def main(args: list[str]) -> int:
             if not number or reason is None or not reason.strip(JS_SPACE):
                 raise ValueError("withdraw requires component@build and --reason <text>.")
             output(withdraw_build(paths.registry, component, number, unicode_text(reason)))
+        elif command in ("lock", "unlock"):
+            if not number:
+                raise ValueError(f"{command} requires component@build.")
+            output(lock_build(paths.registry, component, number, command == "lock"))
         elif command == "prune":
             keep = values.get("--keep")
             if keep is None or re.fullmatch(r"[1-9][0-9]{0,15}", keep) is None or int(keep) > SAFE_INTEGER:

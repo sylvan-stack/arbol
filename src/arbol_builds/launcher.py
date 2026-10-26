@@ -148,7 +148,7 @@ def valid_record(value: object, component: str, build: str) -> bool:
         return False
     if ("rootContracts" in value or trunk(component)) and not root_contracts(value.get("rootContracts")):
         return False
-    if any(key in value and not date(value[key]) for key in ("finishedAt", "prunedAt")):
+    if any(key in value and not date(value[key]) for key in ("finishedAt", "prunedAt", "lockedAt")):
         return False
     if "entry" in value and entry_path("/build", value["entry"]) is None:
         return False

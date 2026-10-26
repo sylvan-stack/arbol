@@ -13,7 +13,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from .config import Locations, default_repository, description
+from .config import Locations, default_repository, description, load_json
 from .launcher import (
     BUILD_PATTERN,
     LONE_SURROGATE,
@@ -83,7 +83,19 @@ def save_unlocked(folder: str, record: Record) -> None:
 
 
 def save_record(folder: str, record: Record) -> None:
-    with_mutation_lock(os.path.dirname(folder), lambda: save_unlocked(folder, record))
+    def change() -> None:
+        # The builder owns the lifecycle fields. Lock/unlock owns this mark, including its absence (BLD-D20).
+        try:
+            current = load_json(os.path.join(folder, "build.json"))
+        except FileNotFoundError:
+            current = {}
+        if isinstance(current, dict) and "lockedAt" in current:
+            record["lockedAt"] = current["lockedAt"]
+        else:
+            record.pop("lockedAt", None)
+        save_unlocked(folder, record)
+
+    with_mutation_lock(os.path.dirname(folder), change)
 
 
 def reserve(registry: str, component: str) -> tuple[str, str]:
@@ -369,6 +381,23 @@ def withdraw_build(registry: str, component: str, number: str, reason: str) -> R
     return with_mutation_lock(os.path.join(registry, component), change)
 
 
+def lock_build(registry: str, component: str, number: str, locked: bool) -> Record:
+    """Idempotent lock/unlock of any known unpruned Build, serialized with every other record change."""
+    def change() -> Record:
+        record = show_build(registry, component, number)
+        if record.get("prunedAt"):
+            raise ValueError("A pruned Build cannot be locked or unlocked.")
+        if locked and "lockedAt" not in record:
+            record["lockedAt"] = now()
+            save_unlocked(os.path.join(registry, component, number), record)
+        elif not locked and "lockedAt" in record:
+            del record["lockedAt"]
+            save_unlocked(os.path.join(registry, component, number), record)
+        return record
+
+    return with_mutation_lock(os.path.join(registry, component), change)
+
+
 def missing_only(function: Any, path: str, error: BaseException) -> None:
     if not isinstance(error, FileNotFoundError):
         raise error
@@ -381,7 +410,7 @@ def prune_builds(registry: str, component: str, keep: int) -> dict[str, Any]:
         selected = default_record(registry, working)
         pruned: list[str] = []
         for record in working[keep:]:
-            if selected is not None and record["build"] == selected["build"]:
+            if record.get("lockedAt") or (selected is not None and record["build"] == selected["build"]):
                 continue
             folder = os.path.join(registry, component, record["build"])
             # Mark unavailable before removing files: a partly pruned Build cannot be started.
