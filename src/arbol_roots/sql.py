@@ -4,12 +4,14 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import stat
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import FrameType
 from typing import Any
 
 from arbol_builds.launcher import default_record, open_use_guard, read_records
@@ -119,6 +121,36 @@ def layout(paths: Places, root: str) -> dict[str, Any]:
             return {"root":root, "rootBuild":build.number, "files":list(build.files)}
 
 
+@contextmanager
+def migration_directory() -> Iterator[Path]:
+    """The CLI entry point's raw signal defaults must not bypass copy cleanup."""
+    previous = {number:signal.getsignal(number) for number in [signal.SIGINT, signal.SIGTERM]}
+    temporary: tempfile.TemporaryDirectory[str] | None = None
+
+    def interrupted(number: int, _frame: FrameType | None) -> None:
+        raise Refused("operation_failed", f"Migration interrupted by {signal.Signals(number).name}; "
+                                         "the Root remains preparing.")
+
+    try:
+        for number in previous:
+            signal.signal(number, interrupted)
+        temporary = tempfile.TemporaryDirectory(prefix="arbol-root-migration-")
+        folder = Path(temporary.name)
+        if stat.S_IMODE(folder.stat().st_mode) != 0o700:
+            raise Refused("operation_failed", "The migration's temporary directory must be private (0700).")
+        yield folder
+    finally:
+        try:
+            # A second catchable signal cannot interrupt removal of the private copies.
+            for number in previous:
+                signal.signal(number, signal.SIG_IGN)
+            if temporary is not None:
+                temporary.cleanup()
+        finally:
+            for number, handler in previous.items():
+                signal.signal(number, handler)
+
+
 def migrate(paths: Places, root: str) -> dict[str, Any]:
     with catalogue_lock(paths):
         record = selected(paths, root)
@@ -127,10 +159,7 @@ def migrate(paths: Places, root: str) -> dict[str, Any]:
         target, source = databases(paths, record)
         with selected_sql(paths, record, migration=True) as build:
             database = database_client(paths)
-            with tempfile.TemporaryDirectory(prefix="arbol-root-migration-") as temporary:
-                folder = Path(temporary)
-                if stat.S_IMODE(folder.stat().st_mode) != 0o700:
-                    raise Refused("operation_failed", "The migration's temporary directory must be private (0700).")
+            with migration_directory() as folder:
                 database.drop(target)
                 database.create(target)
                 for name in ["chat-tables.sql", "root-tables.sql"]:

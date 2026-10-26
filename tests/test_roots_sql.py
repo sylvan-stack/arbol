@@ -3,8 +3,10 @@
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 import unittest
 from pathlib import Path
 from typing import Any
@@ -200,7 +202,8 @@ class Migration(unittest.TestCase):
             save_record(self.paths, record)
         self.folder = image(self.paths, root="second", older="sapling")
         client = test_roots.DATABASE_STAND_IN.replace(
-            "'env': dict(os.environ)", "'env': dict(os.environ), 'cwd': os.getcwd(), 'mode': os.stat('.').st_mode & 511")
+            "'env': dict(os.environ)",
+            "'env': dict(os.environ), 'cwd': os.getcwd(), 'mode': os.stat('.').st_mode & 511, 'pid': os.getpid()")
         client = client.replace("time.sleep(config.get('delay', 0))", """
 migrating = kind == 'psql' and '--file' in sys.argv and sys.argv[sys.argv.index('--file')+1].endswith('migrate.sql')
 if migrating:
@@ -268,8 +271,57 @@ time.sleep(config.get('delay', 0))""")
 
     def test_interrupted_file_runner_still_removes_its_private_directory(self) -> None:
         """roots.migrate-interruption"""
+        before = {number:signal.getsignal(number) for number in [signal.SIGINT, signal.SIGTERM]}
         with mock.patch.object(Database, "file", side_effect=[None,None,KeyboardInterrupt]) as calls:
             with self.assertRaises(KeyboardInterrupt):
                 migrate(self.paths, "second")
         self.assertFalse(calls.call_args.kwargs["cwd"].exists())
+        self.assertEqual({number:signal.getsignal(number) for number in before}, before)
         self.assertEqual(json.loads((self.paths.roots / "second/root.json").read_text())["status"], "preparing")
+
+    def test_real_cli_signals_reap_the_sql_child_and_remove_private_copies(self) -> None:
+        """roots.migrate-signals"""
+        psql = Path(self.paths.psql)
+        psql.write_text(psql.read_text().replace("time.sleep(config.get('delay', 0))",
+                                               "time.sleep(60 if migrating else 0)"))
+        for number in [signal.SIGINT, signal.SIGTERM]:
+            with self.subTest(signal=number):
+                (self.paths.home / "calls.jsonl").unlink(missing_ok=True)
+                command = [sys.executable,"-I","-B",str(test_roots.ENTRY),"migrate","second",
+                           "--roots-dir",str(self.paths.roots),"--settings-dir",str(self.paths.settings),
+                           "--registry-dir",str(self.paths.registry),"--database-config",str(self.paths.database_config),
+                           "--psql",self.paths.psql,"--security",self.paths.security]
+                process = subprocess.Popen(command,env={**test_roots.ENV,"HOME":str(self.paths.home)},
+                                           cwd=self.paths.home,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,
+                                           stderr=subprocess.PIPE,start_new_session=True)
+                folder: Path | None = None
+                try:
+                    deadline = time.monotonic()+10
+                    while time.monotonic() < deadline:
+                        try:
+                            calls = self.calls()
+                            last = calls[-1] if calls else {}
+                            if "--file" in last.get("args",[]) and last["args"][last["args"].index("--file")+1].endswith("migrate.sql"):
+                                candidate = Path(last["cwd"])
+                                if (candidate / "private.copy").exists():
+                                    folder = candidate
+                                    break
+                        except (FileNotFoundError, json.JSONDecodeError):
+                            pass
+                        if process.poll() is not None:
+                            break
+                        time.sleep(0.02)
+                    self.assertIsNotNone(folder, "The real CLI never reached its running migration client.")
+                    os.kill(process.pid, number)
+                    out, err = process.communicate(timeout=5)
+                    self.assertEqual(process.returncode, 1, out+err)
+                    self.assertEqual(json.loads(out)["error"]["code"], "operation_failed")
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(last["pid"], 0)
+                    assert folder is not None
+                    self.assertFalse(folder.exists())
+                    self.assertEqual(json.loads((self.paths.roots / "second/root.json").read_text())["status"], "preparing")
+                finally:
+                    if process.poll() is None:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate(timeout=5)
