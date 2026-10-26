@@ -2727,11 +2727,16 @@ class Install(unittest.TestCase):
         result = self.install(f"--bin-dir={self.folder}")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         installed = os.path.join(self.folder, "arbol-builds")
+        installed_roots = os.path.join(self.folder, "arbol-roots")
         python = document(result)["python"]
+        self.assertEqual(document(result)["rootsProgram"], installed_roots)
+        self.assertEqual(Path(installed_roots).read_text().split("\n", 1)[0], f"#!{python} -ISB")
         self.assertTrue(python.startswith(os.path.join(self.folder, ".arbol-builds/runtime/")))
         os.chmod(installed, 0o600)
+        os.chmod(installed_roots, 0o600)
         self.assertEqual(self.install(f"--bin-dir={self.folder}", home=False).returncode, 0)
         self.assertEqual(stat.S_IMODE(os.stat(installed).st_mode) & 0o111, 0o111)
+        self.assertEqual(stat.S_IMODE(os.stat(installed_roots).st_mode) & 0o111, 0o111)
         build = subprocess.run([installed, "--registry-dir", f.registry, "build", f.component, "--repo", f.repo,
                                 "--bin-dir", f.bin], env=ENV, capture_output=True, timeout=120, check=False)
         self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
@@ -2740,6 +2745,17 @@ class Install(unittest.TestCase):
         listed = subprocess.run([installed, "list", f"--registry-dir={f.registry}"], env=ENV, capture_output=True,
                                 timeout=60, check=False)
         self.assertEqual(listed.returncode, 0)
+        from test_roots import database_fixture
+
+        paths = database_fixture(self)
+        made_root = subprocess.run([installed_roots, "create", "sapling", "--name", "Private installed Root",
+                                    "--roots-dir", str(paths.roots), "--settings-dir", str(paths.settings),
+                                    "--registry-dir", str(paths.registry), "--database-config", str(paths.database_config),
+                                    "--psql", paths.psql, "--security", paths.security],
+                                   env={**ENV, "HOME": str(paths.home)}, capture_output=True, timeout=60, check=False)
+        self.assertEqual(made_root.returncode, 0, made_root.stdout + made_root.stderr)
+        self.assertEqual((document(made_root)["status"], document(made_root)["app"]), ("preparing", "0"))
+        self.assertTrue((paths.roots / "sapling/root.json").is_file())
         self.assertEqual(self.install("--unknown").returncode, 1)
         self.assertEqual(self.install("word").returncode, 1)
 
@@ -2786,14 +2802,16 @@ class Install(unittest.TestCase):
         old = ["cli.js", "service.js", "package.json"]
         for name in old:
             Path(library, name).write_text("// the earlier tool\n")
-        leftovers = [Path(library, f".arbol_builds-{uuid.uuid4()}"), Path(library, "runtime", f".unpacking-{uuid.uuid4()}")]
+        leftovers = [Path(library, f".arbol_builds-{uuid.uuid4()}"), Path(library, f".arbol_roots-{uuid.uuid4()}"),
+                     Path(library, "runtime", f".unpacking-{uuid.uuid4()}")]
         for leftover in leftovers:
             leftover.mkdir(parents=True)
         ended = subprocess.Popen(["/usr/bin/true"])
         ended.wait()
         leftovers += [Path(self.folder, f"arbol-builds.1.{uuid.uuid4()}.tmp"),
+                      Path(self.folder, f"arbol-roots.1.{uuid.uuid4()}.tmp"),
                       Path(self.folder, f"{f.component}.{ended.pid}.{uuid.uuid4()}.tmp")]
-        for leftover in leftovers[-2:]:
+        for leftover in leftovers[-3:]:
             leftover.write_text("unfinished")
         # A launcher that a running build is writing stays.
         writing = Path(self.folder, f"{f.component}.{os.getpid()}.{uuid.uuid4()}.tmp")

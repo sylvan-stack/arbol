@@ -1,0 +1,4 @@
+#!/bin/sh
+# Development entry; scripts/install_builds.py installs it on the pinned Python.
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+exec "$root/.venv/bin/python" -I -B "$root/bin/roots_entry.py" "$@"

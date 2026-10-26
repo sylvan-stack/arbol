@@ -15,7 +15,7 @@ package = false
 python_version = "3.14"
 strict = true
 mypy_path = ["src", "scripts"]
-files = ["src/arbol_builds", "tests", "scripts", "bin/builds_entry.py", "conformance"]
+files = ["src/arbol_builds", "src/arbol_roots", "tests", "scripts", "bin/builds_entry.py", "bin/roots_entry.py", "conformance", "database"]
 
 [tool.ruff]
 target-version = "py314"

@@ -1,11 +1,11 @@
-"""Install arbol-builds with its pinned Python, and rewrite the launchers already installed.
+"""Install arbol-builds and arbol-roots with their pinned Python, and rewrite component launchers.
 
     uv run --no-sync python scripts/install_builds.py [--bin-dir <folder>]
 
 BLD-0, "Where the build tool and the launchers are", with BLD-D14 and BLD-D15. Into
 `<folder>/.arbol-builds` go the pinned standalone CPython that every Build carries, unpacked once
-from the checked archive, and the package arbol_builds, compiled. `<folder>/arbol-builds` starts
-the tool with that Python. Every launcher already in the folder, written by this tool or by the
+from the checked archive, and the packages arbol_builds and arbol_roots, compiled. The two global
+tools start with that Python. Every launcher already in the folder, written by this tool or by the
 earlier Node.js tool, is written again with the current launcher code, for the same component
 and registry; so is arbol-trunk, the launcher every Trunk shares. Any other file there is left
 as it is.
@@ -39,6 +39,7 @@ from arbol_builds.service import LAUNCHER_MARK, SIGINT_LINE, atomic_write, sheba
 USAGE = "Usage: uv run --no-sync python scripts/install_builds.py [--bin-dir <folder>]"
 NODE_LAUNCH = re.compile(r'launch\(("(?:[^"\\\n]|\\.)*"), ("(?:[^"\\\n]|\\.)*"), process\.argv\.slice\(2\)\);')
 NODE_FILES = ("cli.js", "config.js", "records.js", "service.js", "mutation.js", "package.json")
+PACKAGES = ("arbol_builds", "arbol_roots")
 LAUNCHER_LIMIT = 1024 * 1024
 # A temporary file of service.atomic_write: <name>.<pid>.<uuid>.tmp.
 TEMPORARY = re.compile(r"(?P<name>[a-z][a-z0-9]*(?:-[a-z0-9]+)*)\.(?P<pid>[0-9]+)\.[0-9a-f-]{36}\.tmp")
@@ -112,11 +113,11 @@ def runtime(library: Path) -> Path:
     return python
 
 
-def install_package(library: Path, python: Path) -> None:
-    staging = library / f".arbol_builds-{uuid.uuid4()}"
-    shutil.copytree(ROOT / "src/arbol_builds", staging, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    package = library / "arbol_builds"
-    previous = library / f".arbol_builds-previous-{uuid.uuid4()}"
+def install_package(library: Path, python: Path, name: str) -> None:
+    staging = library / f".{name}-{uuid.uuid4()}"
+    shutil.copytree(ROOT / "src" / name, staging, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    package = library / name
+    previous = library / f".{name}-previous-{uuid.uuid4()}"
     try:
         run_group([str(python), "-I", "-m", "compileall", "-q", str(staging)])
         if package.exists():
@@ -187,20 +188,24 @@ def install(args: list[str]) -> dict[str, object]:
     with open(library / ".install.lock", "w") as lock:
         # One install at a time; leftovers of an install that was stopped are removed first.
         fcntl.flock(lock, fcntl.LOCK_EX)
-        for leftover in [*library.glob("runtime/.unpacking-*"), *library.glob(".arbol_builds-*")]:
+        for leftover in [*library.glob("runtime/.unpacking-*"),
+                         *(path for name in PACKAGES for path in library.glob(f".{name}-*"))]:
             shutil.rmtree(leftover, ignore_errors=True)
         for leftover in folder.glob("*.tmp"):
             # The program's, and a launcher's whose writer has ended; a build that runs now keeps its own.
             temporary = TEMPORARY.fullmatch(leftover.name)
-            if temporary and not leftover.is_symlink() and (temporary["name"] == "arbol-builds"
+            if temporary and not leftover.is_symlink() and (temporary["name"] in ("arbol-builds", "arbol-roots")
                                                             or not alive(int(temporary["pid"]))):
                 leftover.unlink(missing_ok=True)
         python = runtime(library)
-        install_package(library, python)
+        for name in PACKAGES:
+            install_package(library, python, name)
         program = folder / "arbol-builds"
-        atomic_write(str(program), (f"{first}\n{SIGINT_LINE}\nsys.path.insert(0, {str(library)!r})\n"
-                                    "from arbol_builds.cli import entry\nentry()\n").encode(), 0o755)
-        os.chmod(program, 0o755)
+        roots_program = folder / "arbol-roots"
+        for path, module in ((program, "arbol_builds"), (roots_program, "arbol_roots")):
+            atomic_write(str(path), (f"{first}\n{SIGINT_LINE}\nsys.path.insert(0, {str(library)!r})\n"
+                                     f"from {module}.cli import entry\nentry()\n").encode(), 0o755)
+            os.chmod(path, 0o755)
         launchers: list[str] = []
         for path in sorted(folder.iterdir()):
             found = served(path)
@@ -210,7 +215,8 @@ def install(args: list[str]) -> dict[str, object]:
         # The earlier Node.js tool goes last, once its replacement and every launcher are in place.
         for name in NODE_FILES:
             (library / name).unlink(missing_ok=True)
-    return {"bin": str(folder), "program": str(program), "python": str(python), "launchers": launchers}
+    return {"bin": str(folder), "program": str(program), "rootsProgram": str(roots_program),
+            "python": str(python), "launchers": launchers}
 
 
 def stopped(number: int, frame: FrameType | None) -> None:
