@@ -1,7 +1,7 @@
 """How long a launcher adds to a start: on demand, not part of the tests.
 
     uv run --no-sync python tests/launcher_benchmark.py [--python <interpreter>] [--node-launcher <file>]
-        [--pairs <n>] [--output <file.json>]
+        [--pairs <n>] [--baseline-ref <local-revision>] [--output <file.json>]
 
 The method of 7 October 2026 (builds/evidence/launcher-benchmark-2026-10-07.json): a tiny sample
 component built twice into a temporary registry, five warm-up rounds, then rounds in rotating
@@ -18,11 +18,16 @@ the Trunk and the Build; each against a direct start of the same Build.
 
 The Root-component launcher is measured against its own direct Build, with current,
 explicit and named selection, alongside the unchanged plain and Trunk variants (SYL-158).
+
+`--baseline-ref` embeds that locally committed revision's Python launcher modules in the same
+wrapper and compares all six selection paths in the rotating rounds (SYL-163). It does not
+change a checkout. Results stay outside git.
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import platform
@@ -38,7 +43,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from arbol_builds.config import Locations  # noqa: E402
-from arbol_builds.service import Stop, build_component, write_launcher  # noqa: E402
+from arbol_builds.service import Stop, build_component, launcher_source, module_text, write_launcher  # noqa: E402
 
 SAMPLE = {"entry": "program.sh", "checks": [{"name": "ready", "command": '"$ARBOL_BUILD_DIR/program.sh"'}],
           "build": ['cp program.sh "$ARBOL_BUILD_DIR/program.sh"; chmod +x "$ARBOL_BUILD_DIR/program.sh"']}
@@ -71,10 +76,28 @@ def stats(values: list[float]) -> dict[str, float]:
             "p95Ms": round(ordered[max(0, int(len(ordered) * 0.95) - 1)], 2)}
 
 
+def baseline_launcher(registry: str, component: str, python: str, revision: str) -> bytes:
+    """Embed locally committed earlier modules in the same launcher wrapper, without changing a checkout."""
+    names = ["launcher.py"]
+    if component in {"arbol-root", "arbol-trunk"}:
+        names += ["roots.py", "root_launcher.py" if component == "arbol-root" else "trunk_launcher.py"]
+    earlier: list[str] = []
+    for name in names:
+        source = subprocess.check_output(["git", "show", f"{revision}:src/arbol_builds/{name}"], cwd=ROOT, text=True)
+        lines = source.split("\n")
+        for node in reversed(ast.parse(source).body):
+            if isinstance(node, ast.ImportFrom) and node.level > 0:
+                del lines[node.lineno - 1:node.end_lineno]
+        earlier.append("\n".join(lines))
+    current = "\n".join(module_text(name) for name in names).encode()
+    return launcher_source(registry, component, python).replace(current, "\n".join(earlier).encode(), 1)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--node-launcher")
+    parser.add_argument("--baseline-ref", help="Local git revision of earlier Python launcher modules")
     parser.add_argument("--pairs", type=int, default=30)
     parser.add_argument("--output")
     options = parser.parse_args()
@@ -117,6 +140,17 @@ def main() -> int:
                     "root-direct": [os.path.join(registry, "arbol-root/2/program.sh")],
                     "root": [roots], "root-explicit": [roots, "--root", "sapling"],
                     "root-named": [roots, "--root", "sapling", "-v", "2"]}
+        compared = ["python", "trunk", "trunk-named", "root", "root-explicit", "root-named"]
+        if options.baseline_ref:
+            baseline = Path(home, "baseline")
+            baseline.mkdir()
+            for component in ["sample", "arbol-trunk", "arbol-root"]:
+                target = baseline / component
+                target.write_bytes(baseline_launcher(registry, component, options.python, options.baseline_ref))
+                target.chmod(0o755)
+            for name in compared:
+                arguments = variants[name]
+                variants[f"baseline-{name}"] = [str(baseline / Path(arguments[0]).name), *arguments[1:]]
         if options.node_launcher:
             lines = Path(options.node_launcher).read_text().rstrip("\n").split("\n")
             lines[-1] = f"launch({json.dumps(registry)}, \"sample\", process.argv.slice(2));"
@@ -156,6 +190,12 @@ def main() -> int:
             node_version = subprocess.run(["node", "--version"], env=env, capture_output=True, text=True).stdout.strip()
             record["node"] = {"version": node_version, "launcherBytes": os.path.getsize(variants["node"][0]),
                               "launched": stats(times["node"]), "added": added("node", "direct")}
+        if options.baseline_ref:
+            record["baselineComparison"] = {
+                "revision": options.baseline_ref,
+                "variants": {name: {"baseline": stats(times[f"baseline-{name}"]),
+                                    "current": stats(times[name]),
+                                    "change": added(name, f"baseline-{name}")} for name in compared}}
         text = json.dumps(record, indent=2) + "\n"
         if options.output:
             Path(options.output).write_text(text)

@@ -14,8 +14,10 @@ from .launcher import (
     COMMAND_WORDS,
     TRUNKS,
     Record,
+    close_build_use,
     code_name,
     executable_entry,
+    hold_build_use,
     json_line,
     named_runnable,
     read_records,
@@ -180,6 +182,7 @@ def launch_trunk(registry: str, args: list[str]) -> int:
     # A Ctrl-C while the Build is being chosen ends the launcher quietly, as in launch().
     if signal.getsignal(signal.SIGINT) is signal.default_int_handler:
         signal.signal(signal.SIGINT, signal.SIG_DFL)
+    use_descriptor: int | None = None
     try:
         call = read_call(args)
         root = the_root(call.root)
@@ -204,6 +207,7 @@ def launch_trunk(registry: str, args: list[str]) -> int:
         entry = executable_entry(os.path.join(registry, component, selected["build"]), selected.get("entry"))
         if entry is None:
             raise OSError(f"The program of {component}@{selected['build']} is no longer there.")
+        use_descriptor = hold_build_use(registry, component, selected["build"])
         record_start(os.path.join(registry, component, selected["build"]))
         # Python ignores these two signals when it starts; a direct start would leave them at their default.
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
@@ -223,3 +227,5 @@ def launch_trunk(registry: str, args: list[str]) -> int:
         except OSError:
             pass
         return 1
+    finally:
+        close_build_use(use_descriptor)
