@@ -1344,6 +1344,100 @@ def top_level_names(path: Path) -> tuple[dict[str, str], list[str]]:
 
 
 class PruningRoots(unittest.TestCase):
+    def trunk_command(self, f: Trunks, *args: str) -> Result:
+        return subprocess.run([*TOOL, *args, "--registry-dir", f.registry], cwd=f.home, env=f.env(),
+                              capture_output=True, timeout=30, check=False)
+
+    def test_builds_prune_versions_keeps_each_retained_contract_version_with_independent_trunk_counts(self) -> None:
+        """builds.prune-versions: overlapping version lists and all Root states protect compatible Builds."""
+        f = Fixture(self, "arbol-trunk/alpha")
+        roots = os.path.join(f.home, "Library/Application Support/Arbol/roots")
+        for name, state, version in (("sapling", "working", 1), ("second", "preparing", 2), ("third", "failed", 1)):
+            write_root(roots, root_record(name, state, contract=version))
+        for versions in ([3], [1], [1, 2], [2], [4]):
+            f.configure(rootContracts=versions)
+            f.build()
+        f.configure(component="arbol-trunk/beta", rootContracts=[1, 2])
+        beta = f.call("build", "arbol-trunk/beta", "--repo", f.repo)
+        self.assertEqual(beta.returncode, 0, beta.stdout + beta.stderr)
+        other = Path(f.registry, "arbol-trunk/beta")
+        before = {path: path.read_bytes() for path in other.rglob("*") if path.is_file()}
+        result = f.call("prune", f.component, "--keep", "1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(document(result)["pruned"], ["2", "1"])
+        self.assertEqual({path: path.read_bytes() for path in other.rglob("*") if path.is_file()}, before)
+        for name, expected in (("sapling", "3"), ("second", "4"), ("third", "3")):
+            launched = subprocess.run([os.path.join(f.bin, "arbol-trunk"), "--root", name, "alpha", "run"],
+                                      cwd=f.home, env=f.env(), capture_output=True, timeout=30, check=False)
+            self.assertEqual(launched.returncode, 0, launched.stdout + launched.stderr)
+            self.assertEqual(document(launched)["build"], expected)
+        for name in ("sapling", "third"):
+            Path(roots, name, "root.json").unlink()
+        self.assertEqual(document(f.call("prune", f.component, "--keep", "1"))["pruned"], ["3"])
+        Path(roots, "second/root.json").unlink()
+        self.assertEqual(document(f.call("prune", f.component, "--keep", "1"))["pruned"], ["4"])
+        self.assertEqual(document(f.call("prune", f.component, "--keep", "1"))["pruned"], [])
+
+    def test_builds_prune_versions_protects_a_runnable_fallback_and_locked_builds(self) -> None:
+        """builds.prune-version-fallback: missing newer executables do not expose the last runnable fit."""
+        f = Trunks(self)
+        f.root("sapling", 1, "2026-10-16T09:00:00.000Z")
+        f.root("second", 2, "2026-10-16T10:00:00.000Z")
+        for number, versions in (("1", [1]), ("2", [1, 2]), ("3", [2]), ("4", [3])):
+            f.build("alpha", number, versions)
+        Path(f.registry, "arbol-trunk/alpha/3/program.py").unlink()
+        self.assertEqual(self.trunk_command(f, "lock", "arbol-trunk/alpha@1").returncode, 0)
+        result = self.trunk_command(f, "prune", "arbol-trunk/alpha", "--keep", "1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(document(result)["pruned"], ["3"])
+        self.assertEqual(f.started("--root", "second", "alpha", "run")[0], "2")
+        self.assertEqual(f.started("--root", "sapling", "alpha", "run")[0], "2")
+        self.assertEqual(self.trunk_command(f, "unlock", "arbol-trunk/alpha@1").returncode, 0)
+        self.assertEqual(document(self.trunk_command(f, "prune", "arbol-trunk/alpha", "--keep", "1"))["pruned"],
+                         ["1"])
+
+    def test_builds_prune_versions_refuses_unresolved_root_records_before_any_build_mutation(self) -> None:
+        """builds.prune-version-refusal: an unknown retained version refuses the whole prune without changes."""
+        f = Trunks(self)
+        f.root("sapling", 1, "2026-10-16T09:00:00.000Z")
+        for number in ("1", "2", "3"):
+            f.build("alpha", number, [1])
+        write_root(f.roots, "{", "damaged")
+        Path(f.roots, "pipe").mkdir()
+        os.mkfifo(Path(f.roots, "pipe/root.json"))
+        before = {path: path.read_bytes() for path in Path(f.registry).rglob("*") if path.is_file()}
+        result = self.trunk_command(f, "prune", "arbol-trunk/alpha", "--keep", "1")
+        self.assertEqual(result.returncode, 1)
+        error = document(result)["error"]
+        self.assertEqual(error["code"], "builds_failed")
+        self.assertIn("damaged, pipe", error["message"])
+        self.assertIn("versions are unknown", error["message"])
+        self.assertEqual({path: path.read_bytes() for path in Path(f.registry).rglob("*") if path.is_file()}, before)
+        write_root(f.roots, root_record("damaged", "failed"))
+        Path(f.roots, "pipe/root.json").unlink()
+        self.assertEqual(document(self.trunk_command(f, "prune", "arbol-trunk/alpha", "--keep", "1"))["pruned"],
+                         ["2", "1"])
+
+    def test_builds_prune_outside_roots_stays_count_based_without_reading_the_catalogue(self) -> None:
+        """builds.prune-outside-roots: Drivers and other components need locks, never per-Root counts."""
+        for component in ("sample", "arbol-claude-driver"):
+            with self.subTest(component=component):
+                f = Fixture(self, component)
+                if component == "arbol-claude-driver":
+                    f.configure(contract=1, checks=[{"name": kind, "kind": kind, "command": CHECK}
+                                                   for kind in ("unit", "contract", "live")])
+                for _ in range(3):
+                    f.build()
+                roots = Path(f.home, "Library/Application Support/Arbol/roots")
+                roots.parent.mkdir(parents=True)
+                roots.write_text("an inaccessible catalogue must not affect this component")
+                self.assertEqual(f.call("lock", component + "@1").returncode, 0)
+                result = f.call("prune", component, "--keep", "1")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(document(result)["pruned"], ["2"])
+                self.assertEqual(f.call("unlock", component + "@1").returncode, 0)
+                self.assertEqual(document(f.call("prune", component, "--keep", "1"))["pruned"], ["1"])
+
     def test_builds_prune_roots_preserves_one_runnable_build_of_every_retained_root_in_any_state(self) -> None:
         """builds.prune-roots: three retained Roots keep three working Builds despite --keep 1."""
         for component in ("arbol", "arbol-root"):

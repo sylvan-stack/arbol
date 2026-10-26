@@ -444,6 +444,17 @@ def prune_protections(registry: str, component: str, working: list[Record]) -> s
             found = root_default_record(registry, working, root)
             if found is not None:
                 protected.add(found["build"])
+    elif trunk(component):
+        roots = retained_roots(roots_folder())
+        unresolved = [name for name, record in roots.items() if record is None]
+        if unresolved:
+            raise ValueError("Cannot prune " + component + ": retained Roots without readable valid root.json: "
+                             + ", ".join(unresolved) + ". Their Root Contract versions are unknown.")
+        versions = {record["rootContract"] for record in roots.values() if record is not None}
+        for version in versions:
+            found = default_record(registry, [record for record in working if version in record["rootContracts"]])
+            if found is not None:
+                protected.add(found["build"])
     return protected
 
 
