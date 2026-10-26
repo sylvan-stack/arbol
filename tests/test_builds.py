@@ -34,7 +34,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-from arbol_builds import mutation  # noqa: E402
+from arbol_builds import mutation, pruning  # noqa: E402
 from arbol_builds.config import component_name  # noqa: E402
 from arbol_builds.launcher import milliseconds, record_start, write_all  # noqa: E402
 from arbol_builds.roots import current_root, read_root, read_roots, roots_folder  # noqa: E402
@@ -1341,6 +1341,55 @@ def top_level_names(path: Path) -> tuple[dict[str, str], list[str]]:
         elif isinstance(node, ast.ImportFrom):
             relative.extend(alias.name for alias in node.names)
     return bound, relative
+
+
+class PruningRoots(unittest.TestCase):
+    def test_builds_prune_catalogue_keeps_retained_identities_even_when_records_cannot_be_used(self) -> None:
+        """builds.prune-catalogue: every state and damaged/unreadable/nonregular entry retains its folder."""
+        with tempfile.TemporaryDirectory() as home:
+            for name, state in (("sapling", "working"), ("preparing", "preparing"), ("failed", "failed")):
+                write_root(home, root_record(name, state))
+            write_root(home, "{", "damaged")
+            write_root(home, root_record("another"), "mismatch")
+            write_root(home, root_record("invalid", contract=0))
+            write_root(home, root_record("BadName"))
+            Path(home, "missing").mkdir()
+            for name in ("directory", "pipe", "dangling", "unreadable"):
+                Path(home, name).mkdir()
+            Path(home, "directory/root.json").mkdir()
+            os.mkfifo(Path(home, "pipe/root.json"))
+            Path(home, "dangling/root.json").symlink_to("absent")
+            Path(home, "unreadable/root.json").write_text("{}")
+            opened = os.open
+
+            def open_record(path: str, flags: int) -> int:
+                if path == str(Path(home, "unreadable/root.json")):
+                    raise PermissionError("private unreadable record")
+                return opened(path, flags)
+
+            with mock.patch("arbol_builds.pruning.os.open", side_effect=open_record):
+                records = pruning.retained_roots(home)
+            self.assertEqual(set(records), {"sapling", "preparing", "failed", "damaged", "mismatch", "invalid",
+                                            "directory", "pipe", "dangling", "unreadable"})
+            for name in ("sapling", "preparing", "failed"):
+                self.assertEqual(records[name], root_record(name, "working" if name == "sapling" else name))
+            for name in set(records) - {"sapling", "preparing", "failed"}:
+                self.assertIsNone(records[name], name)
+            self.assertIsNone(read_root(home, "damaged"))
+
+    def test_builds_prune_catalogue_distinguishes_absence_from_listing_or_record_access_failures(self) -> None:
+        """builds.prune-catalogue-failure: absence is empty; an unlistable catalogue cannot authorize pruning."""
+        with tempfile.TemporaryDirectory() as home:
+            self.assertEqual(pruning.retained_roots(str(Path(home, "absent"))), {})
+            Path(home, "file").write_text("not a catalogue")
+            with self.assertRaisesRegex(ValueError, "Cannot list the retained Roots"):
+                pruning.retained_roots(str(Path(home, "file")))
+            with mock.patch("arbol_builds.pruning.os.scandir", side_effect=PermissionError("private denial")):
+                with self.assertRaisesRegex(ValueError, "private denial"):
+                    pruning.retained_roots(home)
+            write_root(home, root_record("sapling"))
+            with mock.patch("arbol_builds.pruning.os.lstat", side_effect=PermissionError("record inaccessible")):
+                self.assertEqual(pruning.retained_roots(home), {"file": None, "sapling": None})
 
 
 class RootComponents(unittest.TestCase):
