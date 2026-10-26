@@ -3,16 +3,19 @@
 import hashlib
 import json
 import os
+import shutil
 import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from arbol_builds.launcher import default_record, open_use_guard, read_records
 
+from .database import Database, DatabaseError
 from .model import Places, Refused, catalogue, database_name, selected
+from .operations import catalogue_lock
 
 
 def regular(path: Path) -> bytes:
@@ -28,11 +31,11 @@ def connect_name(value: object) -> str:
     return name
 
 
-def databases(paths: Places, record: dict[str, Any]) -> tuple[str, str | None]:
+def databases(paths: Places, record: dict[str, Any], *, migration: bool = True) -> tuple[str, str | None]:
     target = connect_name(record.get("database"))
     if any(other["root"] != record["root"] and other.get("database") == target for other in catalogue(paths)):
         raise Refused("invalid_input", "Another retained Root names the target database; SQL application is refused.")
-    older = selected(paths, record["grewFrom"]) if "grewFrom" in record else None
+    older = selected(paths, record["grewFrom"]) if migration and "grewFrom" in record else None
     source = connect_name(older.get("database")) if older else None
     if source == target:
         raise Refused("invalid_input", "The older and new Root must name different databases.")
@@ -90,3 +93,26 @@ def selected_sql(paths: Places, record: dict[str, Any], *, migration: bool) -> I
     finally:
         if fd is not None:
             os.close(fd)
+
+
+def database_client(paths: Places) -> Database:
+    program = paths.psql
+    if "/" in program and not os.path.isabs(program):
+        program = str(paths.home / program)
+    found = shutil.which(program)
+    if found is None:
+        raise DatabaseError("psql must be an available executable before applying Root SQL.")
+    return Database(replace(paths, psql=os.path.abspath(found)))
+
+
+def layout(paths: Places, root: str) -> dict[str, Any]:
+    with catalogue_lock(paths):
+        record = selected(paths, root)
+        if record["status"] == "preparing":
+            raise Refused("invalid_input", "A preparing Root needs migrate; layout applies to a Root in use.")
+        target, _source = databases(paths, record, migration=False)
+        with selected_sql(paths, record, migration=False) as build:
+            database = database_client(paths)
+            for file in build.files.values():
+                database.file(target, file)
+            return {"root":root, "rootBuild":build.number, "files":list(build.files)}
