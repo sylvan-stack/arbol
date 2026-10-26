@@ -16,6 +16,7 @@ import os
 import re
 import resource
 import select
+import shlex
 import shutil
 import signal
 import stat
@@ -1935,6 +1936,110 @@ class TrunkLauncher(unittest.TestCase):
 
 
 class Locking(unittest.TestCase):
+    def test_builds_in_flight_writes_preserve_a_lock_and_a_later_unlock(self) -> None:
+        """builds.lock-building: stale lifecycle writes cannot undo a concurrent mark or its removal."""
+        f = Fixture(self)
+        gate = Path(f.repo, "gate.py")
+        gate.write_text("from pathlib import Path\nimport sys,time\n"
+                        f"home=Path({f.home!r}); phase=sys.argv[1]\n"
+                        "(home/(phase+'-ready')).touch()\n"
+                        "while not (home/(phase+'-go')).exists():time.sleep(.01)\n")
+        command = f"{shlex.quote(PYTHON)} -I -B {shlex.quote(str(gate))}"
+        f.configure(build=[BUILD, command + " build"], checks=[
+            {"name": "sample-check", "command": CHECK}, {"name": "later-check", "command": command + " check"}])
+        child = f.spawn("build", f.component, "--repo", f.repo, "--registry-dir", f.registry, "--bin-dir", f.bin)
+
+        def ready(phase: str) -> None:
+            path = Path(f.home, phase + "-ready")
+            deadline = time.monotonic() + 15
+            while not path.exists() and child.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(path.exists(), f"Build did not reach {phase}: {child.poll()}")
+
+        ready("build")
+        result = f.call("lock", f"{f.component}@1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        mark = document(result)["lockedAt"]
+        self.assertEqual(document(result)["status"], "building")
+        Path(f.home, "build-go").touch()
+        ready("check")
+        after_first_write = json.loads(Path(f.path("1/build.json")).read_text())
+        self.assertEqual(after_first_write["lockedAt"], mark)
+        self.assertEqual(after_first_write["checks"], [{"name": "sample-check", "passed": True}])
+        self.assertEqual(f.call("unlock", f"{f.component}@1").returncode, 0)
+        Path(f.home, "check-go").touch()
+        output, errors = child.communicate(timeout=30)
+        self.assertEqual(child.returncode, 0, output + errors)
+        finished = json.loads(output)
+        self.assertEqual(finished["status"], "working")
+        self.assertNotIn("lockedAt", finished)
+        self.assertEqual(finished, json.loads(Path(f.path("1/build.json")).read_text()))
+
+    def test_builds_lock_and_unlock_are_idempotent_and_print_the_stored_record(self) -> None:
+        """builds.lock-unlock keeps the first timestamp and makes repeated operations successful no-ops."""
+        f = Fixture(self)
+        f.build()
+        path = Path(f.path("1/build.json"))
+        first = f.call("lock", f"{f.component}@1")
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertEqual(document(first), json.loads(path.read_text()))
+        stamp = document(first)["lockedAt"]
+        self.assertRegex(stamp, r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\Z")
+        locked = path.read_bytes()
+        self.assertEqual(document(f.call("lock", f"{f.component}@1"))["lockedAt"], stamp)
+        self.assertEqual(path.read_bytes(), locked)
+        unlocked = f.call("unlock", f"{f.component}@1")
+        self.assertEqual(unlocked.returncode, 0, unlocked.stdout + unlocked.stderr)
+        self.assertEqual(document(unlocked), json.loads(path.read_text()))
+        self.assertNotIn("lockedAt", document(unlocked))
+        plain = path.read_bytes()
+        self.assertEqual(f.call("unlock", f"{f.component}@1").returncode, 0)
+        self.assertEqual(path.read_bytes(), plain)
+        usage = document(run_tool(f, "--help"))["usage"]
+        self.assertIn("lock <component>@<build>", usage)
+        self.assertIn("unlock <component>@<build>", usage)
+
+    def test_builds_lock_accepts_every_unpruned_status(self) -> None:
+        """builds.lock-states allows building, failed, working and withdrawn records."""
+        f = Fixture(self)
+        original = f.build()
+        path = Path(f.path("1/build.json"))
+        for state in ("building", "failed", "working", "withdrawn"):
+            with self.subTest(state=state):
+                record = {**original, "status": state}
+                if state == "building":
+                    record.pop("finishedAt")
+                    record["checks"] = []
+                if state == "failed":
+                    record["checks"] = [{"name": "sample-check", "passed": False}]
+                if state == "withdrawn":
+                    record["withdrawn"] = {"at": original["finishedAt"], "reason": "qualification failure"}
+                path.write_text(json.dumps(record))
+                result = f.call("lock", f"{f.component}@1")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(document(result)["status"], state)
+                self.assertIn("lockedAt", document(result))
+                self.assertEqual(f.call("unlock", f"{f.component}@1").returncode, 0)
+                self.assertEqual(json.loads(path.read_text()), record)
+
+    def test_builds_lock_requires_an_explicit_known_unpruned_build(self) -> None:
+        """builds.lock-refusal rejects missing, malformed, unknown and pruned targets and irrelevant options."""
+        f = Fixture(self)
+        f.build()
+        for command in ("lock", "unlock"):
+            for target in (f.component, f"{f.component}@", f"{f.component}@0", f"{f.component}@01",
+                           f"{f.component}@A", f"{f.component}@1@2", f"{f.component}@2"):
+                with self.subTest(command=command, target=target):
+                    self.assertEqual(f.call(command, target).returncode, 1)
+            self.assertEqual(f.call(command, f"{f.component}@1", "--keep", "1").returncode, 1)
+        f.build()
+        self.assertEqual(document(f.call("prune", f.component, "--keep", "1"))["pruned"], ["1"])
+        for command in ("lock", "unlock"):
+            result = f.call(command, f"{f.component}@1")
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("pruned", document(result)["error"]["message"])
+        self.assertNotIn("lockedAt", json.loads(Path(f.path("1/build.json")).read_text()))
+
     def test_builds_locked_record(self) -> None:
         """builds.locked-record: a valid mark survives inventory; a damaged one cannot select a Build."""
         f = Fixture(self)
