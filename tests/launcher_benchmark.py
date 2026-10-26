@@ -15,6 +15,9 @@ The launcher arbol-trunk (SYL-179) is timed in the same rounds: a sample Trunk b
 Root Contract version 1, one Root of that version in the temporary home, and two calls, `run`
 for the current Root and the Trunk trivial, and the call arbol-root makes, which names the Root,
 the Trunk and the Build; each against a direct start of the same Build.
+
+The Root-component launcher is measured against its own direct Build, with current,
+explicit and named selection, alongside the unchanged plain and Trunk variants (SYL-158).
 """
 
 from __future__ import annotations
@@ -79,9 +82,11 @@ def main() -> int:
     try:
         repo, registry, folder = (os.path.join(home, name) for name in ("repository", "registry", "bin"))
         trunk_repo = os.path.join(home, "trunk repository")
+        root_repo = os.path.join(home, "root repository")
         env = {"HOME": home, "PATH": "/usr/bin:/bin"}
         repository(repo, env, {"component": "sample"})
         repository(trunk_repo, env, {"component": "arbol-trunk/trivial", "rootContracts": [1]})
+        repository(root_repo, env, {"component": "arbol-root"})
         root = os.path.join(home, "Library/Application Support/Arbol/roots/sapling")
         os.makedirs(root)
         Path(root, "root.json").write_text(json.dumps({
@@ -91,19 +96,27 @@ def main() -> int:
         os.environ.clear()
         os.environ.update(env)
         try:
-            for component, source in (("sample", repo), ("sample", repo), ("arbol-trunk/trivial", trunk_repo),
-                                      ("arbol-trunk/trivial", trunk_repo)):
-                if build_component(component, Locations(registry, folder, source), Stop())["status"] != "working":
+            for component, source, owner in (("sample", repo, None), ("sample", repo, None),
+                                              ("arbol-trunk/trivial", trunk_repo, None),
+                                              ("arbol-trunk/trivial", trunk_repo, None),
+                                              ("arbol-root", root_repo, "sapling"),
+                                              ("arbol-root", root_repo, "sapling")):
+                if build_component(component, Locations(registry, folder, source), Stop(), owner)["status"] != "working":
                     raise RuntimeError(f"The sample {component} did not build.")
         finally:
             os.environ.clear()
             os.environ.update(saved)
         write_launcher(folder, registry, "sample", options.python)
         write_launcher(folder, registry, "arbol-trunk", options.python)
+        write_launcher(folder, registry, "arbol-root", options.python)
         trunks = os.path.join(folder, "arbol-trunk")
+        roots = os.path.join(folder, "arbol-root")
         variants = {"direct": [os.path.join(registry, "sample/2/program.sh")], "python": [os.path.join(folder, "sample")],
                     "trunk-direct": [os.path.join(registry, "arbol-trunk/trivial/2/program.sh")],
-                    "trunk": [trunks, "run"], "trunk-named": [trunks, "--root", "sapling", "trivial", "-v", "2", "run"]}
+                    "trunk": [trunks, "run"], "trunk-named": [trunks, "--root", "sapling", "trivial", "-v", "2", "run"],
+                    "root-direct": [os.path.join(registry, "arbol-root/2/program.sh")],
+                    "root": [roots], "root-explicit": [roots, "--root", "sapling"],
+                    "root-named": [roots, "--root", "sapling", "-v", "2"]}
         if options.node_launcher:
             lines = Path(options.node_launcher).read_text().rstrip("\n").split("\n")
             lines[-1] = f"launch({json.dumps(registry)}, \"sample\", process.argv.slice(2));"
@@ -132,6 +145,12 @@ def main() -> int:
             "trunk": {"launcherBytes": os.path.getsize(trunks), "direct": stats(times["trunk-direct"]),
                       "run": {"launched": stats(times["trunk"]), "added": added("trunk", "trunk-direct")},
                       "named": {"launched": stats(times["trunk-named"]), "added": added("trunk-named", "trunk-direct")}},
+            "rootComponent": {"launcherBytes": os.path.getsize(roots), "direct": stats(times["root-direct"]),
+                              "current": {"launched": stats(times["root"]), "added": added("root", "root-direct")},
+                              "explicit": {"launched": stats(times["root-explicit"]),
+                                           "added": added("root-explicit", "root-direct")},
+                              "named": {"launched": stats(times["root-named"]),
+                                        "added": added("root-named", "root-direct")}},
         }
         if "node" in times:
             node_version = subprocess.run(["node", "--version"], env=env, capture_output=True, text=True).stdout.strip()

@@ -2555,6 +2555,7 @@ class Install(unittest.TestCase):
             "arbol-a": f"#!/x/python -ISB\n{LAUNCHER_MARK}\nsys.exit(launch({{[]: 1}}, \"arbol-a\", sys.argv[1:]))\n",
             "arbol-b": f"#!/x/python -ISB\n{LAUNCHER_MARK}\nsys.exit(start({registry}, \"arbol-b\", sys.argv[1:]))\n",
             "arbol-c": f"#!/x/python -ISB\n{LAUNCHER_MARK}\nsys.exit(launch_trunk({registry}, \"arbol-c\", []))\n",
+            "arbol-d": f"#!/x/python -ISB\n{LAUNCHER_MARK}\nsys.exit(launch_root({registry}, \"arbol-d\", []))\n",
             # The Trunks' launcher under another name.
             "trunks-renamed": f"#!/x/python -ISB\n{LAUNCHER_MARK}\nsys.exit(launch_trunk({registry}, sys.argv[1:]))\n",
         }
@@ -2589,14 +2590,32 @@ class Install(unittest.TestCase):
         # A launcher that a running build is writing stays.
         writing = Path(self.folder, f"{f.component}.{os.getpid()}.{uuid.uuid4()}.tmp")
         writing.write_text("being written")
+        root_fixtures = [Fixture(self, component) for component in ("arbol", "arbol-root")]
+        for fixture in root_fixtures:
+            fixture.build("--root", "sapling")
+            write_root(os.path.join(fixture.home, "Library/Application Support/Arbol/roots"), root_record("sapling"))
+            text = Path(fixture.bin, fixture.component).read_text()
+            if fixture.component == "arbol":
+                # An older generic launcher upgrades; the other exercises future recognition of launch_root.
+                text = text.replace("sys.exit(launch_root(", "sys.exit(launch(")
+            Path(self.folder, fixture.component).write_text(text)
         result = self.install(f"--bin-dir={self.folder}")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(document(result)["launchers"], ["arbol-trunk", "sample", "second"])
+        self.assertEqual(document(result)["launchers"], ["arbol", "arbol-root", "arbol-trunk", "sample", "second"])
         python = document(result)["python"]
         for name in ("sample", "second"):
             text = Path(self.folder, name).read_text()
             self.assertEqual(text.split("\n", 1)[0], f"#!{python} -ISB")
             self.assertTrue(text.rstrip().endswith(f"launch({os.path.abspath(f.registry)!r}, {name!r}, sys.argv[1:]))"))
+        for fixture in root_fixtures:
+            text = Path(self.folder, fixture.component).read_text()
+            self.assertEqual(text.split("\n", 1)[0], f"#!{python} -ISB")
+            self.assertTrue(text.rstrip().endswith(
+                f"launch_root({fixture.registry!r}, {fixture.component!r}, sys.argv[1:]))"))
+            started_root = subprocess.run([os.path.join(self.folder, fixture.component), "--root", "sapling", "probe"],
+                                          env=fixture.env(), capture_output=True, timeout=60, check=False)
+            self.assertEqual(started_root.returncode, 0, started_root.stdout + started_root.stderr)
+            self.assertEqual((document(started_root)["build"], document(started_root)["args"]), ("1", ["probe"]))
         # arbol-trunk holds the current code for the same registry, and runs with the installed Python.
         trunks = Path(self.folder, "arbol-trunk").read_text()
         self.assertEqual(trunks.split("\n", 1)[0], f"#!{python} -ISB")
