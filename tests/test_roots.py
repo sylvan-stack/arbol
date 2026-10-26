@@ -2,20 +2,39 @@
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from arbol_builds.roots import current_root, read_roots  # noqa: E402
-from arbol_roots.model import Refused, catalogue, places, save_record  # noqa: E402
+from arbol_roots.database import Database, DatabaseError, environment  # noqa: E402
+from arbol_roots.model import Places, Refused, catalogue, places, save_record  # noqa: E402
 
 ENTRY = ROOT / "bin/roots_entry.py"
 ENV = {"PATH": "/usr/bin:/bin", "LANG": "en_US.UTF-8"}
+
+DATABASE_STAND_IN = f"""#!{sys.executable} -I
+import json, os, sys, time
+from pathlib import Path
+home = Path(os.environ['HOME'])
+kind = Path(__file__).name
+config = json.loads((home / (kind + '.json')).read_text())
+with (home / 'calls.jsonl').open('a') as stream:
+    stream.write(json.dumps({{'kind': kind, 'args': sys.argv[1:], 'env': dict(os.environ)}}) + '\\n')
+time.sleep(config.get('delay', 0))
+print(config.get('password', '') if kind == 'security' else config.get('stdout', '1'))
+sys.stderr.write(config.get('stderr', ''))
+sys.exit(config.get('status', 0))
+"""
 
 
 def record(name: str = "sapling", state: str = "preparing", created: str = "2026-10-26T09:00:00.000Z",
@@ -25,6 +44,77 @@ def record(name: str = "sapling", state: str = "preparing", created: str = "2026
     if state == "failed":
         value["failed"] = {"at": created, "reason": "private failure"}
     return value
+
+
+class DatabaseAccess(unittest.TestCase):
+    def fixture(self) -> Places:
+        home = Path(tempfile.mkdtemp(prefix="Arbol's database access "))
+        self.addCleanup(shutil.rmtree, home, True)
+        config = home / "database.json"
+        config.write_text(json.dumps({"address": "postgresql://arbol@127.0.0.1:5433"}))
+        for kind, values in (("security", {"password": "private-test-password"}), ("psql", {})):
+            program = home / kind
+            program.write_text(DATABASE_STAND_IN)
+            program.chmod(0o755)
+            (home / (kind + ".json")).write_text(json.dumps(values))
+        return replace(places({"--database-config": str(config), "--security": str(home / "security"),
+                               "--psql": str(home / "psql")}), home=home)
+
+    def test_roots_database_uses_maintenance_psql_keychain_account_and_only_the_declared_environment(self) -> None:
+        """roots.database-access: no caller PG variables, Root database or password argument reaches psql."""
+        paths = self.fixture()
+        with mock.patch.dict(os.environ, {"PGHOST": "hostile", "PGSERVICE": "hostile", "UNRELATED": "private"}):
+            with mock.patch("arbol_roots.database.subprocess.run", wraps=subprocess.run) as called:
+                self.assertEqual(Database(paths).run("SELECT 1"), "1")
+            self.assertEqual(set(called.call_args_list[0].kwargs["env"]), {"HOME", "PATH", "LANG"})
+            self.assertEqual(set(called.call_args_list[1].kwargs["env"]), {"HOME", "PATH", "LANG", "PGPASSWORD"})
+            self.assertEqual(called.call_args_list[0].kwargs["timeout"], 2)
+            self.assertEqual(called.call_args_list[1].kwargs["timeout"], 30)
+        calls = [json.loads(line) for line in (paths.home / "calls.jsonl").read_text().splitlines()]
+        self.assertEqual(calls[0]["args"], ["find-generic-password", "-s", "com.sylvan-stack.arbol.database",
+                                          "-a", "arbol", "-w"])
+        arguments = calls[1]["args"]
+        self.assertIn("postgresql://arbol@127.0.0.1:5433/postgres", arguments)
+        self.assertIn("--no-psqlrc", arguments)
+        self.assertIn("--no-password", arguments)
+        self.assertIn("ON_ERROR_STOP=1", arguments)
+        self.assertNotIn("private-test-password", arguments)
+        self.assertEqual(calls[1]["env"]["PGPASSWORD"], "private-test-password")
+        self.assertFalse(any(name in calls[1]["env"] for name in ("PGHOST", "PGSERVICE", "UNRELATED")))
+
+    def test_roots_database_keychain_missing_failure_and_timeout_are_distinct_without_secret_output(self) -> None:
+        """roots.keychain: status 44 means no password; other failures and the two-second limit name Keychain."""
+        paths = self.fixture()
+        control = paths.home / "security.json"
+        control.write_text(json.dumps({"status": 44}))
+        self.assertIsNone(Database(paths).password)
+        self.assertNotIn("PGPASSWORD", environment(paths))
+        control.write_text(json.dumps({"status": 1, "password": "DO-NOT-PRINT", "stderr": "DO-NOT-PRINT"}))
+        with self.assertRaisesRegex(DatabaseError, "Keychain.*status 1") as failed:
+            Database(paths)
+        self.assertNotIn("DO-NOT-PRINT", str(failed.exception))
+        control.write_text(json.dumps({"delay": 3, "password": "DO-NOT-PRINT"}))
+        started = time.monotonic()
+        with self.assertRaisesRegex(DatabaseError, "Keychain.*2 seconds"):
+            Database(paths)
+        self.assertLess(time.monotonic() - started, 4)
+
+    def test_roots_database_refuses_credential_or_database_addresses_and_redacts_psql_failures(self) -> None:
+        """roots.database-refusal: invalid configuration stays private; psql diagnostics cannot echo a password."""
+        paths = self.fixture()
+        for address in ("postgresql://arbol:DO-NOT-PRINT@127.0.0.1:5433", "postgresql://arbol@127.0.0.1:5433/root",
+                        "postgresql://arbol@127.0.0.1:bad", "not an address"):
+            paths.database_config.write_text(json.dumps({"address": address}))
+            with self.assertRaises(DatabaseError) as failed:
+                Database(paths)
+            self.assertNotIn("DO-NOT-PRINT", str(failed.exception))
+            self.assertFalse((paths.home / "calls.jsonl").exists())
+        paths.database_config.write_text(json.dumps({"address": "postgresql://arbol@127.0.0.1:5433"}))
+        (paths.home / "psql.json").write_text(json.dumps({"status": 3, "stderr": "private-test-password failed"}))
+        with self.assertRaises(DatabaseError) as failed:
+            Database(paths).run("SELECT 1")
+        self.assertNotIn("private-test-password", str(failed.exception))
+        self.assertIn("[password removed]", str(failed.exception))
 
 
 class Catalogue(unittest.TestCase):
