@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import subprocess
 from urllib.parse import unquote, urlsplit
 
@@ -75,6 +76,7 @@ class Database:
     def run(self, sql: str, *, changing: bool = False) -> str:
         try:
             result = subprocess.run([self.paths.psql, "--no-psqlrc", "--no-password", "--set", "ON_ERROR_STOP=1",
+                                     "--set", "VERBOSITY=verbose",
                                      "--no-align", "--tuples-only", "--dbname", self.address, "--command", sql],
                                     env=environment(self.paths, self.password), cwd=self.paths.home,
                                     capture_output=True, text=True, timeout=30, check=False)
@@ -86,8 +88,12 @@ class Database:
             raise DatabaseError("psql returned unreadable output.", uncertain=changing) from error
         if result.returncode != 0:
             detail = (result.stderr or result.stdout).strip()
+            state = re.search(r"(?m)^[^:\n]+:\s+([0-9A-Z]{5}):", detail)
+            confirmed = result.returncode == 3 or (state is not None and not state[1].startswith("08")
+                                                   and state[1] != "40003")
+            detail = "\n".join(line for line in detail.splitlines() if not line.startswith("LOCATION:"))
             if self.password:
                 detail = detail.replace(self.password, "[password removed]")
             raise DatabaseError(f"psql failed with status {result.returncode}: {detail[:4096]}",
-                                uncertain=changing and result.returncode != 3)
+                                uncertain=changing and not confirmed)
         return result.stdout.strip()

@@ -110,7 +110,7 @@ def real_server_example(tool: str | None = None) -> dict[str, object]:
         database = Database(paths)
         token = uuid.uuid4().hex
         names = {root: "arbol_roots_probe_" + token + "_" + suffix
-                 for root, suffix in (("sapling", "a"), ("second", "b"), ("third", "c"))}
+                 for root, suffix in (("sapling", "a"), ("second", "b"), ("third", "c"), ("collision", "d"))}
         attempted: list[str] = []
         prefix = [tool] if tool else [sys.executable, "-I", "-B", str(ENTRY)]
 
@@ -147,6 +147,13 @@ def real_server_example(tool: str | None = None) -> dict[str, object]:
             require(not exists(name), "A randomly named probe database already exists; refusing to touch it.")
         build_record(paths, "arbol-trunk/trivial", "1", rootContracts=[1, 2])
         try:
+            attempted.append(names["collision"])
+            database.create(names["collision"])
+            collision = call("create", "collision", "--name", "Must refuse", "--database-name", names["collision"], code=1)
+            require(collision["error"]["code"] == "database_unavailable", "An existing database was not refused.")
+            require(exists(names["collision"]), "A refused creation removed an existing database.")
+            require(not (paths.roots / "collision").exists() and not (paths.settings / "collision").exists(),
+                    "A confirmed duplicate-database refusal left an unpublished Root behind.")
             attempted.append(names["sapling"])
             first = call("create", "sapling", "--name", "First Sapling", "--database-name", names["sapling"])
             require(first["status"] == "preparing" and first["rootContract"] == 1, "First Root metadata differs.")
@@ -185,7 +192,8 @@ def real_server_example(tool: str | None = None) -> dict[str, object]:
                 database.drop(name)
         return {"passed": True, "checks": ["three-empty-databases", "settings-copy", "version-inheritance",
                                             "explicit-version-2", "ready-fail-current", "current-removal-refusal",
-                                            "database-and-folder-removal"], "databasesLeft": 0, "vendorRequests": 0}
+                                            "database-and-folder-removal", "existing-database-refusal"],
+                "databasesLeft": 0, "vendorRequests": 0}
 
 
 class Commands(unittest.TestCase):
@@ -480,6 +488,18 @@ class Commands(unittest.TestCase):
 class DatabaseAccess(unittest.TestCase):
     def fixture(self) -> Places:
         return database_fixture(self)
+
+    def test_roots_database_distinguishes_psql_status_one_server_refusals_from_unknown_completion(self) -> None:
+        """roots.sqlstate: a server refusal at status 1 is confirmed; connection/unknown completion stays uncertain."""
+        for state, uncertain in (("42P04", False), ("42501", False), ("08007", True), ("40003", True)):
+            with self.subTest(state=state):
+                paths = self.fixture()
+                (paths.home / "psql.json").write_text(json.dumps({
+                    "status": 1, "stderr": f"ERROR:  {state}: private SQL refusal\nLOCATION: private source line"}))
+                with self.assertRaises(DatabaseError) as failed:
+                    Database(paths).create("arbol_sapling")
+                self.assertEqual(failed.exception.uncertain, uncertain)
+                self.assertNotIn("LOCATION:", str(failed.exception))
 
     def test_roots_database_commands_quote_names_use_a_pristine_template_and_never_force_drop(self) -> None:
         """roots.database-ddl: one quoted identifier, template0 and UTF-8; DROP does not end other connections."""
