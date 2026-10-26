@@ -33,7 +33,7 @@ from build_support import ROOT, archive, pin, target  # noqa: E402
 sys.path.insert(0, str(ROOT / "src"))
 from arbol_builds.cli import options  # noqa: E402
 from arbol_builds.config import locations  # noqa: E402
-from arbol_builds.launcher import TRUNKS, json_line, write_all  # noqa: E402
+from arbol_builds.launcher import ROOT_COMPONENTS, TRUNKS, json_line, write_all  # noqa: E402
 from arbol_builds.service import LAUNCHER_MARK, SIGINT_LINE, atomic_write, shebang, write_launcher  # noqa: E402
 
 USAGE = "Usage: uv run --no-sync python scripts/install_builds.py [--bin-dir <folder>]"
@@ -150,12 +150,13 @@ def served(path: Path) -> tuple[str, str] | None:
             call = ast.parse(last, mode="eval").body
             if not isinstance(call, ast.Call) or len(call.args) != 1 or not isinstance(call.args[0], ast.Call):
                 return None
-            # launch(registry, component, argv) in a component's launcher, launch_trunk(registry, argv) in the
-            # launcher arbol-trunk, which every Trunk shares (RCT-0).
+            # Plain, Root-bound and shared Trunk launchers retain the registry they serve.
             inner = call.args[0]
             name = inner.func.id if isinstance(inner.func, ast.Name) else None
-            if name == "launch" and len(inner.args) == 3:
+            if name in ("launch", "launch_root") and len(inner.args) == 3:
                 registry, component = (ast.literal_eval(node) for node in inner.args[:2])
+                if name == "launch_root" and component not in ROOT_COMPONENTS:
+                    return None
             elif name == "launch_trunk" and len(inner.args) == 2:
                 registry, component = ast.literal_eval(inner.args[0]), TRUNKS
             else:

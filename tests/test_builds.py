@@ -1343,6 +1343,197 @@ def top_level_names(path: Path) -> tuple[dict[str, str], list[str]]:
     return bound, relative
 
 
+class RootComponents(unittest.TestCase):
+    def fixture(self, component: str = "arbol-root") -> Fixture:
+        f = Fixture(self, component)
+        roots = os.path.join(f.home, "Library/Application Support/Arbol/roots")
+        write_root(roots, root_record("sapling", "working", "2026-10-16T09:00:00.000Z"))
+        write_root(roots, root_record("second", "working", "2026-10-16T10:00:00.000Z"))
+        return f
+
+    def test_builds_root_default_selects_only_that_root_in_the_arc_example(self) -> None:
+        """builds.root-default: Builds 5/6 for sapling and 7/8 for second choose 6 and 8, for both components."""
+        for component in ("arbol", "arbol-root"):
+            with self.subTest(component=component):
+                f = self.fixture(component)
+                os.makedirs(f.path("4"))  # consume the earlier numbers of ARC-1's example
+                records = [f.build("--root", root) for root in ("sapling", "sapling", "second", "second")]
+                self.assertEqual([r["build"] for r in records], ["5", "6", "7", "8"])
+                self.assertEqual(document(f.launch("--root", "sapling", "command"))["build"], "6")
+                self.assertEqual(document(f.launch("--root", "second", "command"))["build"], "8")
+                current = document(f.launch("command"))
+                self.assertEqual((current["build"], current["args"]), ("8", ["command"]))
+                self.assertEqual(document(f.launch())["args"], [])
+                Path(f.path("6/program.py")).unlink()
+                self.assertEqual(document(f.launch("--root", "sapling"))["build"], "5")
+                Path(f.path("5/program.py")).unlink()
+                refused = f.launch("--root", "sapling")
+                self.assertEqual(refused.returncode, 1)
+                self.assertEqual(document(refused)["error"]["code"], "build_unavailable")
+                self.assertIn(component, document(refused)["error"]["message"])
+                self.assertIn("sapling", document(refused)["error"]["message"])
+                self.assertEqual(document(refused)["error"]["available"], [])
+                self.assertEqual(document(f.launch())["build"], "8")
+
+    def test_builds_root_records_are_reread_and_only_working_roots_can_be_current(self) -> None:
+        """builds.root-refusals isolates damaged records and never substitutes another Root for an explicit one."""
+        f = self.fixture()
+        f.build("--root", "sapling")
+        f.build("--root", "second")
+        roots = os.path.join(f.home, "Library/Application Support/Arbol/roots")
+        write_root(roots, "{", "second")
+        self.assertEqual(document(f.launch())["build"], "1")
+        for args in (["--root", "second"], ["--root", "missing"], ["--root", "../sapling"], ["--root"]):
+            result = f.launch(*args)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(document(result)["error"]["code"], "unknown_root")
+            self.assertEqual(document(result)["error"]["available"], [])
+        write_root(roots, root_record("sapling", "failed", "2026-10-16T09:00:00.000Z"))
+        result = f.launch()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("none is working", document(result)["error"]["message"])
+        self.assertEqual(document(f.launch("--root", "sapling"))["build"], "1")
+        write_root(roots, root_record("second", "preparing", "2026-10-16T11:00:00.000Z"))
+        self.assertEqual(document(f.launch("--root", "second"))["build"], "2")
+        self.assertEqual(f.launch().returncode, 1)
+        write_root(roots, root_record("second", "working", "2026-10-16T11:00:00.000Z"))
+        self.assertEqual(document(f.launch())["build"], "2")
+
+    def test_builds_root_named_selection_uses_its_own_root_and_refuses_conflicting_selectors(self) -> None:
+        """builds.root-named covers independent current Root, explicit agreement, warnings and unavailable Builds."""
+        f = self.fixture()
+        f.build("--root", "sapling")
+        f.build("--root", "second")
+        self.assertEqual(document(f.launch("-v", "1", "run"))["build"], "1")
+        self.assertEqual(document(f.launch("--root", "sapling", "-v", "1", "run"))["build"], "1")
+        conflict = f.launch("--root", "second", "-v", "1", "run")
+        self.assertEqual(conflict.returncode, 1)
+        self.assertEqual(document(conflict)["error"]["code"], "invalid_input")
+        for root in ("sapling", "second"):
+            self.assertIn(root, document(conflict)["error"]["message"])
+        for number in ("0", "01", "A", "missing", "3"):
+            result = f.launch("--root", "sapling", "-v", number, "run")
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(document(result)["error"]["code"], "build_unavailable")
+            self.assertEqual(document(result)["error"]["available"], ["1"])
+        self.assertEqual(f.call("withdraw", f"{f.component}@1", "--reason", "private defect").returncode, 0)
+        result = f.launch("-v", "1", "run")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(b"withdrawn: private defect", result.stderr)
+        self.assertEqual(f.launch("--root", "sapling", "run").returncode, 1)
+        path = Path(f.path("1/build.json"))
+        record = json.loads(path.read_text())
+        record.update(status="failed", checks=[{"name": "private", "passed": False}],
+                      failure={"stage": "check", "name": "private", "message": "synthetic failure"})
+        path.write_text(json.dumps(record))
+        result = f.launch("-v", "1", "run")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(b"failed: check private", result.stderr)
+        record["status"] = "building"
+        path.write_text(json.dumps(record))
+        self.assertEqual(f.launch("-v", "1", "run").returncode, 1)
+        record["status"] = "failed"
+        path.write_text(json.dumps(record))
+        Path(f.path("1/program.py")).unlink()
+        self.assertEqual(f.launch("-v", "1", "run").returncode, 1)
+        self.assertEqual(document(f.launch())["build"], "2")
+        Path(f.home, "Library/Application Support/Arbol/roots/second/root.json").unlink()
+        missing = f.launch("-v", "2", "run")
+        self.assertEqual(document(missing)["error"]["code"], "unknown_root")
+
+    def test_builds_root_pass_through_preserves_arguments_streams_pid_signals_and_status(self) -> None:
+        """builds.root-pass-through adds no Root argument and preserves the caller's process contract."""
+        f = self.fixture()
+        f.build("--root", "sapling")
+        args = ["command", "two words", "", "--root", "second", "-v", "999"]
+        result = f.launch("--root", "sapling", "-v", "1", *args, marker="root caller")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        value = document(result)
+        self.assertEqual((value["build"], value["args"], value["cwd"], value["marker"]),
+                         ("1", args, f.home, "root caller"))
+        raw = b"bytes\x00\xff\nsecond line\n"
+        echo = f.launch("--root", "sapling", "--echo", data=raw)
+        self.assertEqual((echo.returncode, echo.stdout, echo.stderr), (0, raw, b"diagnostic\n"))
+        self.assertEqual(f.launch("--root", "sapling", "--exit", "23").returncode, 23)
+        child = subprocess.Popen([os.path.join(f.bin, f.component), "--root", "sapling", "--wait"],
+                                 cwd=f.home, env=f.env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.addCleanup(finish, child)
+        self.assertEqual(json.loads(first_line(child))["pid"], child.pid)
+        child.send_signal(signal.SIGINT)
+        output, errors = child.communicate(timeout=10)
+        self.assertEqual((child.returncode, output, errors), (2, b"interrupted\n", b""))
+        stamp = Path(f.path("1/last-start")).read_text().strip()
+        self.assertIsNotNone(milliseconds(stamp))
+
+    def test_builds_root_launcher_is_standalone_and_keeps_shared_top_level_names_distinct(self) -> None:
+        """builds.root-launcher-text carries no Root implementation and can start without source imports."""
+        f = self.fixture()
+        f.build("--root", "sapling")
+        text = Path(f.bin, f.component).read_text()
+        tree = ast.parse(text)
+        self.assertFalse(any(isinstance(node, ast.ImportFrom) and (node.level or
+                         node.module is not None and node.module.startswith("arbol_builds"))
+                         for node in ast.walk(tree)))
+        self.assertTrue(text.rstrip().endswith(f"sys.exit(launch_root({f.registry!r}, {f.component!r}, sys.argv[1:]))"))
+        names: dict[str, str] = {}
+        for module in ("launcher.py", "roots.py", "root_launcher.py"):
+            bound, relative = top_level_names(ROOT / "src/arbol_builds" / module)
+            self.assertTrue(all(name in names for name in relative), (module, relative, names))
+            for name, kind in bound.items():
+                self.assertTrue(name not in names or kind.startswith("import ") and kind == names[name],
+                                (module, name, kind, names.get(name)))
+            names.update(bound)
+        with mock.patch.dict(os.environ, f.env(), clear=True):
+            from arbol_builds.service import launcher_source
+            plain = launcher_source(f.registry, "arbol-app", PYTHON).decode()
+            trunk = launcher_source(f.registry, "arbol-trunk", PYTHON).decode()
+        self.assertNotIn("def select_root_build(", plain)
+        self.assertNotIn("def select_root_build(", trunk)
+
+    def test_builds_root_inventory_agrees_with_launchers_and_keeps_other_defaults_global(self) -> None:
+        """builds.root-inventory: explicit/current defaults agree; named introspection outlives a Root record."""
+        f = self.fixture()
+        for root in ("sapling", "sapling", "second", "second"):
+            f.build("--root", root)
+        for root, expected in (("sapling", "2"), ("second", "4")):
+            listed = f.call("list", f.component, "--root", root)
+            self.assertEqual(listed.returncode, 0, listed.stdout + listed.stderr)
+            self.assertEqual([r["build"] for r in document(listed) if r["default"]], [expected])
+            shown = f.call("show", f.component, "--root", root)
+            self.assertEqual(shown.returncode, 0, shown.stdout + shown.stderr)
+            self.assertEqual(document(shown)["build"], expected)
+            self.assertEqual(document(f.launch("--root", root))["build"], expected)
+        self.assertEqual(document(f.call("show", f.component))["build"], "4")
+        self.assertEqual([r["build"] for r in document(f.call("list", f.component)) if r["default"]], ["4"])
+        self.assertEqual(document(f.call("show", f"{f.component}@1", "--root", "sapling"))["build"], "1")
+        mismatch = f.call("show", f"{f.component}@1", "--root", "second")
+        self.assertEqual(mismatch.returncode, 1)
+        self.assertIn("belongs to Root sapling", document(mismatch)["error"]["message"])
+        f.configure(component="sample")
+        built = f.call("build", "sample", "--repo", f.repo)
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+        listed = f.call("list", "--root", "sapling")
+        defaults = {(r["component"], r["build"]) for r in document(listed) if r["default"]}
+        self.assertEqual(defaults, {("arbol-root", "2"), ("sample", "1")})
+        for command in ("list", "show"):
+            self.assertEqual(f.call(command, "sample", "--root", "sapling").returncode, 1)
+        roots = os.path.join(f.home, "Library/Application Support/Arbol/roots")
+        Path(roots, "sapling/root.json").unlink()
+        # Named record introspection stays available after a Root is removed; a default selection does not.
+        self.assertEqual(document(f.call("show", f"{f.component}@1"))["build"], "1")
+        self.assertEqual(document(f.call("show", f"{f.component}@1", "--root", "sapling"))["build"], "1")
+        self.assertEqual(f.call("show", f.component, "--root", "sapling").returncode, 1)
+        self.assertEqual(f.call("list", "--root", "sapling").returncode, 1)
+        write_root(roots, root_record("second", "failed", "2026-10-16T10:00:00.000Z"))
+        listed = f.call("list")
+        self.assertEqual(listed.returncode, 0, listed.stdout + listed.stderr)
+        self.assertEqual([(r["component"], r["build"]) for r in document(listed) if r["default"]], [("sample", "1")])
+        no_current = f.call("show", f.component)
+        self.assertEqual(no_current.returncode, 1)
+        self.assertIn("none is working", document(no_current)["error"]["message"])
+        self.assertEqual(document(f.call("show", "sample"))["build"], "1")
+
+
 class TrunkLauncher(unittest.TestCase):
     """The Roots as the launchers read them, and the launcher arbol-trunk (SYL-179; RCT-0.7 to 0.10, BLD-D17)."""
 
@@ -2364,6 +2555,7 @@ class Install(unittest.TestCase):
             "arbol-a": f"#!/x/python -ISB\n{LAUNCHER_MARK}\nsys.exit(launch({{[]: 1}}, \"arbol-a\", sys.argv[1:]))\n",
             "arbol-b": f"#!/x/python -ISB\n{LAUNCHER_MARK}\nsys.exit(start({registry}, \"arbol-b\", sys.argv[1:]))\n",
             "arbol-c": f"#!/x/python -ISB\n{LAUNCHER_MARK}\nsys.exit(launch_trunk({registry}, \"arbol-c\", []))\n",
+            "arbol-d": f"#!/x/python -ISB\n{LAUNCHER_MARK}\nsys.exit(launch_root({registry}, \"arbol-d\", []))\n",
             # The Trunks' launcher under another name.
             "trunks-renamed": f"#!/x/python -ISB\n{LAUNCHER_MARK}\nsys.exit(launch_trunk({registry}, sys.argv[1:]))\n",
         }
@@ -2398,14 +2590,32 @@ class Install(unittest.TestCase):
         # A launcher that a running build is writing stays.
         writing = Path(self.folder, f"{f.component}.{os.getpid()}.{uuid.uuid4()}.tmp")
         writing.write_text("being written")
+        root_fixtures = [Fixture(self, component) for component in ("arbol", "arbol-root")]
+        for fixture in root_fixtures:
+            fixture.build("--root", "sapling")
+            write_root(os.path.join(fixture.home, "Library/Application Support/Arbol/roots"), root_record("sapling"))
+            text = Path(fixture.bin, fixture.component).read_text()
+            if fixture.component == "arbol":
+                # An older generic launcher upgrades; the other exercises future recognition of launch_root.
+                text = text.replace("sys.exit(launch_root(", "sys.exit(launch(")
+            Path(self.folder, fixture.component).write_text(text)
         result = self.install(f"--bin-dir={self.folder}")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(document(result)["launchers"], ["arbol-trunk", "sample", "second"])
+        self.assertEqual(document(result)["launchers"], ["arbol", "arbol-root", "arbol-trunk", "sample", "second"])
         python = document(result)["python"]
         for name in ("sample", "second"):
             text = Path(self.folder, name).read_text()
             self.assertEqual(text.split("\n", 1)[0], f"#!{python} -ISB")
             self.assertTrue(text.rstrip().endswith(f"launch({os.path.abspath(f.registry)!r}, {name!r}, sys.argv[1:]))"))
+        for fixture in root_fixtures:
+            text = Path(self.folder, fixture.component).read_text()
+            self.assertEqual(text.split("\n", 1)[0], f"#!{python} -ISB")
+            self.assertTrue(text.rstrip().endswith(
+                f"launch_root({fixture.registry!r}, {fixture.component!r}, sys.argv[1:]))"))
+            started_root = subprocess.run([os.path.join(self.folder, fixture.component), "--root", "sapling", "probe"],
+                                          env=fixture.env(), capture_output=True, timeout=60, check=False)
+            self.assertEqual(started_root.returncode, 0, started_root.stdout + started_root.stderr)
+            self.assertEqual((document(started_root)["build"], document(started_root)["args"]), ("1", ["probe"]))
         # arbol-trunk holds the current code for the same registry, and runs with the installed Python.
         trunks = Path(self.folder, "arbol-trunk").read_text()
         self.assertEqual(trunks.split("\n", 1)[0], f"#!{python} -ISB")
