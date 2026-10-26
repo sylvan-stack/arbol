@@ -47,20 +47,111 @@ def record(name: str = "sapling", state: str = "preparing", created: str = "2026
     return value
 
 
+def database_fixture(test: unittest.TestCase) -> Places:
+    home = Path(tempfile.mkdtemp(prefix="Arbol's database access "))
+    test.addCleanup(shutil.rmtree, home, True)
+    config = home / "database.json"
+    config.write_text(json.dumps({"address": "postgresql://arbol@127.0.0.1:5433"}))
+    for kind, values in (("security", {"password": "private-test-password"}), ("psql", {})):
+        program = home / kind
+        program.write_text(DATABASE_STAND_IN)
+        program.chmod(0o755)
+        (home / (kind + ".json")).write_text(json.dumps(values))
+    return replace(places({"--database-config": str(config), "--security": str(home / "security"),
+                           "--psql": str(home / "psql"), "--roots-dir": str(home / "roots"),
+                           "--settings-dir": str(home / "settings"), "--registry-dir": str(home / "registry")}), home=home)
+
+
+def roots_command(paths: Places, *args: str) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run([sys.executable, "-I", "-B", str(ENTRY), *args,
+                           "--roots-dir", str(paths.roots), "--settings-dir", str(paths.settings),
+                           "--registry-dir", str(paths.registry), "--database-config", str(paths.database_config),
+                           "--psql", paths.psql, "--security", paths.security],
+                          cwd=paths.home, env={**ENV, "HOME": str(paths.home)}, capture_output=True, timeout=20, check=False)
+
+
+def build_record(paths: Places, component: str, number: str, **extra: Any) -> dict[str, Any]:
+    folder = paths.registry / component / number
+    folder.mkdir(parents=True)
+    value: dict[str, Any] = {"component": component, "build": number, "packageVersion": "1.0.0", "status": "working",
+                             "startedAt": "2026-10-26T09:00:00.000Z", "finishedAt": "2026-10-26T09:00:01.000Z",
+                             "source": {"repository": "/private", "branch": "main", "commit": "fixture",
+                                        "uncommittedChanges": False}, "entry": "program", "checks": [
+                                 {"name": "private", "passed": True}], **extra}
+    (folder / "build.json").write_text(json.dumps(value))
+    (folder / "program").write_text("#!/bin/sh\nexit 0\n")
+    (folder / "program").chmod(0o755)
+    return value
+
+
+class Commands(unittest.TestCase):
+    def test_roots_create_writes_a_complete_preparing_record_settings_and_only_an_empty_database_command(self) -> None:
+        """roots.create: private paths, App bootstrap, explicit version and App selection, with no Root script."""
+        paths = database_fixture(self)
+        first = roots_command(paths, "create", "sapling", "--name", "First Sapling")
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        value = json.loads(first.stdout)
+        expected = {**record(), "name": "First Sapling"}
+        expected.pop("createdAt")
+        self.assertEqual({key: item for key, item in value.items() if key != "createdAt"}, expected)
+        self.assertEqual(value["name"], "First Sapling")
+        self.assertTrue((paths.settings / "sapling").is_dir())
+        self.assertEqual(set(p.name for p in (paths.roots / "sapling").iterdir()), {"root.json"})
+        self.assertEqual(json.loads((paths.roots / "sapling/root.json").read_text()), value)
+        build_record(paths, "arbol-app", "a")
+        build_record(paths, "arbol-app", "b")
+        (paths.registry / "arbol-app/b/program").unlink()
+        second = roots_command(paths, "create", "second", "--name", "Second", "--root-contract", "2",
+                               "--database-name", 'private"database')
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        value = json.loads(second.stdout)
+        self.assertEqual((value["rootContract"], value["app"], value["database"]), (2, "a", 'private"database'))
+        calls = [json.loads(line) for line in (paths.home / "calls.jsonl").read_text().splitlines()]
+        commands = [row["args"][-1] for row in calls if row["kind"] == "psql"]
+        self.assertEqual(len(commands), 2)
+        self.assertTrue(all(command.startswith("CREATE DATABASE ") for command in commands))
+        self.assertFalse(Path(paths.home, "Library").exists())
+        self.assertFalse(Path(paths.home, ".arbol").exists())
+
+    def test_roots_create_refuses_invalid_existing_or_claimed_targets_and_preserves_previous_state(self) -> None:
+        """roots.create-refusal: input and target failures make no Root or database and overwrite nothing."""
+        paths = database_fixture(self)
+        for args in (("create", "sapling"), ("create", "sapling", "--name", " "),
+                     ("create", "../sapling", "--name", "x"),
+                     ("create", "sapling", "--name", "x", "--root-contract", "0"),
+                     ("create", "sapling", "--name", "x", "--root-contract", "1.5"),
+                     ("create", "sapling", "--name", "x", "--database-name", "postgres")):
+            result = roots_command(paths, *args)
+            self.assertEqual(result.returncode, 1, args)
+            self.assertEqual(json.loads(result.stdout)["error"]["code"], "invalid_input", args)
+            self.assertFalse((paths.roots / "sapling").exists())
+            self.assertFalse((paths.home / "calls.jsonl").exists())
+        first = roots_command(paths, "create", "sapling", "--name", "First")
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        before = (paths.roots / "sapling/root.json").read_bytes()
+        for args in (("create", "sapling", "--name", "replacement"),
+                     ("create", "second", "--name", "x", "--database-name", "arbol_sapling")):
+            result = roots_command(paths, *args)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(json.loads(result.stdout)["error"]["code"], "already_exists")
+        self.assertEqual((paths.roots / "sapling/root.json").read_bytes(), before)
+        self.assertFalse((paths.roots / "second").exists())
+        self.assertEqual((paths.home / "calls.jsonl").read_text().count('"kind": "psql"'), 1)
+
+    def test_roots_create_database_failure_leaves_no_published_or_half_created_root(self) -> None:
+        """roots.create-failure: a confirmed SQL refusal removes only this attempt's unpublished folders."""
+        paths = database_fixture(self)
+        (paths.home / "psql.json").write_text(json.dumps({"status": 3, "stderr": "private database refusal"}))
+        result = roots_command(paths, "create", "sapling", "--name", "First")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(json.loads(result.stdout)["error"]["code"], "database_unavailable")
+        self.assertFalse((paths.roots / "sapling").exists())
+        self.assertFalse((paths.settings / "sapling").exists())
+
+
 class DatabaseAccess(unittest.TestCase):
     def fixture(self) -> Places:
-        home = Path(tempfile.mkdtemp(prefix="Arbol's database access "))
-        self.addCleanup(shutil.rmtree, home, True)
-        config = home / "database.json"
-        config.write_text(json.dumps({"address": "postgresql://arbol@127.0.0.1:5433"}))
-        for kind, values in (("security", {"password": "private-test-password"}), ("psql", {})):
-            program = home / kind
-            program.write_text(DATABASE_STAND_IN)
-            program.chmod(0o755)
-            (home / (kind + ".json")).write_text(json.dumps(values))
-        return replace(places({"--database-config": str(config), "--security": str(home / "security"),
-                               "--psql": str(home / "psql"), "--roots-dir": str(home / "roots"),
-                               "--settings-dir": str(home / "settings")}), home=home)
+        return database_fixture(self)
 
     def test_roots_database_commands_quote_names_use_a_pristine_template_and_never_force_drop(self) -> None:
         """roots.database-ddl: one quoted identifier, template0 and UTF-8; DROP does not end other connections."""

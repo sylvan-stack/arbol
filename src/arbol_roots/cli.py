@@ -6,6 +6,7 @@ from arbol_builds.cli import options
 from arbol_builds.launcher import json_line, standard_descriptors, write_all
 
 from .model import Refused, identifier, list_roots, places, selected
+from .operations import create
 
 USAGE = ("arbol-roots create <root> --name <text> [--from <root>] [--root-contract <version>] "
          "[--database-name <name>] | list | show [<root>] | ready <root> | fail <root> --reason <text> "
@@ -37,6 +38,8 @@ def main(args: list[str]) -> int:
             result = list_roots(paths)
         elif command == "show":
             result = selected(paths, arguments[0] if arguments else None)
+        elif command == "create":
+            result = create(paths, arguments[0], values)
         else:
             raise Refused("invalid_input", f"The {command} command is not available in this development step.")
         write_all(1, json_line(result))

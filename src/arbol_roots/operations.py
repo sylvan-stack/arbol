@@ -4,17 +4,18 @@ import errno
 import fcntl
 import hashlib
 import os
+import re
 import shutil
 import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
 from types import TracebackType
 
-from arbol_builds.launcher import Record
-from arbol_builds.service import atomic_write, json_text
+from arbol_builds.launcher import SAFE_INTEGER, Record, default_record, read_records
+from arbol_builds.service import atomic_write, json_text, now
 
 from .database import Database, DatabaseError
-from .model import Places, Refused, identifier, save_record, validate_record
+from .model import Places, Refused, catalogue, database_name, identifier, nonblank, save_record, validate_record
 
 
 @contextmanager
@@ -43,6 +44,32 @@ def default_database_name(root: str) -> str:
     if len(root) <= 57:
         return "arbol_" + root
     return "arbol_" + root[:40] + "_" + hashlib.sha256(root.encode("ascii")).hexdigest()[:16]
+
+
+def contract_version(value: str) -> int:
+    if len(value) > 16 or re.fullmatch(r"[1-9][0-9]*", value) is None or int(value) > SAFE_INTEGER:
+        raise Refused("invalid_input", "A Root Contract version must be a positive safe whole number.")
+    return int(value)
+
+
+def create(paths: Places, root: str, options: dict[str, str]) -> Record:
+    identifier(root)
+    name = nonblank(options.get("--name"), "Display name")
+    version = contract_version(options.get("--root-contract", "1"))
+    target_database = database_name(options.get("--database-name", default_database_name(root)))
+    if "--from" in options:
+        raise Refused("invalid_input", "Creation from another Root is not available in this development step.")
+    with catalogue_lock(paths):
+        if any(record.get("database") == target_database for record in catalogue(paths)):
+            raise Refused("already_exists", "Another retained Root already names that database.")
+        app = default_record(str(paths.registry), read_records(str(paths.registry), "arbol-app"))
+        record: Record = {"root": root, "name": name, "status": "preparing", "createdAt": now(),
+                          "database": target_database, "app": app["build"] if app is not None else "0",
+                          "rootContract": version}
+        with Creation(paths, record) as attempt:
+            attempt.make_database(Database(paths))
+            attempt.publish()
+        return record
 
 
 class Creation:
