@@ -9,9 +9,11 @@ import shutil
 import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from types import TracebackType
 
-from arbol_builds.launcher import SAFE_INTEGER, Record, default_record, read_records
+from arbol_builds.launcher import BUILD_PATTERN, SAFE_INTEGER, Record, default_record, read_records
+from arbol_builds.roots import current_root
 from arbol_builds.service import atomic_write, json_text, now
 
 from .database import Database, DatabaseError
@@ -92,6 +94,96 @@ def create(paths: Places, root: str, options: dict[str, str]) -> Record:
         return record
 
 
+def ready(paths: Places, root: str) -> Record:
+    with catalogue_lock(paths):
+        record = dict(selected(paths, root))
+        candidates = [build for build in read_records(str(paths.registry), "arbol-trunk/trivial")
+                      if record["rootContract"] in build["rootContracts"]]
+        if default_record(str(paths.registry), candidates) is None:
+            raise Refused("no_fit", f"Root {root} needs a runnable working Trivial Trunk Build for Root Contract "
+                                    f"{record['rootContract']}.")
+        record["status"] = "working"
+        record.pop("failed", None)
+        save_record(paths, record)
+        return record
+
+
+def fail(paths: Places, root: str, reason: object) -> Record:
+    explanation = nonblank(reason, "Failure reason")
+    with catalogue_lock(paths):
+        record = dict(selected(paths, root))
+        if record["status"] != "working":
+            raise Refused("invalid_input", "Only a working Root can be marked failed.")
+        record["status"] = "failed"
+        record["failed"] = {"at": now(), "reason": explanation}
+        save_record(paths, record)
+        return record
+
+
+def app(paths: Places, root: str, number: str) -> Record:
+    if BUILD_PATTERN.fullmatch(number) is None:
+        raise Refused("invalid_input", "An App Build number is canonical lower-case hexadecimal, without leading zero.")
+    with catalogue_lock(paths):
+        record = dict(selected(paths, root))
+        validate_record(record)
+        found = default_record(str(paths.registry), [build for build in read_records(str(paths.registry), "arbol-app")
+                                                     if build["build"] == number])
+        if found is None:
+            raise Refused("build_unavailable", f"No runnable working arbol-app@{number} Build is available.")
+        if int(number, 16) < int(record.get("app", "0"), 16):
+            raise Refused("invalid_input", "The App minimum may be raised or repeated, never lowered.")
+        record["app"] = number
+        save_record(paths, record)
+        return record
+
+
+def distinct_targets(state: Path, settings: Path) -> None:
+    a, b = state.resolve(), settings.resolve()
+    if a.is_relative_to(b) or b.is_relative_to(a):
+        raise Refused("invalid_input", "The Root's state and settings targets must not overlap.")
+
+
+def remove(paths: Places, root: str) -> Record:
+    with catalogue_lock(paths):
+        record = selected(paths, root)
+        records = catalogue(paths)
+        current = current_root(records)
+        if current is not None and current["root"] == root:
+            raise Refused("current_root", "The current Root cannot be removed.")
+        name = database_name(record.get("database"))
+        if any(other["root"] != root and other.get("database") == name for other in records):
+            raise Refused("invalid_input", "Another retained Root names the same database; removal is refused.")
+        state, settings = paths.roots / root, paths.settings / root
+        if state.is_symlink() or settings.is_symlink():
+            raise Refused("invalid_input", "The Root's removal targets must not be symlinks.")
+        distinct_targets(state, settings)
+        if not state.is_dir() or (os.path.lexists(settings) and not settings.is_dir()):
+            raise Refused("operation_failed", "The Root's state/settings targets must be directories.")
+        Database(paths).drop(name)
+        try:
+            if settings.exists():
+                shutil.rmtree(settings)
+            # Keep root.json until all payload has gone, so an ordinary cleanup failure can be retried.
+            for child in state.iterdir():
+                if child.name == "root.json":
+                    continue
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+            (state / "root.json").unlink()
+            state.rmdir()
+        except OSError as error:
+            if state.is_dir() and not state.is_symlink() and not (state / "root.json").exists():
+                try:
+                    save_record(paths, record)
+                except Exception:
+                    pass
+            raise Refused("operation_failed", f"The database was removed, but folder cleanup for Root {root} "
+                                              "is incomplete; retry remove or inspect its remaining files.") from error
+        return record
+
+
 class Creation:
     """Own only the folders and database this attempt made; keep a receipt when rollback cannot be proved."""
 
@@ -110,9 +202,7 @@ class Creation:
         self.committed = False
 
     def __enter__(self) -> Creation:
-        a, b = self.root.resolve(), self.settings.resolve()
-        if a.is_relative_to(b) or b.is_relative_to(a):
-            raise Refused("invalid_input", "The Root's state and settings targets must not overlap.")
+        distinct_targets(self.root, self.settings)
         if os.path.lexists(self.root) or os.path.lexists(self.settings):
             raise Refused("already_exists", "The Root's state or settings target already exists.")
         try:

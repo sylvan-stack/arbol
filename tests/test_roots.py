@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from arbol_builds.roots import current_root, read_roots  # noqa: E402
 from arbol_roots.database import Database, DatabaseError, environment  # noqa: E402
 from arbol_roots.model import Places, Refused, catalogue, places, save_record  # noqa: E402
-from arbol_roots.operations import Creation, catalogue_lock, create, default_database_name  # noqa: E402
+from arbol_roots.operations import Creation, catalogue_lock, create, default_database_name, remove  # noqa: E402
 
 ENTRY = ROOT / "bin/roots_entry.py"
 ENV = {"PATH": "/usr/bin:/bin", "LANG": "en_US.UTF-8"}
@@ -85,6 +85,168 @@ def build_record(paths: Places, component: str, number: str, **extra: Any) -> di
 
 
 class Commands(unittest.TestCase):
+    def test_roots_app_minimum_requires_an_available_working_build_and_never_moves_backwards(self) -> None:
+        """roots.app: bootstrap is replaced by an available minimum, with idempotence and monotonic hexadecimal order."""
+        paths = database_fixture(self)
+        made = roots_command(paths, "create", "sapling", "--name", "First")
+        self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
+        for number in ("9", "a"):
+            build_record(paths, "arbol-app", number)
+        build_record(paths, "arbol-app", "b", status="withdrawn",
+                     withdrawn={"at": "2026-10-26T10:00:00.000Z", "reason": "private"})
+        build_record(paths, "arbol-app", "c", status="failed")
+        build_record(paths, "arbol-app", "d")
+        (paths.registry / "arbol-app/d/program").unlink()
+        result = roots_command(paths, "app", "sapling", "a")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["app"], "a")
+        self.assertEqual(json.loads(roots_command(paths, "app", "sapling", "a").stdout), json.loads(result.stdout))
+        before = (paths.roots / "sapling/root.json").read_bytes()
+        for number, code in (("9", "invalid_input"), ("b", "build_unavailable"), ("c", "build_unavailable"),
+                             ("d", "build_unavailable"), ("e", "build_unavailable"), ("0", "invalid_input")):
+            refused = roots_command(paths, "app", "sapling", number)
+            self.assertEqual(refused.returncode, 1)
+            self.assertEqual(json.loads(refused.stdout)["error"]["code"], code)
+            self.assertEqual((paths.roots / "sapling/root.json").read_bytes(), before)
+
+    def test_roots_remove_never_removes_current_and_deletes_only_the_named_noncurrent_root(self) -> None:
+        """roots.remove: current is refused before SQL, while a noncurrent Root's own database/settings/state go."""
+        paths = database_fixture(self)
+        build_record(paths, "arbol-trunk/trivial", "1", rootContracts=[1])
+        for name in ("sapling", "second"):
+            result = roots_command(paths, "create", name, "--name", name.title())
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(roots_command(paths, "ready", "sapling").returncode, 0)
+        source_record = (paths.roots / "sapling/root.json").read_bytes()
+        (paths.settings / "sapling/arbol.json").write_text("keep source settings")
+        refused = roots_command(paths, "remove", "sapling")
+        self.assertEqual(refused.returncode, 1)
+        self.assertEqual(json.loads(refused.stdout)["error"]["code"], "current_root")
+        self.assertEqual((paths.home / "calls.jsonl").read_text().count('"kind": "psql"'), 2)
+        removed = roots_command(paths, "remove", "second")
+        self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
+        self.assertEqual(json.loads(removed.stdout)["root"], "second")
+        self.assertFalse((paths.roots / "second").exists())
+        self.assertFalse((paths.settings / "second").exists())
+        self.assertEqual((paths.roots / "sapling/root.json").read_bytes(), source_record)
+        self.assertEqual((paths.settings / "sapling/arbol.json").read_text(), "keep source settings")
+        calls = [json.loads(line) for line in (paths.home / "calls.jsonl").read_text().splitlines()]
+        self.assertEqual([row["args"][-1] for row in calls if row["kind"] == "psql"][-1],
+                         'DROP DATABASE IF EXISTS "arbol_second"')
+
+    def test_roots_remove_database_failure_or_duplicate_claim_preserves_all_files(self) -> None:
+        """roots.remove-refusal: DROP failure, a shared database claim and symlink targets authorize no deletion."""
+        paths = database_fixture(self)
+        self.assertEqual(roots_command(paths, "create", "sapling", "--name", "First").returncode, 0)
+        (paths.settings / "sapling/arbol.json").write_text("private settings")
+        before = (paths.roots / "sapling/root.json").read_bytes()
+        (paths.home / "psql.json").write_text(json.dumps({"status": 3, "stderr": "database has open connections"}))
+        refused = roots_command(paths, "remove", "sapling")
+        self.assertEqual(refused.returncode, 1)
+        self.assertEqual(json.loads(refused.stdout)["error"]["code"], "database_unavailable")
+        self.assertEqual((paths.roots / "sapling/root.json").read_bytes(), before)
+        self.assertEqual((paths.settings / "sapling/arbol.json").read_text(), "private settings")
+        (paths.roots / "second").mkdir()
+        save_record(paths, {**record("second"), "database": "arbol_sapling"}, complete=True)
+        calls_before = (paths.home / "calls.jsonl").read_bytes()
+        refused = roots_command(paths, "remove", "sapling")
+        self.assertEqual(json.loads(refused.stdout)["error"]["code"], "invalid_input")
+        self.assertEqual((paths.home / "calls.jsonl").read_bytes(), calls_before)
+        (paths.roots / "second/root.json").unlink()
+        target = paths.home / "elsewhere"
+        (paths.settings / "sapling").rename(target)
+        (paths.settings / "sapling").symlink_to(target, target_is_directory=True)
+        refused = roots_command(paths, "remove", "sapling")
+        self.assertEqual(json.loads(refused.stdout)["error"]["code"], "invalid_input")
+        self.assertEqual((paths.home / "calls.jsonl").read_bytes(), calls_before)
+        self.assertEqual((target / "arbol.json").read_text(), "private settings")
+
+    def test_roots_remove_reports_partial_filesystem_cleanup_and_can_be_retried(self) -> None:
+        """roots.remove-retry: a completed DROP with failed folder cleanup retains its record for a truthful retry."""
+        paths = database_fixture(self)
+        self.assertEqual(roots_command(paths, "create", "sapling", "--name", "First").returncode, 0)
+        with mock.patch("arbol_roots.operations.shutil.rmtree", side_effect=PermissionError("private cleanup failure")):
+            with self.assertRaisesRegex(Refused, "database was removed.*cleanup.*incomplete"):
+                remove(paths, "sapling")
+        self.assertTrue((paths.roots / "sapling/root.json").exists())
+        retried = roots_command(paths, "remove", "sapling")
+        self.assertEqual(retried.returncode, 0, retried.stdout + retried.stderr)
+        self.assertFalse((paths.roots / "sapling").exists())
+
+    def test_roots_ready_requires_a_runnable_working_compatible_trivial_build(self) -> None:
+        """roots.ready: only a working runnable Trivial Build of the Root's contract permits readiness."""
+        paths = database_fixture(self)
+        made = roots_command(paths, "create", "sapling", "--name", "First", "--root-contract", "2")
+        self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
+        before = (paths.roots / "sapling/root.json").read_bytes()
+
+        def refused() -> None:
+            result = roots_command(paths, "ready", "sapling")
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(json.loads(result.stdout)["error"]["code"], "no_fit")
+            self.assertIn("Root Contract 2", json.loads(result.stdout)["error"]["message"])
+            self.assertEqual((paths.roots / "sapling/root.json").read_bytes(), before)
+
+        refused()
+        build_record(paths, "arbol-trunk/other", "1", rootContracts=[2])
+        build_record(paths, "arbol-trunk/trivial", "1", rootContracts=[1])
+        refused()
+        build_record(paths, "arbol-trunk/trivial", "2", rootContracts=[2])
+        (paths.registry / "arbol-trunk/trivial/2/program").unlink()
+        build_record(paths, "arbol-trunk/trivial", "3", rootContracts=[2], status="building")
+        build_record(paths, "arbol-trunk/trivial", "4", rootContracts=[2], status="withdrawn",
+                     withdrawn={"at": "2026-10-26T10:00:00.000Z", "reason": "private"})
+        build_record(paths, "arbol-trunk/trivial", "5", rootContracts=[2], status="failed")
+        refused()
+        build_record(paths, "arbol-trunk/trivial", "6", rootContracts=[2])
+        result = roots_command(paths, "ready", "sapling")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["status"], "working")
+        self.assertEqual(json.loads(result.stdout)["rootContract"], 2)
+
+    def test_roots_ready_and_fail_reread_current_preserve_identity_and_clear_an_old_failure(self) -> None:
+        """roots.states: preparing/failed Roots are never current, and readiness restores the same identity."""
+        paths = database_fixture(self)
+        build_record(paths, "arbol-trunk/trivial", "1", rootContracts=[1])
+        first = roots_command(paths, "create", "sapling", "--name", "First")
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertEqual(roots_command(paths, "ready", "sapling").returncode, 0)
+        second = roots_command(paths, "create", "second", "--name", "Second", "--from", "sapling")
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        original = json.loads(second.stdout)
+        self.assertEqual(json.loads(roots_command(paths, "show").stdout)["root"], "sapling")
+        invalid = roots_command(paths, "fail", "second", "--reason", "not working yet")
+        self.assertEqual(invalid.returncode, 1)
+        self.assertEqual(json.loads(invalid.stdout)["error"]["code"], "invalid_input")
+        self.assertEqual(roots_command(paths, "ready", "second").returncode, 0)
+        self.assertEqual(json.loads(roots_command(paths, "show").stdout)["root"], "second")
+        failed = roots_command(paths, "fail", "second", "--reason", "private failure")
+        self.assertEqual(failed.returncode, 0, failed.stdout + failed.stderr)
+        self.assertEqual(json.loads(failed.stdout)["failed"]["reason"], "private failure")
+        self.assertEqual(json.loads(roots_command(paths, "show").stdout)["root"], "sapling")
+        for key in ("root", "database", "app", "grewFrom", "rootContract", "createdAt"):
+            self.assertEqual(json.loads(failed.stdout)[key], original[key])
+        restored = roots_command(paths, "ready", "second")
+        self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
+        self.assertNotIn("failed", json.loads(restored.stdout))
+        self.assertEqual(json.loads(restored.stdout)["createdAt"], original["createdAt"])
+        self.assertEqual(json.loads(roots_command(paths, "show").stdout)["root"], "second")
+        again = roots_command(paths, "ready", "second")
+        self.assertEqual(json.loads(again.stdout), json.loads(restored.stdout))
+        self.assertEqual(roots_command(paths, "fail", "second", "--reason", " ").returncode, 1)
+
+    def test_roots_state_command_uses_the_catalogue_lock_and_changes_nothing_while_busy(self) -> None:
+        """roots.state-busy: the CLI mutation shares the same lock as create/remove and current selection."""
+        paths = database_fixture(self)
+        made = roots_command(paths, "create", "sapling", "--name", "First")
+        self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
+        before = (paths.roots / "sapling/root.json").read_bytes()
+        with catalogue_lock(paths):
+            result = roots_command(paths, "ready", "sapling")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(json.loads(result.stdout)["error"]["code"], "busy")
+        self.assertEqual((paths.roots / "sapling/root.json").read_bytes(), before)
+
     def test_roots_create_from_records_lineage_inherits_or_overrides_contract_and_copies_settings_once(self) -> None:
         """roots.create-from: source settings stay independent, opaque and unchanged, and no migration runs."""
         paths = database_fixture(self)
