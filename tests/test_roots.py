@@ -5,6 +5,7 @@ import ast
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -158,7 +159,13 @@ def real_server_example(tool: str | None = None) -> dict[str, object]:
             first = call("create", "sapling", "--name", "First Sapling", "--database-name", names["sapling"])
             require(first["status"] == "preparing" and first["rootContract"] == 1, "First Root metadata differs.")
             require(empty(names["sapling"]), "The first new database is not empty.")
+            exchanges = paths.roots / "sapling/exchanges"
+            require(exchanges.is_dir() and stat.S_IMODE(exchanges.stat().st_mode) == 0o700,
+                    "Creation did not provide a private Exchange coordination directory.")
+            exchanges.rmdir()  # A Root created by an older catalogue needs the same bootstrap at ready.
             call("ready", "sapling")
+            require(exchanges.is_dir() and stat.S_IMODE(exchanges.stat().st_mode) == 0o700,
+                    "Readiness did not repair an older Root's missing Exchange directory.")
             (paths.settings / "sapling/arbol.json").write_text('{"brain":"private acceptance recipe"}\n')
             attempted.append(names["second"])
             second = call("create", "second", "--name", "Second", "--from", "sapling",
@@ -192,7 +199,8 @@ def real_server_example(tool: str | None = None) -> dict[str, object]:
                 database.drop(name)
         return {"passed": True, "checks": ["three-empty-databases", "settings-copy", "version-inheritance",
                                             "explicit-version-2", "ready-fail-current", "current-removal-refusal",
-                                            "database-and-folder-removal", "existing-database-refusal"],
+                                            "database-and-folder-removal", "existing-database-refusal",
+                                            "private-exchange-directory", "legacy-exchange-directory-repair"],
                 "databasesLeft": 0, "vendorRequests": 0}
 
 
@@ -360,6 +368,54 @@ class Commands(unittest.TestCase):
         self.assertEqual(json.loads(again.stdout), json.loads(restored.stdout))
         self.assertEqual(roots_command(paths, "fail", "second", "--reason", " ").returncode, 1)
 
+    def test_roots_ready_repairs_a_legacy_exchange_directory_and_preserves_existing_payload_and_mode(self) -> None:
+        """roots.exchanges: readiness repairs older Roots before a first Trunk can lock their directory."""
+        paths = database_fixture(self)
+        self.assertEqual(roots_command(paths, "create", "sapling", "--name", "First").returncode, 0)
+        folder = paths.roots / "sapling/exchanges"
+        folder.rmdir()
+        # No compatible Trunk means no filesystem or record repair yet.
+        before = (paths.roots / "sapling/root.json").read_bytes()
+        self.assertEqual(roots_command(paths, "ready", "sapling").returncode, 1)
+        self.assertFalse(folder.exists())
+        self.assertEqual((paths.roots / "sapling/root.json").read_bytes(), before)
+        build_record(paths, "arbol-trunk/trivial", "1", rootContracts=[1])
+        result = roots_command(paths, "ready", "sapling")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o700)
+        folder.chmod(0o750)
+        (folder / "existing").write_bytes(b"opaque exchange payload")
+        working = (paths.roots / "sapling/root.json").read_bytes()
+        self.assertEqual(roots_command(paths, "ready", "sapling").returncode, 0)
+        self.assertEqual((folder / "existing").read_bytes(), b"opaque exchange payload")
+        self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o750)
+        self.assertEqual((paths.roots / "sapling/root.json").read_bytes(), working)
+
+    def test_roots_ready_refuses_file_and_symlink_exchange_paths_without_changing_the_record(self) -> None:
+        """roots.exchanges-refusal: a file or symlink never becomes a Trunk's coordination directory."""
+        paths = database_fixture(self)
+        self.assertEqual(roots_command(paths, "create", "sapling", "--name", "First").returncode, 0)
+        build_record(paths, "arbol-trunk/trivial", "1", rootContracts=[1])
+        folder = paths.roots / "sapling/exchanges"
+        folder.rmdir()
+        other = paths.home / "other"
+        other.mkdir()
+        (other / "untouched").write_text("preserve")
+        before = (paths.roots / "sapling/root.json").read_bytes()
+        for kind in ("file", "directory-link", "dangling-link"):
+            with self.subTest(kind=kind):
+                if kind == "file":
+                    folder.write_text("preserve")
+                else:
+                    folder.symlink_to(other if kind == "directory-link" else paths.home / "missing")
+                result = roots_command(paths, "ready", "sapling")
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(json.loads(result.stdout)["error"]["code"], "operation_failed")
+                self.assertEqual((paths.roots / "sapling/root.json").read_bytes(), before)
+                self.assertEqual((other / "untouched").read_text(), "preserve")
+                self.assertTrue(os.path.lexists(folder))
+                folder.unlink()
+
     def test_roots_state_command_uses_the_catalogue_lock_and_changes_nothing_while_busy(self) -> None:
         """roots.state-busy: the CLI mutation shares the same lock as create/remove and current selection."""
         paths = database_fixture(self)
@@ -432,7 +488,8 @@ class Commands(unittest.TestCase):
         self.assertEqual({key: item for key, item in value.items() if key != "createdAt"}, expected)
         self.assertEqual(value["name"], "First Sapling")
         self.assertTrue((paths.settings / "sapling").is_dir())
-        self.assertEqual(set(p.name for p in (paths.roots / "sapling").iterdir()), {"root.json"})
+        self.assertEqual(set(p.name for p in (paths.roots / "sapling").iterdir()), {"root.json", "exchanges"})
+        self.assertEqual(stat.S_IMODE((paths.roots / "sapling/exchanges").stat().st_mode), 0o700)
         self.assertEqual(json.loads((paths.roots / "sapling/root.json").read_text()), value)
         build_record(paths, "arbol-app", "a")
         build_record(paths, "arbol-app", "b")
