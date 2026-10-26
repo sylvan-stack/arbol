@@ -1,4 +1,4 @@
-"""arbol-builds and its launchers (BLD-0.1 to 0.17 and 0.21 to 0.23), and the launcher arbol-trunk
+"""arbol-builds and its launchers (BLD-0.1 to 0.17 and 0.21 to 0.24), and the launcher arbol-trunk
 (RCT-0.7 to 0.10): the checks named builds.* in BLD-0 and RCT-0.
 
 The same checks the TypeScript tool had, under the same names, the checks of what the Python
@@ -2218,6 +2218,18 @@ class Install(unittest.TestCase):
         started = subprocess.run([os.path.join(self.folder, f.component)], env=ENV, capture_output=True, timeout=60,
                                  check=False)
         self.assertEqual(document(started)["build"], "1")
+        self.assertTrue(Path(f.path("1/last-start")).is_file())
+        t = Trunks(self)
+        t.build("trivial", "1", [1])
+        shutil.copytree(Path(t.registry, "arbol-trunk"), Path(f.registry, "arbol-trunk"))
+        started_trunk = subprocess.run([os.path.join(self.folder, "arbol-trunk"), "run"],
+                                       env={**ENV, "HOME": f.home}, capture_output=True, timeout=60, check=False)
+        self.assertEqual([started_trunk.returncode, document(started_trunk)["build"]], [0, "1"])
+        self.assertTrue(Path(f.registry, "arbol-trunk/trivial/1/last-start").is_file())
+        inventory = subprocess.run([os.path.join(self.folder, "arbol-builds"), "show", "arbol-trunk/trivial@1",
+                                    "--registry-dir", f.registry], env=ENV, capture_output=True, timeout=60, check=False)
+        self.assertEqual(document(inventory)["lastStart"],
+                         Path(f.registry, "arbol-trunk/trivial/1/last-start").read_text().strip())
         for name, text in others.items():
             self.assertEqual(Path(self.folder, name).read_text(), text, name)
         self.assertTrue(os.path.islink(os.path.join(self.folder, "linked")))
