@@ -6,16 +6,19 @@ import os
 import re
 import stat
 import subprocess
+import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .config import Locations
 from .launcher import BUILD_PATTERN, Record, code_name, js_integer, milliseconds, read_records, refuse_constant
+from .mutation import with_mutation_lock
 from .pruning import retained_roots
 from .root_launcher import root_default_record
 from .roots import roots_folder
-from .service import components_in
+from .service import build_details, components_in, prune_protections, remove_build_payload
 
 
 def read_days(home: Path | None = None) -> float | None:
@@ -43,11 +46,54 @@ def read_days(home: Path | None = None) -> float | None:
         raise ValueError(f'Invalid unused-Build settings at {path}: {error}') from error
 
 
-def prune_unused(paths: Locations) -> list[dict[str, Any]]:
+def old_enough(registry: str, record: Record, clock: float, days: float) -> bool:
+    if record["status"] == "building" or record.get("prunedAt") or record.get("lockedAt"):
+        return False
+    value = build_details(registry,record)["unusedSince"]
+    stamp = milliseconds(value) if isinstance(value,str) else None
+    return stamp is not None and clock-stamp > days*86_400_000
+
+
+def prune_unused(paths: Locations, *, now_ms: float | None = None) -> list[dict[str, Any]]:
     days = read_days()
-    if days is not None:
-        raise ValueError('Configured unused removal is not implemented yet.')
-    return [{'component':component, 'pruned':[]} for component in components_in(paths.registry)]
+    names = components_in(paths.registry)
+    if days is None:
+        return [{"component":component,"pruned":[]} for component in names]
+    usage = usage_snapshot(paths)
+    clock = time.time()*1000 if now_ms is None else now_ms
+    if usage.unavailable:
+        print("Cannot obtain complete manager listings for Roots: "+", ".join(usage.unavailable)+
+              "; retained every Trunk, Driver and classifier Build.",file=sys.stderr)
+    results: list[dict[str, Any]] = []
+    for component in names:
+        row: dict[str, Any] = {"component":component,"pruned":[]}
+        dynamic = component.startswith("arbol-trunk/") or shared_runtime(component)
+        if dynamic and usage.unavailable:
+            row["unavailableRoots"] = list(usage.unavailable)
+        if shared_runtime(component) and usage.roots_with_exchanges:
+            row["rootsWithExchanges"] = list(usage.roots_with_exchanges)
+        if (dynamic and usage.unavailable) or (shared_runtime(component) and usage.roots_with_exchanges):
+            results.append(row)
+            continue
+
+        def change(component: str = component, row: dict[str, Any] = row) -> None:
+            records = read_records(paths.registry,component)
+            working = [record for record in records if record["status"] == "working" and not record.get("prunedAt")]
+            protected = prune_protections(paths.registry,component,working,usage.roots)
+            protected.update(usage.trunks.get(component,set()))
+            for record in records:
+                if record["build"] in protected or not old_enough(paths.registry,record,clock,days):
+                    continue
+                def still_old(record: Record = record) -> bool:
+                    return old_enough(paths.registry,record,clock,days)
+                outcome = remove_build_payload(paths.registry,record,still_old)
+                if outcome == "pruned":
+                    row["pruned"].append(record["build"])
+                elif outcome in ("inUse","unverifiable"):
+                    row.setdefault(outcome,[]).append(record["build"])
+        with_mutation_lock(os.path.join(paths.registry,component),change)
+        results.append(row)
+    return results
 
 
 UUID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\Z", re.ASCII)

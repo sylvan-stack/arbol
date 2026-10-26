@@ -5,6 +5,7 @@ import os
 import subprocess
 import unittest
 from pathlib import Path
+from typing import Any
 
 from test_builds import TRUNK_PROGRAM, Fixture, document, finish, first_line
 
@@ -204,6 +205,7 @@ class ManagerSnapshots(unittest.TestCase):
         script = Path(f.home,'manager.py')
         script.write_text('''import json,os,sys
 from pathlib import Path
+from typing import Any
 home=Path(os.environ['HOME']); root=sys.argv[2]
 with (home/'manager-calls.jsonl').open('a') as out:
     out.write(json.dumps({'args':sys.argv[1:],'path':os.environ['PATH']})+'\\n')
@@ -293,3 +295,140 @@ print(json.dumps(json.loads((home/'replies.json').read_text())[root]))
         with mock.patch('arbol_builds.pruning.os.scandir',side_effect=PermissionError('private fixture')):
             with self.assertRaises(ValueError):
                 self.snapshot(f)
+
+
+class AgedRemoval(unittest.TestCase):
+    CLOCK = 1793016000000.0  # 2026-10-26T12:00:00.000Z; every age assertion supplies this clock.
+
+    def setting(self, f: Fixture, days: float = 1) -> None:
+        path = Path(f.home,'.arbol/arbol-builds.json')
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps({'removeUnusedAfterDays':days}))
+
+    def iso(self, stamp: float) -> str:
+        from datetime import UTC, datetime
+        return datetime.fromtimestamp(stamp/1000,UTC).isoformat(timespec='milliseconds').replace('+00:00','Z')
+
+    def aged(self, f: Fixture, number: str, stamp: float | None = None) -> None:
+        path = Path(f.path(number,'build.json'))
+        value = json.loads(path.read_text())
+        stamp = self.CLOCK-2*86_400_000 if stamp is None else stamp
+        value['startedAt'] = self.iso(stamp-1000)
+        if value['status'] != 'building':
+            value['finishedAt'] = self.iso(stamp)
+        path.write_text(json.dumps(value))
+
+    def prune(self, f: Fixture, clock: float | None = None) -> list[dict[str, Any]]:
+        from unittest import mock
+
+        from arbol_builds.config import Locations
+        from arbol_builds.unused import prune_unused
+        with mock.patch.dict(os.environ,f.env()):
+            return prune_unused(Locations(f.registry,f.bin),now_ms=self.CLOCK if clock is None else clock)
+
+    def test_exact_age_future_start_and_regular_mtime_fallback_keep_the_right_files(self) -> None:
+        """builds.unused-age"""
+        f = Fixture(self)
+        for _ in range(4):
+            f.build()
+        self.setting(f)
+        for number in ['1','2','3','4']:
+            self.aged(f,number)
+        Path(f.path('2','last-start')).write_text(self.iso(self.CLOCK-86_400_000)+'\n')
+        Path(f.path('3','last-start')).write_text(self.iso(self.CLOCK+86_400_000)+'\n')
+        self.assertEqual(self.prune(f), [{'component':'sample','pruned':['1']}])
+        self.assertTrue(Path(f.path('2','program.py')).is_file())
+        self.assertTrue(Path(f.path('3','program.py')).is_file())
+        self.assertTrue(Path(f.path('4','program.py')).is_file())
+        marker = Path(f.path('2','last-start'))
+        marker.write_text('damaged regular marker')
+        stamp = (self.CLOCK-3*86_400_000)/1000
+        os.utime(marker,(stamp,stamp))
+        self.assertEqual(self.prune(f), [{'component':'sample','pruned':['2']}])
+        self.assertEqual(marker.read_text(), 'damaged regular marker')
+        for number in ['1','2']:
+            self.assertIn('prunedAt',json.loads(Path(f.path(number,'build.json')).read_text()))
+            self.assertTrue(Path(f.path(number,'build.log')).is_file())
+
+    def test_old_failed_and_withdrawn_payloads_go_but_defaults_and_locks_stay(self) -> None:
+        """builds.unused-statuses"""
+        f = Fixture(self)
+        for _ in range(3):
+            f.build()
+        self.assertEqual(f.call('lock','sample@1').returncode, 0)
+        self.assertEqual(f.call('withdraw','sample@2','--reason','private fixture').returncode, 0)
+        f.configure(checks=[{'name':'private-failure','kind':'unit','command':'exit 1'}])
+        failed = f.call('build','sample','--repo',f.repo)
+        self.assertEqual(document(failed)['status'], 'failed')
+        self.setting(f)
+        for number in ['1','2','3','4']:
+            self.aged(f,number)
+        self.assertEqual(self.prune(f), [{'component':'sample','pruned':['4','2']}])
+        self.assertTrue(Path(f.path('1','program.py')).is_file())
+        self.assertTrue(Path(f.path('3','program.py')).is_file())
+
+    def test_building_and_damaged_records_never_authorize_removal(self) -> None:
+        """builds.unused-building-damaged"""
+        f = Fixture(self)
+        for _ in range(3):
+            f.build()
+        self.setting(f)
+        path = Path(f.path('1','build.json'))
+        value = json.loads(path.read_text())
+        value['status'] = 'building'
+        value.pop('finishedAt',None)
+        path.write_text(json.dumps(value))
+        Path(f.path('2','build.json')).write_text('{bad}')
+        before = {str(p):p.read_bytes() for p in Path(f.registry).rglob('*') if p.is_file()}
+        self.assertEqual(self.prune(f), [{'component':'sample','pruned':[]}])
+        self.assertEqual({str(p):p.read_bytes() for p in Path(f.registry).rglob('*') if p.is_file()}, before)
+
+    def test_an_active_old_build_is_kept_even_when_its_start_is_older_than_the_period(self) -> None:
+        """builds.unused-active-process"""
+        import time
+        f = Fixture(self)
+        f.build()
+        f.build()
+        self.setting(f)
+        child = subprocess.Popen([str(Path(f.bin,'sample')),'-v','1','--wait'],env=f.env(),
+                                 stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        self.addCleanup(finish,child)
+        first_line(child)
+        clock = time.time()*1000+10*86_400_000
+        self.assertEqual(self.prune(f,clock), [{'component':'sample','pruned':[],'inUse':['1']}])
+        self.assertTrue(Path(f.path('1','program.py')).is_file())
+        finish(child)
+        self.assertEqual(self.prune(f,clock), [{'component':'sample','pruned':['1']}])
+
+    def test_last_start_is_read_again_after_exclusive_guard_acquisition(self) -> None:
+        """builds.unused-recent-start"""
+        from unittest import mock
+        f = Fixture(self)
+        f.build()
+        f.build()
+        self.setting(f)
+        self.aged(f,'1')
+        def acquire(registry: str, component: str, number: str, *, exclusive: bool = False) -> int:
+            fd = open_use_guard(registry,component,number,exclusive=exclusive)
+            Path(f.path(number,'last-start')).write_text(self.iso(self.CLOCK)+'\n')
+            return fd
+        with mock.patch('arbol_builds.service.open_use_guard',side_effect=acquire):
+            self.assertEqual(self.prune(f), [{'component':'sample','pruned':[]}])
+        self.assertTrue(Path(f.path('1','program.py')).is_file())
+        self.assertNotIn('prunedAt',json.loads(Path(f.path('1','build.json')).read_text()))
+
+    def test_removal_failure_keeps_record_log_and_unavailable_mark(self) -> None:
+        """builds.unused-removal-failure"""
+        from unittest import mock
+        f = Fixture(self)
+        f.build()
+        f.build()
+        self.setting(f)
+        self.aged(f,'1')
+        Path(f.path('1','payload')).mkdir()
+        with mock.patch('arbol_builds.service.shutil.rmtree',side_effect=PermissionError('private fixture')):
+            with self.assertRaises(PermissionError):
+                self.prune(f)
+        self.assertIn('prunedAt',json.loads(Path(f.path('1','build.json')).read_text()))
+        self.assertTrue(Path(f.path('1','build.log')).is_file())
+        self.assertEqual(f.launch('-v','1').returncode, 1)

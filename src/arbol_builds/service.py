@@ -437,17 +437,18 @@ def missing_only(function: Any, path: str, error: BaseException) -> None:
         raise error
 
 
-def prune_protections(registry: str, component: str, working: list[Record]) -> set[str]:
+def prune_protections(registry: str, component: str, working: list[Record],
+                      retained: dict[str, Record | None] | None = None) -> set[str]:
     """Extra retained defaults, in addition to newest-n and Locked Builds (BLD-D22)."""
     selected = default_record(registry, working)
     protected = {selected["build"]} if selected is not None else set()
     if component in ROOT_COMPONENTS:
-        for root in retained_roots(roots_folder()):
+        for root in (retained if retained is not None else retained_roots(roots_folder())):
             found = root_default_record(registry, working, root)
             if found is not None:
                 protected.add(found["build"])
     elif trunk(component):
-        roots = retained_roots(roots_folder())
+        roots = retained if retained is not None else retained_roots(roots_folder())
         unresolved = [name for name, record in roots.items() if record is None]
         if unresolved:
             raise ValueError("Cannot prune " + component + ": retained Roots without readable valid root.json: "
