@@ -190,7 +190,9 @@ class Creation:
     def __init__(self, paths: Places, record: Record) -> None:
         validate_record(record, complete=True)
         self.paths = paths
-        self.record = record
+        self.record = dict(record)
+        self.root_name = record["root"]
+        self.database_name = record["database"]
         self.root = paths.roots / record["root"]
         self.settings = paths.settings / record["root"]
         self.receipt = self.root / ".creating.json"
@@ -221,7 +223,7 @@ class Creation:
     def make_database(self, database: Database) -> None:
         self.database = database
         try:
-            database.create(self.record["database"])
+            database.create(self.database_name)
         except DatabaseError as error:
             self.uncertain = error.uncertain
             raise
@@ -229,6 +231,8 @@ class Creation:
         atomic_write(str(self.receipt), json_text({"record": self.record, "databaseCreated": True}, 2) + b"\n")
 
     def publish(self) -> None:
+        if self.record.get("root") != self.root_name or self.record.get("database") != self.database_name:
+            raise Refused("invalid_input", "A creation's Root/database identity cannot change after reservation.")
         save_record(self.paths, self.record, complete=True)
         self.receipt.unlink()
         self.committed = True
@@ -239,7 +243,7 @@ class Creation:
                                 uncertain=True)
         if self.database_created and self.database is not None:
             try:
-                self.database.drop(self.record["database"])
+                self.database.drop(self.database_name)
             except Exception as error:
                 raise DatabaseError(f"Creation rollback could not remove the new database; recovery files are kept "
                                     f"in {self.root}.", uncertain=True) from error
