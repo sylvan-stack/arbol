@@ -4,7 +4,8 @@ import json
 import os
 import re
 import subprocess
-from urllib.parse import unquote, urlsplit
+from pathlib import Path
+from urllib.parse import quote, unquote, urlsplit
 
 from .model import Places, Refused, database_name, nonblank
 
@@ -74,14 +75,26 @@ class Database:
         self.run(f"DROP DATABASE IF EXISTS {quoted}", changing=True)
 
     def run(self, sql: str, *, changing: bool = False) -> str:
+        return self._execute(["--no-align", "--tuples-only", "--dbname", self.address, "--command", sql],
+                             cwd=self.paths.home, seconds=30, changing=changing)
+
+    def file(self, name: str, file: Path, *, single: bool = True, variables: dict[str, str] | None = None,
+             cwd: Path | None = None) -> None:
+        address = urlsplit(self.address)._replace(path="/" + quote(database_name(name), safe="")).geturl()
+        args = ["--single-transaction"] if single else []
+        for key, value in (variables or {}).items():
+            args += ["--set", key + "=" + value]
+        self._execute([*args, "--file", str(file.resolve()), "--dbname", address],
+                      cwd=cwd or self.paths.home, seconds=60, changing=True)
+
+    def _execute(self, arguments: list[str], *, cwd: Path, seconds: int, changing: bool) -> str:
         try:
             result = subprocess.run([self.paths.psql, "--no-psqlrc", "--no-password", "--set", "ON_ERROR_STOP=1",
-                                     "--set", "VERBOSITY=verbose",
-                                     "--no-align", "--tuples-only", "--dbname", self.address, "--command", sql],
-                                    env=environment(self.paths, self.password), cwd=self.paths.home,
-                                    capture_output=True, text=True, timeout=30, check=False)
+                                     "--set", "VERBOSITY=verbose", *arguments],
+                                    env=environment(self.paths, self.password), cwd=cwd, stdin=subprocess.DEVNULL,
+                                    capture_output=True, text=True, timeout=seconds, check=False)
         except subprocess.TimeoutExpired as error:
-            raise DatabaseError("psql did not answer within 30 seconds.", uncertain=changing) from error
+            raise DatabaseError(f"psql did not answer within {seconds} seconds.", uncertain=changing) from error
         except OSError as error:
             raise DatabaseError("psql could not be started.") from error
         except UnicodeError as error:
