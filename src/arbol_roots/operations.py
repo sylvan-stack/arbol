@@ -94,6 +94,20 @@ def create(paths: Places, root: str, options: dict[str, str]) -> Record:
         return record
 
 
+def exchanges_directory(root: Path) -> None:
+    """Establish the Root-owned coordination directory without following or replacing a link."""
+    target = root / "exchanges"
+    try:
+        try:
+            target.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        if not stat.S_ISDIR(target.lstat().st_mode):
+            raise Refused("operation_failed", "The Root's exchanges path must be a directory, not a file or symlink.")
+    except OSError as error:
+        raise Refused("operation_failed", "Cannot establish the Root's exchanges directory.") from error
+
+
 def ready(paths: Places, root: str) -> Record:
     with catalogue_lock(paths):
         record = dict(selected(paths, root))
@@ -102,6 +116,7 @@ def ready(paths: Places, root: str) -> Record:
         if default_record(str(paths.registry), candidates) is None:
             raise Refused("no_fit", f"Root {root} needs a runnable working Trivial Trunk Build for Root Contract "
                                     f"{record['rootContract']}.")
+        exchanges_directory(paths.roots / root)
         record["status"] = "working"
         record.pop("failed", None)
         save_record(paths, record)
@@ -211,6 +226,7 @@ class Creation:
             self.root.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             self.root.mkdir(mode=0o700)
             self.root_owned = True
+            exchanges_directory(self.root)
             self.settings.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             self.settings.mkdir(mode=0o700)
             self.settings_owned = True
