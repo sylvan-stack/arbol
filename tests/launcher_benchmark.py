@@ -48,9 +48,9 @@ def repository(repo: str, env: dict[str, str], description: dict[str, object]) -
     Path(repo, "program.sh").write_text("#!/bin/sh\necho ready\n")
     Path(repo, "arbol-build.json").write_text(json.dumps({**SAMPLE, **description}))
     for arguments in (["git", "init", "-q", "-b", "main"], ["git", "add", "."],
-                      ["git", "-c", "user.name=Benchmark", "-c", "user.email=builds@example.invalid",
-                       "commit", "-qm", "Sample"]):
-        subprocess.run(arguments, cwd=repo, env=env, check=True, capture_output=True)
+                      ["git", "commit", "-qm", "Sample"]):
+        # Sample commits use the caller's existing identity and hooks, outside the benchmark's fake home.
+        subprocess.run(arguments, cwd=repo, env={**env, "HOME": str(Path.home())}, check=True, capture_output=True)
 
 
 def run(arguments: list[str], cwd: str, env: dict[str, str]) -> float:

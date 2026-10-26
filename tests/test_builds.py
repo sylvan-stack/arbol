@@ -187,7 +187,7 @@ class Fixture:
         self.configure()
         self.git("init", "-q", "-b", "main")
         self.git("add", ".")
-        self.git("-c", "user.name=Build Tests", "-c", "user.email=builds@example.invalid", "commit", "-qm", "Sample")
+        self.git("commit", "-qm", "Sample")
 
     def remove(self) -> None:
         for folder, _, _ in os.walk(self.home):
@@ -202,7 +202,8 @@ class Fixture:
         Path(self.repo, "arbol-build.json").write_text(json.dumps(self.config), encoding="utf-8")
 
     def git(self, *args: str) -> str:
-        return subprocess.run(["git", *args], cwd=self.repo, env={**ENV, "HOME": self.home}, check=True,
+        # Git keeps the caller's configured identity and hooks; only the programs under test use the fake home.
+        return subprocess.run(["git", *args], cwd=self.repo, env={**ENV, "HOME": str(Path.home())}, check=True,
                               capture_output=True, text=True).stdout.strip()
 
     def env(self, **extra: str) -> dict[str, str]:
