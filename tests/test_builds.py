@@ -1399,6 +1399,97 @@ class RootComponents(unittest.TestCase):
         write_root(roots, root_record("second", "working", "2026-10-16T11:00:00.000Z"))
         self.assertEqual(document(f.launch())["build"], "2")
 
+    def test_builds_root_named_selection_uses_its_own_root_and_refuses_conflicting_selectors(self) -> None:
+        """builds.root-named covers independent current Root, explicit agreement, warnings and unavailable Builds."""
+        f = self.fixture()
+        f.build("--root", "sapling")
+        f.build("--root", "second")
+        self.assertEqual(document(f.launch("-v", "1", "run"))["build"], "1")
+        self.assertEqual(document(f.launch("--root", "sapling", "-v", "1", "run"))["build"], "1")
+        conflict = f.launch("--root", "second", "-v", "1", "run")
+        self.assertEqual(conflict.returncode, 1)
+        self.assertEqual(document(conflict)["error"]["code"], "invalid_input")
+        for root in ("sapling", "second"):
+            self.assertIn(root, document(conflict)["error"]["message"])
+        for number in ("0", "01", "A", "missing", "3"):
+            result = f.launch("--root", "sapling", "-v", number, "run")
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(document(result)["error"]["code"], "build_unavailable")
+            self.assertEqual(document(result)["error"]["available"], ["1"])
+        self.assertEqual(f.call("withdraw", f"{f.component}@1", "--reason", "private defect").returncode, 0)
+        result = f.launch("-v", "1", "run")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(b"withdrawn: private defect", result.stderr)
+        self.assertEqual(f.launch("--root", "sapling", "run").returncode, 1)
+        path = Path(f.path("1/build.json"))
+        record = json.loads(path.read_text())
+        record.update(status="failed", checks=[{"name": "private", "passed": False}],
+                      failure={"stage": "check", "name": "private", "message": "synthetic failure"})
+        path.write_text(json.dumps(record))
+        result = f.launch("-v", "1", "run")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(b"failed: check private", result.stderr)
+        record["status"] = "building"
+        path.write_text(json.dumps(record))
+        self.assertEqual(f.launch("-v", "1", "run").returncode, 1)
+        record["status"] = "failed"
+        path.write_text(json.dumps(record))
+        Path(f.path("1/program.py")).unlink()
+        self.assertEqual(f.launch("-v", "1", "run").returncode, 1)
+        self.assertEqual(document(f.launch())["build"], "2")
+        Path(f.home, "Library/Application Support/Arbol/roots/second/root.json").unlink()
+        missing = f.launch("-v", "2", "run")
+        self.assertEqual(document(missing)["error"]["code"], "unknown_root")
+
+    def test_builds_root_pass_through_preserves_arguments_streams_pid_signals_and_status(self) -> None:
+        """builds.root-pass-through adds no Root argument and preserves the caller's process contract."""
+        f = self.fixture()
+        f.build("--root", "sapling")
+        args = ["command", "two words", "", "--root", "second", "-v", "999"]
+        result = f.launch("--root", "sapling", "-v", "1", *args, marker="root caller")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        value = document(result)
+        self.assertEqual((value["build"], value["args"], value["cwd"], value["marker"]),
+                         ("1", args, f.home, "root caller"))
+        raw = b"bytes\x00\xff\nsecond line\n"
+        echo = f.launch("--root", "sapling", "--echo", data=raw)
+        self.assertEqual((echo.returncode, echo.stdout, echo.stderr), (0, raw, b"diagnostic\n"))
+        self.assertEqual(f.launch("--root", "sapling", "--exit", "23").returncode, 23)
+        child = subprocess.Popen([os.path.join(f.bin, f.component), "--root", "sapling", "--wait"],
+                                 cwd=f.home, env=f.env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.addCleanup(finish, child)
+        self.assertEqual(json.loads(first_line(child))["pid"], child.pid)
+        child.send_signal(signal.SIGINT)
+        output, errors = child.communicate(timeout=10)
+        self.assertEqual((child.returncode, output, errors), (2, b"interrupted\n", b""))
+        stamp = Path(f.path("1/last-start")).read_text().strip()
+        self.assertIsNotNone(milliseconds(stamp))
+
+    def test_builds_root_launcher_is_standalone_and_keeps_shared_top_level_names_distinct(self) -> None:
+        """builds.root-launcher-text carries no Root implementation and can start without source imports."""
+        f = self.fixture()
+        f.build("--root", "sapling")
+        text = Path(f.bin, f.component).read_text()
+        tree = ast.parse(text)
+        self.assertFalse(any(isinstance(node, ast.ImportFrom) and (node.level or
+                         node.module is not None and node.module.startswith("arbol_builds"))
+                         for node in ast.walk(tree)))
+        self.assertTrue(text.rstrip().endswith(f"sys.exit(launch_root({f.registry!r}, {f.component!r}, sys.argv[1:]))"))
+        names: dict[str, str] = {}
+        for module in ("launcher.py", "roots.py", "root_launcher.py"):
+            bound, relative = top_level_names(ROOT / "src/arbol_builds" / module)
+            self.assertTrue(all(name in names for name in relative), (module, relative, names))
+            for name, kind in bound.items():
+                self.assertTrue(name not in names or kind.startswith("import ") and kind == names[name],
+                                (module, name, kind, names.get(name)))
+            names.update(bound)
+        with mock.patch.dict(os.environ, f.env(), clear=True):
+            from arbol_builds.service import launcher_source
+            plain = launcher_source(f.registry, "arbol-app", PYTHON).decode()
+            trunk = launcher_source(f.registry, "arbol-trunk", PYTHON).decode()
+        self.assertNotIn("def select_root_build(", plain)
+        self.assertNotIn("def select_root_build(", trunk)
+
 
 class TrunkLauncher(unittest.TestCase):
     """The Roots as the launchers read them, and the launcher arbol-trunk (SYL-179; RCT-0.7 to 0.10, BLD-D17)."""
