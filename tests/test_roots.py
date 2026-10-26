@@ -1,5 +1,6 @@
 """The global Root catalogue: private homes and stand-ins, with a separate real-server example (SYL-160)."""
 
+import ast
 import json
 import os
 import shutil
@@ -510,6 +511,33 @@ class DatabaseAccess(unittest.TestCase):
 
 
 class Catalogue(unittest.TestCase):
+    def test_roots_damaged_record_drill_passes_with_the_real_standalone_trunk_launcher(self) -> None:
+        """roots.damaged-drill: list/ready and the standalone Trunk launcher isolate one damaged Root and reread repairs."""
+        result = subprocess.run([sys.executable, "-I", "-B", str(ROOT / "scripts/roots_drill.py")],
+                                capture_output=True, timeout=30, check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        value = json.loads(result.stdout)
+        self.assertTrue(value["passed"])
+        self.assertEqual(value["databaseRequests"], 0)
+        self.assertEqual(value["vendorRequests"], 0)
+        self.assertEqual(value["checks"], ["catalogue-isolation", "ready-isolation", "trunk-isolation", "repair-reread"])
+
+    def test_roots_global_tool_holds_no_root_implementation_table_layout_or_migration(self) -> None:
+        """roots.boundary: catalogue code is outside Roots, and database lifecycle uses only maintenance SQL."""
+        files = list((ROOT / "src/arbol_roots").glob("*.py"))
+        self.assertTrue(files)
+        self.assertFalse(list((ROOT / "src/arbol_roots").rglob("*.sql")))
+        for path in files:
+            text = path.read_text()
+            for forbidden in ("CREATE TABLE", "ALTER TABLE"):
+                self.assertNotIn(forbidden, text, path)
+            for node in ast.walk(ast.parse(text)):
+                if isinstance(node, ast.ImportFrom):
+                    self.assertNotIn((node.module or "").split(".")[0], ("arbol_root", "arbol_trunk_trivial"), path)
+                elif isinstance(node, ast.Import):
+                    self.assertFalse(any(alias.name.split(".")[0] in ("arbol_root", "arbol_trunk_trivial")
+                                         for alias in node.names), path)
+
     def test_roots_catalogue_agrees_with_launcher_headers_and_rereads_current_selection(self) -> None:
         """roots.catalogue: creation order, ties and state changes use the launchers' current-Root rule."""
         with tempfile.TemporaryDirectory() as home:
