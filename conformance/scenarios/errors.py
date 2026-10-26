@@ -25,6 +25,7 @@ from ..js import (
 )
 from .runs import events as parse_events
 from .runs import signed, stream
+from .subscriptions import check_resources
 from .support import at, delay, exists, find, is_integer, item, now_monotonic, write_file
 
 # --- JavaScript's reads, with V8's errors ----------------------------------------------------------------
@@ -355,6 +356,7 @@ async def run_c30(home: ScenarioHome) -> None:
     equal("Latest shares", _windows(record, "usedPercent"), [25, 100])
     equal("Window durations", _windows(record, "windowMinutes"), [300, 10080])
     equal("Exhausted window", _windows(record, "limitReached"), [False, True])
+    check_resources("record.lastUsage.windows", prop(prop(record, "lastUsage"), "windows"))
     if is_codex:
         equal("Normal run does not poll limits", len(limit_reads(await home.received())), before_run_reads)
         equal("Sparse update keeps reached reason", prop(prop(record["lastUsage"], "extra"), "rateLimitReachedType"),
@@ -369,5 +371,6 @@ async def run_c30(home: ScenarioHome) -> None:
 
 
 c30 = Scenario("C30", "Latest run limit information",
-               "latest report stored at completion and read without a tool invocation", ["DRV-4.13", "DRV-1.18"],
+               "latest report stored at completion and read without a tool invocation; what each window counts",
+               ["DRV-4.13", "DRV-1.18", "DRV-1.27"],
                run_c30)

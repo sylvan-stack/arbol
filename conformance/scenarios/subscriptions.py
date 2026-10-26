@@ -1038,6 +1038,17 @@ async def run_c39(home: ScenarioHome) -> None:
 
 # --- C41 -------------------------------------------------------------------------------------------------
 
+RESOURCES = ("tokens", "credits", "calls")
+
+
+def check_resources(site: str, windows: Any) -> None:
+    """DRV-1.27: a window says what it counts, `tokens`, `credits` or `calls`, or leaves `resource` absent; it never
+    carries another value."""
+    for index, window in enumerate(array(windows, "forEach", site)):
+        resource = get(object_(f"{site}[{index}]", window), "resource")
+        check(f"{site}[{index}].resource", resource is UNDEFINED or resource in RESOURCES,
+              "tokens, credits, calls or absent", resource)
+
 
 def operations(records: list[JSObject]) -> JSArray:
     """The operations the stand-in was asked for, setup requests left out."""
@@ -1075,6 +1086,7 @@ async def check_chatgpt_usage(home: ScenarioHome) -> None:
     equal("Usage plan", usage.result["plan"], "fixture")
     equal("Only requested usage", operations((await home.received())[before_usage:]), ["usage"])
     windows = [object_("Window", value) for value in array(usage.result["windows"], "map", "usage.result.windows")]
+    check_resources("usage.result.windows", usage.result["windows"])
     equal("Window kind follows duration", [value["kind"] for value in windows], ["weekly", "session"])
     equal("Window labels", [value["label"] for value in windows], ["Weekly window", "5-hour window"])
     equal("Used percentage", get(item(windows, 0), "usedPercent"), 25)
@@ -1100,6 +1112,7 @@ async def check_chatgpt_usage(home: ScenarioHome) -> None:
     unknown = await home.json(["subscriptions", "usage", identifier])
     equal("Unknown-window usage", unknown.result["outcome"], "ok")
     other = [object_("Window", value) for value in array(unknown.result["windows"], "map", "unknown.result.windows")]
+    check_resources("unknown.result.windows", unknown.result["windows"])
     equal("Unknown length is absent", get(item(other, 0), "windowMinutes"), UNDEFINED)
     equal("Unknown length kind", get(item(other, 0), "kind"), "other")
     equal("Unknown reset is absent", get(item(other, 0), "resetsAt"), UNDEFINED)
@@ -1133,8 +1146,9 @@ async def run_c41(home: ScenarioHome) -> None:
         before = len(await home.received())
         await home.call(["subscriptions", "list"])
         equal("List does not poll", len(await home.received()), before)
-        equal("Usage unsupported before run",
-              (await home.json(["subscriptions", "usage", "anthropic"])).result["outcome"], "unsupported")
+        unsupported = await home.json(["subscriptions", "usage", "anthropic"])
+        equal("Usage unsupported before run", unsupported.result["outcome"], "unsupported")
+        check_resources("unsupported.result.windows", unsupported.result["windows"])
         equal("Tool catalog source", (await home.json(["subscriptions", "models", "anthropic"])).result["source"],
               "tool")
         await home.part("unavailable")
@@ -1172,6 +1186,7 @@ async def run_c41(home: ScenarioHome) -> None:
         equal("Usage outcome", usage.result["outcome"], "ok")
         equal("Only requested usage", gateway.paths, ["/api/monitor/usage/quota/limit"])
         windows = usage.result["windows"]
+        check_resources("usage.result.windows", windows)
         equal("Computed percentage", get(prop(windows, 0), "usedPercent"), 25)
         equal("Unknown reset absent", get(prop(windows, 1), "resetsAt"), UNDEFINED)
         equal("Unknown length absent", get(prop(windows, 2), "windowMinutes"), UNDEFINED)
@@ -1233,6 +1248,6 @@ c39 = Scenario("C39", "Two accounts of one family stay independent",
                "independent login, homes and sign-out; conversation separation covered by C14",
                ["DRV-1.2 (subscriptions)"], run_c39)
 c41 = Scenario("C41", "Usage, model catalogs and vendor account details",
-               "available usage outcomes, cached reports, unknown fields, family fallback and account clearing; "
-               "run-derived usage covered by C30",
-               ["DRV-1.16", "DRV-1.17", "DRV-1.18", "DRV-1.19", "DRV-1.20", "DRV-1.21", "DRV-1.22"], run_c41)
+               "available usage outcomes, cached reports, unknown fields, what each window counts, family fallback and "
+               "account clearing; run-derived usage covered by C30",
+               ["DRV-1.16", "DRV-1.17", "DRV-1.18", "DRV-1.19", "DRV-1.20", "DRV-1.21", "DRV-1.22", "DRV-1.27"], run_c41)
