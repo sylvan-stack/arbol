@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import sys
 import unittest
 from dataclasses import FrozenInstanceError
@@ -637,6 +638,48 @@ class ExhaustedSubscriptions(unittest.TestCase):
         )
         assert result.vigor is not None
         self.assertEqual(round(result.vigor, 2), 0.37)
+
+
+class Advisory(unittest.TestCase):
+    """Vigor is advisory: the package runs no program, reads no Driver and writes no file (SGM-1.15)."""
+
+    ALLOWED_IMPORTS = {
+        "__future__",
+        "collections.abc",
+        "dataclasses",
+        "datetime",
+        "math",
+        "typing",
+        "arbol_radar.model",
+    }
+    FORBIDDEN_NAMES = {"open", "exec", "eval", "compile", "__import__", "input", "print"}
+
+    def test_the_package_imports_nothing_that_runs_a_program_or_writes_a_file(self) -> None:
+        """radar.advisory-imports"""
+        files = sorted((ROOT / "src/arbol_radar").glob("*.py"))
+        self.assertEqual([path.name for path in files], ["__init__.py", "model.py", "vigor.py"])
+        for path in files:
+            tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        self.assertIn(alias.name, self.ALLOWED_IMPORTS, f"{path.name} imports {alias.name}")
+                elif isinstance(node, ast.ImportFrom):
+                    self.assertEqual(node.level, 0, f"{path.name} has a relative import")
+                    self.assertIn(node.module, self.ALLOWED_IMPORTS, f"{path.name} imports from {node.module}")
+                elif isinstance(node, ast.Name):
+                    self.assertNotIn(node.id, self.FORBIDDEN_NAMES, f"{path.name} uses {node.id}")
+
+    def test_the_same_inputs_give_the_same_result_and_change_nothing(self) -> None:
+        """radar.advisory-pure"""
+        r = report(CLAUDE, claude(), extra={"isUsingOverage": False})
+        before = (r, FIRST_PROFILE)
+        first = compute(r, FIRST_PROFILE, MONDAY)
+        second = compute(r, FIRST_PROFILE, MONDAY)
+        self.assertEqual(first, second)
+        self.assertEqual(before, (r, FIRST_PROFILE))
+        with self.assertRaises(FrozenInstanceError):
+            first.vigor = 1.0  # type: ignore[misc]
 
 
 if __name__ == "__main__":
