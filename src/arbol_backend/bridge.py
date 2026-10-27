@@ -181,6 +181,7 @@ class Subscription:
     seq: int = 0
     sent: int = 0
     ready: bool = False
+    snapshots: int = 0
     active: bool = True
     pending: list[tuple[int, bytes]] = field(default_factory=list)
     task: asyncio.Task[None] | None = None
@@ -200,6 +201,8 @@ class Subscription:
             self.connection.end(self, error)
 
     def send(self, event: Params) -> None:
+        if event.get("kind") == "snapshot":
+            self.snapshots += 1
         data = encode({"type": "event", "id": self.id, "seq": self.seq + 1, "event": event})
         self.seq += 1
         self.connection.enqueue(Frame(data, self, self.seq))

@@ -12,14 +12,17 @@ from typing import Any
 
 from .bridge import MAX_LINE, Connection, Registry
 from .chats import Chats
+from .controls import Controls
 from .database import Database
 from .dispatch import Dispatch
 from .drafts import Drafts
 from .lifetime import Lifetime
+from .live import Live
 from .migration import Migration
 from .model import Identity, Refused, root_record, settings
 from .process import Programs
 from .roots import Roots
+from .settling import Settling
 
 
 class Backend:
@@ -36,6 +39,9 @@ class Backend:
                            lineage=isinstance(self.record.get("grewFrom"), str))
         self.drafts = Drafts(self.chats, self.registry)
         self.dispatch = Dispatch(identity, self.programs, self.chats, self.drafts, self.registry, self.settings)
+        self.live = Live(identity, self.chats, self.dispatch)
+        self.controls = Controls(self.programs, self.dispatch, self.live, self.registry)
+        self.settling = Settling(self.programs, self.database, self.live)
         self.migration = Migration(identity, self.programs, self.chats, self.registry, self.record)
         self.windows: set[asyncio.StreamWriter] = set()
         self.tasks: set[asyncio.Task[None]] = set()
@@ -66,15 +72,8 @@ class Backend:
         except Refused:
             pass
 
-    async def initial_settle(self) -> None:
-        try:
-            await self.programs.call("arbol-root", ["settle"], kind="settle")
-        except Refused:
-            pass
-
     async def initial_work(self) -> None:
-        await self.initial_database()
-        await self.initial_settle()
+        self.settling.start()
 
     async def monitor(self) -> None:
         while True:
@@ -133,6 +132,7 @@ class Backend:
             )
             self.dispatch.start()
             self.chats.start()
+            self.live.start()
             self.task(self.initial_work())
             self.task(self.initial_catalogue())
             self.task(self.monitor())
@@ -154,6 +154,9 @@ class Backend:
                 await asyncio.gather(*self.tasks, return_exceptions=True)
             if server is not None:
                 await server.wait_closed()
+            await self.settling.close()
+            await self.controls.close()
+            await self.live.close()
             await self.dispatch.close()
             await self.migration.close()
             await self.chats.close()

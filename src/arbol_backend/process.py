@@ -147,7 +147,7 @@ class Programs:
                         raise Refused("no_answer", "The launcher returned no bounded successful reply.")
                     try:
                         value = json.loads(child.data)
-                        structured_refusal = (kind in ("start", "migrate-check", "reimport") and status == 1
+                        structured_refusal = (kind in ("start", "stop", "settle", "list", "migrate-check", "reimport") and status == 1
                                               and isinstance(value, dict) and isinstance(value.get("error"), dict))
                         if status != 0 and not structured_refusal:
                             raise Refused("no_answer", "The launcher returned no bounded successful reply.")
