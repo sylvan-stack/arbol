@@ -165,18 +165,23 @@ class Sending(WindowFixture):
             await self.execute(params)
         self.assertEqual(caught.exception.code, "no_answer")
         self.assertLess(time.monotonic() - started, 0.3)
-        self.assertEqual(len(starts(self.frame)), 1)
+        # The deadline bounds the caller, not when the detached Python stand-in finishes importing.
+        self.assertEqual(len(await self.wait_starts()), 1)
         current = await self.backend.drafts.current({"chat": chat(1)})
         assert current
         self.assertEqual(current["sentAs"], params["exchange"])
         path = self.frame.root / "requests" / (params["exchange"] + ".json")
         self.assertTrue(path.exists())
+        manager = self.backend.programs.running[("start", params["exchange"])].process
+        self.assertIsNone(manager.poll())
         with self.assertRaises(Error):
             await self.execute(params)
         self.assertEqual(len(starts(self.frame)), 1)
-        await asyncio.sleep(0.5)
+        await asyncio.wait_for(asyncio.to_thread(manager.wait), 3)
+        async with asyncio.timeout(1):
+            while path.exists():
+                await asyncio.sleep(0.01)
         self.assertEqual(len(starts(self.frame)), 1)
-        self.assertFalse(path.exists())
         r, w = await self.open()
         self.assertIsNone((await self.call(r, w, "draft.get", {"chat": chat(1)}))["result"])
         self.backend.dispatch.total = 2.0
