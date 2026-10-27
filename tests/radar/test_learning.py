@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "runtime/site-packages"))
 sys.path.insert(0, str(ROOT / "tests"))
-from arbol_radar.learning import Observation, observations, observe, pairs, runs_between  # noqa: E402
+from arbol_radar.learning import Observation, estimate, observations, observe, pairs, runs_between  # noqa: E402
 from arbol_radar.model import Learning, Report, Subscription  # noqa: E402
 from radar.fixture import RecordFixture, usage  # noqa: E402
 from radar.support import CLAUDE, CODEX, KIMI, MONDAY, at, codex, kimi, report, window  # noqa: E402
@@ -146,6 +146,59 @@ class ThePairs(unittest.TestCase):
         d = claude_report(40, 23, hours=3, name="d")
         self.assertEqual([(x.id, y.id) for x, y in pairs([d, b, a, c])], [("a", "c"), ("c", "d")])
         self.assertEqual(pairs([a]), [])
+
+
+def observation(ratio: float | None, *, reason: str | None = None, subscription: Subscription = CLAUDE) -> Observation:
+    """An observation of the Claude five-hour gate with the given ratio: a store change of 2 over the gate's."""
+    gate = 2 / ratio if ratio else None
+    return Observation(
+        subscription, "Five hours", "Seven days", "a", "b", MONDAY, MONDAY + timedelta(hours=1), 1, 2, gate, reason
+    )
+
+
+class TheEstimate(unittest.TestCase):
+    """The calibrated estimate per family and gate: the median of the trusted ratios, its pair count and spread."""
+
+    RATIOS = (0.08, 0.13, 0.1, 0.09, 0.11, 0.1, 0.12, 0.1, 0.09, 0.11)
+
+    def test_enough_trusted_pairs_give_the_median_with_its_count_and_spread(self) -> None:
+        """radar.learn-estimate"""
+        found = [observation(r) for r in self.RATIOS] + [observation(0.5, reason="2 runs of this Mac ended between")]
+        (gate,) = estimate(found, LEARNING)
+        self.assertEqual(
+            (gate.family, gate.gate, gate.trusted, gate.untrusted, gate.needed), ("anthropic", "Five hours", 10, 1, 10)
+        )
+        self.assertAlmostEqual(gate.value or 0, 0.1)
+        self.assertAlmostEqual(gate.low or 0, 0.08)
+        self.assertAlmostEqual(gate.high or 0, 0.13)
+        self.assertTrue(gate.calibrated)
+        self.assertEqual(gate.missing, 0)
+
+    def test_too_few_trusted_pairs_say_how_many_are_missing(self) -> None:
+        """radar.learn-too-few"""
+        found = [observation(r) for r in self.RATIOS[:3]] + [observation(None, reason="Five hours did not move")]
+        (gate,) = estimate(found, LEARNING)
+        self.assertEqual((gate.trusted, gate.untrusted, gate.missing), (3, 1, 7))
+        self.assertIsNone(gate.value)
+        self.assertFalse(gate.calibrated)
+        self.assertEqual((gate.low, gate.high), (0.08, 0.13))
+        (none,) = estimate([], LEARNING, [("anthropic", "Five hours")])  # a gate never observed
+        self.assertEqual((none.trusted, none.missing, none.value, none.low), (0, 10, None, None))
+        self.assertTrue(estimate(found, Learning(pairs=3))[0].calibrated)
+
+    def test_the_subscriptions_of_one_family_count_together_and_families_apart(self) -> None:
+        """radar.learn-family"""
+        other = Subscription("claude", "test-anthropic", "anthropic")
+        found = [observation(r) for r in self.RATIOS[:5]] + [
+            observation(r, subscription=other) for r in self.RATIOS[5:]
+        ]
+        found.append(Observation(CODEX, "5-hour window", "Weekly window", "c", "d", MONDAY, MONDAY, 1, 2, 10, None))
+        anthropic, chatgpt = estimate(found, LEARNING)
+        self.assertEqual((anthropic.family, anthropic.trusted), ("anthropic", 10))
+        self.assertTrue(anthropic.calibrated)
+        self.assertEqual(
+            (chatgpt.family, chatgpt.gate, chatgpt.trusted, chatgpt.missing), ("chatgpt", "5-hour window", 1, 9)
+        )
 
 
 class TheRuns(RecordFixture):

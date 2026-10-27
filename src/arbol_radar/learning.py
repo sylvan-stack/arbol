@@ -11,7 +11,8 @@ other observation is kept with its reason. Nothing here approves a profile (SGM-
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import statistics
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from itertools import pairwise
@@ -55,6 +56,29 @@ class Observation:
         if self.store_change is None or self.gate_change is None or self.gate_change <= 0:
             return None
         return self.store_change / self.gate_change
+
+
+@dataclass(frozen=True)
+class Estimate:
+    """One family's gate over its trusted observations: the calibrated estimate with its spread, or what is missing."""
+
+    family: str
+    gate: str
+    trusted: int  # the trusted observations, the pairs the estimate rests on
+    untrusted: int
+    needed: int  # the trusted pairs a calibrated estimate needs, the profile's value
+    value: float | None  # the profile's estimator over the trusted ratios, once `needed` exist; None before
+    low: float | None  # the spread: the lowest and the highest trusted ratio; None without one
+    high: float | None
+
+    @property
+    def missing(self) -> int:
+        """How many trusted pairs are still missing for a calibrated estimate."""
+        return max(0, self.needed - self.trusted)
+
+    @property
+    def calibrated(self) -> bool:
+        return self.value is not None
 
 
 def points(value: float) -> str:
@@ -121,6 +145,34 @@ def observe(first: Report, second: Report, runs: int, learning: Learning) -> lis
             )
         )
     return found
+
+
+def estimate(found: Sequence[Observation], learning: Learning, gates: Iterable[tuple[str, str]] = ()) -> list[Estimate]:
+    """The estimate of every family's gate that was observed or is named, by family and gate (SGM-1.11).
+
+    A gate's observations of every Subscription of its family count together, since the weight is the family's. The
+    calibrated estimate is the profile's estimator, the median, over the trusted ratios once the profile's number of
+    pairs is reached; before that the estimate says how many are missing. Untrusted observations never count.
+    """
+    keys = sorted({(observation.subscription.family, observation.gate) for observation in found} | set(gates))
+    estimates: list[Estimate] = []
+    for family, gate in keys:
+        own = [o for o in found if (o.subscription.family, o.gate) == (family, gate)]
+        ratios = sorted(o.ratio for o in own if o.trusted and o.ratio is not None)
+        value = statistics.median(ratios) if ratios and len(ratios) >= learning.pairs else None
+        estimates.append(
+            Estimate(
+                family=family,
+                gate=gate,
+                trusted=len(ratios),
+                untrusted=len(own) - len(ratios),
+                needed=learning.pairs,
+                value=value,
+                low=ratios[0] if ratios else None,
+                high=ratios[-1] if ratios else None,
+            )
+        )
+    return estimates
 
 
 def pairs(reports: Sequence[Report]) -> list[tuple[Report, Report]]:

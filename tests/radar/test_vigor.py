@@ -605,7 +605,13 @@ class Advisory(unittest.TestCase):
         # The tick reaches the Drivers' listing and the records, and nothing else.
         "tick.py": {"arbol_backend.process", "arbol_radar.drivers", "arbol_radar.records"},
         # The learner (SYL-299) reaches the records and the Root's chat tables through the bounded connection.
-        "learning.py": {"arbol_backend.database", "arbol_radar.records", "arbol_radar.vigor", "itertools"},
+        "learning.py": {
+            "arbol_backend.database",
+            "arbol_radar.records",
+            "arbol_radar.vigor",
+            "itertools",
+            "statistics",
+        },
     }
     PRINTS = {"cli.py"}  # the one module that answers on standard output
 
