@@ -184,7 +184,8 @@ class Chats:
         try:
             await view.snapshot(params)
         except Refused as error:
-            view.topic.fail(error, params=params)
+            if not self.database.away:
+                view.topic.fail(error, params=params)
 
     def changed(self, chat: str) -> None:
         params = {"chat": chat}
@@ -261,15 +262,18 @@ class Chats:
     async def observe(self, view: View, params: Params) -> None:
         try:
             while any(sub.params == params for sub in view.topic.listeners):
+                if self.database.away:
+                    await asyncio.sleep(0.25)
+                    continue
                 try:
                     async with asyncio.timeout(0.75):
                         await view.snapshot(params)
                 except TimeoutError:
-                    view.topic.fail(Error("timeout"), params=params)
-                    return
+                    pass  # The coalesced read can finish later; an old display remains truthful.
                 except Refused as error:
-                    view.topic.fail(error, params=params)
-                    return
+                    if not self.database.away:
+                        view.topic.fail(error, params=params)
+                        return
                 await asyncio.sleep(0.25)
         except asyncio.CancelledError:
             raise

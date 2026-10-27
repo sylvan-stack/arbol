@@ -120,6 +120,14 @@ class Live:
         self.ready = asyncio.Event()
         self.stopping: dict[str, str] = {}
         self.followers: dict[Subscription, asyncio.Task[None]] = {}
+        self.states: dict[Subscription, Following] = {}
+        self.row_cache: dict[str, dict[str, tuple[str, int, Any]]] = {}
+        self.queried: dict[str, set[str]] = {}
+        self.row_tasks: dict[str, asyncio.Task[None]] = {}
+        self.row_at: dict[str, float] = {}
+        self.saved_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
+        self.saved_cache: dict[tuple[str, str], Params] = {}
+        self.saved_at: dict[tuple[str, str], float] = {}
         self.tasks: set[asyncio.Task[None]] = set()
         self.scan_task: asyncio.Task[None] | None = None
         self.dead: set[tuple[Any, ...]] = set()
@@ -156,6 +164,8 @@ class Live:
             new_dead = bool(dead - self.dead)
             self.dead = dead
             self.known = {**{id: value for id, value in self.known.items() if id in unreadable}, **records}
+            for id in records.keys() - self.records.keys():
+                self.row_at[records[id].chat] = 0
             self.records, self.unreadable, self.observed, self.failed = records, unreadable, observed, False
             self.folders.forget(set(names))
             if new_dead and self.on_dead:
@@ -244,19 +254,48 @@ class Live:
             saved, _ = await self.chats.reader.exchanges(session, layout, chat, before=rows[0][0]+1, limit=1)
             return saved[0] if saved and saved[0]["exchange"] == exchange else None
 
+    async def observe_rows(self, chat: str, ids: set[str]) -> None:
+        try:
+            rows = await self.row_states(chat, ids)
+            self.row_cache[chat], self.queried[chat] = rows, ids
+        except Refused:
+            pass  # Health owns the outage; existing followers never wait for this read.
+        except Exception:
+            pass  # Corrupt metadata supplies no row proof and no raw diagnostic.
+
+    async def observe_saved(self, chat: str, exchange: str) -> None:
+        try:
+            row = await self.saved(chat, exchange)
+            if row is not None:
+                self.saved_cache[(chat, exchange)] = row
+        except Refused:
+            pass
+        except Exception:
+            pass
+
+    def request_saved(self, chat: str, exchange: str) -> None:
+        key = (chat, exchange)
+        task = self.saved_tasks.get(key)
+        if (not self.chats.database.away and key not in self.saved_cache
+                and (task is None or task.done()) and time.monotonic() >= self.saved_at.get(key, 0)):
+            self.saved_at[key] = time.monotonic() + 0.25
+            self.saved_tasks[key] = self.task(self.observe_saved(chat, exchange))
+
     async def step(self, sub: Subscription, state: Following) -> None:
         params = sub.params
-        snapshot = await self.chats.chat_view.snapshot(params)
+        snapshot = self.chats.chat_view.states.get(self.chats.chat_view.key(params))
+        if snapshot is None:
+            raise Error("database_unavailable")
         self.check(sub, state)
         if self.failed:
             raise Error("no_answer")
         if any(self.known[id].chat == params["chat"] for id in self.unreadable if id in self.known):
             raise Error("no_answer")
-        rows = {row["exchange"]: row for row in snapshot.event["exchanges"]}
-        ids = ({id for id, record in self.records.items() if record.chat == params["chat"]} | state.tracked
-               | {id for id, chat in self.stopping.items() if chat == params["chat"]})
-        actual = await self.row_states(params["chat"], ids)
-        self.check(sub, state)
+        rows = {row["exchange"]: row for row in snapshot["exchanges"]}
+        actual = dict(self.row_cache.get(params["chat"], {}))
+        for id, row in rows.items():
+            if id not in actual or actual[id][0] == "open" or row["state"] != "open":
+                actual[id] = (row["state"], row["number"], None)
         for exchange, chat in list(self.stopping.items()):
             if chat == params["chat"] and exchange in actual and actual[exchange][0] != "open":
                 self.stopping.pop(exchange, None)
@@ -267,6 +306,8 @@ class Live:
             if observed.chat != params["chat"]:
                 continue
             row = rows.get(exchange)
+            if row is None and exchange not in self.queried.get(params["chat"], set()):
+                continue  # Row-first: do not guess accepting for an older, already saved folder.
             if exchange in actual and actual[exchange][0] != "open":
                 self.stopping.pop(exchange, None)
                 if cursor := state.cursors.pop(exchange, None):
@@ -292,7 +333,7 @@ class Live:
             try:
                 if cursor is not None and cursor.changed():
                     self.check(sub, state)
-                    sub.send(snapshot.event)
+                    sub.send(snapshot)
                     raise Restart()
                 if cursor is None:
                     cursor = self.open_cursor(exchange)
@@ -303,7 +344,8 @@ class Live:
         for exchange in list(state.tracked):
             if not self.missing(exchange):
                 continue
-            row = await self.saved(params["chat"], exchange)
+            self.request_saved(params["chat"], exchange)
+            row = self.saved_cache.get((params["chat"], exchange))
             self.check(sub, state)
             if row is not None:
                 if row:
@@ -316,6 +358,7 @@ class Live:
 
     async def follow(self, sub: Subscription) -> None:
         state = Following()
+        self.states[sub] = state
         try:
             await self.ready.wait()
             while sub.active:
@@ -338,6 +381,7 @@ class Live:
             sub.connection.end(sub, Error("no_answer"))
         finally:
             state.reset()
+            self.states.pop(sub, None)
 
     async def monitor(self) -> None:
         next_scan = 0.0
@@ -357,6 +401,29 @@ class Live:
                     self.followers[sub] = self.task(self.follow(sub))
             for sub in set(self.followers) - listeners:
                 self.followers.pop(sub).cancel()
+            chats = {sub.params["chat"] for sub in listeners}
+            for chat in chats:
+                task = self.row_tasks.get(chat)
+                if (not self.chats.database.away and (task is None or task.done())
+                        and time.monotonic() >= self.row_at.get(chat, 0)):
+                    ids = {id for id, record in self.records.items() if record.chat == chat}
+                    ids |= {id for id, target in self.stopping.items() if target == chat}
+                    self.row_at[chat] = time.monotonic() + 0.25
+                    self.row_tasks[chat] = self.task(self.observe_rows(chat, ids))
+            for chat in (set(self.row_tasks) | set(self.row_at) | set(self.row_cache)) - chats:
+                row_task = self.row_tasks.pop(chat, None)
+                if row_task is not None:
+                    row_task.cancel()
+                self.row_cache.pop(chat, None)
+                self.queried.pop(chat, None)
+                self.row_at.pop(chat, None)
+            wanted = {(sub.params["chat"], id) for sub, state in self.states.items() if sub in listeners for id in state.tracked}
+            for key in (set(self.saved_tasks) | set(self.saved_cache)) - wanted:
+                task = self.saved_tasks.pop(key, None)
+                if task is not None:
+                    task.cancel()
+                self.saved_cache.pop(key, None)
+                self.saved_at.pop(key, None)
             await asyncio.sleep(0.05)
 
     def start(self) -> None:
