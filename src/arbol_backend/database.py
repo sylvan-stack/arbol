@@ -123,16 +123,20 @@ async def credentials(identity: Identity) -> dict[str, str]:
 
 
 class Session:
-    def __init__(self, connection: AsyncConnection[tuple[Any, ...]], seconds: float) -> None:
+    def __init__(self, connection: AsyncConnection[tuple[Any, ...]], seconds: float, on_success: Callable[[], None] | None = None) -> None:
         self.connection = connection
         self.seconds = seconds
+        self.on_success = on_success
 
     async def execute(self, sql: str, params: Sequence[Any] | None = None) -> list[tuple[Any, ...]]:
         try:
             async with asyncio.timeout(self.seconds):
                 async with self.connection.cursor() as cursor:
                     await cursor.execute(sql, params)
-                    return await cursor.fetchall() if cursor.description else []
+                    result = await cursor.fetchall() if cursor.description else []
+                    if self.on_success:
+                        self.on_success()
+                    return result
         except (TimeoutError, psycopg.errors.QueryCanceled) as error:
             raise Refused("timeout", "The database statement exceeded five seconds.") from error
         except psycopg.Error as error:
@@ -167,6 +171,8 @@ class Database:
             if self.away and not probe:
                 raise Unavailable("The Root database is unavailable.")
             async with self.credentials_lock:
+                if self.away and not probe:
+                    raise Unavailable("The Root database is unavailable.")
                 if self.parameters is None:
                     try:
                         self.parameters = await credentials(self.identity)
@@ -190,9 +196,7 @@ class Database:
             except (TimeoutError, psycopg.Error) as error:
                 raise Unavailable("The database server does not answer.") from error
             self.connections.add(connection)
-            if self.on_connected:
-                self.on_connected()
-            session = Session(connection, self.seconds)
+            session = Session(connection, self.seconds, None if probe else self.on_connected)
             if snapshot:
                 await session.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
             try:

@@ -184,7 +184,7 @@ class Chats:
         try:
             await view.snapshot(params)
         except Refused as error:
-            if not self.database.away:
+            if not self.database.away and error.code != "timeout":
                 view.topic.fail(error, params=params)
 
     def changed(self, chat: str) -> None:
@@ -271,7 +271,7 @@ class Chats:
                 except TimeoutError:
                     pass  # The coalesced read can finish later; an old display remains truthful.
                 except Refused as error:
-                    if not self.database.away:
+                    if not self.database.away and error.code != "timeout":
                         view.topic.fail(error, params=params)
                         return
                 await asyncio.sleep(0.25)

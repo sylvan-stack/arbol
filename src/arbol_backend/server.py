@@ -25,6 +25,7 @@ from .migration import Migration
 from .model import Identity, Refused, root_record, settings
 from .notes import Notes
 from .process import Programs
+from .recovery import Recovery
 from .roots import Roots
 from .settling import Settling
 from .stuck import Stuck
@@ -55,6 +56,7 @@ class Backend:
         self.listings.on_failed = self.stuck.failed
         self.settling.read_listing = self.listings.get
         self.discovery = Discovery(self.roots, self.listings, self.registry)
+        self.recovery = Recovery(self.health, self.chats, self.registry, self.settling, self.notes, self.discovery, self.stuck)
         self.migration = Migration(identity, self.programs, self.chats, self.registry, self.record)
         self.windows: set[asyncio.StreamWriter] = set()
         self.tasks: set[asyncio.Task[None]] = set()
@@ -75,13 +77,6 @@ class Backend:
             await Connection(reader, writer, self.registry).run(self.roots.hello)
         finally:
             self.windows.discard(writer)
-
-    async def initial_database(self) -> None:
-        try:
-            await self.database.execute("SELECT 1")
-        except Refused:
-            # The later database-away/attention Beat supplies publication and recovery.
-            pass
 
     async def initial_catalogue(self) -> None:
         try:
@@ -174,6 +169,7 @@ class Backend:
                 await asyncio.gather(*self.tasks, return_exceptions=True)
             if server is not None:
                 await server.wait_closed()
+            await self.recovery.close()
             await self.stuck.close()
             await self.health.close()
             await self.controls.close()

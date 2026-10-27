@@ -276,6 +276,8 @@ class Live:
             row = await self.saved(chat, exchange)
             if row is not None:
                 self.saved_cache[(chat, exchange)] = row
+                self.chats.invalidate(chat)
+                self.chats.changed(chat)
         except Refused:
             pass
         except Exception:

@@ -79,13 +79,14 @@ class Notes:
                 if blocked:
                     self.live.notes.pop(exchange, None)
                     continue
+                if wire is not None:
+                    self.chats.invalidate(note.value["chat"])
                 self.live.note(note.value["chat"], wire or note.wire, committed=wire is not None)
                 if wire is not None:
                     try:
                         await asyncio.to_thread(self.files.remove, note)
                     except (OSError, Refused):
                         continue  # Preserve any replacement at the same name.
-                    self.chats.invalidate(note.value["chat"])
                     self.chats.changed(note.value["chat"])
                 await asyncio.sleep(0)
 
