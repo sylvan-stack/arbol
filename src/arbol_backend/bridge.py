@@ -19,6 +19,7 @@ MAX_LINE = 16 * 1024 * 1024
 MAX_WAITING = 64 * 1024 * 1024
 MAX_IDS = 65536
 MESSAGES = {
+    "draft_conflict": "The Draft changed in another window; use its current text and revision.",
     "invalid_input": "The Bridge request is invalid.",
     "unknown_method": "This Build does not provide that method or topic.",
     "not_found": "The requested item was not found.",

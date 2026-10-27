@@ -13,6 +13,8 @@ from typing import Any
 from .bridge import MAX_LINE, Connection, Registry
 from .chats import Chats
 from .database import Database
+from .dispatch import Dispatch
+from .drafts import Drafts
 from .lifetime import Lifetime
 from .migration import Migration
 from .model import Identity, Refused, root_record, settings
@@ -32,6 +34,8 @@ class Backend:
         self.roots.register(self.registry)
         self.chats = Chats(identity, self.database, self.programs, self.roots, self.registry,
                            lineage=isinstance(self.record.get("grewFrom"), str))
+        self.drafts = Drafts(self.chats, self.registry)
+        self.dispatch = Dispatch(identity, self.programs, self.chats, self.drafts, self.registry, self.settings)
         self.migration = Migration(identity, self.programs, self.chats, self.registry, self.record)
         self.windows: set[asyncio.StreamWriter] = set()
         self.tasks: set[asyncio.Task[None]] = set()
@@ -127,6 +131,7 @@ class Backend:
                 ),
                 flush=True,
             )
+            self.dispatch.start()
             self.chats.start()
             self.task(self.initial_work())
             self.task(self.initial_catalogue())
@@ -149,6 +154,7 @@ class Backend:
                 await asyncio.gather(*self.tasks, return_exceptions=True)
             if server is not None:
                 await server.wait_closed()
+            await self.dispatch.close()
             await self.migration.close()
             await self.chats.close()
             await self.roots.close()

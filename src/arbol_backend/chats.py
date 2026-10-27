@@ -105,6 +105,7 @@ class Chats:
         self.tasks: set[asyncio.Task[None]] = set()
         self.observers: dict[tuple[str, str], asyncio.Task[None]] = {}
         self.on_list_open: Callable[[], None] | None = None
+        self.extra_views: dict[str, View] = {}
 
     def task(self, work: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
         task = asyncio.create_task(work)
@@ -273,7 +274,7 @@ class Chats:
 
     async def monitor(self) -> None:
         while True:
-            for name, view in (("chats", self.list_view), ("chat", self.chat_view)):
+            for name, view in (("chats", self.list_view), ("chat", self.chat_view), *self.extra_views.items()):
                 params_by_key = {view.key(sub.params): sub.params for sub in view.topic.listeners}
                 for key, params in params_by_key.items():
                     identity = (name, key)
@@ -305,3 +306,5 @@ class Chats:
         await self.list_view.close()
         await self.chat_view.close()
         await self.catalogues.close()
+        for view in self.extra_views.values():
+            await view.close()
