@@ -10,6 +10,7 @@ import stat
 from collections.abc import Coroutine
 from typing import Any
 
+from .accounts import Accounts
 from .bridge import MAX_LINE, Connection, Registry
 from .chats import Chats
 from .controls import Controls
@@ -44,6 +45,8 @@ class Backend:
         self.chats = Chats(identity, self.database, self.programs, self.roots, self.registry,
                            lineage=isinstance(self.record.get("grewFrom"), str))
         self.health = Health(self.database, self.chats.attention)
+        self.accounts = Accounts(self.programs, self.chats.catalogues, self.registry,
+                                 lambda: ((self.database.parameters or {}).get("password", ""),))
         self.drafts = Drafts(self.chats, self.registry)
         self.dispatch = Dispatch(identity, self.programs, self.chats, self.drafts, self.registry, self.settings)
         self.live = Live(identity, self.chats, self.dispatch)
@@ -180,6 +183,7 @@ class Backend:
             await self.live.close()
             await self.dispatch.close()
             await self.migration.close()
+            await self.accounts.close()
             await self.chats.close()
             await self.roots.close()
             await self.database.close()

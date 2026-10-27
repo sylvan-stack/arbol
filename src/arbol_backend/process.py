@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any, BinaryIO
 from uuid import UUID
 
+from .bridge import constant, finite, pairs
 from .model import ROOT_ID, Identity, Refused
 
 LIMITS = {"start": 25.0, "stop": 90.0, "settle": 120.0, "list": 10.0, "account": 10.0, "migrate-check": 90.0, "reimport": 90.0}
@@ -53,12 +54,17 @@ class Child:
 class Programs:
     def __init__(self, identity: Identity, *, limits: dict[str, float] | None = None) -> None:
         self.identity = identity
-        self.drivers = {path.name[len("arbol-"):-len("-driver")]
-                        for path in identity.bin_dir.glob("arbol-*-driver")
-                        if path.is_file() and os.access(path, os.X_OK)
-                        and re.fullmatch(r"arbol-[a-z][a-z0-9-]*-driver", path.name)}
+        self.drivers: set[str] = set()
+        self.find_drivers()
         self.limits = dict(LIMITS if limits is None else limits)
         self.running: dict[tuple[str, str], Child] = {}
+
+    def find_drivers(self) -> set[str]:
+        self.drivers = {path.name[len("arbol-"):-len("-driver")]
+                        for path in self.identity.bin_dir.glob("arbol-*-driver")
+                        if path.is_file() and os.access(path, os.X_OK)
+                        and re.fullmatch(r"arbol-[a-z][a-z0-9-]*-driver", path.name)}
+        return self.drivers
 
     def reap(self) -> None:
         for key, child in list(self.running.items()):
@@ -155,8 +161,9 @@ class Programs:
                     if child.overflow:
                         raise Refused("no_answer", "The launcher returned no bounded successful reply.")
                     try:
-                        value = json.loads(child.data)
-                        structured_refusal = (kind in ("start", "stop", "settle", "list", "migrate-check", "reimport") and status == 1
+                        value = (json.loads(child.data, object_pairs_hook=pairs, parse_constant=constant, parse_float=finite)
+                                 if kind == "account" else json.loads(child.data))
+                        structured_refusal = (kind in ("start", "stop", "settle", "list", "migrate-check", "reimport", "account") and status == 1
                                               and isinstance(value, dict) and isinstance(value.get("error"), dict))
                         if status != 0 and not structured_refusal:
                             raise Refused("no_answer", "The launcher returned no bounded successful reply.")
