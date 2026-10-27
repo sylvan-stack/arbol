@@ -1,8 +1,9 @@
-"""Drills of the installed `arbol vigor` and of the backend's tick (SYL-298, SGM-1.13 and SGM-1.14); records go outside git.
+"""Drills of the installed `arbol vigor`, the backend's tick and the learner (SYL-298, SYL-299); records go outside git.
 
     uv run --no-sync python scripts/radar_drill.py read [--arbol <launcher>] [--seconds <n>]
     uv run --no-sync python scripts/radar_drill.py refresh [--arbol <launcher>]
     uv run --no-sync python scripts/radar_drill.py tick [--arbol <launcher>] [--seconds <n>]
+    uv run --no-sync python scripts/radar_drill.py learn [--arbol <launcher>]
 
 `read` starts the installed backend by its name in a clean login shell, as the owner would, waits for its first tick,
 stops it through its standard input, then runs `arbol vigor` and `arbol vigor --text` the same way: the owner's own
@@ -11,7 +12,10 @@ Subscriptions through the owner's current Root, with no vendor contacted. `refre
 Drivers' test state folders, a private launcher folder with the installed Driver launchers, and a private PostgreSQL
 cluster with the chat tables and the Vigor tables; the vendors of the test Subscriptions are contacted, the owner's
 Subscriptions and Root are not. `tick` runs the installed backend in such a private Root space for `--seconds` and
-counts the results its ticks recorded, at its first wake and three minutes later. `--arbol` names another launcher,
+counts the results its ticks recorded, at its first wake and three minutes later. `learn` is the scenario of
+SGM-1.11 over the owner's own records: `arbol vigor learn`, then `arbol vigor profiles` as JSON and as text, by name in a
+clean login shell on the owner's current Root; it may write a proposed profile and approves nothing, and no Driver
+runs. `--arbol` names another launcher,
 such as `bin/arbol` of a checkout, in place of the installed one. Every drill writes its record to
 `~/Library/Logs/Arbol/radar-drill-<name>-<time>.json` and prints it.
 """
@@ -39,7 +43,9 @@ HOME = Path.home()
 LOGS = HOME / "Library/Logs/Arbol"
 DRIVERS = ("claude", "codex", "pi")
 TEST_STATE = {driver: HOME / f"Library/Application Support/Arbol/drivers/arbol-{driver}-driver" for driver in DRIVERS}
-USAGE = "Usage: uv run --no-sync python scripts/radar_drill.py read|refresh|tick [--arbol <launcher>] [--seconds <n>]"
+USAGE = (
+    "Usage: uv run --no-sync python scripts/radar_drill.py read|refresh|tick|learn [--arbol <launcher>] [--seconds <n>]"
+)
 
 
 def now() -> str:
@@ -274,6 +280,37 @@ def read(launcher: Path, seconds: float) -> dict[str, Any]:
     return record
 
 
+def learn(launcher: Path) -> dict[str, Any]:
+    """The scenario of SGM-1.11: the learner over the owner's records, then every profile; nothing is approved."""
+    installed = launcher == HOME / ".local/bin/arbol"
+    root = current_root()
+    # A checkout's launcher names the Root itself, since only a Build knows its Root.
+    name = launcher.name if installed else f"{shlex.quote(str(launcher))} --root {shlex.quote(root)}"
+    record: dict[str, Any] = {"drill": "learn", "launcher": name, "root": root, "startedAt": now()}
+    for key, words in (
+        ("learn", "vigor learn"),
+        ("profiles", "vigor profiles"),
+        ("profilesText", "vigor profiles --text"),
+    ):
+        child = login_shell(f"{name} {words}")
+        out, err = child.communicate(timeout=120)
+        answer: dict[str, Any] = {"status": child.returncode, "stdout": out.decode(errors="replace")}
+        answer["stderr"] = err.decode(errors="replace")
+        if key != "profilesText" and child.returncode == 0:
+            answer["document"] = json.loads(out)
+        record[key] = answer
+    document = record["learn"].get("document")
+    if isinstance(document, dict):
+        record["summary"] = {
+            "subscriptions": document["subscriptions"],
+            "observations": len(document["observations"]),
+            "trusted": sum(1 for item in document["observations"] if item["trusted"]),
+            "estimates": document["estimates"],
+            "proposed": (document["proposed"] or {}).get("version"),
+        }
+    return record
+
+
 def refresh(launcher: Path) -> dict[str, Any]:
     """The refresh against the test Subscriptions in a private Root space, then a plain read of what it recorded."""
     root = current_root()
@@ -340,7 +377,7 @@ def main(argv: list[str]) -> int:
         else:
             words.append(argv[i])
             i += 1
-    if len(words) != 1 or words[0] not in ("read", "refresh", "tick"):
+    if len(words) != 1 or words[0] not in ("read", "refresh", "tick", "learn"):
         print(USAGE, file=sys.stderr)
         return 2
     launcher = Path(options.get("--arbol", str(HOME / ".local/bin/arbol"))).expanduser().resolve()
@@ -352,6 +389,8 @@ def main(argv: list[str]) -> int:
         record = read(launcher, seconds)
     elif words[0] == "refresh":
         record = refresh(launcher)
+    elif words[0] == "learn":
+        record = learn(launcher)
     else:
         record = tick(launcher, seconds)
     record["finishedAt"] = now()
