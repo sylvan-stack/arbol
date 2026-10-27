@@ -239,6 +239,7 @@ class WindowsThatTakePart(unittest.TestCase):
                 self.assertEqual((week.role, week.loss, week.contribution), ("shown", None, None))
                 self.assertEqual(week.reason, f"{name} unknown; shown, not summed")
                 self.assertEqual(by_label(result)["Five hours"].role, "store")
+                self.assertEqual((result.vigor, result.unknown), (None, f"{name} missing in the anthropic report"))
 
     def test_the_longest_window_is_the_store_and_shorter_ones_gates(self) -> None:
         """radar.store-longest"""
@@ -279,10 +280,11 @@ class WindowsThatTakePart(unittest.TestCase):
         for outcome in ("needs_sign_in", "unavailable", "unsupported"):
             with self.subTest(outcome=outcome):
                 result = compute(report(ZAI, [], outcome=outcome, message="why"), FIRST_PROFILE, MONDAY)
-                self.assertEqual((result.vigor, result.windows, result.exhausted), (None, (), False))
-                self.assertEqual(result.notes, (f"no Vigor: the zai report's outcome is {outcome}",))
+                self.assertEqual((result.vigor, result.windows, result.exhausted, result.notes), (None, (), False, ()))
+                self.assertIsNotNone(result.unknown)  # the reason is SYL-296's, checked in test_change
         only_calls = compute(report(KIMI, kimi()[:1]), FIRST_PROFILE, MONDAY)
-        self.assertEqual((only_calls.vigor, only_calls.notes), (None, ("no Vigor: no window takes part in the sum",)))
+        self.assertEqual((only_calls.vigor, only_calls.notes), (None, ()))
+        self.assertEqual(only_calls.unknown, "no token or credit window in the kimi-coding report")
 
     def test_the_clock_is_an_argument_that_names_its_time_zone(self) -> None:
         """radar.clock-argument"""
@@ -554,8 +556,10 @@ class ExhaustedSubscriptions(unittest.TestCase):
         self.assertEqual(
             (entry.role, entry.loss, entry.reason), ("shown", None, "usedPercent unknown; shown, not summed")
         )
-        assert result.vigor is not None
-        self.assertEqual(round(result.vigor, 2), 0.37)
+        week = by_label(result)["Seven days"]
+        assert week.contribution is not None
+        self.assertEqual(round(week.contribution, 2), 0.37)  # the week's part is still on the record
+        self.assertEqual((result.vigor, result.unknown), (None, "usedPercent missing in the anthropic report"))
 
 
 class Advisory(unittest.TestCase):

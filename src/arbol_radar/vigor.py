@@ -10,7 +10,7 @@ import math
 from dataclasses import replace
 from datetime import datetime, timedelta
 
-from arbol_radar.model import SUMMED, Loss, Profile, Rejected, Report, Result, Role, Window, stale_after
+from arbol_radar.model import SUMMED, Loss, Profile, Rejected, Report, Result, Role, Subscription, Window, stale_after
 
 
 def loss(window: Window, now: datetime) -> float | None:
@@ -126,7 +126,6 @@ def _calculate(
         vigor: float | None = 0.0
     elif store is None:
         vigor = None
-        notes.append("no Vigor: no window takes part in the sum")
     else:
         vigor = min(1.0, total)
     return tuple(losses), vigor, exhausted, tuple(notes)
@@ -150,11 +149,54 @@ def next_change(
     return moment, value
 
 
-def compute(report: Report, profile: Profile, now: datetime) -> Result:
-    """The Vigor of the report's Subscription at `now` by `profile` (SGM-1.1 to 1.8), on the windows predicted for `now`."""
+def unknown_reason(report: Report | None) -> str | None:
+    """Why the Subscription's Vigor cannot be computed, in the chapter's words after `unknown: `; None when it can (SGM-1.9).
+
+    A missing field in an `ok` report is a Driver defect and names the field and the family; an `unsupported` outcome is
+    a known gap; `needs_sign_in` and `unavailable` carry the Driver's message; no report means nothing has run and
+    nothing was fetched (SGM-D19). An `ok` report without a token or credit window cannot be summed either (SGM-D33).
+    """
+    if report is None:
+        return "no report yet"
+    family = report.subscription.family
+    if report.outcome == "unsupported":
+        return f"allowance not supported for {family}"
+    if report.outcome != "ok":
+        return f"{report.outcome}: {report.message}" if report.message else report.outcome
+    summed = [window for window in report.windows if counted_as(window)[0] is not None]
+    for window in summed:
+        if window.missing is not None:
+            return f"{window.missing} missing in the {family} report"
+    if not summed:
+        return f"no token or credit window in the {family} report"
+    return None
+
+
+def compute(
+    report: Report | None, profile: Profile, now: datetime, *, subscription: Subscription | None = None
+) -> Result:
+    """The Vigor of the report's Subscription at `now` by `profile` (SGM-1.1 to 1.9), on the windows predicted for `now`.
+
+    Without a report the Subscription is named, and the result is unknown with the reason `no report yet`. A result that
+    cannot be computed carries Vigor None and its reason, never zero; its windows are still listed as the report gave
+    them, and it has no next change.
+    """
     if now.tzinfo is None:
         raise Rejected("clock", "The clock names no time zone.")
-    family = report.subscription.family
+    if report is None:
+        if subscription is None:
+            raise Rejected("subscription", "Without a report, the Subscription is named.")
+        return Result(
+            subscription=subscription,
+            moment=now,
+            report=None,
+            profile=profile.version,
+            windows=(),
+            vigor=None,
+            exhausted=False,
+            unknown=unknown_reason(None),
+        )
+    reason = unknown_reason(report)
     if report.outcome != "ok":
         return Result(
             subscription=report.subscription,
@@ -164,11 +206,11 @@ def compute(report: Report, profile: Profile, now: datetime) -> Result:
             windows=(),
             vigor=None,
             exhausted=False,
-            notes=(f"no Vigor: the {family} report's outcome is {report.outcome}",),
+            unknown=reason,
         )
     windows = tuple(predict(window, now) for window in report.windows)
     losses, vigor, exhausted, notes = _calculate(report, windows, profile, now)
-    moment, value = next_change(report, windows, profile, now)
+    moment, value = next_change(report, windows, profile, now) if reason is None else (None, None)
     # Stale when the report is older than the shortest window that is summed or can exhaust the Subscription; the
     # result is still computed, since the report is a floor the owner's other devices may have spent past (SGM-1.8).
     age = now - report.fetched_at
@@ -179,11 +221,12 @@ def compute(report: Report, profile: Profile, now: datetime) -> Result:
         report=report.id,
         profile=profile.version,
         windows=losses,
-        vigor=vigor,
+        vigor=vigor if reason is None else None,
         exhausted=exhausted,
         notes=notes,
         predicted=any(window.predicted for window in windows),
         stale=age if limit is not None and age > limit else None,
+        unknown=reason,
         next_change=moment,
         next_value=value,
     )

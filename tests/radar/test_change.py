@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tests"))
 from arbol_radar.model import FIRST_PROFILE, Profile, Rejected, Weight, Window, stale_after  # noqa: E402
-from arbol_radar.vigor import compute, next_change, predict  # noqa: E402
+from arbol_radar.vigor import compute, next_change, predict, unknown_reason  # noqa: E402
 from radar.support import (  # noqa: E402
     CLAUDE,
     CODEX,
@@ -277,6 +277,124 @@ class Stale(unittest.TestCase):
         with self.assertRaises(Rejected) as caught:
             Profile(1, "proposed", "even", Weight(0.1), stale_rule="fixed")
         self.assertEqual(caught.exception.field, "staleRule")
+
+
+class Unknown(unittest.TestCase):
+    """A result that cannot be computed is unknown with its reason, never zero (SGM-1.9, SGM-D19)."""
+
+    def test_a_token_window_of_an_ok_report_lacking_a_field_names_the_field_and_the_family(self) -> None:
+        """radar.unknown-missing-field"""
+        windows = [codex()[0], window("weekly", "Weekly window", resource=None, used=70, resets=None, minutes=10080)]
+        result = compute(report(CODEX, windows), FIRST_PROFILE, MONDAY)
+        self.assertEqual((result.vigor, result.unknown), (None, "resetsAt missing in the chatgpt report"))
+        self.assertEqual((result.exhausted, result.next_change, result.next_value), (False, None, None))
+        self.assertEqual([entry.label for entry in result.windows], ["5-hour window", "Weekly window"])  # still shown
+        self.assertEqual(by_label(result)["Weekly window"].reason, "resetsAt unknown; shown, not summed")
+        for name, w in (
+            (
+                "usedPercent",
+                window("weekly", "Weekly window", resource=None, used=None, resets=at(days=1), minutes=10080),
+            ),
+            (
+                "windowMinutes",
+                window("weekly", "Weekly window", resource=None, used=70, resets=at(days=1), minutes=None),
+            ),
+        ):
+            with self.subTest(field=name):
+                r = report(CODEX, [codex()[0], w])
+                self.assertEqual(unknown_reason(r), f"{name} missing in the chatgpt report")
+                self.assertIsNone(compute(r, FIRST_PROFILE, MONDAY).vigor)
+        calls = report(KIMI, [window("session", "Five hours", resource="calls", used=70, resets=None), *kimi()[1:]])
+        self.assertIsNone(unknown_reason(calls))  # a window that is not summed may lack a field
+        assert compute(calls, FIRST_PROFILE, MONDAY).vigor is not None
+
+    def test_a_used_share_below_0_is_named_as_missing(self) -> None:
+        """radar.unknown-below-zero"""
+        r = report(CLAUDE, [window("session", "Five hours", used=-5, resets=at(hours=3, minutes=20)), claude()[1]])
+        result = compute(r, FIRST_PROFILE, MONDAY)
+        self.assertEqual((result.vigor, result.unknown), (None, "usedPercent missing in the anthropic report"))
+        self.assertEqual(by_label(result)["Five hours"].used_percent, None)
+        later = compute(r, FIRST_PROFILE, MONDAY + timedelta(hours=4))  # the reset passed: the defect stays visible
+        self.assertEqual(
+            (later.vigor, later.unknown, later.predicted), (None, "usedPercent missing in the anthropic report", False)
+        )
+
+    def test_an_unsupported_family_is_a_known_gap(self) -> None:
+        """radar.unknown-unsupported"""
+        r = report(ZAI, [], outcome="unsupported", message="no allowance reading for zai through Pi")
+        result = compute(r, FIRST_PROFILE, MONDAY)
+        self.assertEqual((result.vigor, result.unknown), (None, "allowance not supported for zai"))
+        self.assertEqual((result.windows, result.exhausted, result.stale, result.next_change), ((), False, None, None))
+        self.assertEqual(result.report, "r1")
+
+    def test_a_sign_in_need_and_an_unreachable_vendor_carry_the_message(self) -> None:
+        """radar.unknown-outcome-message"""
+        signed_out = report(KIMI, [], outcome="needs_sign_in", message="the token was rejected")
+        self.assertEqual(compute(signed_out, FIRST_PROFILE, MONDAY).unknown, "needs_sign_in: the token was rejected")
+        unreachable = report(CODEX, [], outcome="unavailable", message="the app server did not answer")
+        self.assertEqual(
+            compute(unreachable, FIRST_PROFILE, MONDAY).unknown, "unavailable: the app server did not answer"
+        )
+        silent = report(CODEX, [], outcome="unavailable")
+        self.assertEqual(compute(silent, FIRST_PROFILE, MONDAY).unknown, "unavailable")
+
+    def test_no_report_yet(self) -> None:
+        """radar.unknown-no-report"""
+        result = compute(None, FIRST_PROFILE, MONDAY, subscription=ZAI)
+        self.assertEqual((result.subscription, result.moment, result.report, result.profile), (ZAI, MONDAY, None, 1))
+        self.assertEqual(
+            (result.vigor, result.unknown, result.windows, result.exhausted), (None, "no report yet", (), False)
+        )
+        self.assertEqual(
+            (result.stale, result.predicted, result.next_change, result.next_value), (None, False, None, None)
+        )
+        self.assertEqual(unknown_reason(None), "no report yet")
+        with self.assertRaises(Rejected) as caught:
+            compute(None, FIRST_PROFILE, MONDAY)
+        self.assertEqual(caught.exception.field, "subscription")
+
+    def test_unknown_is_never_zero_and_never_blank(self) -> None:
+        """radar.unknown-never-zero"""
+        cases = [
+            report(
+                CODEX,
+                [codex()[0], window("weekly", "Weekly window", resource=None, used=70, resets=None, minutes=10080)],
+            ),
+            report(ZAI, [], outcome="unsupported", message="why"),
+            report(KIMI, [], outcome="needs_sign_in", message="why"),
+            report(CODEX, [], outcome="unavailable"),
+            None,
+        ]
+        for r in cases:
+            with self.subTest(report=r):
+                result = compute(r, FIRST_PROFILE, MONDAY, subscription=ZAI)
+                self.assertIsNone(result.vigor)
+                self.assertTrue(result.unknown)
+                if r is None or r.outcome != "ok":
+                    self.assertEqual(result.notes, ())
+        known = compute(report(CLAUDE, claude()), FIRST_PROFILE, MONDAY)
+        self.assertEqual((known.unknown, unknown_reason(report(CLAUDE, claude()))), (None, None))
+        assert known.vigor is not None
+
+    def test_an_ok_report_without_a_token_or_credit_window_cannot_be_summed(self) -> None:
+        """radar.unknown-no-summed-window"""
+        only_calls = compute(report(KIMI, kimi()[:1]), FIRST_PROFILE, MONDAY)
+        self.assertEqual(
+            (only_calls.vigor, only_calls.unknown), (None, "no token or credit window in the kimi-coding report")
+        )
+        self.assertEqual(by_label(only_calls)["Five hours"].role, "shown")
+        empty = compute(report(CODEX, []), FIRST_PROFILE, MONDAY)
+        self.assertEqual((empty.vigor, empty.unknown), (None, "no token or credit window in the chatgpt report"))
+        reached = compute(report(KIMI, kimi(five_reached=True)[:1]), FIRST_PROFILE, MONDAY)
+        self.assertEqual((reached.vigor, reached.exhausted), (None, True))  # exhausted is a fact; the value is unknown
+
+    def test_a_missing_field_keeps_an_exhausted_subscription_unknown(self) -> None:
+        """radar.unknown-exhausted"""
+        windows = [claude(100, reached=True)[0], window("weekly", "Seven days", used=20, resets=None, minutes=10080)]
+        result = compute(report(CLAUDE, windows, extra={"isUsingOverage": False}), FIRST_PROFILE, MONDAY)
+        self.assertEqual((result.vigor, result.exhausted), (None, True))
+        self.assertEqual(result.unknown, "resetsAt missing in the anthropic report")
+        self.assertEqual((result.next_change, result.next_value), (None, None))
 
 
 if __name__ == "__main__":

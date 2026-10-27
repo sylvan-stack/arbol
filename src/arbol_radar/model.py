@@ -317,7 +317,7 @@ class Result:
 
     subscription: Subscription
     moment: datetime
-    report: str  # the id of the report used
+    report: str | None  # the id of the report used; None while there is no report yet (SGM-1.9)
     profile: int  # the profile version used
     windows: tuple[Loss, ...]
     vigor: float | None
