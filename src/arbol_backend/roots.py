@@ -11,7 +11,7 @@ from typing import Any
 from .bridge import Error, Params, Registry, Snapshot, Topic
 from .database import Database
 from .model import ROOT_ID, Identity, Refused, root_record
-from .process import Programs
+from .process import GLOBAL_CATALOGUE, Programs
 
 
 @dataclass(frozen=True)
@@ -31,7 +31,7 @@ class Roots:
     async def catalogue_read(self) -> Catalogue:
         try:
             async with asyncio.timeout(0.8):
-                value: Any = await self.programs.call("arbol-roots", ["list"], kind="list", key="catalogue")
+                value: Any = await self.programs.call("arbol-roots", ["list"], kind="list", key=GLOBAL_CATALOGUE)
         except (TimeoutError, Refused) as error:
             raise Error("no_answer", source="roots") from error
         if not isinstance(value, list):

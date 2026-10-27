@@ -24,6 +24,7 @@ from arbol_backend.database import Database, Session  # noqa: E402
 from arbol_backend.health import Health  # noqa: E402
 from arbol_backend.measurements import Measurements  # noqa: E402
 from arbol_backend.metadata import Attention  # noqa: E402
+from arbol_backend.process import Programs  # noqa: E402
 from arbol_backend.storage import LocalDisk  # noqa: E402
 from backend.recovery_support import offline  # noqa: E402
 from backend.test_chat_wire import WindowFixture  # noqa: E402
@@ -217,3 +218,16 @@ class Storage(WindowFixture):
         self.assertIn("freeBytes", report)
         self.assertIn("diskProblem", report)
         self.assertNotIn("dataFolderBytes", report)
+
+    async def test_a_root_named_catalogue_cannot_collide_with_the_global_catalogue_command(self) -> None:
+        """measurement.catalogue-namespace; measurement.valid-root-name"""
+        self.frame.behavior["arbol-roots"] = {"sleep": 0.1, "output": [{"root": "catalogue", "current": True}]}
+        self.frame.behavior["arbol-root"] = {"sleep": 0.1, "output": {"root": "catalogue", "exchanges": [], "unreadable": []}}
+        self.frame.configure()
+        programs = Programs(replace(self.backend.identity, root="catalogue"))
+        try:
+            current, listed = await asyncio.gather(programs.current_root(), programs.call("arbol-root", ["list"], kind="list"))
+            self.assertEqual(current, {"root": "catalogue", "current": True})
+            self.assertEqual(listed["root"], "catalogue")
+        finally:
+            programs.close()

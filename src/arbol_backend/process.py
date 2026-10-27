@@ -22,6 +22,7 @@ LIMITS = {"start": 25.0, "stop": 90.0, "settle": 120.0, "list": 10.0, "account":
 DRIVERS = {"claude", "codex", "pi"}
 ACCOUNT_COMMANDS = {"check", "usage", "models"}
 MAX_OUTPUT = 1024 * 1024
+GLOBAL_CATALOGUE = "roots.catalogue"
 
 
 @dataclass
@@ -207,7 +208,7 @@ class Programs:
         raise Refused("no_answer", "The listing process group could not be stopped.")
 
     async def current_root(self) -> dict[str, Any] | None:
-        value = await self.call("arbol-roots", ["list"], kind="list", key="catalogue")
+        value = await self.call("arbol-roots", ["list"], kind="list", key=GLOBAL_CATALOGUE)
         if not isinstance(value, list) or any(not isinstance(row, dict) for row in value):
             raise Refused("no_answer", "The Root catalogue returned an invalid list.")
         current = [row for row in value if row.get("current") is True]
