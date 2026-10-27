@@ -29,6 +29,9 @@ class Settles(WindowFixture):
         assert self.backend.settling.worker and self.backend.settling.look
         await self.backend.settling.worker
         await self.backend.settling.look
+        if self.backend.discovery.task is not None:
+            await self.backend.discovery.task
+        await asyncio.gather(*self.backend.listings.tasks.values())
         self.initial = self.calls()
         code = STANDIN.replace("config=json.loads((base/'behavior.json').read_text()).get(name,{})",
             "config=json.loads((base/'behavior.json').read_text()).get(name,{})\nconfig=config.get('commands',{}).get(sys.argv[3],config)")

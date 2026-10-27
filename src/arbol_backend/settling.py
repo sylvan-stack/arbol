@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 from .bridge import Error, Params, uuid_id
@@ -41,41 +43,59 @@ def listing(value: Any, root: str) -> list[Params]:
     return value["exchanges"]  # type: ignore[no-any-return]
 
 
+@dataclass
+class Queue:
+    root: str
+    pending: bool = False
+    task: asyncio.Task[None] | None = None
+
+
 class Settling:
     def __init__(self, programs: Programs, database: Database, live: Live) -> None:
         self.programs, self.database, self.live = programs, database, live
-        self.pending = False
+        self.queues = {live.identity.root: Queue(live.identity.root)}
         self.look_pending = False
-        self.worker: asyncio.Task[None] | None = None
         self.look: asyncio.Task[None] | None = None
         self.closed = False
+        self.read_listing: Callable[[str], Awaitable[Params]] | None = None
+        self.on_settled: Callable[[str], None] | None = None
         self.live.on_dead = self.request_listing
 
-    def request(self) -> None:
+    @property
+    def worker(self) -> asyncio.Task[None] | None:
+        return self.queues[self.live.identity.root].task
+
+    def request(self, root: str | None = None) -> None:
         if self.closed:
             return
-        self.pending = True
-        if self.worker is None or self.worker.done():
-            self.worker = asyncio.create_task(self.work())
+        selected = self.live.identity.root if root is None else root
+        queue = self.queues.setdefault(selected, Queue(selected))
+        queue.pending = True
+        if queue.task is None or queue.task.done():
+            queue.task = asyncio.create_task(self.work(queue))
 
-    async def work(self) -> None:
-        while self.pending:
-            self.pending = False
-            # A returned timeout is not a returned manager. A new reason may wait for it,
-            # but never launches another settle while its actual process is retained.
+    async def work(self, queue: Queue) -> None:
+        while queue.pending:
+            queue.pending = False
             while True:
                 self.programs.reap()
-                if ("settle", self.live.identity.root) not in self.programs.running:
+                if self.programs.command_key("settle", queue.root, queue.root) not in self.programs.running:
                     break
                 await asyncio.sleep(0.05)
             try:
                 await self.database.execute("SELECT 1")
-                value = await self.programs.call("arbol-root", ["settle"], kind="settle")
-                if (not isinstance(value, dict) or value.get("root") != self.live.identity.root
+                value = await self.programs.call("arbol-root", ["settle"], kind="settle", root=queue.root)
+                if (not isinstance(value, dict) or value.get("root") != queue.root
                         or not isinstance(value.get("results"), list)):
                     raise Error("no_answer")
+                if self.on_settled:
+                    self.on_settled(queue.root)
             except Refused:
-                pass  # No retry without another reason; recovery/public attention belongs to SYL-252.
+                pass  # No retry without another reason.
+
+    def listed(self, root: str, value: Params) -> None:
+        if any(row["state"] in ELIGIBLE for row in value["exchanges"]):
+            self.request(root)
 
     def request_listing(self) -> None:
         if self.closed:
@@ -88,10 +108,11 @@ class Settling:
         while self.look_pending:
             self.look_pending = False
             try:
-                value = await self.programs.call("arbol-root", ["list"], kind="list")
-                rows = listing(value, self.live.identity.root)
-                if any(row["state"] in ELIGIBLE for row in rows):
-                    self.request()
+                if self.read_listing:
+                    await self.read_listing(self.live.identity.root)  # Its one shared result callback owns this reason.
+                else:
+                    raw = await self.programs.call("arbol-root", ["list"], kind="list")
+                    self.listed(self.live.identity.root, {"exchanges": listing(raw, self.live.identity.root)})
             except Refused:
                 pass
 
@@ -102,7 +123,9 @@ class Settling:
     async def close(self) -> None:
         self.closed = True
         self.live.on_dead = None
-        tasks = [task for task in (self.worker, self.look) if task is not None]
+        tasks = [queue.task for queue in self.queues.values() if queue.task is not None]
+        if self.look is not None:
+            tasks.append(self.look)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

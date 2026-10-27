@@ -14,10 +14,12 @@ from .bridge import MAX_LINE, Connection, Registry
 from .chats import Chats
 from .controls import Controls
 from .database import Database
+from .discovery import Discovery
 from .dispatch import Dispatch
 from .drafts import Drafts
 from .health import Health
 from .lifetime import Lifetime
+from .listings import Listings
 from .live import Live
 from .migration import Migration
 from .model import Identity, Refused, root_record, settings
@@ -46,6 +48,10 @@ class Backend:
         self.notes = Notes(identity, self.database, self.chats, self.live)
         self.controls = Controls(self.programs, self.dispatch, self.live, self.registry)
         self.settling = Settling(self.programs, self.database, self.live)
+        self.listings = Listings(self.programs, self.database)
+        self.listings.on_rows = self.settling.listed
+        self.settling.read_listing = self.listings.get
+        self.discovery = Discovery(self.roots, self.listings, self.registry)
         self.migration = Migration(identity, self.programs, self.chats, self.registry, self.record)
         self.windows: set[asyncio.StreamWriter] = set()
         self.tasks: set[asyncio.Task[None]] = set()
@@ -72,7 +78,7 @@ class Backend:
 
     async def initial_catalogue(self) -> None:
         try:
-            await self.roots.catalogue()
+            await self.discovery.get({})
         except Refused:
             pass
 
@@ -160,6 +166,8 @@ class Backend:
                 await asyncio.gather(*self.tasks, return_exceptions=True)
             if server is not None:
                 await server.wait_closed()
+            await self.discovery.close()
+            await self.listings.close()
             await self.notes.close()
             await self.health.close()
             await self.settling.close()

@@ -462,6 +462,8 @@ class RootWire(unittest.IsolatedAsyncioTestCase):
 
     async def test_catalogue_current_fresh_coalesced_and_only_rootinfo_fields(self) -> None:
         """bridge.root-catalogue"""
+        if self.backend.discovery.task is not None:
+            await self.backend.discovery.task
         reader, writer = await self.open()
         for index, current in enumerate((True, False)):
             self.fixture.behavior["arbol-roots"]["output"][0]["current"] = current

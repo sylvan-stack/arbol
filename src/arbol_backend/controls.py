@@ -12,7 +12,7 @@ from .bridge import Error, Params, Registry, uuid_id
 from .dispatch import Dispatch, Forwarded
 from .live import Live
 from .migration import message
-from .model import Refused
+from .model import ROOT_ID, Refused
 from .process import Programs
 
 START_WAIT = 120.0
@@ -21,7 +21,13 @@ ENDED = {"completed", "failed", "cancelled", "interrupted", "saved", "none"}
 
 
 async def stop_params(params: Params) -> Params:
-    return {"exchange": uuid_id(params.get("exchange"))}
+    result = {"exchange": uuid_id(params.get("exchange"))}
+    if "root" in params:
+        root = params["root"]
+        if not isinstance(root, str) or not ROOT_ID.fullmatch(root):
+            raise Error("invalid_input")
+        result["root"] = root
+    return result
 
 
 class Controls:
@@ -30,7 +36,7 @@ class Controls:
         self.programs, self.dispatch, self.live = programs, dispatch, live
         self.start_wait, self.stop_wait = start_wait, stop_wait
         self.answers = Answers(live.folders)
-        self.tasks: dict[str, asyncio.Task[Params | Error]] = {}
+        self.tasks: dict[tuple[str, str], asyncio.Task[Params | Error]] = {}
         registry.method("exchange.stop", self.stop, stop_params)
         registry.method("exchange.answer", self.answers.write, answer_params)
 
@@ -60,7 +66,7 @@ class Controls:
         if chat:
             self.live.mark_stopping(exchange, chat)
 
-    def result(self, value: Any, exchange: str) -> Params:
+    def result(self, value: Any, exchange: str, *, root: str | None = None) -> Params:
         if not isinstance(value, dict):
             raise Error("no_answer")
         if "error" in value:
@@ -72,7 +78,7 @@ class Controls:
             secret = (self.live.chats.database.parameters or {}).get("password", "")
             raise Forwarded(error["code"], "root-manager", message(error["message"], secrets=(secret,),
                 fallback="The stop command refused; its diagnostic is not safe to display."))
-        if (value.get("root") != self.live.identity.root or value.get("exchange") != exchange
+        if (value.get("root") != (self.live.identity.root if root is None else root) or value.get("exchange") != exchange
                 or not isinstance(value.get("ended"), str) or value["ended"] not in ENDED):
             raise Error("no_answer")
         return {"ended": value["ended"]}
@@ -87,24 +93,26 @@ class Controls:
                 raise Error("no_answer")
             await asyncio.sleep(min(0.01, max(0, deadline-time.monotonic())))
 
-    async def run(self, exchange: str) -> Params | Error:
+    async def run(self, exchange: str, root: str) -> Params | Error:
         try:
-            await self.notice(exchange)
-            await self.start_done(exchange)
-            await self.notice(exchange)  # A pending start may just have published its row/folder.
+            own = root == self.live.identity.root
+            if own:
+                await self.notice(exchange)
+                await self.start_done(exchange)
+                await self.notice(exchange)  # A pending start may just have published its row/folder.
             deadline = time.monotonic() + self.stop_wait
             while True:
                 self.programs.reap()
-                child = self.programs.running.get(("stop", exchange))
+                child = self.programs.running.get(self.programs.command_key("stop", exchange, root))
                 if child is None:
                     break
                 if time.monotonic() >= deadline:
                     return Error("no_answer")
                 await asyncio.sleep(min(0.01, max(0, deadline-time.monotonic())))
             async with asyncio.timeout(max(0, deadline-time.monotonic())):
-                value = await self.programs.call("arbol-root", ["stop", exchange], kind="stop", key=exchange)
-            result = self.result(value, exchange)
-            if result["ended"] == "none":
+                value = await self.programs.call("arbol-root", ["stop", exchange], kind="stop", key=exchange, root=root)
+            result = self.result(value, exchange, root=root)
+            if own and result["ended"] == "none":
                 # none confirms no current folder; no inferred completed/cancelled state is emitted.
                 self.live.stopping.pop(exchange, None)
             return result
@@ -119,13 +127,19 @@ class Controls:
 
     async def stop(self, params: Params) -> Params:
         exchange = params["exchange"]
-        task = self.tasks.get(exchange)
+        root = params.get("root", self.live.identity.root)
+        if root != self.live.identity.root:
+            catalogue = await self.live.chats.roots.catalogue()
+            if not any(row["root"] == root for row in catalogue):
+                raise Forwarded("unknown_root", "root-manager", "The requested Root is not in the catalogue.")
+        key = (root, exchange)
+        task = self.tasks.get(key)
         if task is None or task.done():
-            task = asyncio.create_task(self.run(exchange))
-            self.tasks[exchange] = task
+            task = asyncio.create_task(self.run(exchange, root))
+            self.tasks[key] = task
             if len(self.tasks) > 1024:
                 for id, previous in list(self.tasks.items()):
-                    if id != exchange and previous.done():
+                    if id != key and previous.done():
                         self.tasks.pop(id)
         result = await asyncio.shield(task)
         if isinstance(result, Error):
