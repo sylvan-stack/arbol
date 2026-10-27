@@ -587,13 +587,16 @@ class Advisory(unittest.TestCase):
             "arbol_radar.vigor",
             "uuid",
         },
+        # The rollup (SYL-298) reaches the records only for the shape of a loss row in the JSON answer.
+        "rollup.py": {"arbol_radar.records"},
     }
 
     def test_the_package_imports_nothing_that_runs_a_program_or_writes_a_file(self) -> None:
         """radar.advisory-imports"""
         files = sorted((ROOT / "src/arbol_radar").glob("*.py"))
         self.assertEqual(
-            [path.name for path in files], ["__init__.py", "drivers.py", "model.py", "records.py", "vigor.py"]
+            [path.name for path in files],
+            ["__init__.py", "drivers.py", "model.py", "records.py", "rollup.py", "vigor.py"],
         )
         for path in files:
             allowed = self.ALLOWED_IMPORTS | self.REACHES.get(path.name, set())
