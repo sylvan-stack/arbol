@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -13,15 +14,21 @@ from .model import ROOT_ID, Identity, Refused, root_record
 from .process import Programs
 
 
+@dataclass(frozen=True)
+class Catalogue:
+    public: list[Params]
+    databases: list[Params]
+
+
 class Roots:
     def __init__(self, identity: Identity, programs: Programs, database: Database) -> None:
         self.identity, self.programs, self.database = identity, programs, database
-        self.inflight: asyncio.Task[list[Params] | Error] | None = None
+        self.inflight: asyncio.Task[Catalogue | Error] | None = None
         self.current: Params | None = None
         self.complete: Callable[[], Awaitable[bool]] | None = None
         self.topic = Topic(self.snapshot)
 
-    async def catalogue_read(self) -> list[Params]:
+    async def catalogue_read(self) -> Catalogue:
         try:
             async with asyncio.timeout(0.8):
                 value: Any = await self.programs.call("arbol-roots", ["list"], kind="list", key="catalogue")
@@ -32,9 +39,21 @@ class Roots:
         rows = [self.info(row) for row in value]
         if sum(row["current"] for row in rows) > 1 or len({row["root"] for row in rows}) != len(rows):
             raise Error("no_answer", source="roots")
-        return rows
+        databases = []
+        for row, record in zip(rows, value, strict=True):
+            name = record.get("database")
+            valid = isinstance(name, str) and bool(name.strip()) and "\0" not in name and name.lower() not in {"postgres", "template0", "template1"}
+            try:
+                valid = valid and len(name.encode("utf-8")) <= 63
+            except UnicodeError:
+                valid = False
+            entry = {"root": row["root"], "name": row["name"], "database": name if valid else ""}
+            if not valid:
+                entry["problem"] = "This Root's database name is not available."
+            databases.append(entry)
+        return Catalogue(rows, databases)
 
-    async def catalogue_outcome(self) -> list[Params] | Error:
+    async def catalogue_outcome(self) -> Catalogue | Error:
         # A cancelled shield must never leave an exception to asyncio's default logger.
         try:
             return await self.catalogue_read()
@@ -43,13 +62,19 @@ class Roots:
         except Exception:
             return Error("no_answer", source="roots")
 
-    async def catalogue(self) -> list[Params]:
+    async def shared_catalogue(self) -> Catalogue:
         if self.inflight is None or self.inflight.done():
             self.inflight = asyncio.create_task(self.catalogue_outcome())
         value = await asyncio.shield(self.inflight)
         if isinstance(value, Error):
             raise value
         return value
+
+    async def catalogue(self) -> list[Params]:
+        return (await self.shared_catalogue()).public
+
+    async def database_records(self) -> list[Params]:
+        return [dict(row) for row in (await self.shared_catalogue()).databases]
 
     @staticmethod
     def info(record: Any) -> Params:

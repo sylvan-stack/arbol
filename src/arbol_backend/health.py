@@ -21,6 +21,7 @@ class Health:
         self.on_return: Callable[[int], Awaitable[None]] | None = None
         self.on_away: Callable[[], None] | None = None
         self.monitor: asyncio.Task[None] | None = None
+        self.probing: asyncio.Task[None] | None = None
         self.recoveries: set[asyncio.Task[None]] = set()
         self.database.on_failure = self.failed
         self.database.on_connected = self.connected
@@ -57,7 +58,7 @@ class Health:
         except Exception:
             pass  # Keep diagnostics fixed; the next actual transition can retry recovery.
 
-    async def probe(self) -> None:
+    async def probe_once(self) -> None:
         try:
             async with asyncio.timeout(self.database.seconds):
                 if self.database.away:
@@ -67,6 +68,11 @@ class Health:
             self.connected()
         except (TimeoutError, Refused, OSError):
             self.failed("The database server does not answer.")
+
+    async def probe(self) -> None:
+        if self.probing is None or self.probing.done():
+            self.probing = asyncio.create_task(self.probe_once())
+        await asyncio.shield(self.probing)
 
     async def watch(self) -> None:
         while True:
@@ -79,7 +85,8 @@ class Health:
             self.monitor = asyncio.create_task(self.watch())
 
     async def close(self) -> None:
-        tasks = [*self.recoveries, *([self.monitor] if self.monitor is not None else [])]
+        tasks = [*self.recoveries, *([self.monitor] if self.monitor is not None else []),
+                 *([self.probing] if self.probing is not None else [])]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

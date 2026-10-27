@@ -22,6 +22,7 @@ from .health import Health
 from .lifetime import Lifetime
 from .listings import Listings
 from .live import Live
+from .measurements import Measurements
 from .migration import Migration
 from .model import Identity, Refused, root_record, settings
 from .notes import Notes
@@ -45,6 +46,7 @@ class Backend:
         self.chats = Chats(identity, self.database, self.programs, self.roots, self.registry,
                            lineage=isinstance(self.record.get("grewFrom"), str))
         self.health = Health(self.database, self.chats.attention)
+        self.measurements = Measurements(self.health, self.roots, self.registry)
         self.accounts = Accounts(self.programs, self.chats.catalogues, self.registry,
                                  lambda: ((self.database.parameters or {}).get("password", ""),))
         self.drafts = Drafts(self.chats, self.registry)
@@ -173,6 +175,7 @@ class Backend:
             if server is not None:
                 await server.wait_closed()
             await self.recovery.close()
+            await self.measurements.close()
             await self.stuck.close()
             await self.health.close()
             await self.controls.close()
