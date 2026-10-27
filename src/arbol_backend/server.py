@@ -14,15 +14,21 @@ from .bridge import MAX_LINE, Connection, Registry
 from .chats import Chats
 from .controls import Controls
 from .database import Database
+from .discovery import Discovery
 from .dispatch import Dispatch
 from .drafts import Drafts
+from .health import Health
 from .lifetime import Lifetime
+from .listings import Listings
 from .live import Live
 from .migration import Migration
 from .model import Identity, Refused, root_record, settings
+from .notes import Notes
 from .process import Programs
+from .recovery import Recovery
 from .roots import Roots
 from .settling import Settling
+from .stuck import Stuck
 
 
 class Backend:
@@ -37,15 +43,28 @@ class Backend:
         self.roots.register(self.registry)
         self.chats = Chats(identity, self.database, self.programs, self.roots, self.registry,
                            lineage=isinstance(self.record.get("grewFrom"), str))
+        self.health = Health(self.database, self.chats.attention)
         self.drafts = Drafts(self.chats, self.registry)
         self.dispatch = Dispatch(identity, self.programs, self.chats, self.drafts, self.registry, self.settings)
         self.live = Live(identity, self.chats, self.dispatch)
+        self.notes = Notes(identity, self.database, self.chats, self.live)
         self.controls = Controls(self.programs, self.dispatch, self.live, self.registry)
         self.settling = Settling(self.programs, self.database, self.live)
+        self.listings = Listings(self.programs, self.database)
+        self.stuck = Stuck(identity, self.listings, self.controls, self.notes, self.chats.attention)
+        self.listings.on_rows = self.listed
+        self.listings.on_failed = self.stuck.failed
+        self.settling.read_listing = self.listings.get
+        self.discovery = Discovery(self.roots, self.listings, self.registry)
+        self.recovery = Recovery(self.health, self.chats, self.registry, self.settling, self.notes, self.discovery, self.stuck)
         self.migration = Migration(identity, self.programs, self.chats, self.registry, self.record)
         self.windows: set[asyncio.StreamWriter] = set()
         self.tasks: set[asyncio.Task[None]] = set()
         self.stopped = asyncio.Event()
+
+    def listed(self, root: str, value: dict[str, Any]) -> None:
+        self.settling.listed(root, value)
+        self.stuck.observe(root, value)
 
     def task(self, work: Coroutine[Any, Any, None]) -> None:
         task = asyncio.create_task(work)
@@ -59,16 +78,9 @@ class Backend:
         finally:
             self.windows.discard(writer)
 
-    async def initial_database(self) -> None:
-        try:
-            await self.database.execute("SELECT 1")
-        except Refused:
-            # The later database-away/attention Beat supplies publication and recovery.
-            pass
-
     async def initial_catalogue(self) -> None:
         try:
-            await self.roots.catalogue()
+            await self.discovery.get({})
         except Refused:
             pass
 
@@ -130,11 +142,14 @@ class Backend:
                 ),
                 flush=True,
             )
+            self.health.start()
             self.dispatch.start()
             self.chats.start()
             self.live.start()
+            self.notes.start()
             self.task(self.initial_work())
             self.task(self.initial_catalogue())
+            self.stuck.start()
             self.task(self.monitor())
             await self.stopped.wait()
             return 0
@@ -154,8 +169,14 @@ class Backend:
                 await asyncio.gather(*self.tasks, return_exceptions=True)
             if server is not None:
                 await server.wait_closed()
-            await self.settling.close()
+            await self.recovery.close()
+            await self.stuck.close()
+            await self.health.close()
             await self.controls.close()
+            await self.discovery.close()
+            await self.settling.close()
+            await self.listings.close()
+            await self.notes.close()
             await self.live.close()
             await self.dispatch.close()
             await self.migration.close()

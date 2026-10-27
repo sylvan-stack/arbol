@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any, BinaryIO
 from uuid import UUID
 
-from .model import Identity, Refused
+from .model import ROOT_ID, Identity, Refused
 
 LIMITS = {"start": 25.0, "stop": 90.0, "settle": 120.0, "list": 10.0, "account": 10.0, "migrate-check": 90.0, "reimport": 90.0}
 DRIVERS = {"claude", "codex", "pi"}
@@ -69,7 +69,16 @@ class Programs:
                 child.close()
                 del self.running[key]
 
-    async def call(self, program: str, args: list[str], *, kind: str, key: str = "") -> Any:
+    def command_key(self, kind: str, key: str, root: str | None = None) -> tuple[str, str]:
+        selected = self.identity.root if root is None else root
+        return kind, key if selected == self.identity.root else selected+":"+key
+
+    async def call(self, program: str, args: list[str], *, kind: str, key: str = "", root: str | None = None) -> Any:
+        selected = self.identity.root if root is None else root
+        if (not isinstance(selected, str) or not ROOT_ID.fullmatch(selected)
+                or root is not None and program != "arbol-root"
+                or selected != self.identity.root and kind not in ("list", "stop", "settle")):
+            raise Refused("invalid_input", "Unsupported explicit Root command.")
         allowed = {"arbol-root", "arbol-roots", *("arbol-" + x + "-driver" for x in self.drivers)}
         if program not in allowed or kind not in LIMITS:
             raise Refused("invalid_input", "Unsupported backend child command.")
@@ -101,18 +110,18 @@ class Programs:
             raise Refused("invalid_input", "A child cannot override this backend's Root.")
         self.reap()
         if program == "arbol-root" and kind in ("settle", "list"):
-            key = self.identity.root
+            key = selected
         if program == "arbol-root" and kind in ("start", "stop") and "--exchange" in args:
             index = args.index("--exchange")
             if index + 1 == len(args):
                 raise Refused("invalid_input", "An Exchange identifier is required.")
             key = args[index + 1]
-        identity = (kind, key or self.identity.root)
+        identity = self.command_key(kind, key or self.identity.root, selected)
         if identity in self.running:
             raise Refused("in_progress", "This command is still running.")
         arguments = [str(self.identity.bin_dir / program)]
         if program == "arbol-root":
-            arguments += ["--root", self.identity.root]
+            arguments += ["--root", selected]
         arguments += args
         env = {key: value for key, value in os.environ.items() if not key.startswith("PG")}
         env["HOME"] = str(self.identity.home)

@@ -169,18 +169,28 @@ class Chats:
         return {"chats": rows[:params["limit"]]}
 
     async def attention_snapshot(self, params: Params) -> Snapshot:
-        await self.reader.complete()
+        if not self.database.away:
+            try:
+                await self.reader.complete()
+            except Refused:
+                pass
         return await self.attention.snapshot(params)
 
     def invalidate(self, chat: str | None = None) -> None:
         self.list_view.invalidate({})
         self.chat_view.invalidate({"chat": chat} if chat is not None else None)
 
+    def failed_refresh(self, view: View, params: Params, error: Refused) -> None:
+        preserve = self.database.away or error.code == "timeout"
+        for sub in list(view.topic.listeners):
+            if sub.params == params and (not preserve or not sub.ready):
+                sub.connection.end(sub, error)
+
     async def refresh(self, view: View, params: Params) -> None:
         try:
             await view.snapshot(params)
         except Refused as error:
-            view.topic.fail(error, params=params)
+            self.failed_refresh(view, params, error)
 
     def changed(self, chat: str) -> None:
         params = {"chat": chat}
@@ -257,15 +267,17 @@ class Chats:
     async def observe(self, view: View, params: Params) -> None:
         try:
             while any(sub.params == params for sub in view.topic.listeners):
+                if self.database.away:
+                    await asyncio.sleep(0.25)
+                    continue
                 try:
                     async with asyncio.timeout(0.75):
                         await view.snapshot(params)
                 except TimeoutError:
-                    view.topic.fail(Error("timeout"), params=params)
-                    return
+                    # Only a ready subscription has a captured display/stream to preserve.
+                    self.failed_refresh(view, params, Error("database_unavailable" if self.database.away else "timeout"))
                 except Refused as error:
-                    view.topic.fail(error, params=params)
-                    return
+                    self.failed_refresh(view, params, error)
                 await asyncio.sleep(0.25)
         except asyncio.CancelledError:
             raise
