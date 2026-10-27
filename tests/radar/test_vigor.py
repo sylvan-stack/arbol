@@ -562,5 +562,82 @@ class Weights(unittest.TestCase):
         self.assertEqual(result.vigor, 1.0)
 
 
+class ExhaustedSubscriptions(unittest.TestCase):
+    """The exhausted state (SGM-1.5, SGM-D27); the recovery is computed on predicted windows and is not here."""
+
+    def test_a_reached_five_hour_window_exhausts_and_vigor_is_0(self) -> None:
+        """radar.exhausted-reached"""
+        result = compute(
+            report(CLAUDE, claude(100, reached=True), extra={"isUsingOverage": False}), FIRST_PROFILE, MONDAY
+        )
+        self.assertTrue(result.exhausted)
+        self.assertEqual(result.vigor, 0.0)
+        five, week = by_label(result)["Five hours"], by_label(result)["Seven days"]
+        self.assertEqual((five.reached, five.loss, five.contribution), (True, 0.0, 0.0))
+        assert week.loss is not None
+        self.assertEqual(round(week.loss, 2), 0.37)  # the week's loss is still on the record
+
+    def test_a_reached_window_with_overage_does_not_exhaust(self) -> None:
+        """radar.exhausted-overage"""
+        result = compute(
+            report(CLAUDE, claude(100, reached=True), extra={"isUsingOverage": True}), FIRST_PROFILE, MONDAY
+        )
+        assert result.vigor is not None
+        self.assertFalse(result.exhausted)
+        self.assertEqual(by_label(result)["Five hours"].loss, 0.0)
+        self.assertEqual(round(result.vigor, 2), 0.37)
+        for extra in ({"isUsingOverage": "yes"}, {"isUsingOverage": 1}, {}):
+            with self.subTest(extra=extra):
+                self.assertTrue(
+                    compute(report(CLAUDE, claude(100, reached=True), extra=extra), FIRST_PROFILE, MONDAY).exhausted
+                )
+
+    def test_a_reached_window_of_calls_exhausts(self) -> None:
+        """radar.exhausted-calls"""
+        result = compute(report(KIMI, kimi(five_reached=True)), FIRST_PROFILE, MONDAY)
+        self.assertTrue(result.exhausted)
+        self.assertEqual(result.vigor, 0.0)
+        self.assertEqual(by_label(result)["Five hours"].role, "shown")
+
+    def test_a_reached_window_shown_and_not_summed_exhausts_too(self) -> None:
+        """radar.exhausted-shown-window"""
+        result = compute(report(KIMI, kimi(total_reached=True)), FIRST_PROFILE, MONDAY)
+        self.assertTrue(result.exhausted)
+        self.assertEqual(result.vigor, 0.0)
+        self.assertEqual(by_label(result)["Monthly, all Kimi products"].role, "shown")
+
+    def test_a_window_scoped_to_one_tool_does_not_exhaust(self) -> None:
+        """radar.exhausted-tool-scoped"""
+        windows = [
+            window("session", "5-hour window", used=30, resets=at(hours=4), minutes=300),
+            window("weekly", "Weekly window", used=20, resets=at(days=3), minutes=10080),
+            window("other", "MCP", resource="calls", used=100, resets=at(days=20), minutes=43200, reached=True),
+        ]
+        zai = compute(report(ZAI, windows), FIRST_PROFILE, MONDAY)
+        self.assertFalse(zai.exhausted)
+        assert zai.vigor is not None
+        self.assertEqual(round(zai.vigor, 2), 0.37)
+        self.assertEqual(by_label(zai)["MCP"].role, "shown")
+        another = compute(report(Subscription("pi", "deepseek", "deepseek"), windows), FIRST_PROFILE, MONDAY)
+        self.assertTrue(another.exhausted)  # the same label of another family is scoped to the Subscription
+
+    def test_a_used_share_above_100_loses_nothing_and_below_0_is_shown_only(self) -> None:
+        """radar.used-share-in-the-sum"""
+        over = report(
+            CLAUDE,
+            [window("session", "Five hours", used=130, resets=at(hours=3), minutes=300), claude()[1]],
+            extra={"isUsingOverage": True},
+        )
+        self.assertEqual(by_label(compute(over, FIRST_PROFILE, MONDAY))["Five hours"].loss, 0.0)
+        below = report(CLAUDE, [window("session", "Five hours", used=-5, resets=at(hours=3), minutes=300), claude()[1]])
+        result = compute(below, FIRST_PROFILE, MONDAY)
+        entry = by_label(result)["Five hours"]
+        self.assertEqual(
+            (entry.role, entry.loss, entry.reason), ("shown", None, "usedPercent unknown; shown, not summed")
+        )
+        assert result.vigor is not None
+        self.assertEqual(round(result.vigor, 2), 0.37)
+
+
 if __name__ == "__main__":
     unittest.main()
