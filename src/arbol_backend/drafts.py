@@ -11,6 +11,7 @@ from psycopg.types.json import Jsonb
 from .bridge import Error, Params, Registry, uuid_id
 from .chat_data import draft
 from .chats import Chats
+from .model import Refused
 from .validation import integer, text
 from .views import View
 
@@ -99,11 +100,11 @@ class Drafts:
             rows = await session.execute(f"SELECT {COLUMNS} FROM drafts WHERE {column(params)}=%s", [value(params)])
             return draft(rows[0] if rows else None)
 
-    async def reconcile(self, params: Params | None = None) -> None:
+    async def reconcile(self, params: Params | None = None) -> bool:
         # Observe candidates in one READ ONLY moment; the later write rechecks every identity.
         async with self.chats.reader.session() as (session, layout):
             if not layout.own:
-                return
+                return False
             where = f" AND d.{column(params)}=%s" if params is not None else ""
             rows = await session.execute(
                 "SELECT d.chat_id,d.folder,d.revision,d.sent_as,d.sent_request FROM drafts d "
@@ -132,21 +133,50 @@ class Drafts:
                 for (id,) in removed:
                     self.chats.invalidate(str(id))
                     self.chats.changed(str(id))
+        return bool(rows)
+
+    async def recover_captured(self, params: Params, current: Params | None) -> bool:
+        if current is None or "sentAs" not in current:
+            return False
+        request = current.get("sentRequest", {})
+        try:
+            chat = uuid_id(request.get("chat"))
+            exchange = uuid_id(current["sentAs"])
+        except Refused:
+            return False
+        if "chat" in current and current["chat"] != chat:
+            return False
+        # Check the captured identity even if another reader already removed its current row.
+        async with self.chats.reader.session() as (session, _):
+            rows = await session.execute("SELECT id FROM exchanges WHERE id=%s AND chat_id=%s", [exchange, chat])
+        if not rows:
+            return False
+        await self.reconcile(params)
+        return True
 
     async def load(self, params: Params) -> Params:
-        await self.reconcile(params)
-        return {"kind": "snapshot", "draft": await self.current(params)}
+        for _ in range(3):
+            current = await self.current(params)
+            if not await self.recover_captured(params, current):
+                return {"kind": "snapshot", "draft": current}
+        raise Error("timeout")
 
     async def get(self, params: Params) -> Params | None:
         return (await self.view.snapshot(params)).event["draft"]  # type: ignore[no-any-return]
 
     async def chat(self, params: Params) -> Params:
-        await self.reconcile({"chat": params["chat"]})
-        return await self.chats.reader.chat(params)
+        for _ in range(3):
+            state = await self.chats.reader.chat(params)
+            if not await self.recover_captured({"chat": params["chat"]}, state["draft"]):
+                return state
+        raise Error("timeout")
 
     async def summaries(self, params: Params) -> Params:
-        await self.reconcile()
-        return await self.chats.reader.summaries(params)
+        for _ in range(3):
+            state = await self.chats.reader.summaries(params)
+            if not await self.reconcile():
+                return state
+        raise Error("timeout")
 
     async def save(self, params: Params) -> Params:
         key = await scope(params)

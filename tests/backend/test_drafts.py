@@ -161,3 +161,25 @@ class Drafts(WindowFixture):
         current = await self.backend.drafts.current(key)
         assert current
         self.assertEqual(current["text"], "newer")
+
+    async def test_acceptance_between_capture_and_reconciliation_never_returns_a_stale_mark(self) -> None:
+        """drafts.capture-acceptance-race"""
+        key = {"chat": chat(1)}
+        revision = await self.saved({**key, "text": "original", "baseRevision": None})
+        await self.backend.drafts.mark({**key, "exchange": chat(800), "message": "original",
+            "draft": {"revision": revision}, "route": {}, "workingFolder": str(self.frame.base)})
+        real = self.backend.chats.reader.chat
+        committed = False
+        async def raced(params: Params) -> Params:
+            nonlocal committed
+            state = await real(params)
+            if not committed:
+                committed = True
+                await self.seed_exchange(chat(800), chat(1))
+                await self.backend.drafts.reconcile(key)
+            return state
+        with mock.patch.object(self.backend.chats.reader, "chat", side_effect=raced):
+            state = await self.backend.drafts.chat(key)
+        self.assertIsNone(state["draft"])
+        self.assertEqual(state["chat"]["exchangeCount"], 1)
+        self.assertTrue(state["marks"]["ongoing"])
