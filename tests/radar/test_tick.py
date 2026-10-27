@@ -8,7 +8,9 @@ without the tables left alone. Vigor stays advisory: nothing of the package writ
 from __future__ import annotations
 
 import ast
+import asyncio
 import re
+import subprocess
 import sys
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -164,6 +166,62 @@ class TheTick(RecordFixture):
         self.assertIsInstance(done, Tick)
 
 
+class TheBackend(RecordFixture):
+    """The backend's loop ticks while it runs: at its first wake, then every three minutes; without the tables it runs on."""
+
+    def backend(self) -> subprocess.Popen[bytes]:
+        child = self.frame.start(args=self.frame.options(self.cluster.address))
+        self.assertTrue(self.frame.line(child)["ready"])
+        return child
+
+    @staticmethod
+    def stop(child: subprocess.Popen[bytes]) -> None:
+        assert child.stdin is not None
+        child.stdin.close()  # the end of its standard input stops the backend, as the Swift App would
+        child.communicate(timeout=10)
+
+    async def test_the_running_backend_ticks_at_its_first_wake_and_not_again_within_the_interval(self) -> None:
+        """radar.backend-ticks"""
+        drivers(self.frame, listing())
+        child = self.backend()
+        try:
+            for _ in range(60):  # the first wake comes four seconds after start
+                if await self.count("vigor_results") >= 4:
+                    break
+                await asyncio.sleep(0.25)
+            self.assertEqual(await self.count("vigor_results"), 4)  # one result per listed Subscription
+            self.assertEqual(await self.count("vigor_reports"), 3)  # the listing's reports, recorded once
+            self.assertEqual(await self.count("vigor_profiles"), 1)
+            await asyncio.sleep(2)
+            self.assertEqual(await self.count("vigor_results"), 4)  # no second tick within the interval
+            # The backend's own account listing at startup asks `list` too (SYL-253): the tick adds `list` and nothing
+            # else, and no `usage`, since a tick contacts no vendor.
+            driver_calls = [call["args"] for call in self.frame.calls() if call["program"].endswith("-driver")]
+            self.assertTrue(all(args == LIST for args in driver_calls))
+            self.assertGreaterEqual(len(driver_calls), 3)
+            self.assertIsNone(child.poll())
+        finally:
+            self.stop(child)
+        self.assertEqual(child.returncode, 0)
+
+    async def test_a_root_without_the_tables_leaves_the_backend_running_without_vigor(self) -> None:
+        """radar.backend-layout-incomplete"""
+        drivers(self.frame, listing())
+        await self.db.execute("DROP TABLE vigor_results")
+        try:
+            child = self.backend()
+            try:
+                await asyncio.sleep(6)
+                self.assertIsNone(child.poll())  # still running after its first wake
+                self.assertEqual(await self.count("vigor_reports"), 0)  # the tick refused before listing anything
+                self.assertEqual(await self.count("vigor_profiles"), 0)
+            finally:
+                self.stop(child)
+            self.assertEqual(child.returncode, 0)
+        finally:
+            await self.db.execute(LAYOUT.read_text(encoding="utf-8"))
+
+
 class Advisory(unittest.TestCase):
     """Nothing of `arbol_radar` writes a route, a binding or a request file, or runs anything but the two commands."""
 
@@ -200,6 +258,14 @@ class Advisory(unittest.TestCase):
                 self.assertEqual(literal[0], "subscriptions")
                 self.assertIn(literal[1], ("list", "usage"))
         self.assertLess(datetime(2026, 10, 27, tzinfo=UTC), datetime.now(UTC))
+
+    def test_a_build_of_arbol_carries_the_radar_and_its_checks(self) -> None:
+        """radar.packaged"""
+        text = (ROOT / "scripts/package_backend.py").read_text(encoding="utf-8")
+        for folder in ("src/arbol_radar", "tests/radar"):
+            self.assertIn(f'root / "{folder}", folder / "{folder}"', text)  # copied into the Build as the backend is
+        check = (ROOT / "scripts/check_backend.py").read_text(encoding="utf-8")
+        self.assertIn('"-p", "test*.py"', check)  # the Build's unit check runs every packaged test, the radar's too
 
 
 if __name__ == "__main__":
