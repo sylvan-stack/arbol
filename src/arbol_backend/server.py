@@ -16,6 +16,7 @@ from .controls import Controls
 from .database import Database
 from .dispatch import Dispatch
 from .drafts import Drafts
+from .health import Health
 from .lifetime import Lifetime
 from .live import Live
 from .migration import Migration
@@ -37,6 +38,7 @@ class Backend:
         self.roots.register(self.registry)
         self.chats = Chats(identity, self.database, self.programs, self.roots, self.registry,
                            lineage=isinstance(self.record.get("grewFrom"), str))
+        self.health = Health(self.database, self.chats.attention)
         self.drafts = Drafts(self.chats, self.registry)
         self.dispatch = Dispatch(identity, self.programs, self.chats, self.drafts, self.registry, self.settings)
         self.live = Live(identity, self.chats, self.dispatch)
@@ -130,6 +132,7 @@ class Backend:
                 ),
                 flush=True,
             )
+            self.health.start()
             self.dispatch.start()
             self.chats.start()
             self.live.start()
@@ -154,6 +157,7 @@ class Backend:
                 await asyncio.gather(*self.tasks, return_exceptions=True)
             if server is not None:
                 await server.wait_closed()
+            await self.health.close()
             await self.settling.close()
             await self.controls.close()
             await self.live.close()

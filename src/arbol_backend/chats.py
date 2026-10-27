@@ -169,7 +169,11 @@ class Chats:
         return {"chats": rows[:params["limit"]]}
 
     async def attention_snapshot(self, params: Params) -> Snapshot:
-        await self.reader.complete()
+        if not self.database.away:
+            try:
+                await self.reader.complete()
+            except Refused:
+                pass
         return await self.attention.snapshot(params)
 
     def invalidate(self, chat: str | None = None) -> None:

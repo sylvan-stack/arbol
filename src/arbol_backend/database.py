@@ -6,7 +6,7 @@ import asyncio
 import os
 import signal
 import tempfile
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -21,6 +21,13 @@ from .model import Identity, Refused, object_file, root_record
 
 SERVICE = "com.sylvan-stack.arbol.database"
 SECONDS = 5.0
+
+
+class Unavailable(Refused):
+    """A classified connection/credential failure, never a statement deadline."""
+
+    def __init__(self, cause: str) -> None:
+        super().__init__("database_unavailable", cause)
 
 
 async def password(role: str, *, program: str = "/usr/bin/security", seconds: float = 2.0) -> str:
@@ -103,11 +110,15 @@ async def credentials(identity: Identity) -> dict[str, str]:
             "dbname": record["database"],
         }
     except (OSError, ValueError, psycopg.Error, UnicodeError) as error:
-        raise Refused("database_unavailable", "Cannot read the Root's database configuration.") from error
+        raise Unavailable("Cannot read this Root's database configuration.") from error
     try:
         result["password"] = await password(role)
+    except Refused as error:
+        cause = ("The Keychain did not answer for the database's password." if error.code == "timeout"
+                 else "The database Keychain lookup failed.")
+        raise Unavailable(cause) from error
     except OSError as error:
-        raise Refused("database_unavailable", "The database Keychain lookup could not be started.") from error
+        raise Unavailable("The database Keychain lookup could not be started.") from error
     return result
 
 
@@ -125,6 +136,9 @@ class Session:
         except (TimeoutError, psycopg.errors.QueryCanceled) as error:
             raise Refused("timeout", "The database statement exceeded five seconds.") from error
         except psycopg.Error as error:
+            code = error.sqlstate or ""
+            if self.connection.closed or self.connection.broken or code.startswith("08") or code in {"57P01", "57P02", "57P03"}:
+                raise Unavailable("The database connection was lost.") from error
             raise Refused("database_unavailable", "The database statement failed.") from error
 
 
@@ -136,42 +150,65 @@ class Database:
         self.connections: set[AsyncConnection[tuple[Any, ...]]] = set()
         self.passfile: Path | None = None
         self.credentials_lock = asyncio.Lock()
+        self.away = False
+        self.on_failure: Callable[[str], None] | None = None
+        self.on_connected: Callable[[], None] | None = None
+
+    async def renew(self) -> None:
+        async with self.credentials_lock:
+            if self.passfile is not None:
+                self.passfile.unlink(missing_ok=True)
+            self.parameters, self.passfile = None, None
 
     @asynccontextmanager
-    async def session(self, *, snapshot: bool = False) -> AsyncIterator[Session]:
+    async def session(self, *, snapshot: bool = False, probe: bool = False) -> AsyncIterator[Session]:
         connection: AsyncConnection[tuple[Any, ...]] | None = None
         try:
+            if self.away and not probe:
+                raise Unavailable("The Root database is unavailable.")
             async with self.credentials_lock:
                 if self.parameters is None:
-                    self.parameters = await credentials(self.identity)
-                    fd, name = tempfile.mkstemp(prefix="arbol-backend-empty-passfile-")
+                    try:
+                        self.parameters = await credentials(self.identity)
+                    except Unavailable:
+                        raise
+                    except Refused as error:
+                        raise Unavailable("Cannot read this Root's database configuration.") from error
+                    try:
+                        fd, name = tempfile.mkstemp(prefix="arbol-backend-empty-passfile-")
+                    except OSError as error:
+                        raise Unavailable("Cannot prepare the private database connection settings.") from error
                     os.close(fd)
                     self.passfile = Path(name)
                     self.parameters["passfile"] = name
-            async with asyncio.timeout(self.seconds):
-                connection = await AsyncConnection.connect(
-                    make_conninfo(**self.parameters),
-                    autocommit=True,
-                    row_factory=tuple_row,
-                    connect_timeout=5,
-                    options="-c statement_timeout=5000 -c lock_timeout=5000 -c client_encoding=UTF8",
-                )
+            try:
+                async with asyncio.timeout(self.seconds):
+                    connection = await AsyncConnection.connect(
+                        make_conninfo(**self.parameters), autocommit=True, row_factory=tuple_row, connect_timeout=5,
+                        options="-c statement_timeout=5000 -c lock_timeout=5000 -c client_encoding=UTF8",
+                    )
+            except (TimeoutError, psycopg.Error) as error:
+                raise Unavailable("The database server does not answer.") from error
             self.connections.add(connection)
+            if self.on_connected:
+                self.on_connected()
             session = Session(connection, self.seconds)
             if snapshot:
                 await session.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
             try:
                 yield session
             except BaseException:
-                # Closing discards an unfinished read-only snapshot, with no extra network wait.
-                raise
+                raise  # Closing discards an unfinished snapshot without another network wait.
             else:
                 if snapshot:
                     await session.execute("COMMIT")
-        except (TimeoutError, psycopg.errors.QueryCanceled, psycopg.errors.ConnectionTimeout) as error:
-            raise Refused("timeout", "The database connection exceeded five seconds.") from error
+        except Unavailable as error:
+            if self.on_failure:
+                self.on_failure(str(error))
+            raise
         except psycopg.Error as error:
-            raise Refused("database_unavailable", "The Root database cannot be reached.") from error
+            # Raw database diagnostics can contain credentials and never cross the Bridge.
+            raise Refused("database_unavailable", "The database statement failed.") from error
         finally:
             if connection is not None:
                 self.connections.discard(connection)

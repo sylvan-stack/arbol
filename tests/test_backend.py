@@ -438,7 +438,7 @@ class SQL(unittest.IsolatedAsyncioTestCase):
             started = time.monotonic()
             with self.assertRaises(Refused) as caught:
                 await db.execute("SELECT 1")
-            self.assertEqual(caught.exception.code, "timeout")
+            self.assertEqual(caught.exception.code, "database_unavailable")
             self.assertLess(time.monotonic() - started, 6)
             f = self.frame
             child = f.start(args=f.options(address))
