@@ -146,12 +146,13 @@ class Fixture:
                             await self.send(writer, {"type": "reply", "id": message["id"], "error": {"code": "not_found", "message": "Chat not found"}})
                             continue
                         snapshot["settings"] = {**snapshot.get("settings", {}), **{k: v for k, v in params.items() if k != "chat"}}
-                        value = snapshot["settings"]
+                        settings_value = snapshot["settings"]
                         for peer, subscriptions in tuple(self.windows.items()):
                             for id, subscription in tuple(subscriptions.items()):
                                 if subscription["topic"] == "chat" and subscription["params"].get("chat") == params["chat"]:
                                     subscription["seq"] += 1
-                                    await self.send(peer, {"type": "event", "id": id, "seq": subscription["seq"], "event": {"kind": "settings", "settings": value}})
+                                    await self.send(peer, {"type": "event", "id": id, "seq": subscription["seq"], "event": {"kind": "settings", "settings": settings_value}})
+                        value = {}
                     elif method == "chat.exchanges" and "exchangePages" in self.scenario:
                         value = self.scenario["exchangePages"].get(
                             str(message.get("params", {}).get("beforeNumber")), {"exchanges": [], "more": False}
