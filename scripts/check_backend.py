@@ -13,7 +13,7 @@ def main() -> int:
     try:
         verify(ROOT)
         child = subprocess.run(
-            [str(ROOT / "runtime/python/bin/python3.14"), "-I", "-B", str(ROOT / "tests/test_backend.py"), "-v"],
+            [str(ROOT / "runtime/python/bin/python3.14"), "-I", "-B", "-m", "unittest", "discover", "-s", str(ROOT / "tests"), "-p", "test*.py", "-v"],
             cwd=ROOT,
             check=False,
         )

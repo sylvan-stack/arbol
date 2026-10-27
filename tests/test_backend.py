@@ -88,7 +88,7 @@ class Process(unittest.TestCase):
             out, err = child.communicate(timeout=2)
             self.assertLess(time.monotonic() - started, 2)
             self.assertEqual((child.returncode, out, err), (0, b"", b""))
-            self.assertEqual(client.recv(1), b"")
+            self.assertTrue(all(json.loads(line)["type"] == "hello" for line in client.makefile("rb").read().splitlines()))
             client.close()
             self.assertFalse((f.root / "backend.sock").exists())
             self.assertEqual(sentinel.read_text(), "exact")
@@ -297,6 +297,8 @@ class AsyncFoundation(unittest.IsolatedAsyncioTestCase):
             current = await p.current_root()
             assert current is not None
             self.assertEqual(current["root"], root)
+        f.behavior = {"arbol-roots": {"output": [{**f.record, "current": True}]}}
+        f.configure()
         backend = Backend(self.selected)
         task = asyncio.create_task(backend.run())
         await asyncio.sleep(0.1)
