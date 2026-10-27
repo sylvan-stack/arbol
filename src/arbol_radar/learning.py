@@ -18,7 +18,7 @@ from datetime import datetime
 from itertools import pairwise
 
 from arbol_backend.database import Database
-from arbol_radar.model import FIRST_PROFILE, Learning, Report, Subscription, Window
+from arbol_radar.model import FIRST_PROFILE, Learning, Profile, Report, Subscription, Weight, Window
 from arbol_radar.records import Records
 from arbol_radar.vigor import compute
 
@@ -187,12 +187,71 @@ async def runs_between(database: Database, subscription: Subscription, since: da
     return int(rows[0][0]) if rows else 0
 
 
-async def observations(records: Records, learning: Learning) -> list[Observation]:
-    """Every gate's observation over the recorded reports of every Subscription of the Root's `vigor_reports`."""
+@dataclass(frozen=True)
+class Series:
+    """What the records hold for learning about one Subscription: its recorded reports and their pairs."""
+
+    subscription: Subscription
+    reports: int
+    pairs: int
+
+
+@dataclass(frozen=True)
+class Learned:
+    """One run of the learner: the profile whose values it used, every observation, every estimate, and the proposal.
+
+    `proposed` is the profile `arbol vigor learn` wrote, `proposed` and never approved here; None when no gate has a
+    calibrated estimate, and then nothing was written (SGM-1.11).
+    """
+
+    moment: datetime
+    profile: Profile  # the profile in use, whose learning values were used and whose other values a proposal carries
+    series: tuple[Series, ...]
+    observations: tuple[Observation, ...]
+    estimates: tuple[Estimate, ...]
+    proposed: Profile | None
+
+
+async def survey(records: Records, learning: Learning) -> tuple[list[Series], list[Observation], set[tuple[str, str]]]:
+    """Every Subscription's reports and pairs, every gate's observation, and the gates of each Subscription's last report."""
     await records.require_layout()
+    series: list[Series] = []
     found: list[Observation] = []
+    gates: set[tuple[str, str]] = set()
     for subscription in await records.reported():
-        for first, second in pairs(await records.reports(subscription)):
+        reports = await records.reports(subscription)
+        usable = pairs(reports)
+        series.append(Series(subscription, len(reports), len(usable)))
+        latest = [report for report in reports if report.outcome == "ok"]
+        if latest:
+            gates |= {(subscription.family, gate) for gate in roles(latest[-1])[1]}
+        for first, second in usable:
             runs = await runs_between(records.database, subscription, first.fetched_at, second.fetched_at)
             found.extend(observe(first, second, runs, learning))
-    return found
+    return series, found, gates
+
+
+async def observations(records: Records, learning: Learning) -> list[Observation]:
+    """Every gate's observation over the recorded reports of every Subscription of the Root's `vigor_reports`."""
+    return (await survey(records, learning))[1]
+
+
+async def learn(records: Records, now: datetime, first: Profile = FIRST_PROFILE) -> Learned:
+    """`arbol vigor learn`: observe, estimate, and write a proposed profile when a gate's estimate is calibrated.
+
+    The learner uses the learning values of the profile in use and carries its other values into the proposal. It
+    writes one profile row at most, `proposed`, and approves nothing: only the owner's `arbol vigor approve` does
+    (SGM-D17). With too few trusted pairs it writes nothing and says how many are missing.
+    """
+    await records.require_layout()
+    await records.ensure_profile(first, now)
+    profile = await records.in_use(first)
+    series, found, gates = await survey(records, profile.learning)
+    estimates = estimate(found, profile.learning, gates)
+    learned = {
+        (item.family, item.gate): Weight(item.value, "learned", item.trusted, item.low, item.high)
+        for item in estimates
+        if item.value is not None
+    }
+    proposed = await records.propose(learned, profile, now) if learned else None
+    return Learned(now, profile, tuple(series), tuple(found), tuple(estimates), proposed)

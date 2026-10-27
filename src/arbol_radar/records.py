@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -19,7 +19,7 @@ from psycopg.types.json import Jsonb
 
 from arbol_backend.database import Database
 from arbol_backend.model import Refused
-from arbol_radar.model import Loss, Profile, Report, Result, Role, Subscription, Weight
+from arbol_radar.model import FIRST_PROFILE, Loss, Profile, Report, Result, Role, Source, Subscription, Weight
 from arbol_radar.vigor import compute
 
 TABLES = ("vigor_profiles", "vigor_reports", "vigor_results")
@@ -92,11 +92,37 @@ def _loss(value: Mapping[str, Any]) -> Loss:
 
 
 def profile_row(profile: Profile) -> list[dict[str, Any]]:
-    """The learned gate weights of a profile as the `gates` column holds them, with their marking."""
-    return [
-        {"family": family, "label": label, "value": weight.value, "source": weight.source}
-        for (family, label), weight in profile.gates.items()
-    ]
+    """The learned gate weights of a profile as the `gates` column holds them, with their marking (SGM-1.11).
+
+    A learned weight carries the trusted pairs it rests on and their spread, and the profile's learning values it was
+    learned with: the estimator, the store's threshold and the pairs needed (SGM-D35).
+    """
+    rows: list[dict[str, Any]] = []
+    for (family, label), weight in profile.gates.items():
+        row: dict[str, Any] = {"family": family, "label": label, "value": weight.value, "source": weight.source}
+        if weight.source == "learned":
+            row |= {
+                "pairs": weight.pairs,
+                "low": weight.low,
+                "high": weight.high,
+                "estimator": profile.learning.estimator,
+                "threshold": profile.learning.threshold,
+                "needed": profile.learning.pairs,
+            }
+        rows.append(row)
+    return rows
+
+
+def _weight(gate: Mapping[str, Any]) -> Weight:
+    source: Source = "placeholder" if gate.get("source") == "placeholder" else "learned"
+    pairs, low, high = gate.get("pairs"), gate.get("low"), gate.get("high")
+    return Weight(
+        float(gate["value"]),
+        source,
+        int(pairs) if isinstance(pairs, int) else None,
+        float(low) if isinstance(low, int | float) else None,
+        float(high) if isinstance(high, int | float) else None,
+    )
 
 
 class Records:
@@ -143,18 +169,87 @@ class Records:
         )
         if not rows:
             return None
-        approval, pace, placeholder, gates, rule = rows[0]
+        return self._profile(version, rows[0])
+
+    @staticmethod
+    def _profile(version: int, row: Sequence[Any]) -> Profile:
+        approval, pace, placeholder, gates, rule = row[:5]
         return Profile(
             version=version,
             approval=str(approval),
             pace=str(pace),
             placeholder=Weight(float(placeholder), "placeholder"),
-            gates={
-                (str(gate["family"]), str(gate["label"])): Weight(float(gate["value"]), gate.get("source", "learned"))
-                for gate in gates
-            },
+            gates={(str(gate["family"]), str(gate["label"])): _weight(gate) for gate in gates},
             stale_rule=str(rule),
         )
+
+    async def profiles(self) -> list[tuple[Profile, datetime]]:
+        """Every recorded profile with the moment it was written, oldest version first."""
+        rows = await self.database.execute(
+            "SELECT approval, pace, placeholder, gates, stale_rule, recorded_at, version FROM vigor_profiles "
+            "ORDER BY version",
+            [],
+        )
+        return [(self._profile(int(row[6]), row), row[5]) for row in rows]
+
+    async def in_use(self, first: Profile = FIRST_PROFILE) -> Profile:
+        """The profile the calculation uses: the highest approved version, else the first profile (SGM-D36).
+
+        A proposed profile is never in use, the first excepted, which stands for the chapter's placeholder until the
+        owner approves a profile; the learner proposes and only the owner's `arbol vigor approve` approves (SGM-D17).
+        """
+        rows = await self.database.execute("SELECT max(version) FROM vigor_profiles WHERE approval='approved'", [])
+        version = rows[0][0] if rows else None
+        if version is None:
+            return first
+        recorded = await self.profile(int(version))
+        if recorded is None:
+            raise Refused("database_unavailable", "The approved profile vanished while it was read.")
+        return recorded
+
+    async def propose(self, learned: Mapping[tuple[str, str], Weight], base: Profile, now: datetime) -> Profile:
+        """Write a learned profile one version above the highest, `proposed`, with the rest carried from `base`.
+
+        The learned weights replace `base`'s for their gates; its other gate weights, its placeholder, pace, stale rule
+        and learning values are carried, so the proposal changes only what was learned (SGM-1.11).
+        """
+        await self.require_layout()
+        draft = replace(base, approval="proposed", gates={**base.gates, **learned})
+        rows = await self.database.execute(
+            "INSERT INTO vigor_profiles (version, approval, pace, placeholder, gates, stale_rule, recorded_at) "
+            "SELECT coalesce(max(version), 0) + 1, 'proposed', %s, %s, %s, %s, %s FROM vigor_profiles "
+            "RETURNING version",
+            [draft.pace, draft.placeholder.value, Jsonb(profile_row(draft)), draft.stale_rule, now],
+        )
+        return replace(draft, version=int(rows[0][0]))
+
+    async def approve(self, version: int, now: datetime) -> Profile:
+        """The owner's approval of a recorded profile, recorded in its row: the one in use from the next calculation.
+
+        Refused for a version the Root does not record (`unknown_profile`), a profile already approved
+        (`already_approved`), and one older than the approved profile in use (`older_profile`), since the profile in
+        use is the highest approved version.
+        """
+        await self.ensure_profile(FIRST_PROFILE, now)
+        profile = await self.profile(version)
+        if profile is None:
+            raise Refused("unknown_profile", f"The Root records no profile {version}.")
+        if profile.approval == "approved":
+            raise Refused("already_approved", f"Profile {version} is approved already.")
+        current = await self.in_use()
+        if current.approval == "approved" and current.version > version:
+            raise Refused(
+                "older_profile",
+                f"Profile {version} is older than profile {current.version}, the one in use; learn again for a "
+                "newer proposal.",
+            )
+        rows = await self.database.execute(
+            "UPDATE vigor_profiles SET approval='approved' WHERE version=%s AND approval='proposed' RETURNING version",
+            [version],
+        )
+        if not rows:
+            raise Refused("already_approved", f"Profile {version} is approved already.")
+        return replace(profile, approval="approved")
 
     async def record_report(
         self, subscription: Subscription, value: Mapping[str, Any], *, now: datetime, run: str | None = None
@@ -292,7 +387,17 @@ class Records:
         return self._result(subscription, rows[0]) if rows else None
 
     async def calculate(self, subscription: Subscription, profile: Profile, now: datetime) -> Result:
-        """Compute the Subscription's Vigor at `now` over its last recorded report by `profile`, and record it."""
+        """Compute the Subscription's Vigor at `now` over its last recorded report by `profile`, and record it.
+
+        A proposed profile is refused, the first excepted while no profile is approved (SGM-D36): the calculation never
+        uses a learned profile the owner has not approved. The tick and `--refresh` pass the profile in use.
+        """
+        if profile.approval == "proposed" and profile.version != FIRST_PROFILE.version:
+            raise Refused(
+                "profile_not_approved",
+                f"Profile {profile.version} is proposed; the calculation uses an approved profile, or the first one "
+                "while none is approved.",
+            )
         await self.ensure_profile(profile, now)
         result = compute(await self.last_report(subscription), profile, now, subscription=subscription)
         await self.record_result(result)
