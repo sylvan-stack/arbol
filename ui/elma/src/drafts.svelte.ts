@@ -27,7 +27,7 @@ export class DraftEditor {
   catch{this.storageProblem='Unsaved-text recovery is unavailable in this window.';}
   this.subscription=bridge.subscribe('draft',scope,event=>{
    if(!['snapshot','draft'].includes(String(event.kind)))return;
-   try{this.observe(decode(event.draft));onCanonical?.(this);if(this.ready){for(const waiter of this.readyWaiters)waiter.resolve();this.readyWaiters.clear();}}catch(e){this.problem=e instanceof Error?e.message:'The Draft could not be read.';this.rejectReady();}
+   try{this.observe(decode(event.draft));onCanonical?.(this);if(this.ready){for(const waiter of this.readyWaiters)waiter.resolve();this.readyWaiters.clear();if(event.kind==='snapshot'){if(!this.dirty)this.problem='';else if(!this.conflict&&this.recovery===null)void this.flush();}}}catch(e){this.problem=e instanceof Error?e.message:'The Draft could not be read.';this.rejectReady();}
   },error=>{this.problem='Draft not loaded: '+(error?.message??'The subscription ended.');this.rejectReady();});
  }
  private rejectReady(){for(const waiter of this.readyWaiters)waiter.reject(new Error(this.problem||'The Draft was closed.'));this.readyWaiters.clear();}

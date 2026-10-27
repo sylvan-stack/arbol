@@ -136,21 +136,31 @@ class Fixture:
         self.tasks.add(task)
         self.windows[writer] = {}
         try:
+            if self.scenario.get("helloDelay"):
+                await asyncio.sleep(self.scenario["helloDelay"])
             await self.send(
-                writer, {"type": "hello", "bridge": 1, "root": ROOT, "build": self.scenario.get("build", "development")}
+                writer, {"type": "hello", "bridge": 1, "root": self.scenario.get("root", ROOT), "build": self.scenario.get("build", "development")}
             )
             while line := await reader.readline():
                 message = json.loads(line)
                 if message["type"] == "subscribe":
+                    if self.record and self.scenario.get("recordSubscriptions"):
+                        with os.fdopen(os.open(self.record, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "w") as out:
+                            out.write(json.dumps({"method": "fixture.subscribe", "topic": message["topic"], "id": message["id"], "params": message.get("params", {})}) + "\n")
                     topic_key = message["topic"] + ":" + str(message.get("params", {}).get("chat", ""))
                     subscription_delay = self.scenario.get("subscriptionDelays", {}).get(topic_key, self.scenario.get("subscriptionDelays", {}).get(message["topic"], 0))
+                    subscription_errors = self.scenario.get("subscriptionErrors", {}).get(topic_key, [])
+                    subscription_error = subscription_errors.pop(0) if subscription_errors else None
                     if subscription_delay:
                         await asyncio.sleep(subscription_delay)
+                    if subscription_error:
+                        await self.send(writer, {"type": "ended", "id": message["id"], "error": subscription_error})
+                        continue
                     sub = {"topic": message["topic"], "params": message.get("params", {}), "seq": 1}
                     self.windows[writer][message["id"]] = sub
                     event = self.scenario.get("topics", {}).get(
                         message["topic"],
-                        {"kind": "snapshot", "root": ROOT}
+                        {"kind": "snapshot", "root": self.scenario.get("root", ROOT)}
                         if message["topic"] == "root"
                         else {"kind": "snapshot", "items": []},
                     )
@@ -273,7 +283,7 @@ class Fixture:
                                     sub["seq"] += 1
                                     await self.send(peer, {"type": "event", "id": id, "seq": sub["seq"], "event": event})
                     elif method == "root.get":
-                        value = {"root": ROOT, "layoutComplete": True}
+                        value = {"root": self.scenario.get("root", ROOT), "layoutComplete": True}
                     elif method == "chat.send":
                         value = await self.start_message(message["params"])
                         if "error" in value:
@@ -339,6 +349,12 @@ class Fixture:
         if value["kind"] == "disconnect":
             for writer in tuple(self.windows):
                 writer.close()
+        elif value["kind"] == "end":
+            for writer, subs in tuple(self.windows.items()):
+                for id, sub in tuple(subs.items()):
+                    if sub["topic"] == value["topic"]:
+                        await self.send(writer, {"type": "ended", "id": id, "error": value["error"]})
+                        subs.pop(id, None)
         elif value["kind"] == "scenario":
             self.scenario.update(value["value"])
         elif value["kind"] == "publish":
