@@ -1,0 +1,6 @@
+#!/bin/sh
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+if [ -x "$root/runtime/python/bin/python3.14" ]; then
+  exec "$root/runtime/python/bin/python3.14" -I -B "$root/bin/arbol_entry.py" "$@"
+fi
+exec "$root/.venv/bin/python" -I -B "$root/bin/arbol_entry.py" "$@"
