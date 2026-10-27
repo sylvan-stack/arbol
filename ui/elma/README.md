@@ -33,3 +33,14 @@ fonts, paths and immutable hashes, plus the real HTTP/WebSocket relay. Browser
 qualification additionally runs the compiled window through a private Unix
 backend stand-in; it does not establish Swift host, installed Root/Trunk or vendor
 behavior. Those journeys retain their own later Beats.
+
+<!-- sources:
+arbol:ui/elma/src/bridge.ts
+arbol:ui/elma/src/app-channel.ts
+arbol:tools/elma_bundle.py
+arbol:tools/sync_elma_design.py
+arbol:tools/bridge_relay.py
+arbol:scripts/package_backend.py#package
+arbol:tests/ui/test_bundle.py#Bundle
+arbol:tests/ui/relay_browser.mjs
+-->
