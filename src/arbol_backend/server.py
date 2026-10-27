@@ -1,9 +1,8 @@
-"""Process foundation; Bridge wire handling is added by SYL-248."""
+"""Own one Root backend and isolate its Bridge connections and asynchronous work."""
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import os
 import signal
@@ -11,10 +10,12 @@ import stat
 from collections.abc import Coroutine
 from typing import Any
 
+from .bridge import MAX_LINE, Connection, Registry
 from .database import Database
 from .lifetime import Lifetime
 from .model import Identity, Refused, root_record, settings
 from .process import Programs
+from .roots import Roots
 
 
 class Backend:
@@ -24,6 +25,9 @@ class Backend:
         self.programs = Programs(identity)
         self.database = Database(identity)
         self.record = root_record(identity.folder, identity.root)
+        self.registry = Registry()
+        self.roots = Roots(identity, self.programs, self.database)
+        self.roots.register(self.registry)
         self.windows: set[asyncio.StreamWriter] = set()
         self.tasks: set[asyncio.Task[None]] = set()
         self.stopped = asyncio.Event()
@@ -36,16 +40,9 @@ class Backend:
     async def connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self.windows.add(writer)
         try:
-            # There is no alternative protocol: SYL-248 replaces this with Bridge framing.
-            while await reader.read(65536):
-                pass
-        except (ConnectionError, OSError):
-            pass
+            await Connection(reader, writer, self.registry).run(self.roots.hello)
         finally:
             self.windows.discard(writer)
-            writer.close()
-            with contextlib.suppress(ConnectionError, OSError):
-                await writer.wait_closed()
 
     async def initial_database(self) -> None:
         try:
@@ -56,7 +53,7 @@ class Backend:
 
     async def initial_catalogue(self) -> None:
         try:
-            await self.programs.current_root()
+            await self.roots.catalogue()
         except Refused:
             pass
 
@@ -72,13 +69,14 @@ class Backend:
 
     async def monitor(self) -> None:
         while True:
-            await asyncio.sleep(5)
+            await asyncio.sleep(4)
             self.programs.reap()
             if self.windows:
                 try:
+                    await self.roots.refresh()
                     self.record = root_record(self.identity.folder, self.identity.root)
-                except Refused:
-                    pass
+                except Refused as error:
+                    self.roots.topic.fail(error)
 
     async def run(self) -> int:
         loop = asyncio.get_running_loop()
@@ -110,7 +108,7 @@ class Backend:
                     return
                 self.task(self.connection(reader, writer))
 
-            server = await asyncio.start_unix_server(connected, sock=listening, cleanup_socket=False)
+            server = await asyncio.start_unix_server(connected, sock=listening, cleanup_socket=False, limit=MAX_LINE - 1)
             print(
                 json.dumps(
                     {
@@ -145,6 +143,7 @@ class Backend:
                 await asyncio.gather(*self.tasks, return_exceptions=True)
             if server is not None:
                 await server.wait_closed()
+            await self.roots.close()
             await self.database.close()
             self.programs.close()
             lifetime.close()

@@ -137,6 +137,11 @@ class Programs:
                         self.kill(child)
                     raise Refused("no_answer", "The launcher did not answer within its time limit.")
                 await asyncio.sleep(0.01)
+        except asyncio.CancelledError:
+            if child.kill_on_timeout:
+                self.kill(child)
+                await asyncio.to_thread(child.process.wait)
+            raise
         finally:
             child.waiting = False
             if child.process.poll() is not None:
@@ -145,10 +150,16 @@ class Programs:
 
     @staticmethod
     def kill(child: Child) -> None:
+        if child.process.poll() is not None:
+            return
         try:
             os.killpg(child.process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+        except PermissionError as error:
+            # macOS can report EPERM for a group whose final child just exited.
+            if child.process.poll() is None:
+                raise Refused("no_answer", "The listing process group could not be stopped.") from error
 
     async def current_root(self) -> dict[str, Any] | None:
         value = await self.call("arbol-roots", ["list"], kind="list", key="catalogue")
