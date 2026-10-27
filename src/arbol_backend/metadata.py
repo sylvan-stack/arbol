@@ -33,8 +33,8 @@ class Attention:
     async def snapshot(self, params: Params) -> Snapshot:
         return Snapshot(self.topic.version, {"kind": "snapshot", "items": list(self.items.values())})
 
-    def open(self, id: str, message: str) -> None:
-        item = {"id": id, "kind": id, "severity": "warning", "message": message,
+    def open(self, id: str, message: str, *, severity: str = "warning") -> None:
+        item = {"id": id, "kind": id, "severity": severity, "message": message,
                 "since": self.items.get(id, {}).get("since", now())}
         if self.items.get(id) != item:
             self.items[id] = item

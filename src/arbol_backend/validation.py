@@ -6,7 +6,9 @@ import asyncio
 import os
 import re
 import stat
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from .bridge import Error, Params, driver_id, subscription_id, uuid_id
@@ -40,11 +42,13 @@ class Catalogues:
         self.launchers = set(programs.drivers)
         self.subscriptions: dict[str, set[str]] = {}
         self.task: asyncio.Task[None] | None = None
+        self.fetch: Callable[[str], Awaitable[list[Any]]] | None = None
 
     async def load_driver(self, driver: str) -> None:
         try:
-            value = await self.programs.call("arbol-" + driver + "-driver", ["subscriptions", "list"],
-                                             kind="account", key="catalogue-" + driver)
+            value = (await self.fetch(driver) if self.fetch else
+                     await self.programs.call("arbol-" + driver + "-driver", ["subscriptions", "list"],
+                                             kind="account", key="catalogue-" + driver))
             if not isinstance(value, list) or any(not isinstance(row, dict) or not isinstance(row.get("id"), str)
                                                    for row in value):
                 return
@@ -65,10 +69,16 @@ class Catalogues:
         result = {key: text(value.get(key)) for key in ("driver", "subscription", "model")}
         if "effort" in value:
             result["effort"] = text(value["effort"])
+        self.launchers = self.programs.find_drivers()
         driver_id(result["driver"], self.launchers)
         if result["subscription"].startswith("-") or not re.fullmatch(r"[^\x00-\x20\x7f]+", result["subscription"]):
             raise Error("invalid_input")
-        if self.task:
+        if self.fetch and result["driver"] not in self.subscriptions:
+            try:
+                await self.fetch(result["driver"])
+            except Refused as error:
+                raise Error("no_answer", source="driver") from error
+        elif self.fetch is None and self.task:
             await asyncio.shield(self.task)
         if result["driver"] not in self.subscriptions:
             raise Error("no_answer", source="driver")

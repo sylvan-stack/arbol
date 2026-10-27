@@ -10,6 +10,7 @@ import stat
 from collections.abc import Coroutine
 from typing import Any
 
+from .accounts import Accounts
 from .bridge import MAX_LINE, Connection, Registry
 from .chats import Chats
 from .controls import Controls
@@ -21,6 +22,7 @@ from .health import Health
 from .lifetime import Lifetime
 from .listings import Listings
 from .live import Live
+from .measurements import Measurements
 from .migration import Migration
 from .model import Identity, Refused, root_record, settings
 from .notes import Notes
@@ -44,6 +46,9 @@ class Backend:
         self.chats = Chats(identity, self.database, self.programs, self.roots, self.registry,
                            lineage=isinstance(self.record.get("grewFrom"), str))
         self.health = Health(self.database, self.chats.attention)
+        self.measurements = Measurements(self.health, self.roots, self.registry)
+        self.accounts = Accounts(self.programs, self.chats.catalogues, self.registry,
+                                 lambda: ((self.database.parameters or {}).get("password", ""),))
         self.drafts = Drafts(self.chats, self.registry)
         self.dispatch = Dispatch(identity, self.programs, self.chats, self.drafts, self.registry, self.settings)
         self.live = Live(identity, self.chats, self.dispatch)
@@ -57,6 +62,7 @@ class Backend:
         self.settling.read_listing = self.listings.get
         self.discovery = Discovery(self.roots, self.listings, self.registry)
         self.recovery = Recovery(self.health, self.chats, self.registry, self.settling, self.notes, self.discovery, self.stuck)
+        self.recovery.on_returned = self.measurements.returned
         self.migration = Migration(identity, self.programs, self.chats, self.registry, self.record)
         self.windows: set[asyncio.StreamWriter] = set()
         self.tasks: set[asyncio.Task[None]] = set()
@@ -143,6 +149,7 @@ class Backend:
                 flush=True,
             )
             self.health.start()
+            self.measurements.start()
             self.dispatch.start()
             self.chats.start()
             self.live.start()
@@ -170,6 +177,7 @@ class Backend:
             if server is not None:
                 await server.wait_closed()
             await self.recovery.close()
+            await self.measurements.close()
             await self.stuck.close()
             await self.health.close()
             await self.controls.close()
@@ -180,6 +188,7 @@ class Backend:
             await self.live.close()
             await self.dispatch.close()
             await self.migration.close()
+            await self.accounts.close()
             await self.chats.close()
             await self.roots.close()
             await self.database.close()
