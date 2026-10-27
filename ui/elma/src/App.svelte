@@ -4,7 +4,7 @@
  import PinnedMessage from '../design-system/src/sections/PinnedMessage.svelte';
  import HistoryTree from '../design-system/src/sections/HistoryTree.svelte';
  import Modal from '../design-system/src/patterns/Modal.svelte';
- import Response from '../design-system/src/sections/Response.svelte';
+ import ResponseReader from '../design-system/src/sections/ResponseReader.svelte';
  import { ElmaWindow } from './window.svelte';
  let view=$state<ElmaWindow>();
  onMount(()=>{const model=new ElmaWindow();view=model;return()=>model.close();});
@@ -17,8 +17,8 @@
   {#if view.connection!=='Connected'}<p class="connection" role="status">{view.connection}</p>{/if}
   {#if view.problem||view.pageProblem}<p class="problem" role="alert">{view.problem||view.pageProblem}</p>{/if}
   <section class="chat" aria-label="Chat">
-   {#if view.exchange}<PinnedMessage text={view.prompt} index={view.turn} total={view.info?.exchangeCount??0} busy={view.pageBusy} onolder={()=>void view?.older()} onnewer={()=>view?.newer()} onhistory={()=>{if(view)view.historyOpen=true;}}/><!-- svelte-ignore a11y_no_noninteractive_tabindex (The response scroll region stays keyboard reachable.) --><div class="response-scroll" role="region" tabindex="0" aria-label="Response reading area"><Response blocks={view.response} streaming={!view.complete} statusLabel={view.statusLabel} acceptedAt={view.exchange.acceptedAt} startedAt={view.startedAt} endedAt={view.exchange.endedAt} now={view.now} error={view.error} questions={view.questions} notes={view.responseNotes} onloadTool={tool=>view!.loadTool(tool)} onopenLink={url=>view!.openLink(url)}/></div>
-   {:else}<p class="empty">New Chat</p>{/if}
+   {#if view.exchange}<PinnedMessage text={view.prompt} index={view.turn} total={view.info?.exchangeCount??0} busy={view.pageBusy} onolder={()=>void view?.older()} onnewer={()=>view?.newer()} onhistory={()=>{if(view)view.historyOpen=true;}}/><ResponseReader identity={(view.info?.chat??'')+':'+view.exchange.exchange} snapshot={view.snapshotRevision} positions={view.readingPositions} response={{blocks:view.response,streaming:!view.complete,statusLabel:view.statusLabel,acceptedAt:view.exchange.acceptedAt,startedAt:view.startedAt,endedAt:view.exchange.endedAt,now:view.now,error:view.error,questions:view.questions,notes:view.responseNotes,openTools:view.openTools,onToolOpen:(id,open)=>{if(view)view.openTools[id]=open;},onloadTool:tool=>view!.loadTool(tool),onopenLink:url=>view!.openLink(url)}}/>
+   {:else if view.restoring}<p class="empty" role="status">Restoring selected turn…</p>{:else}<p class="empty">New Chat</p>{/if}
   </section>
 
  {#if view.historyOpen}<Modal title={`History · ${view.info?.exchangeCount??0} turns`} onclose={()=>{if(view)view.historyOpen=false;}} initialFocus="button[data-history-row]"><HistoryTree items={view.history} selected={view.selected??''} problem={view.pageProblem} more={view.more} busy={view.pageBusy} onselect={id=>view?.selectExchange(id)} onmore={()=>void view?.page()}/></Modal>{/if}
@@ -27,5 +27,5 @@
 {:else}<p role="status">Connecting…</p>{/if}
 <style>
 .connection,.problem{margin:0;padding:6px 16px;background:var(--inset);color:var(--warning);border-bottom:1px solid var(--border)}
-.problem{color:var(--failure)}.chat{display:flex;flex-direction:column;min-height:0;flex:1;overflow:hidden}.response-scroll{flex:1;min-height:0;overflow:auto}.empty{margin:auto;color:var(--muted)}
+.problem{color:var(--failure)}.chat{display:flex;flex-direction:column;min-height:0;flex:1;overflow:hidden}.empty{margin:auto;color:var(--muted)}
 </style>

@@ -8,7 +8,7 @@ export interface ChatInfo {chat:string;title:string|null;firstMessage?:string;cr
 export interface Repository {name:string;folder:string;route:ElmaRoute}
 interface ChatSnapshot {kind:string;chat:ChatInfo;exchanges:ElmaExchange[];more:boolean;settings:{route?:ElmaRoute;workingFolder?:string};marks:{ongoing:boolean};draft:unknown}
 export class ElmaWindow {
- private live=new Map<string,LiveExchange>();private revision=$state(0);snapshotRevision=$state(0);
+ private live=new Map<string,LiveExchange>();private revision=$state(0);snapshotRevision=$state(0);openTools=$state<Record<string,boolean>>({});readonly readingPositions=new Map<string,{top:number;following:boolean}>();restoring=$state(false);
  now=$state(Date.now());private clock=setInterval(()=>{this.now=Date.now();},1000);
  root=$state<RootInfo>({root:'',name:'…',status:'working',current:false});
  connection=$state('Connecting…');problem=$state('');info=$state<ChatInfo|null>(null);exchanges=$state<ElmaExchange[]>([]);
@@ -20,7 +20,7 @@ export class ElmaWindow {
  constructor(){this.bridge=new Bridge({build:__ARBOL_BUILD__,onstate:s=>this.connection=s,onhello:(root)=>{this.root=root;this.preferences=readPreferences(root.root);void this.bootstrap();void this.loadAccounts();}});
   this.bridge.subscribe('root',{},event=>{if(event.root)this.root=event.root as unknown as RootInfo;},e=>this.failure(e));
  }
- get exchange(){return this.exchanges.find(e=>e.exchange===this.selected)??this.exchanges.at(-1);}
+ get exchange(){if(this.restoring)return undefined;return this.exchanges.find(e=>e.exchange===this.selected)??this.exchanges.at(-1);}
  get title(){return this.info?.title||Array.from((this.info?.firstMessage??'').split('\n')[0]).slice(0,80).join('')||'New Chat';}
  get placeholder(){return !this.info?.title;}
  get route(){return this.settings.route??this.exchange?.route??this.defaultRoute;}
@@ -61,10 +61,12 @@ export class ElmaWindow {
     if(event.kind==='snapshot'){
      const snapshot=event as unknown as ChatSnapshot;this.pageTicket++;this.pageBusy=false;this.pageProblem='';
      if(!snapshot.chat||!snapshot.chat.createdAt&&snapshot.chat.exchangeCount===0){if(!settled){settled=true;resolve(false);}return;}
-     this.live.clear();this.revision++;this.snapshotRevision++;
+     const desired=this.info?.chat===snapshot.chat.chat?this.selected:null;for(const [exchange,live]of this.live)for(const block of live.blocks)if(block.kind==='tool'&&block.tool.position!==undefined&&this.openTools[block.tool.id])this.openTools[exchange+':'+block.tool.position]=true;
+     this.restoring=false;this.live.clear();this.revision++;this.snapshotRevision++;
      this.info=snapshot.chat;this.exchanges=snapshot.exchanges;this.more=snapshot.more;this.settings=snapshot.settings;this.ongoing=snapshot.marks.ongoing;this.selected=this.exchanges.some(e=>e.exchange===this.selected)?this.selected:this.exchanges.at(-1)?.exchange??null;
      this.folder=this.settings.workingFolder??this.exchange?.workingFolder??this.folder;
      this.preferences.lastChat=chat;this.preferences.repositoryChats[this.repository]=chat;this.preferences.recentChats=[chat,...this.preferences.recentChats.filter(v=>v!==chat)].slice(0,100);this.savePreferences();
+     if(desired&&!this.exchanges.some(e=>e.exchange===desired)&&this.more){this.restoring=true;void this.restoreSelection(desired,generation,this.snapshotRevision);}
      if(!settled){settled=true;resolve(true);}
     }else if(event.kind==='exchange'){const status=event.exchange as Fields;const row=this.exchanges.find(e=>e.exchange===status.exchange);if(row){this.projection(row).status(status);this.revision++;}}
     else if(event.kind==='lines'){const row=this.exchanges.find(e=>e.exchange===event.exchange);if(row&&Array.isArray(event.lines)){this.projection(row).apply(event.lines);this.revision++;}}
@@ -93,6 +95,7 @@ export class ElmaWindow {
  selectExchange(id:string){if(this.exchanges.some(e=>e.exchange===id)){this.selected=id;this.historyOpen=false;}}
  async older(){if(this.pageBusy)return;const chosen=this.exchange?.exchange;if(!chosen)return;let index=this.exchanges.findIndex(e=>e.exchange===chosen);if(index===0&&this.more){await this.page();if(this.selected!==chosen)return;index=this.exchanges.findIndex(e=>e.exchange===chosen);}if(index>0)this.selected=this.exchanges[index-1].exchange;}
  newer(){if(this.pageBusy)return;const index=this.exchanges.findIndex(e=>e.exchange===this.exchange?.exchange);if(index>=0&&index<this.exchanges.length-1)this.selected=this.exchanges[index+1].exchange;}
+ private async restoreSelection(id:string,generation:number,snapshot:number){while(this.more&&!this.exchanges.some(e=>e.exchange===id)){await this.page();if(this.closed||generation!==this.generation||snapshot!==this.snapshotRevision)return;if(this.pageProblem||this.pageBusy)break;}if(generation===this.generation&&snapshot===this.snapshotRevision){this.restoring=false;this.selected=this.exchanges.some(e=>e.exchange===id)?id:this.exchanges.at(-1)?.exchange??null;}}
  async page(){
   if(this.pageBusy||!this.more||!this.info||!this.exchanges.length)return;
   const ticket=++this.pageTicket,generation=this.generation,chat=this.info.chat,beforeNumber=Math.min(...this.exchanges.map(e=>e.number));this.pageBusy=true;this.pageProblem='';
@@ -102,6 +105,6 @@ export class ElmaWindow {
   }catch(e){if(ticket===this.pageTicket&&e instanceof Refusal)this.pageProblem=describe(e.detail);}
   finally{if(ticket===this.pageTicket)this.pageBusy=false;}
  }
- private clear(){this.live.clear();this.revision++;this.pageTicket++;this.pageBusy=false;this.pageProblem='';this.historyOpen=false;this.cancelOpening?.();this.chatSub?.close();this.chatSub=undefined;this.generation++;this.info=null;this.exchanges=[];this.selected=null;this.settings={};this.ongoing=false;}
+ private clear(){this.restoring=false;this.live.clear();this.revision++;this.pageTicket++;this.pageBusy=false;this.pageProblem='';this.historyOpen=false;this.cancelOpening?.();this.chatSub?.close();this.chatSub=undefined;this.generation++;this.info=null;this.exchanges=[];this.selected=null;this.settings={};this.ongoing=false;}
  close(){clearInterval(this.clock);this.cancelOpening?.();this.closed=true;this.bootstrapGeneration++;this.chatSub?.close();this.bridge.close();this.app.close();}
 }

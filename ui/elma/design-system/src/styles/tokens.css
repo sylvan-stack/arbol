@@ -3,21 +3,6 @@
   --font-scale: 1;
   --font-ui: 'Hanken Grotesk', -apple-system, BlinkMacSystemFont, sans-serif;
   --font-mono: 'Spline Sans Mono', 'SF Mono', Menlo, monospace;
-  --text: #f9f5f0;
-  --muted: #d9d0c6;
-  --disabled: #9d9994;
-  --canvas: var(--arbol-color-bg);
-  --panel: var(--arbol-color-surface);
-  --inset: var(--arbol-color-surface-2);
-  --border: var(--arbol-color-border);
-  --accent: var(--arbol-color-accent);
-  --selected: color-mix(in srgb, var(--accent) 15%, var(--panel));
-  --action-ink: #171210;
-  --link: #f2c9ac;
-  --success: #b9e5c4;
-  --warning: #ffe0a0;
-  --failure: #ffb6b0;
-  --focus: #ffe2b8;
   --radius-sm: 5px;
   --radius-md: 9px;
   --radius-lg: 16px;
@@ -34,6 +19,24 @@
   --motion-normal: 160ms;
   --motion-panel: 200ms;
   --shadow: 0 12px 40px #0003;
+}
+:root,
+[data-theme] {
+  --text: #f9f5f0;
+  --muted: #d9d0c6;
+  --disabled: #9d9994;
+  --canvas: var(--arbol-color-bg);
+  --panel: var(--arbol-color-surface);
+  --inset: var(--arbol-color-surface-2);
+  --border: var(--arbol-color-border);
+  --accent: var(--arbol-color-accent);
+  --selected: color-mix(in srgb, var(--accent) 15%, var(--panel));
+  --action-ink: #171210;
+  --link: #f2c9ac;
+  --success: #b9e5c4;
+  --warning: #ffe0a0;
+  --failure: #ffb6b0;
+  --focus: #ffe2b8;
   color-scheme: dark;
 }
 /* Mid-ladder surfaces are darker than the archive: readable metadata takes precedence. */
