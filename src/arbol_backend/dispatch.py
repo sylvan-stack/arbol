@@ -35,6 +35,7 @@ class Forwarded(Error):
 @dataclass
 class Entry:
     fingerprint: str
+    chat: str = ""
     task: asyncio.Task[Params | Error] | None = None
     request: Request | None = None
     marked: Params | None = None
@@ -128,7 +129,7 @@ class Dispatch:
         exchange = params["exchange"]
         entry = self.entries.get(exchange)
         if entry is None:
-            entry = Entry(fingerprint)
+            entry = Entry(fingerprint, chat=params["chat"])
             self.entries[exchange] = entry
         elif fingerprint != entry.fingerprint:
             raise Error("invalid_input")

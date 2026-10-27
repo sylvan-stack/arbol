@@ -7,7 +7,7 @@ import codecs
 import json
 import os
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -296,8 +296,9 @@ class Line:
 
 
 class Scanner:
-    def __init__(self, descriptor: int, *, offset: int = 0) -> None:
+    def __init__(self, descriptor: int, *, offset: int = 0, checkpoint: Callable[[], None] | None = None) -> None:
         self.descriptor = descriptor
+        self.checkpoint = checkpoint
         self.offset = self.complete = self.start = offset
         self.size = 0
         self.buffer = bytearray()
@@ -372,12 +373,16 @@ class Scanner:
                         yield line
                         emitted += 1
                         if emitted % 64 == 0:
+                            if self.checkpoint:
+                                self.checkpoint()
                             await asyncio.sleep(0)
+            if self.checkpoint:
+                self.checkpoint()
             await asyncio.sleep(0)
 
 
-async def completed(descriptor: int, limit: int) -> tuple[int, dict[tuple[str, str, str, str], int]]:
-    reader = Scanner(descriptor)
+async def completed(descriptor: int, limit: int, *, checkpoint: Callable[[], None] | None = None) -> tuple[int, dict[tuple[str, str, str, str], int]]:
+    reader = Scanner(descriptor, checkpoint=checkpoint)
     blocks: dict[tuple[str, str, str, str], int] = {}
     async for line in reader.lines(limit=limit):
         if line.meta.kind in ("text", "thinking", "tool_finished") and (key := line.meta.block()) is not None:
