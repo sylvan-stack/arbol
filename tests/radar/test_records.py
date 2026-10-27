@@ -26,7 +26,7 @@ from arbol_backend.process import Programs  # noqa: E402
 from arbol_radar.drivers import LIST, Listed, Listing, drivers_of, list_subscriptions, records_of  # noqa: E402
 from arbol_radar.model import FIRST_PROFILE, Profile, Rejected, Subscription, Weight  # noqa: E402
 from arbol_radar.records import Records, loss_row  # noqa: E402
-from radar.support import CLAUDE, CODEX, FETCHED, KIMI, MONDAY, ZAI, at, claude, codex, kimi  # noqa: E402
+from radar.support import CLAUDE, CODEX, FETCHED, KIMI, MONDAY, ZAI, at, claude, codex, kimi, window  # noqa: E402
 
 LAYOUT = ROOT / "tests/radar/layout.sql"
 MERGED = Path.home() / "repos/sylvan-stack/readonly/arbol-root"
@@ -403,6 +403,53 @@ class TheRecords(RecordFixture):
         finally:
             await self.db.execute(LAYOUT.read_text(encoding="utf-8"))  # the check's own layout, never the process's
         self.assertTrue(await self.records.layout())
+
+
+class TheReplay(RecordFixture):
+    """A named profile replayed over every recorded report of a Subscription gives the recorded results (SGM-1.14)."""
+
+    async def test_profile_1_reproduces_every_recorded_result_row_for_row(self) -> None:
+        """radar.replay"""
+        first = await self.records.record_report(CLAUDE, usage(claude(), extra={"isUsingOverage": False}), now=MONDAY)
+        moments = [MONDAY, MONDAY + timedelta(hours=1), MONDAY + timedelta(hours=4), MONDAY + timedelta(hours=5)]
+        for moment in moments[:3]:
+            await self.records.calculate(CLAUDE, FIRST_PROFILE, moment)
+        reached = [
+            window("session", "Five hours", used=100, resets=at(hours=9, minutes=50), reached=True),
+            window("weekly", "Seven days", used=23, resets=at(days=3), minutes=10080),
+        ]
+        second = await self.records.record_report(
+            CLAUDE, usage(reached, fetched=at(hours=4, minutes=50)), now=moments[3]
+        )
+        assert first is not None and second is not None
+        await self.records.calculate(CLAUDE, FIRST_PROFILE, moments[3])
+        await self.records.calculate(ZAI, FIRST_PROFILE, MONDAY)
+        recorded = await self.records.results(CLAUDE)
+        self.assertEqual([entry.report for entry in recorded], [first.id, first.id, first.id, second.id])
+        replays = await self.records.replay(CLAUDE, FIRST_PROFILE)
+        self.assertEqual([entry.recorded for entry in replays], recorded)
+        self.assertEqual([entry.replayed for entry in replays], recorded)  # row for row
+        self.assertTrue(all(entry.same for entry in replays))
+        self.assertEqual([entry.replayed.moment for entry in replays], moments)
+        self.assertEqual(await self.count("vigor_results"), 5)  # a replay writes nothing
+        # A changed formula over the same history: the gate weighs 0.5 instead of the placeholder 0.1.
+        heavier = Profile(1, "proposed", "even", Weight(0.5))
+        changed = await self.records.replay(CLAUDE, heavier)
+        self.assertEqual([entry.recorded for entry in changed], recorded)
+        self.assertFalse(changed[2].same)  # at 14:00 the five-hour window, predicted fresh, loses and weighs more
+        assert changed[2].replayed.vigor is not None and recorded[2].vigor is not None
+        self.assertGreater(changed[2].replayed.vigor, recorded[2].vigor)
+        # At 10:00 the gate loses nothing, so the Vigor is the same, though the record shows the other weight; while
+        # exhausted the Vigor is 0 whatever the weight.
+        self.assertFalse(changed[0].same)
+        self.assertEqual(changed[0].replayed.vigor, recorded[0].vigor)
+        self.assertEqual([entry.weight for entry in changed[0].replayed.windows], [0.5, 1.0])
+        self.assertEqual((changed[3].replayed.vigor, changed[3].replayed.exhausted), (0.0, True))
+        self.assertEqual(await self.count("vigor_results"), 5)
+        zai = await self.records.replay(ZAI, FIRST_PROFILE)
+        self.assertEqual(len(zai), 1)
+        self.assertTrue(zai[0].same and zai[0].recorded.unknown == "no report yet")
+        self.assertEqual(await self.records.replay(CODEX, FIRST_PROFILE), [])
 
 
 if __name__ == "__main__":
