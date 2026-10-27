@@ -180,12 +180,17 @@ class Chats:
         self.list_view.invalidate({})
         self.chat_view.invalidate({"chat": chat} if chat is not None else None)
 
+    def failed_refresh(self, view: View, params: Params, error: Refused) -> None:
+        preserve = self.database.away or error.code == "timeout"
+        for sub in list(view.topic.listeners):
+            if sub.params == params and (not preserve or not sub.ready):
+                sub.connection.end(sub, error)
+
     async def refresh(self, view: View, params: Params) -> None:
         try:
             await view.snapshot(params)
         except Refused as error:
-            if not self.database.away and error.code != "timeout":
-                view.topic.fail(error, params=params)
+            self.failed_refresh(view, params, error)
 
     def changed(self, chat: str) -> None:
         params = {"chat": chat}
@@ -269,11 +274,10 @@ class Chats:
                     async with asyncio.timeout(0.75):
                         await view.snapshot(params)
                 except TimeoutError:
-                    pass  # The coalesced read can finish later; an old display remains truthful.
+                    # Only a ready subscription has a captured display/stream to preserve.
+                    self.failed_refresh(view, params, Error("database_unavailable" if self.database.away else "timeout"))
                 except Refused as error:
-                    if not self.database.away and error.code != "timeout":
-                        view.topic.fail(error, params=params)
-                        return
+                    self.failed_refresh(view, params, error)
                 await asyncio.sleep(0.25)
         except asyncio.CancelledError:
             raise
