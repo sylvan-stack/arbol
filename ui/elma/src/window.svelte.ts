@@ -5,6 +5,7 @@ import { Sending,type SendIntent,type SendOperation,type Accepted } from './send
 import type { Revision } from './wire-json';
 import { Routing } from './routes.svelte';
 import { LiveExchange,savedBlocks } from './live';
+import {signInCommand} from '../design-system/src/sections/elma-response';
 import { readPreferences, savePreferences, type Preferences } from './preferences';
 import type { ElmaExchange, ElmaRoute } from '../design-system/src/sections/elma-types';
 import type { ResponseBlock,ToolView,ToolDetails,QuestionView,Answer } from '../design-system/src/sections/elma-response';
@@ -20,7 +21,7 @@ export class ElmaWindow {
  selected=$state<string|null>(null);more=$state(false);pageBusy=$state(false);pageProblem=$state('');historyOpen=$state(false);settings=$state<ChatSnapshot['settings']>({});ongoing=$state(false);
  repositories=$state<Repository[]>([]);folder=$state('');defaultRoute=$state<ElmaRoute>({});private workspaceRoute:ElmaRoute={};routing:Routing;private settingsQueues=new Map<string,Promise<unknown>>();
  preferences=$state<Preferences>(readPreferences(''));bridge:Bridge;app=new AppChannel();drafts:Drafts;
- composerOpen=$state(false);sendWait=$state('');stopping=$state<string[]>([]);sending:Sending;stopConfirmation=$state<PendingMessage|null>(null);private stopQueue?:PendingMessage&{finish:()=>void};private previousSelection=new Map<string,string|null>();private stopCalls=new Map<string,Promise<void>>();private answerSerial=0;private answerStates=$state<Record<string,{token:number;pending:boolean;problem:string;after:number}>>({});
+ composerOpen=$state(false);sendWait=$state('');stopping=$state<string[]>([]);sending:Sending;stopConfirmation=$state<PendingMessage|null>(null);private stopQueue?:PendingMessage&{finish:()=>void};private previousSelection=new Map<string,string|null>();private replacements=new Map<string,ElmaExchange>();private stopCalls=new Map<string,Promise<void>>();private answerSerial=0;private answerStates=$state<Record<string,{token:number;pending:boolean;problem:string;after:number}>>({});
  repositoryNotice=$state('');repositoryChange=$state<{root:string;chat:string;folder:string;generation:number}|null>(null);
  private pageTicket=0;private generation=0;private settingsObservation=0;private chatSub?:{close:()=>void;retry:()=>void};private bootstrapGeneration=0;private closed=false;private cancelOpening?:()=>void;
  constructor(){this.bridge=new Bridge({build:__ARBOL_BUILD__,onstate:s=>{this.connection=s;if(s==='Reconnecting…'||s==='Connecting…'||s.includes('Bridge version'))this.sending?.offline();},beforeReload:()=>this.drafts.beforeReload(),onhello:(root)=>{if(this.root.root&&this.root.root!==root.root){this.clear();this.folder='';this.stopping=[];this.stopCalls.clear();}this.drafts?.rootChanged(root.root);this.root=root;this.sending?.hello(root.root);this.preferences=readPreferences(root.root);void this.bootstrap();void this.loadAccounts();const rootId=root.root;setTimeout(()=>{if(this.root.root===rootId)for(const id of this.stopping)void this.stopExchange(id,true);},0);}});
@@ -98,6 +99,11 @@ export class ElmaWindow {
  get complete(){return !!this.exchange&&['completed','failed','cancelled','interrupted'].includes(this.exchange.state);}
  get startedAt(){return this.currentLive?.startedAt??this.exchange?.runs.map(run=>run.started?.at).filter((value):value is string=>typeof value==='string'&&Number.isFinite(Date.parse(value))).sort((a,b)=>Date.parse(a)-Date.parse(b))[0];}
  get statusLabel(){if(this.exchange&&this.stopping.includes(this.exchange.exchange)&&!this.complete)return 'Stopping…';return this.exchange?(this.currentLive??new LiveExchange(this.exchange)).label(this.exchange,this.now):'';}
+ get endedAt(){return this.exchange?.endedAt??this.currentLive?.end?.at;}
+ get failureActions(){return this.exchange?.state==='failed'&&this.exchange.exchange===this.exchanges.at(-1)?.exchange&&!this.moreAfterSelected;}
+ private get moreAfterSelected(){return !!this.info&&this.exchange?.number!==this.info.exchangeCount;}
+ get failureBusy(){return this.composerBusy||!!this.sendWait||this.working||!this.routing.available||this.routing.busy;}
+ get signIn(){return signInCommand(this.exchange?.route.driver,this.exchange?.route.subscription);}
  get error(){return this.exchange?.error??this.currentLive?.end?.error;}
  get responseNotes(){const state=this.currentLive?.state??this.exchange?.state;return [...(this.complete&&this.exchange?.state==='cancelled'?['⏹ Stopped']:[]),...(state==='unsaved'?['Not yet saved']:[]),...(state==='gone'||this.exchange?.state==='interrupted'?[this.exchange?.note?.kind==='ended_stuck'?'Ended because it was stuck. What had arrived is kept.':"Interrupted: the agent's process ended before the answer was finished. What had arrived is kept."]:[])];}
  async loadTool(tool:ToolView):Promise<ToolDetails>{const exchange=this.exchange?.exchange;if(!exchange||tool.position===undefined)throw new Error('not_found: The tool call is unavailable.');try{return await this.bridge.call<ToolDetails>('toolCall.get',{exchange,position:tool.position});}catch(e){throw new Error(e instanceof Refusal?describe(e.detail):'The tool details could not be read.');}}
@@ -111,6 +117,19 @@ export class ElmaWindow {
  }
  get composerBusy(){return !!this.drafts.current?.pendingSend||!!(this.info&&this.sending.forChat(this.info.chat));}
  get composerStatus(){return(this.info?this.sending.forChat(this.info.chat)?.status:undefined)||this.sendWait||this.drafts.current?.pastes.status||this.drafts.current?.status||'';}
+ async recoverFailure(continueFrom=false){
+  const row=this.exchange,editor=this.drafts.current,chat=this.info?.chat,root=this.root.root,generation=this.generation;
+  if(!row||!chat||!editor?.ready||!this.failureActions||this.failureBusy)return;
+  editor.pendingSend=true;editor.sendProblem='';this.sendWait='Preparing failure recovery…';let transferred=false,finish!:()=>void;const preparing=new Promise<void>(resolve=>finish=resolve);this.drafts.holdSend(preparing);
+  try{await this.routing.settle();if(this.routing.problem.startsWith('Route not saved:'))throw new Error(this.routing.problem);if(this.routing.busy||!this.routing.available)throw new Error('Choose a signed-in Subscription and model before sending.');await editor.flush();
+   if(this.closed||root!==this.root.root||generation!==this.generation||chat!==this.info?.chat||editor!==this.drafts.current||row.exchange!==this.exchange?.exchange||!this.failureActions||this.working)throw new Error('The failed response changed before recovery could start.');
+   if(editor.dirty||editor.conflict||editor.recovery!==null)throw new Error('Save or resolve the Draft before continuing.');
+   const exchange=crypto.randomUUID(),common={version:1 as const,root,scope:{chat},chat,exchange,existing:true};
+   const intent:SendIntent=continueFrom?{...common,method:'chat.send',purpose:'continue',params:{chat,exchange,message:'proceed',route:{...this.route},workingFolder:this.settings.workingFolder??this.folder},number:(this.info?.exchangeCount??0)+1}:{...common,method:'exchange.sendAgain',params:{exchange:row.exchange,newExchange:exchange,route:{...this.route}},prompt:this.prompt,retryFolder:row.workingFolder,number:row.number};
+   this.sending.start(intent);transferred=true;
+  }catch(e){editor.sendProblem='Not sent: '+(e instanceof Refusal?describe(e.detail):e instanceof Error?e.message:'Recovery could not start.');this.composerOpen=true;}
+  finally{this.sendWait='';if(!transferred)editor.pendingSend=false;finish();}
+ }
  requestSend(){const editor=this.drafts.current;if(!editor?.ready||editor.pendingSend||this.composerBusy||!editor.text.trim())return;const generation=this.generation;editor.sendProblem='';editor.pastes.requestSend(()=>void this.prepareSend(editor,generation));}
  private async prepareSend(editor:DraftEditor,generation:number){
   if(this.closed||generation!==this.generation||editor!==this.drafts.current){editor.sendProblem='Not sent: the composition changed while pasted text was saved.';return;}
@@ -126,28 +145,28 @@ export class ElmaWindow {
   }catch(e){const message=e instanceof Error?e.message:'The message could not be sent.';editor.sendProblem=message.startsWith('Not sent:')?message:'Not sent: '+message;this.composerOpen=true;}
   finally{if(!transferred){editor.pendingSend=false;this.sendWait='';}}
  }
- private provisionalRow(op:SendOperation,number=op.intent.number):ElmaExchange{return{exchange:op.intent.exchange,number,state:'accepting',route:op.intent.params.route as ElmaRoute,workingFolder:typeof op.intent.params.workingFolder==='string'?op.intent.params.workingFolder:this.exchanges.find(row=>row.exchange===op.intent.params.exchange)?.workingFolder??this.folder,acceptedAt:'',items:[{position:0,kind:'message',role:'user',text:op.message}],runs:[]};}
+ private provisionalRow(op:SendOperation,number=op.intent.number):ElmaExchange{return{exchange:op.intent.exchange,number,state:'accepting',route:op.intent.params.route as ElmaRoute,workingFolder:op.intent.retryFolder??(typeof op.intent.params.workingFolder==='string'?op.intent.params.workingFolder:this.folder),acceptedAt:'',items:[{position:0,kind:'message',role:'user',text:op.message}],runs:[]};}
  private provisional(op:SendOperation){
   if(op.intent.root!==this.root.root)return;const same=this.info?.chat===op.intent.chat;
   this.previousSelection.set(op.intent.exchange,this.previousSelection.get(op.intent.exchange)??this.selected);
   if(!same){this.live.clear();this.info={chat:op.intent.chat,title:null,firstMessage:op.intent.existing?'':op.message,exchangeCount:op.intent.number,usage:{inputTokens:0,outputTokens:0}};this.exchanges=[];this.settings={route:op.intent.params.route as ElmaRoute,workingFolder:typeof op.intent.params.workingFolder==='string'?op.intent.params.workingFolder:undefined};}
-  const present=this.exchanges.some(row=>row.exchange===op.intent.exchange);if(!present)this.exchanges=[...this.exchanges,this.provisionalRow(op)];if(!same||!present)this.selected=op.intent.exchange;
+  const present=this.exchanges.some(row=>row.exchange===op.intent.exchange);if(!present){const old=this.exchanges.find(row=>row.exchange===op.intent.params.exchange);if(op.intent.method==='exchange.sendAgain'&&old){this.replacements.set(op.intent.exchange,old);this.exchanges=this.exchanges.map(row=>row===old?this.provisionalRow(op):row);}else this.exchanges=[...this.exchanges,this.provisionalRow(op)];}if(!same||!present)this.selected=op.intent.exchange;
   if(this.info)this.info.exchangeCount=Math.max(this.info.exchangeCount,op.intent.number);this.folder=this.settings.workingFolder??this.folder;this.drafts.select(this.root.root,op.intent.scope);this.sending.select(this.root.root,this.drafts.current);this.selectRoute();this.composerOpen=false;
  }
  private async accepted(op:SendOperation,result:Accepted){
   if(this.root.root!==op.intent.root)return;const visible=this.info?.chat===op.intent.chat;
   if(visible){const row=this.exchanges.find(row=>row.exchange===op.intent.exchange);if(row)row.number=result.number;let opened=false;try{opened=await this.openChat(op.intent.chat,true);if(!opened)this.problem='The message was sent, but the chat is not available yet.';}catch(e){this.problem='The message was sent, but the chat could not be restored: '+(e instanceof Refusal?describe(e.detail):'read failed');}if(!opened&&this.root.root===op.intent.root&&this.info?.chat===op.intent.chat){this.drafts.select(this.root.root,{chat:op.intent.chat});this.sending.select(this.root.root,this.drafts.current);}}
-  this.previousSelection.delete(op.intent.exchange);
+  this.previousSelection.delete(op.intent.exchange);this.replacements.delete(op.intent.exchange);
  }
  private async refused(op:SendOperation,error:BridgeError){
   if(this.root.root!==op.intent.root)return;
   if(error.code==='draft_conflict'&&Object.hasOwn(error,'draft')){try{op.editor.receiveDraft(error.draft);}catch{/* The retained message still needs its canonical subscription. */}}
-  if(op.intent.method==='chat.send')op.editor.restoreMessage(op.message,(op.intent.params.draft as {revision:Revision}).revision);
+  if(op.intent.method==='chat.send'&&op.intent.purpose!=='continue')op.editor.restoreMessage(op.message,(op.intent.params.draft as {revision:Revision}).revision);
   op.editor.sendProblem=error.code==='chat_busy'?'Another message of this chat is running':'Not sent: '+describe(error);
   if(this.info?.chat===op.intent.chat){if(!op.intent.existing){this.clear();this.folder=(op.intent.scope as {folder:string}).folder;this.selectDraft();this.selectRoute();this.routing.preview(op.intent.params.route as ElmaRoute);}
-   else{this.exchanges=this.exchanges.filter(row=>row.exchange!==op.intent.exchange);if(this.selected===op.intent.exchange)this.selected=this.previousSelection.get(op.intent.exchange)??this.exchanges.at(-1)?.exchange??null;try{await this.openChat(op.intent.chat,true);}catch{/* The retained Draft and refusal remain visible. */}}
+   else{const original=this.replacements.get(op.intent.exchange);this.exchanges=original?this.exchanges.map(row=>row.exchange===op.intent.exchange?original:row):this.exchanges.filter(row=>row.exchange!==op.intent.exchange);if(this.selected===op.intent.exchange)this.selected=this.previousSelection.get(op.intent.exchange)??this.exchanges.at(-1)?.exchange??null;try{await this.openChat(op.intent.chat,true);}catch{/* The retained Draft and refusal remain visible. */}}
    this.composerOpen=true;
-  }this.previousSelection.delete(op.intent.exchange);
+  }this.previousSelection.delete(op.intent.exchange);this.replacements.delete(op.intent.exchange);
  }
  cancelStop(){const pending=this.stopConfirmation;this.stopConfirmation=null;if(pending)pending.editor.pendingSend=false;this.sendWait='';this.composerOpen=true;}
  async confirmStopSend(){const pending=this.stopConfirmation;this.stopConfirmation=null;if(!pending)return;if(pending.generation!==this.generation||pending.intent.root!==this.root.root||pending.intent.chat!==this.info?.chat){pending.editor.pendingSend=false;return;}

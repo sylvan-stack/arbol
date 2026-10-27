@@ -3,7 +3,7 @@ import { Refusal,type Bridge,type Fields,type BridgeError } from './bridge';
 import { parseWire,stringifyWire,validRevision } from './wire-json';
 import type { DraftEditor,DraftScope } from './drafts.svelte';
 import type { ElmaRoute } from '../design-system/src/sections/elma-types';
-export interface SendIntent {version:1;root:string;scope:DraftScope;chat:string;exchange:string;method:'chat.send'|'exchange.sendAgain';params:Fields;number:number;existing:boolean;prompt?:string}
+export interface SendIntent {version:1;root:string;scope:DraftScope;chat:string;exchange:string;method:'chat.send'|'exchange.sendAgain';params:Fields;number:number;existing:boolean;prompt?:string;retryFolder?:string;purpose?:'continue'}
 export interface Accepted {accepted:true;duplicate:boolean;chat:string;exchange:string;number:number}
 const uuid=(value:unknown):value is string=>typeof value==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
 const object=(value:unknown):Fields=>value&&typeof value==='object'&&!Array.isArray(value)?value as Fields:{};
@@ -14,8 +14,8 @@ function valid(value:unknown,root:string):value is SendIntent {
  const v=object(value),p=object(v.params),s=object(v.scope);
  if(v.version!==1||v.root!==root||!uuid(v.chat)||!uuid(v.exchange)||!Number.isSafeInteger(v.number)||Number(v.number)<1||typeof v.existing!=='boolean'||!route(p.route))return false;
  if(('chat' in s)===('folder' in s)||('chat' in s?!uuid(s.chat):!folder(s.folder)))return false;
- if(v.method==='chat.send'){const d=object(p.draft);return p.chat===v.chat&&p.exchange===v.exchange&&typeof p.message==='string'&&!!p.message.trim()&&!p.message.includes('\0')&&folder(p.workingFolder)&&validRevision(d.revision)&&('folder' in s?d.folder===s.folder&&p.workingFolder===s.folder:!('folder' in d)&&s.chat===v.chat);}
- return v.method==='exchange.sendAgain'&&uuid(p.exchange)&&p.newExchange===v.exchange&&p.exchange!==v.exchange&&s.chat===v.chat&&typeof v.prompt==='string';
+ if(v.method==='chat.send'){const d=object(p.draft),selected=v.purpose==='continue'?v.existing===true&&p.message==='proceed'&&!('draft' in p)&&s.chat===v.chat:validRevision(d.revision)&&('folder' in s?d.folder===s.folder&&p.workingFolder===s.folder:!('folder' in d)&&s.chat===v.chat);return p.chat===v.chat&&p.exchange===v.exchange&&typeof p.message==='string'&&!!p.message.trim()&&!p.message.includes('\0')&&folder(p.workingFolder)&&selected;}
+ return v.method==='exchange.sendAgain'&&uuid(p.exchange)&&p.newExchange===v.exchange&&p.exchange!==v.exchange&&s.chat===v.chat&&v.existing===true&&typeof v.prompt==='string'&&folder(v.retryFolder);
 }
 export class SendOperation {
  status=$state('Sending…');pending=$state(true);outcome=$state<'pending'|'accepted'|'refused'>('pending');running=false;timer?:ReturnType<typeof setTimeout>;attempts=0;
@@ -60,7 +60,7 @@ export class Sending {
   try{
    const value=await this.bridge.call<Accepted>(op.intent.method,op.intent.params);
    if(value?.accepted!==true||typeof value.duplicate!=='boolean'||value.chat!==op.intent.chat||value.exchange!==op.intent.exchange||!Number.isSafeInteger(value.number)||value.number<1)throw new Refusal({code:'no_answer',message:'The backend did not return a valid send receipt.'});
-   op.outcome='accepted';op.status='Sent; restoring chat…';if(op.intent.method==='chat.send')op.editor.rereadAfterSend();try{await this.callbacks.accepted(op,value);}finally{this.complete(op);}
+   op.outcome='accepted';op.status='Sent; restoring chat…';if(op.intent.method==='chat.send'&&op.intent.purpose!=='continue')op.editor.rereadAfterSend();try{await this.callbacks.accepted(op,value);}finally{this.complete(op);}
   }catch(e){
    if(!op.pending||this.closed)return;
    const error=e instanceof Refusal?e.detail:{code:'no_answer',message:'The send receipt could not be read.'};

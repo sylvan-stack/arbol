@@ -86,6 +86,32 @@ class Fixture:
     def draft_key(params: dict[str, Any]) -> str:
         return "chat:" + str(params["chat"]) if "chat" in params else "folder:" + str(params["folder"])
 
+    async def start_again(self, params: dict[str, Any]) -> dict[str, Any]:
+        exchange = params["newExchange"]
+        if exchange in self.accepted:
+            if self.requests[exchange] != params:
+                return {"error": {"code": "invalid_input", "message": "Changed retry request"}}
+            return {**self.accepted[exchange], "duplicate": True}
+        for chat, snapshot in self.scenario.get("chats", {}).items():
+            previous = next((row for row in snapshot["exchanges"] if row["exchange"] == params["exchange"]), None)
+            if previous is None:
+                continue
+            if any(row["state"] not in ("completed", "failed", "cancelled", "interrupted") for row in snapshot["exchanges"]):
+                return {"error": {"code": "chat_busy", "message": "Another message of this chat is running"}}
+            row = {"exchange": exchange, "number": previous["number"], "state": "open", "route": params["route"],
+                   "workingFolder": previous["workingFolder"], "acceptedAt": datetime.now(UTC).isoformat(),
+                   "items": [item for item in previous["items"] if item["kind"] == "message" and item["role"] == "user"], "runs": []}
+            snapshot["exchanges"] = [row if item is previous else item for item in snapshot["exchanges"]]
+            snapshot["marks"]["ongoing"] = True
+            self.requests[exchange] = params
+            self.accepted[exchange] = {"accepted": True, "duplicate": False, "chat": chat, "exchange": exchange, "number": previous["number"]}
+            if self.record:
+                with os.fdopen(os.open(self.record, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "w") as out:
+                    out.write(json.dumps({"method": "fixture.start", "chat": chat, "exchange": exchange, "replaces": previous["exchange"]}) + "\n")
+            await self.chat_changed(chat)
+            return self.accepted[exchange]
+        return {"error": {"code": "not_found", "message": "The replaced Exchange is unavailable"}}
+
     async def draft_changed(self, params: dict[str, Any]) -> None:
         current = self.drafts.get(self.draft_key(params))
         for writer, subscriptions in tuple(self.windows.items()):
@@ -224,6 +250,14 @@ class Fixture:
                             return
                     elif method == "exchange.stop":
                         value = self.scenario.get("calls", {}).get(method, {"ended": "cancelled"})
+                    elif method == "exchange.sendAgain":
+                        value = await self.start_again(message["params"])
+                        if "error" in value:
+                            await self.send(writer, {"type": "reply", "id": message["id"], "error": value["error"]})
+                            continue
+                        if self.scenario.get("dropSendReplies", 0):
+                            self.scenario["dropSendReplies"] -= 1
+                            return
                     elif method == "draft.get":
                         value = self.drafts.get(self.draft_key(message["params"]))
                     elif method == "paste.save":
