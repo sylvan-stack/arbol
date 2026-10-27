@@ -1,6 +1,7 @@
 import { Bridge, Refusal, describe, type BridgeError, type Fields, type RootInfo } from './bridge';
 import { AppChannel } from './app-channel';
 import { Drafts } from './drafts.svelte';
+import { Routing } from './routes.svelte';
 import { LiveExchange,savedBlocks } from './live';
 import { readPreferences, savePreferences, type Preferences } from './preferences';
 import type { ElmaExchange, ElmaRoute } from '../design-system/src/sections/elma-types';
@@ -14,44 +15,46 @@ export class ElmaWindow {
  root=$state<RootInfo>({root:'',name:'…',status:'working',current:false});
  connection=$state('Connecting…');problem=$state('');info=$state<ChatInfo|null>(null);exchanges=$state<ElmaExchange[]>([]);
  selected=$state<string|null>(null);more=$state(false);pageBusy=$state(false);pageProblem=$state('');historyOpen=$state(false);settings=$state<ChatSnapshot['settings']>({});ongoing=$state(false);
- repositories=$state<Repository[]>([]);folder=$state('');defaultRoute=$state<ElmaRoute>({});routes=$state<{driver:string;subscription:string;unavailable?:string}[]>([]);
- accountProblems=$state<string[]>([]);
+ repositories=$state<Repository[]>([]);folder=$state('');defaultRoute=$state<ElmaRoute>({});private workspaceRoute:ElmaRoute={};routing:Routing;private settingsQueues=new Map<string,Promise<unknown>>();
  preferences=$state<Preferences>(readPreferences(''));bridge:Bridge;app=new AppChannel();drafts:Drafts;
  private pageTicket=0;private generation=0;private chatSub?:{close:()=>void;retry:()=>void};private bootstrapGeneration=0;private closed=false;private cancelOpening?:()=>void;
  constructor(){this.bridge=new Bridge({build:__ARBOL_BUILD__,onstate:s=>this.connection=s,beforeReload:()=>this.drafts.beforeReload(),onhello:(root)=>{this.drafts?.rootChanged(root.root);this.root=root;this.preferences=readPreferences(root.root);void this.bootstrap();void this.loadAccounts();}});
-  this.drafts=new Drafts(this.bridge);
+  this.drafts=new Drafts(this.bridge);this.routing=new Routing(this.bridge,(chat,route)=>this.saveSettings(chat,{route}));
   this.bridge.subscribe('root',{},event=>{if(event.root)this.root=event.root as unknown as RootInfo;},e=>this.failure(e));
  }
  get exchange(){if(this.restoring)return undefined;return this.exchanges.find(e=>e.exchange===this.selected)??this.exchanges.at(-1);}
  get title(){return this.info?.title||Array.from((this.info?.firstMessage??'').split('\n')[0]).slice(0,80).join('')||'New Chat';}
  get placeholder(){return !this.info?.title;}
- get route(){return this.settings.route??this.exchange?.route??this.defaultRoute;}
+ get route(){return this.routing.value;}
+ get routes(){return this.routing.rows;}
+ get accountProblems(){return this.routing.accountProblems;}
  get repository(){return this.repositories.find(r=>r.folder===(this.settings.workingFolder??this.exchange?.workingFolder??this.folder))?.name??(this.settings.workingFolder??this.exchange?.workingFolder??this.folder).split('/').filter(Boolean).at(-1)??'—';}
  get turn(){return this.info?this.info.exchangeCount-this.exchanges.filter(e=>e.number>(this.exchange?.number??Infinity)).length:0;}
  get working(){this.revision;return this.exchanges.some(e=>['open','accepting','running','stopping','ending','unsaved','gone'].includes(e.state));}
  savePreferences(){savePreferences(this.root.root,this.preferences);}
  private failure(error?:BridgeError){if(error)this.problem=describe(error);}
- private async loadAccounts(){
-  try{const data=await this.bridge.call<{drivers:{driver:string;subscriptions?:{id:string;state:string}[];error?:BridgeError}[]}>('accounts.list');
-   if(this.closed)return;
-   this.accountProblems=data.drivers.filter(d=>d.error).map(d=>d.driver+': '+d.error!.code+': '+d.error!.message);
-   this.routes=data.drivers.flatMap(driver=>(driver.subscriptions??[]).map(sub=>({driver:driver.driver,subscription:sub.id,...(sub.state==='signed_in'?{}:{unavailable:sub.state==='signed_out'?'logged out':sub.state==='signing_in'?'signing in':sub.state==='needs_attention'?'needs attention':sub.state})})));
-  }catch(e){if(e instanceof Refusal&&e.detail.code!=='disconnected')this.failure(e.detail);}
+ private async loadAccounts(){await this.routing.refresh(this.root.root);}
+ private selectRoute(){if(this.root.root&&(this.info||this.folder))this.routing.select(this.root.root+':'+(this.info?.chat??this.folder),this.info?.chat,this.info?(this.settings.route??this.exchange?.route):undefined,[this.repositories.find(r=>r.folder===this.folder)?.route??{},this.workspaceRoute]);}
+ private async saveSettings(chat:string,change:{route?:ElmaRoute;workingFolder?:string}){
+  const root=this.root.root,key=root+':'+chat,previous=this.settingsQueues.get(key)??Promise.resolve();
+  const operation=previous.catch(()=>undefined).then(()=>{if(root!==this.root.root)throw new Refusal({code:'disconnected',message:'The Root changed before its settings could be saved.'});return this.bridge.call<ChatSnapshot['settings']>('chat.settings',{chat,...change});});this.settingsQueues.set(key,operation);
+  try{const settings=await operation;if(this.root.root===root&&this.info?.chat===chat)this.settings=settings;return settings;}
+  finally{if(this.settingsQueues.get(key)===operation)this.settingsQueues.delete(key);}
  }
  private async bootstrap(){
   const generation=++this.bootstrapGeneration;
   try{
    const request=await this.app.call('app.takeOpen');const workspace=await this.bridge.call<{repositories:Repository[];route:ElmaRoute}>('workspace.get');
    if(this.closed||generation!==this.bootstrapGeneration)return;
-   this.repositories=[...workspace.repositories];const recent=this.preferences.recentRepositories;
+   this.workspaceRoute=workspace.route;this.repositories=[...workspace.repositories];const recent=this.preferences.recentRepositories;
    this.repositories=[...this.repositories.slice(0,1),...this.repositories.slice(1).sort((a,b)=>{const ai=recent.indexOf(a.name),bi=recent.indexOf(b.name);return(ai<0?Infinity:ai)-(bi<0?Infinity:bi);})];
    this.folder=this.folder||this.repositories[0]?.folder||'';this.defaultRoute=this.repositories.find(r=>r.folder===this.folder)?.route??workspace.route;
    // A live view is reread by its retained subscription on hello, not replaced by convenience state.
-   if(this.info&&!request.chat)return;
+   if(this.info&&!request.chat){this.selectRoute();return;}
    const first=this.repositories[0];const candidates=[request.chat,this.preferences.lastChat,first&&this.preferences.repositoryChats[first.name]].filter((v):v is string=>typeof v==='string');
    let opened=false;for(const chat of [...new Set(candidates)]){if(generation!==this.bootstrapGeneration)return;if(await this.openChat(chat)){opened=true;break;}}if(generation!==this.bootstrapGeneration)return;
    if(!opened){this.clear();if(typeof request.folder==='string')this.folder=request.folder;}
-   this.selectDraft();this.problem='';
+   this.selectDraft();this.selectRoute();this.problem='';
   }catch(e){this.problem=e instanceof Refusal?describe(e.detail):'The chat could not be read.';}
  }
  async openChat(chat:string):Promise<boolean>{
@@ -66,7 +69,7 @@ export class ElmaWindow {
      const desired=this.info?.chat===snapshot.chat.chat?this.selected:null;for(const [exchange,live]of this.live)for(const block of live.blocks)if(block.kind==='tool'&&block.tool.position!==undefined&&this.openTools[block.tool.id])this.openTools[exchange+':'+block.tool.position]=true;
      this.restoring=false;this.live.clear();this.revision++;this.snapshotRevision++;
      this.info=snapshot.chat;this.exchanges=snapshot.exchanges;this.more=snapshot.more;this.settings=snapshot.settings;this.ongoing=snapshot.marks.ongoing;this.selected=this.exchanges.some(e=>e.exchange===this.selected)?this.selected:this.exchanges.at(-1)?.exchange??null;
-     this.folder=this.settings.workingFolder??this.exchange?.workingFolder??this.folder;this.selectDraft();
+     this.folder=this.settings.workingFolder??this.exchange?.workingFolder??this.folder;this.selectDraft();this.selectRoute();
      this.preferences.lastChat=chat;this.preferences.repositoryChats[this.repository]=chat;this.preferences.recentChats=[chat,...this.preferences.recentChats.filter(v=>v!==chat)].slice(0,100);this.savePreferences();
      if(desired&&!this.exchanges.some(e=>e.exchange===desired)&&this.more){this.restoring=true;void this.restoreSelection(desired,generation,this.snapshotRevision);}
      if(!settled){settled=true;resolve(true);}
@@ -75,7 +78,7 @@ export class ElmaWindow {
     else if(event.kind==='saved'){const row=event.exchange as unknown as ElmaExchange;const old=this.exchanges.find(e=>e.exchange===row.exchange);if(old){this.projection(old).reconcile(row);this.exchanges=this.exchanges.map(e=>e.exchange===row.exchange?row:e);this.revision++;}}
     else if(event.kind==='note'){const note=event.note as Fields;const row=this.exchanges.find(e=>e.exchange===note.exchange);if(row){row.note=note as unknown as ElmaExchange['note'];this.revision++;}}
     else if(event.kind==='title'&&this.info)this.info.title=event.title as string|null;
-    else if(event.kind==='settings')this.settings=event.settings as ChatSnapshot['settings'];
+    else if(event.kind==='settings'){this.settings=event.settings as ChatSnapshot['settings'];this.selectRoute();}
     else if(event.kind==='marks')this.ongoing=!!(event.marks as {ongoing:boolean}).ongoing;
    },error=>{this.failure(error);if(!settled){settled=true;reject(new Refusal(error??{code:'ended',message:'The chat subscription ended.'}));}});
   });
@@ -109,5 +112,5 @@ export class ElmaWindow {
  }
  private clear(){this.restoring=false;this.live.clear();this.revision++;this.pageTicket++;this.pageBusy=false;this.pageProblem='';this.historyOpen=false;this.cancelOpening?.();this.chatSub?.close();this.chatSub=undefined;this.generation++;this.info=null;this.exchanges=[];this.selected=null;this.settings={};this.ongoing=false;}
  private selectDraft(){if(this.root.root&&(this.info||this.folder))this.drafts.select(this.root.root,this.info?{chat:this.info.chat}:{folder:this.folder});}
- close(){clearInterval(this.clock);this.cancelOpening?.();this.closed=true;this.bootstrapGeneration++;this.chatSub?.close();this.drafts.close();this.bridge.close();this.app.close();}
+ close(){clearInterval(this.clock);this.cancelOpening?.();this.closed=true;this.bootstrapGeneration++;this.chatSub?.close();this.drafts.close();this.routing.close();this.bridge.close();this.app.close();}
 }

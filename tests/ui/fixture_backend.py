@@ -112,7 +112,7 @@ class Fixture:
                                         "limit": message.get("params", {}).get("limit"),
                                         "exchange": message.get("params", {}).get("exchange"),
                                         "position": message.get("params", {}).get("position"),
-                                        **({"params": message.get("params", {})} if method.startswith("draft.") else {}),
+                                        **({"params": message.get("params", {})} if method.startswith(("draft.", "accounts.")) or method == "chat.settings" else {}),
                                         **({"characters": len(message["params"]["text"])} if method == "paste.save" else {}),
                                     }
                                 )
@@ -136,6 +136,22 @@ class Fixture:
                         }
                     elif method == "accounts.list" and method not in self.scenario.get("calls", {}):
                         value = {"drivers": []}
+                    elif method == "accounts.models" and "catalogs" in self.scenario:
+                        params = message["params"]
+                        value = self.scenario["catalogs"].get(params["driver"] + ":" + params["subscription"], {"models": []})
+                    elif method == "chat.settings":
+                        params = message["params"]
+                        snapshot = self.scenario.get("chats", {}).get(params["chat"])
+                        if snapshot is None:
+                            await self.send(writer, {"type": "reply", "id": message["id"], "error": {"code": "not_found", "message": "Chat not found"}})
+                            continue
+                        snapshot["settings"] = {**snapshot.get("settings", {}), **{k: v for k, v in params.items() if k != "chat"}}
+                        value = snapshot["settings"]
+                        for peer, subscriptions in tuple(self.windows.items()):
+                            for id, subscription in tuple(subscriptions.items()):
+                                if subscription["topic"] == "chat" and subscription["params"].get("chat") == params["chat"]:
+                                    subscription["seq"] += 1
+                                    await self.send(peer, {"type": "event", "id": id, "seq": subscription["seq"], "event": {"kind": "settings", "settings": value}})
                     elif method == "chat.exchanges" and "exchangePages" in self.scenario:
                         value = self.scenario["exchangePages"].get(
                             str(message.get("params", {}).get("beforeNumber")), {"exchanges": [], "more": False}
