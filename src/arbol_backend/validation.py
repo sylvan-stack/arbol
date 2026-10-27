@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from .bridge import Error, Params, driver_id, subscription_id, uuid_id
 from .model import Identity, Refused
-from .process import DRIVERS, Programs
+from .process import Programs
 
 
 def text(value: object, *, nonempty: bool = True) -> str:
@@ -37,7 +37,7 @@ async def chat(params: Params) -> Params:
 class Catalogues:
     def __init__(self, identity: Identity, programs: Programs) -> None:
         self.identity, self.programs = identity, programs
-        self.launchers = {name for name in DRIVERS if (identity.bin_dir / ("arbol-" + name + "-driver")).is_file()}
+        self.launchers = set(programs.drivers)
         self.subscriptions: dict[str, set[str]] = {}
         self.task: asyncio.Task[None] | None = None
 
@@ -49,7 +49,7 @@ class Catalogues:
                                                    for row in value):
                 return
             self.subscriptions[driver] = {row["id"] for row in value}
-        except Refused:
+        except Exception:
             pass
 
     async def load(self) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any
 
@@ -17,6 +18,7 @@ class Roots:
         self.identity, self.programs, self.database = identity, programs, database
         self.inflight: asyncio.Task[list[Params] | Error] | None = None
         self.current: Params | None = None
+        self.complete: Callable[[], Awaitable[bool]] | None = None
         self.topic = Topic(self.snapshot)
 
     async def catalogue_read(self) -> list[Params]:
@@ -98,13 +100,17 @@ class Roots:
 
     async def get(self, params: Params) -> Params:
         snapshot = await self.refresh()
-        rows = await self.database.execute(
-            "SELECT count(*)=5 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
-            "WHERE n.nspname='public' AND ((c.relname IN "
-            "('drafts','chat_settings','chat_marks','exchange_notes') AND c.relkind IN ('r','p')) "
-            "OR (c.relname='drafts_revision' AND c.relkind='S'))"
-        )
-        return {"root": snapshot.event["root"], "layoutComplete": rows[0][0] is True}
+        if self.complete is not None:
+            complete = await self.complete()
+        else:
+            rows = await self.database.execute(
+                "SELECT count(*)=5 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
+                "WHERE n.nspname='public' AND ((c.relname IN "
+                "('drafts','chat_settings','chat_marks','exchange_notes') AND c.relkind IN ('r','p')) "
+                "OR (c.relname='drafts_revision' AND c.relkind='S'))"
+            )
+            complete = rows[0][0] is True
+        return {"root": snapshot.event["root"], "layoutComplete": complete}
 
     async def list(self, params: Params) -> Params:
         return {"roots": [{"root": row} for row in await self.catalogue()]}

@@ -9,7 +9,6 @@ import sys
 import time
 import unittest
 from pathlib import Path
-from typing import Any
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -466,14 +465,14 @@ class RootWire(unittest.IsolatedAsyncioTestCase):
         for index, current in enumerate((True, False)):
             self.fixture.behavior["arbol-roots"]["output"][0]["current"] = current
             self.fixture.configure()
-            before = len(self.fixture.calls())
+            before = len([row for row in self.fixture.calls() if row["program"] == "arbol-roots"])
             for n in range(3):
                 await self.send(writer, {"type": "call", "id": f"{index}-{n}", "method": "roots.list"})
             for _ in range(3):
                 result = (await self.read(reader))["result"]
                 self.assertEqual(result["roots"][0]["root"]["current"], current)
                 self.assertEqual(set(result["roots"][0]["root"]), {"root", "name", "status", "current"})
-            self.assertEqual(len(self.fixture.calls()) - before, 1)
+            self.assertEqual(len([row for row in self.fixture.calls() if row["program"] == "arbol-roots"]) - before, 1)
         self.assertEqual(list(self.fixture.settings.iterdir()), [])
 
     async def test_cancelled_catalogue_does_not_log_a_late_failure(self) -> None:
@@ -516,27 +515,28 @@ class RootWire(unittest.IsolatedAsyncioTestCase):
             db = Database(replace(self.selected, database=cluster.address))
             self.backend.database = db
             self.backend.roots.database = db
+            self.backend.chats.database = db
+            self.backend.chats.reader.database = db
             await old.close()
             reader, writer = await self.open()
             async def get(id: str) -> Params:
                 await self.send(writer, {"type": "call", "id": id, "method": "root.get"})
                 return await self.read(reader)
             self.assertFalse((await get("absent"))["result"]["layoutComplete"])
-            for table in ("drafts", "chat_settings", "chat_marks", "exchange_notes"):
-                await db.execute("CREATE TABLE " + table + " (id integer)")
-            await db.execute("CREATE SEQUENCE drafts_revision")
+            await db.execute((ROOT / "tests/backend/own-layout.sql").read_text())
             self.assertTrue((await get("present"))["result"]["layoutComplete"])
             await db.execute("DROP TABLE drafts")
             self.assertFalse((await get("missing"))["result"]["layoutComplete"])
             await db.execute("CREATE VIEW drafts AS SELECT 1 AS id")
             self.assertFalse((await get("view"))["result"]["layoutComplete"])
             entered, release = asyncio.Event(), asyncio.Event()
-            original = db.execute
-            async def delayed(sql: str, params: Any = None) -> Any:
+            original = self.backend.roots.complete
+            assert original is not None
+            async def delayed() -> bool:
                 entered.set()
                 await release.wait()
-                return await original(sql, params)
-            with mock.patch.object(db, "execute", side_effect=delayed):
+                return await original()
+            with mock.patch.object(self.backend.roots, "complete", side_effect=delayed):
                 await self.send(writer, {"type": "call", "id": "blocked", "method": "root.get"})
                 await entered.wait()
                 await self.send(writer, {"type": "call", "id": "fast", "method": "subscriptions.check"})

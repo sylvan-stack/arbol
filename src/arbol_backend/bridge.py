@@ -148,9 +148,10 @@ class Topic:
             if params is None or subscription.params == params:
                 subscription.publish(self.version, event)
 
-    def fail(self, error: Refused) -> None:
+    def fail(self, error: Refused, *, params: Params | None = None) -> None:
         for subscription in list(self.listeners):
-            subscription.connection.end(subscription, error)
+            if params is None or subscription.params == params:
+                subscription.connection.end(subscription, error)
 
 
 class Registry:

@@ -116,6 +116,27 @@ class Inputs(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.catalogues.settings({"chat": valid["chat"], "workingFolder": str(self.frame.root)}),
                          {"chat": valid["chat"], "workingFolder": str(self.frame.root)})
 
+    async def test_an_added_launcher_supplies_its_own_validation_catalogue(self) -> None:
+        """chats.additive-driver-catalogue"""
+        extra = self.frame.bin / "arbol-extra-driver"
+        extra.write_bytes((self.frame.bin / "arbol-claude-driver").read_bytes())
+        extra.chmod(0o700)
+        self.frame.behavior["arbol-extra-driver"] = {"output": [{"id": "extra-sub"}]}
+        self.frame.configure()
+        programs = Programs(self.selected)
+        catalogues = Catalogues(self.selected, programs)
+        try:
+            catalogues.start()
+            assert catalogues.task
+            await catalogues.task
+            self.assertIn("extra", catalogues.launchers)
+            result = await catalogues.settings({"chat": "12345678-1234-4234-8234-123456789012",
+                                                "route": {"driver": "extra", "subscription": "extra-sub", "model": "test"}})
+            self.assertEqual(result["route"]["driver"], "extra")
+        finally:
+            await catalogues.close()
+            programs.close()
+
     async def test_input_primitives_reject_booleans_and_invalid_unicode(self) -> None:
         """chats.input-types"""
         for value in (True, 0, 201, "12"):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import signal
 import subprocess
 import tempfile
@@ -50,6 +51,10 @@ class Child:
 class Programs:
     def __init__(self, identity: Identity, *, limits: dict[str, float] | None = None) -> None:
         self.identity = identity
+        self.drivers = {path.name[len("arbol-"):-len("-driver")]
+                        for path in identity.bin_dir.glob("arbol-*-driver")
+                        if path.is_file() and os.access(path, os.X_OK)
+                        and re.fullmatch(r"arbol-[a-z][a-z0-9-]*-driver", path.name)}
         self.limits = dict(LIMITS if limits is None else limits)
         self.running: dict[tuple[str, str], Child] = {}
 
@@ -63,7 +68,7 @@ class Programs:
                 del self.running[key]
 
     async def call(self, program: str, args: list[str], *, kind: str, key: str = "") -> Any:
-        allowed = {"arbol-root", "arbol-roots", *("arbol-" + x + "-driver" for x in DRIVERS)}
+        allowed = {"arbol-root", "arbol-roots", *("arbol-" + x + "-driver" for x in self.drivers)}
         if program not in allowed or kind not in LIMITS:
             raise Refused("invalid_input", "Unsupported backend child command.")
         if program.endswith("-driver"):
