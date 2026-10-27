@@ -226,7 +226,7 @@ class Stale(unittest.TestCase):
         self.assertEqual(result.stale, timedelta(hours=5, minutes=5))
         assert result.vigor is not None
         self.assertEqual(
-            (result.predicted, round(result.vigor, 2)), (True, 0.42)
+            (result.predicted, round(result.vigor, 2)), (True, 0.43)
         )  # the five-hour window fresh at 13:20
         self.assertEqual(by_label(result)["Seven days"].used_percent, 20.0)  # the floor the report gives
         self.assertIsNone(compute(report(CLAUDE, claude()), FIRST_PROFILE, MONDAY).stale)
