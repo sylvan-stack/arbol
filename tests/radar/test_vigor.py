@@ -22,7 +22,7 @@ from arbol_radar.model import (  # noqa: E402
     Weight,
     Window,
 )
-from arbol_radar.vigor import compute  # noqa: E402
+from arbol_radar.vigor import compute, loss  # noqa: E402
 
 MONDAY = datetime(2026, 10, 26, 10, 0, tzinfo=UTC)  # the worked examples' Monday 10:00
 CLAUDE = Subscription("claude", "anthropic", "anthropic")
@@ -378,6 +378,72 @@ class WindowsThatTakePart(unittest.TestCase):
         self.assertEqual(later.moment, MONDAY + timedelta(hours=2))
         assert later.vigor is not None
         self.assertGreater(later.vigor, 0.37)  # the same report two hours later loses more of the week
+
+
+class LossOfAWindow(unittest.TestCase):
+    """The loss of one window at its even pace (SGM-1.3)."""
+
+    def test_the_rows_of_the_worked_examples(self) -> None:
+        """radar.loss-rows"""
+        rows = [
+            ("Five hours", 35, 200, 300, 0.0),
+            ("Seven days", 20, 4320, 10080, 0.37),
+            ("Weekly window", 70, 1440, 10080, 0.16),
+            ("Five hours, calls", 70, 60, 300, 0.10),
+            ("Month, Kimi Code share", 40, 5760, 43200, 0.47),
+        ]
+        for label, used, minutes_left, length, expected in rows:
+            with self.subTest(window=label):
+                w = Window("other", label, "tokens", used, MONDAY + timedelta(minutes=minutes_left), length, False)
+                value = loss(w, MONDAY)
+                assert value is not None
+                self.assertEqual(round(value, 2), expected)
+
+    def test_never_below_zero_nothing_at_the_start_and_nearly_all_near_the_reset(self) -> None:
+        """radar.loss-bounds"""
+        ahead = Window("session", "ahead of pace", "tokens", 90, MONDAY + timedelta(minutes=200), 300, False)
+        self.assertEqual(loss(ahead, MONDAY), 0.0)
+        at_start = Window("weekly", "full at its start", "tokens", 0, MONDAY + timedelta(minutes=10080), 10080, False)
+        self.assertEqual(loss(at_start, MONDAY), 0.0)
+        near_reset = Window("weekly", "a minute to go", "tokens", 10, MONDAY + timedelta(minutes=1), 10080, False)
+        near = loss(near_reset, MONDAY)
+        assert near is not None
+        self.assertAlmostEqual(near, 0.9 - 1 / 10080)
+        reached = Window("session", "reached", "tokens", 100, MONDAY + timedelta(minutes=100), 300, True)
+        self.assertEqual(loss(reached, MONDAY), 0.0)
+        reached_early = Window("session", "reached below 100", "tokens", 97, MONDAY + timedelta(minutes=100), 300, True)
+        self.assertEqual(loss(reached_early, MONDAY), 0.0)
+        passed = Window("session", "reset passed", "tokens", 40, MONDAY - timedelta(minutes=30), 300, False)
+        self.assertEqual(loss(passed, MONDAY), 0.6)
+
+    def test_none_while_a_field_is_unknown(self) -> None:
+        """radar.loss-unknown"""
+        for name, w in (
+            ("usedPercent", Window("session", "no share", "tokens", None, MONDAY + timedelta(minutes=100), 300, False)),
+            (
+                "windowMinutes",
+                Window("session", "no length", "tokens", 40, MONDAY + timedelta(minutes=100), None, False),
+            ),
+            ("resetsAt", Window("session", "no reset", "tokens", 40, None, 300, False)),
+            (
+                "usedPercent",
+                Window(
+                    "session",
+                    "below zero",
+                    "tokens",
+                    None,
+                    MONDAY,
+                    300,
+                    False,
+                    raw_used_percent=-5,
+                    unknown="usedPercent",
+                ),
+            ),
+        ):
+            with self.subTest(field=name):
+                self.assertIsNone(loss(w, MONDAY))
+                self.assertEqual(w.missing, name)
+                self.assertFalse(w.known)
 
 
 if __name__ == "__main__":
