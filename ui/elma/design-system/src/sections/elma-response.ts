@@ -1,8 +1,9 @@
+import {stringifyJson} from '../json';
 export interface QuestionView {id:string;askId?:string;ask:unknown;at?:string;answer?:unknown;open:boolean}
 export interface ToolDetails {input:unknown;result?:unknown;error?:string}
 export interface ToolView extends ToolDetails {id:string;name:string;state:'Running'|'Complete'|'Failed'|'Interrupted';startedAt?:string;endedAt?:string;truncated?:boolean;cut?:boolean;outputDelta?:string;parallel?:{running:number;total:number};children?:ResponseBlock[];position?:number}
 export type ResponseBlock={id:string;kind:'text'|'thinking'|'notice';text:string}|{id:string;kind:'tool';tool:ToolView};
-export function pretty(value:unknown):string {if(value===undefined)return 'Not recorded';if(typeof value==='string')return value;try{return JSON.stringify(value,null,2);}catch{return String(value);}}
+export function pretty(value:unknown):string {if(value===undefined)return 'Not recorded';if(typeof value==='string')return value;try{return stringifyJson(value,2);}catch{return String(value);}}
 export function toolSummary(input:unknown):string {if(input&&typeof input==='object')for(const key of ['command','path','file_path','query','url']){const value=(input as Record<string,unknown>)[key];if(typeof value==='string')return value.split('\n')[0].slice(0,240);}return pretty(input).replace(/\s+/g,' ').slice(0,240);}
 export function clock(value?:string):string {if(!value||!Number.isFinite(Date.parse(value)))return 'Not recorded';return new Date(value).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',hourCycle:'h23'});}
 export function duration(start?:string,end?:string,now=Date.now()):string {if(!start||!Number.isFinite(Date.parse(start)))return 'Not recorded';const last=end?Date.parse(end):now;if(!Number.isFinite(last)||last<Date.parse(start))return 'Not recorded';const seconds=Math.floor((last-Date.parse(start))/1000),hours=Math.floor(seconds/3600),minutes=Math.floor(seconds%3600/60);return hours?`${hours} h ${minutes} min`:minutes?`${minutes} min ${seconds%60} s`:`${seconds} s`;}

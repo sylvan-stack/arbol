@@ -1,4 +1,5 @@
 /** BKD-1: one connection, independent calls and replaceable subscriptions. No content logs. */
+import {parseWire,stringifyWire} from './wire-json';
 export type Fields = Record<string, unknown>;
 export interface RootInfo {root:string;name:string;status:'preparing'|'working'|'failed';current:boolean;failed?:{at:string;reason:string}}
 export interface BridgeError {code:string;message:string;source?:string;[key:string]:unknown}
@@ -37,7 +38,7 @@ export class Bridge {
   ws.onerror=()=>ws.close();
  }
  private send(message:Fields){
-  const text=JSON.stringify(message);if(new TextEncoder().encode(text+'\n').length>limit)throw error('invalid_input','The message is too large.');
+  const text=stringifyWire(message);if(new TextEncoder().encode(text+'\n').length>limit)throw error('invalid_input','The message is too large.');
   const native=window.webkit?.messageHandlers?.arbol;
   if(native)native.postMessage(text);else if(this.socket?.readyState===WebSocket.OPEN)this.socket.send(text);else throw error('disconnected','The backend is disconnected.');
  }
@@ -68,7 +69,7 @@ export class Bridge {
  }
  receive(text:string){
   if(this.stopped||typeof text!=='string'||new TextEncoder().encode(text+'\n').length>limit)return;
-  let m:Fields;try{const value:unknown=JSON.parse(text);if(!value||typeof value!=='object'||Array.isArray(value))return;m=value as Fields;}catch{return;}
+  let m:Fields;try{const value:unknown=parseWire(text);if(!value||typeof value!=='object'||Array.isArray(value))return;m=value as Fields;}catch{return;}
   if(m.type==='lost'){this.lost();return;}
   if(m.type==='hello'){
    this.lost(false);if(m.bridge!==1){this.versionOk=false;this.state('This window cannot work with this Bridge version.');return;}
