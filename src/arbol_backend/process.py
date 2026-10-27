@@ -9,6 +9,7 @@ import re
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, BinaryIO
@@ -146,7 +147,7 @@ class Programs:
                         raise Refused("no_answer", "The launcher returned no bounded successful reply.")
                     try:
                         value = json.loads(child.data)
-                        structured_refusal = (kind in ("migrate-check", "reimport") and status == 1
+                        structured_refusal = (kind in ("start", "migrate-check", "reimport") and status == 1
                                               and isinstance(value, dict) and isinstance(value.get("error"), dict))
                         if status != 0 and not structured_refusal:
                             raise Refused("no_answer", "The launcher returned no bounded successful reply.")
@@ -203,6 +204,8 @@ class Programs:
             if child.kill_on_timeout:
                 self.kill(child)
             child.close()
-            child.process.poll()
+            if child.process.poll() is None:
+                # Reap the detached manager eventually without holding shutdown or logging Popen warnings.
+                threading.Thread(target=child.process.wait, daemon=True).start()
         # Never signal an unresolved start/stop/settle, and never wait for it here.
         self.running.clear()

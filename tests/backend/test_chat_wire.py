@@ -31,7 +31,9 @@ def chat(n: int) -> str:
     return str(UUID(int=n))
 
 
-class Windows(unittest.IsolatedAsyncioTestCase):
+class WindowFixture(unittest.IsolatedAsyncioTestCase):
+    """Socket/PG fixture shared by the chat and Draft/dispatch suites."""
+
     async def asyncSetUp(self) -> None:
         self.frame = Frame()
         self.cluster = await asyncio.to_thread(Cluster)
@@ -123,6 +125,9 @@ class Windows(unittest.IsolatedAsyncioTestCase):
         assert isinstance(event, dict)
         return event
 
+
+
+class Windows(WindowFixture):
     async def test_default_and_explicit_pages_use_the_same_exact_millisecond_cursor(self) -> None:
         """chats.page-cursor"""
         reader, writer = await self.open()

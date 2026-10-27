@@ -20,8 +20,8 @@ class Forwarded(Error):
         self.args = (message,)
 
 
-def message(value: Any, *, secrets: tuple[str, ...] = ()) -> str:
-    fallback = "The Root migration command could not confirm the operation; refresh before trying it explicitly again."
+def message(value: Any, *, secrets: tuple[str, ...] = (),
+            fallback: str = "The Root migration command could not confirm the operation; refresh before trying it explicitly again.") -> str:
     if not isinstance(value, str) or not value.strip():
         return fallback
     if any(secret and secret in value for secret in secrets):
