@@ -26,6 +26,9 @@
     conflict,
     onKeepMine,
     onTakeTheirs,
+    recovery,
+    onRestore,
+    onDiscardRecovery,
     firstSapling = false,
     empty = false,
   }: {
@@ -48,6 +51,9 @@
     conflict?: {mine:string;theirs:string}|null;
     onKeepMine?:()=>void;
     onTakeTheirs?:()=>void;
+    recovery?:string|null;
+    onRestore?:()=>void;
+    onDiscardRecovery?:()=>void;
     firstSapling?: boolean;
     empty?: boolean;
   } = $props();
@@ -172,6 +178,7 @@
     {#if !empty && !expanded && status}<small class="muted" role="status">{status}</small>{/if}
     {#if problem}<p class="problem" role="alert">{problem}</p>{/if}
     {#if conflict}<section class="conflict" aria-label="Changed elsewhere"><strong>Changed elsewhere</strong><div class="versions"><div><b>Your text</b><pre>{conflict.mine||'(empty)'}</pre></div><div><b>Other text</b><pre>{conflict.theirs||'(removed)'}</pre></div></div><div class="choices"><button onclick={onKeepMine} disabled={!onKeepMine}>Keep mine</button><button onclick={onTakeTheirs} disabled={!onTakeTheirs}>Take theirs</button></div></section>{/if}
+    {#if recovery!==undefined&&recovery!==null}<section class="conflict" aria-label="Unsaved text from this window"><strong>Unsaved text from this window</strong><p>The Draft still has the revision this text was typed over.</p><pre>{recovery||'(empty)'}</pre><div class="choices"><button onclick={onRestore} disabled={!onRestore}>Restore text</button><button onclick={onDiscardRecovery} disabled={!onDiscardRecovery}>Discard</button></div></section>{/if}
   </section>
 {:else}
   <section class="panel stack" aria-label="Message composer">
@@ -225,7 +232,8 @@
   .first-composer.empty {
     flex: 1;
     min-height: 0;
-    justify-content: center;
+    justify-content: safe center;
+    overflow-y: auto;
   }
   .context-line {
     margin: 0 0 6px;
@@ -234,6 +242,7 @@
     overflow-wrap: anywhere;
   }
   .first-composer textarea {
+    flex-shrink: 0;
     width: 100%;
     min-width: 0;
     resize: vertical;
@@ -283,7 +292,7 @@
     font-size: 0.9em;
     overflow-wrap: anywhere;
   }
-  .conflict{border:1px solid var(--warning);padding:12px;border-radius:4px;max-height:40vh;overflow:auto}.versions{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:8px 0}.versions>div{min-width:0}.versions pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;margin:4px 0}.choices{display:flex;gap:8px}.choices button{font:inherit;color:var(--text);background:var(--panel);border:1px solid var(--border);border-radius:4px;padding:6px 10px}.choices button:focus-visible{outline:2px solid var(--focus)}
+  .conflict{border:1px solid var(--warning);padding:12px;border-radius:4px;max-height:40vh;overflow:auto}.versions{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:8px 0}.versions>div{min-width:0}.conflict pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;margin:4px 0}.choices{display:flex;gap:8px}.choices button{font:inherit;color:var(--text);background:var(--panel);border:1px solid var(--border);border-radius:4px;padding:6px 10px}.choices button:focus-visible{outline:2px solid var(--focus)}
   @media (max-width: 600px) {
     .versions{grid-template-columns:1fr}
     .first-composer {

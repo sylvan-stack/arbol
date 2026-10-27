@@ -18,7 +18,7 @@ export class ElmaWindow {
  accountProblems=$state<string[]>([]);
  preferences=$state<Preferences>(readPreferences(''));bridge:Bridge;app=new AppChannel();drafts:Drafts;
  private pageTicket=0;private generation=0;private chatSub?:{close:()=>void;retry:()=>void};private bootstrapGeneration=0;private closed=false;private cancelOpening?:()=>void;
- constructor(){this.bridge=new Bridge({build:__ARBOL_BUILD__,onstate:s=>this.connection=s,onhello:(root)=>{this.root=root;this.preferences=readPreferences(root.root);void this.bootstrap();void this.loadAccounts();}});
+ constructor(){this.bridge=new Bridge({build:__ARBOL_BUILD__,onstate:s=>this.connection=s,beforeReload:()=>this.drafts.beforeReload(),onhello:(root)=>{this.drafts?.rootChanged(root.root);this.root=root;this.preferences=readPreferences(root.root);void this.bootstrap();void this.loadAccounts();}});
   this.drafts=new Drafts(this.bridge);
   this.bridge.subscribe('root',{},event=>{if(event.root)this.root=event.root as unknown as RootInfo;},e=>this.failure(e));
  }
