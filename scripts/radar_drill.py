@@ -218,6 +218,29 @@ class Space:
         self.temp.cleanup()
 
 
+def installed_entry(launcher: Path, root: str) -> Path:
+    """The program a private Root space runs: the newest working Build's own entry for the installed launcher.
+
+    The launcher chooses the Build through the owner's home folder, which a private space replaces, so the space runs
+    the chosen Build's `bin/arbol` itself; a checkout's launcher is run as it is.
+    """
+    if launcher != HOME / ".local/bin/arbol":
+        return launcher
+    child = login_shell("arbol-builds list arbol")
+    out, _ = child.communicate(timeout=30)
+    records: object = json.loads(out)
+    assert isinstance(records, list)
+    working = [
+        record
+        for record in records
+        if isinstance(record, dict) and record.get("status") == "working" and record.get("root") == root
+    ]
+    if not working:
+        raise RuntimeError(f"No working arbol Build for the Root {root}.")
+    newest = max(working, key=lambda record: int(str(record["build"]), 16))
+    return HOME / "Library/Application Support/Arbol/builds/arbol" / str(newest["build"]) / "bin/arbol"
+
+
 def current_root() -> str:
     child = login_shell("arbol-roots list")
     out, _ = child.communicate(timeout=30)
@@ -254,16 +277,18 @@ def read(launcher: Path, seconds: float) -> dict[str, Any]:
 def refresh(launcher: Path) -> dict[str, Any]:
     """The refresh against the test Subscriptions in a private Root space, then a plain read of what it recorded."""
     root = current_root()
+    program = installed_entry(launcher, root)
     space = Space(root, launcher)
     try:
         env = space.env(login_path())
-        record: dict[str, Any] = {"drill": "refresh", "launcher": str(launcher), "root": root, "startedAt": now()}
-        record["refresh"] = run([str(launcher), "vigor", "--refresh", "--text", *space.options()], env=env, timeout=300)
+        record: dict[str, Any] = {"drill": "refresh", "launcher": str(launcher), "program": str(program), "root": root}
+        record["startedAt"] = now()
+        record["refresh"] = run([str(program), "vigor", "--refresh", "--text", *space.options()], env=env, timeout=300)
         record["counts"] = {table: space.count(table) for table in ("vigor_reports", "vigor_results")}
         record["reports"] = space.rows(
             "SELECT driver || '/' || subscription || ' ' || outcome || ' ' || fetched_at FROM vigor_reports ORDER BY 1"
         )
-        record["read"] = run([str(launcher), "vigor", *space.options()], env=env)
+        record["read"] = run([str(program), "vigor", *space.options()], env=env)
         record["countsAfterRead"] = {table: space.count(table) for table in ("vigor_reports", "vigor_results")}
         return record
     finally:
@@ -273,12 +298,14 @@ def refresh(launcher: Path) -> dict[str, Any]:
 def tick(launcher: Path, seconds: float) -> dict[str, Any]:
     """The backend in a private Root space for `seconds`: the results its ticks recorded, one per Subscription each."""
     root = current_root()
+    program = installed_entry(launcher, root)
     space = Space(root, launcher)
     try:
         env = space.env(login_path())
-        record: dict[str, Any] = {"drill": "tick", "launcher": str(launcher), "root": root, "startedAt": now()}
+        record: dict[str, Any] = {"drill": "tick", "launcher": str(launcher), "program": str(program), "root": root}
+        record["startedAt"] = now()
         backend = subprocess.Popen(
-            [str(launcher), "backend", *space.options()],
+            [str(program), "backend", *space.options()],
             env=env,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
