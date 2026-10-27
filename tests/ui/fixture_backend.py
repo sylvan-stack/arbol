@@ -192,7 +192,7 @@ class Fixture:
                                         "limit": message.get("params", {}).get("limit"),
                                         "exchange": message.get("params", {}).get("exchange"),
                                         "position": message.get("params", {}).get("position"),
-                                        **({"params": message.get("params", {})} if method.startswith(("draft.", "accounts.")) or method in ("chat.settings", "chat.send", "exchange.stop", "exchange.sendAgain", "exchange.answer") else {}),
+                                        **({"params": message.get("params", {})} if method.startswith(("draft.", "accounts.")) or method in ("chat.settings", "chat.send", "exchange.stop", "exchange.sendAgain", "exchange.answer", "chat.rename", "chat.mark") else {}),
                                         **({"characters": len(message["params"]["text"])} if method == "paste.save" else {}),
                                     }
                                 )
@@ -200,6 +200,8 @@ class Fixture:
                             )
                     failures = self.scenario.get("callErrors", {}).get(method, [])
                     failure = failures.pop(0) if failures else None
+                    reply_delays = self.scenario.get("replyDelays", {}).get(method, 0)
+                    reply_delay = reply_delays.pop(0) if isinstance(reply_delays, list) and reply_delays else reply_delays if not isinstance(reply_delays, list) else 0
                     delay = self.scenario.get("delays", {}).get(method, 0)
                     if delay:
                         await asyncio.sleep(delay)
@@ -238,6 +240,32 @@ class Fixture:
                         value = self.scenario["exchangePages"].get(
                             str(message.get("params", {}).get("beforeNumber")), {"exchanges": [], "more": False}
                         )
+                    elif method in ("chat.rename", "chat.mark"):
+                        params = message["params"]
+                        snapshot = self.scenario.get("chats", {}).get(params["chat"])
+                        if snapshot is None:
+                            await self.send(writer, {"type": "reply", "id": message["id"], "error": {"code": "not_found", "message": "No such chat"}})
+                            continue
+                        if method == "chat.rename":
+                            snapshot["chat"]["title"] = str(params["title"]).strip() or None if params["title"] is not None else None
+                            value = {"title": snapshot["chat"]["title"]}
+                            event = {"kind": "title", "title": value["title"]}
+                        else:
+                            marks = snapshot["marks"]
+                            if "ongoing" in params:
+                                marks["ongoing"] = params["ongoing"]
+                            if "archived" in params:
+                                if params["archived"]:
+                                    marks["archivedAt"] = datetime.now(UTC).isoformat()
+                                else:
+                                    marks.pop("archivedAt", None)
+                            value = dict(marks)
+                            event = {"kind": "marks", "marks": dict(marks)}
+                        for peer, subscriptions in tuple(self.windows.items()):
+                            for id, sub in tuple(subscriptions.items()):
+                                if sub["topic"] == "chat" and sub["params"].get("chat") == params["chat"]:
+                                    sub["seq"] += 1
+                                    await self.send(peer, {"type": "event", "id": id, "seq": sub["seq"], "event": event})
                     elif method == "root.get":
                         value = {"root": ROOT, "layoutComplete": True}
                     elif method == "chat.send":
@@ -286,6 +314,11 @@ class Fixture:
                         await self.draft_changed({k: params[k] for k in ("chat", "folder") if k in params})
                     else:
                         value = self.scenario.get("calls", {}).get(method, {})
+                    if method in ("chat.rename", "chat.mark") and self.scenario.get("dropMetadataReplies", 0):
+                        self.scenario["dropMetadataReplies"] -= 1
+                        return
+                    if reply_delay:
+                        await asyncio.sleep(reply_delay)
                     await self.send(writer, {"type": "reply", "id": message["id"], "result": value})
         except (OSError, asyncio.CancelledError):
             pass
