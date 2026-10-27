@@ -22,6 +22,7 @@ from arbol_radar.model import (  # noqa: E402
     Weight,
     Window,
 )
+from arbol_radar.vigor import compute  # noqa: E402
 
 MONDAY = datetime(2026, 10, 26, 10, 0, tzinfo=UTC)  # the worked examples' Monday 10:00
 CLAUDE = Subscription("claude", "anthropic", "anthropic")
@@ -278,6 +279,105 @@ class Records(unittest.TestCase):
             r.windows[0].used_percent = 1.0  # type: ignore[misc]
         with self.assertRaises(FrozenInstanceError):
             FIRST_PROFILE.placeholder = Weight(0.2)  # type: ignore[misc]
+
+
+class WindowsThatTakePart(unittest.TestCase):
+    """Which windows take part in the sum, the store and the gates (SGM-1.2, SGM-D24, SGM-D25)."""
+
+    def test_only_tokens_and_credits_are_summed_and_an_absent_resource_counts_as_tokens(self) -> None:
+        """radar.take-part-resource"""
+        windows = [
+            window("other", "Tokens", resource="tokens", used=20, resets=at(days=1), minutes=10080),
+            window("other", "Credits", resource="credits", used=20, resets=at(days=1), minutes=1440),
+            window("other", "Calls", resource="calls", used=20, resets=at(days=1), minutes=1440),
+            window("other", "Unnamed", resource=None, used=20, resets=at(days=1), minutes=1440),
+            window("other", "Something else", resource="requests", used=20, resets=at(days=1), minutes=1440),
+        ]
+        result = compute(report(CODEX, windows), FIRST_PROFILE, MONDAY)
+        entries = by_label(result)
+        self.assertEqual(entries["Tokens"].role, "store")
+        self.assertEqual((entries["Credits"].role, entries["Credits"].counted_as), ("gate", "credits"))
+        self.assertEqual((entries["Calls"].role, entries["Calls"].reason), ("shown", "counts calls; shown, not summed"))
+        self.assertEqual(
+            (entries["Unnamed"].role, entries["Unnamed"].counted_as, entries["Unnamed"].assumed),
+            ("gate", "tokens", True),
+        )
+        self.assertEqual(entries["Something else"].role, "shown")
+        self.assertEqual(entries["Something else"].reason, "counts requests; shown, not summed")
+        self.assertEqual(result.notes, ("Unnamed: the chatgpt report names no resource; counted as tokens",))
+        assert entries["Calls"].loss is not None
+        self.assertEqual(round(entries["Calls"].loss, 2), 0.0)  # its loss is still computed and shown
+
+    def test_a_window_lacking_a_field_is_shown_and_not_summed(self) -> None:
+        """radar.take-part-known"""
+        for name, w in (
+            ("usedPercent", window("weekly", "Seven days", used=None, resets=at(days=3), minutes=10080)),
+            ("usedPercent", window("weekly", "Seven days", used=-5, resets=at(days=3), minutes=10080)),
+            ("windowMinutes", window("weekly", "Seven days", used=20, resets=at(days=3), minutes=None)),
+            ("resetsAt", window("weekly", "Seven days", used=20, resets=None, minutes=10080)),
+        ):
+            with self.subTest(field=name, value=w):
+                windows = [window("session", "Five hours", used=35, resets=at(hours=3, minutes=20), minutes=300), w]
+                result = compute(report(CLAUDE, windows), FIRST_PROFILE, MONDAY)
+                week = by_label(result)["Seven days"]
+                self.assertEqual((week.role, week.loss, week.contribution), ("shown", None, None))
+                self.assertEqual(week.reason, f"{name} unknown; shown, not summed")
+                self.assertEqual(by_label(result)["Five hours"].role, "store")
+
+    def test_the_longest_window_is_the_store_and_shorter_ones_gates(self) -> None:
+        """radar.store-longest"""
+        windows = [
+            window("session", "Five hours", used=0, resets=at(minutes=1), minutes=300),
+            window("weekly", "Seven days", used=0, resets=at(minutes=1), minutes=10080),
+            window("other", "A day", used=0, resets=at(minutes=1), minutes=1440),
+        ]
+        result = compute(report(CLAUDE, windows), FIRST_PROFILE, MONDAY)
+        roles = {entry.label: (entry.role, entry.weight) for entry in result.windows}
+        self.assertEqual(roles, {"Five hours": ("gate", 0.1), "Seven days": ("store", 1.0), "A day": ("gate", 0.1)})
+
+    def test_among_equal_lengths_the_coding_product_window_is_the_store(self) -> None:
+        """radar.store-coding-product"""
+        windows = list(reversed(kimi()))  # the total delivered first: the order does not decide
+        result = compute(report(KIMI, windows), FIRST_PROFILE, MONDAY)
+        roles = {entry.label: entry.role for entry in result.windows}
+        self.assertEqual(
+            roles, {"Monthly, all Kimi products": "shown", "Monthly, Kimi Code": "store", "Five hours": "shown"}
+        )
+        self.assertEqual(result.windows[0].label, "Monthly, all Kimi products")
+        total = by_label(result)["Monthly, all Kimi products"]
+        self.assertEqual(total.reason, "as long as the store and not the coding product's window; shown, not summed")
+
+    def test_among_equal_lengths_without_a_coding_product_window_the_first_delivered_is_the_store(self) -> None:
+        """radar.store-equal-fallback"""
+        windows = [
+            window("other", "Month A", resource="credits", used=40, resets=at(days=4), minutes=43200),
+            window("other", "Month B", resource="credits", used=10, resets=at(days=4), minutes=43200),
+        ]
+        result = compute(report(CODEX, windows), FIRST_PROFILE, MONDAY)
+        self.assertEqual([entry.role for entry in result.windows], ["store", "shown"])
+        assert result.vigor is not None
+        self.assertEqual(round(result.vigor, 2), 0.47)
+
+    def test_a_report_without_numbers_gives_no_vigor(self) -> None:
+        """radar.outcome-not-ok"""
+        for outcome in ("needs_sign_in", "unavailable", "unsupported"):
+            with self.subTest(outcome=outcome):
+                result = compute(report(ZAI, [], outcome=outcome, message="why"), FIRST_PROFILE, MONDAY)
+                self.assertEqual((result.vigor, result.windows, result.exhausted), (None, (), False))
+                self.assertEqual(result.notes, (f"no Vigor: the zai report's outcome is {outcome}",))
+        only_calls = compute(report(KIMI, kimi()[:1]), FIRST_PROFILE, MONDAY)
+        self.assertEqual((only_calls.vigor, only_calls.notes), (None, ("no Vigor: no window takes part in the sum",)))
+
+    def test_the_clock_is_an_argument_that_names_its_time_zone(self) -> None:
+        """radar.clock-argument"""
+        r = report(CLAUDE, claude())
+        with self.assertRaises(Rejected) as caught:
+            compute(r, FIRST_PROFILE, MONDAY.replace(tzinfo=None))
+        self.assertEqual(caught.exception.field, "clock")
+        later = compute(r, FIRST_PROFILE, MONDAY + timedelta(hours=2))
+        self.assertEqual(later.moment, MONDAY + timedelta(hours=2))
+        assert later.vigor is not None
+        self.assertGreater(later.vigor, 0.37)  # the same report two hours later loses more of the week
 
 
 if __name__ == "__main__":
