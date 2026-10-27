@@ -2,7 +2,7 @@
 
 Arbol 2: the rewrite of Arbol, the local macOS application for working with several coding agents at once.
 
-The shared Driver conformance runner, all 38 scenarios of DRV-5, is in [`conformance/`](conformance/README.md). It is typed Python since SYL-166 and needs no Node.js. The application itself remains a scaffold.
+The shared Driver conformance runner, all 38 scenarios of DRV-5, is in [`conformance/`](conformance/README.md). It is typed Python since SYL-166 and needs no Node.js. The Root-scoped Backend process foundation is in `src/arbol_backend/`; its Bridge and Elma Chat remain later work.
 
 The [`arbol-builds` tool](builds/README.md) builds components into numbered folders, runs their checks, lists and withdraws Builds, prunes older files on command, and writes standalone component launchers (SYL-76). It is typed Python since SYL-165, with its own pinned Python. Install it with `uv sync --locked --group dev` and `uv run --no-sync python scripts/install_builds.py`. The Drivers' own build descriptions and first Builds are separate tasks.
 
@@ -17,6 +17,10 @@ The directly installed PostgreSQL server and its repeatable probe are documented
 | Predecessor | `sylvan-stack/arbol_deprecated_v1`, frozen. This repository starts at 2.0.0 because version 1 is that deprecated code base |
 
 ## What the rewrite is built from
+
+`arbol --root <root> backend` starts one Backend for that Root. A private lock/socket and one ready JSON line identify it; SIGTERM, SIGINT or pipe EOF close its clients and release the socket without stopping an Exchange or an unresolved Root command. Root commands use their launchers, independent process groups and bounded waits. Database calls use pinned psycopg binary 3.3.6, independent autocommit connections, five-second deadlines and explicit read-only repeatable snapshots. Optional defaults come from `~/.arbol/roots/<root>/arbol.json`. The process clears inherited PG* overrides and reads only its configured Root database/password; no schema is changed here. The wire protocol, chat operations, attention/recovery and renderer are subsequent Backend Beats.
+
+For development use `bin/arbol --root <root> backend`. Private checks supply all of `--root-dir`, `--bin-dir`, `--settings-dir` and `--database`; `--root-dir` requires the bin and database options. Run them with `uv run --no-sync python -B -m unittest discover -s tests -p test_backend.py`. They require PostgreSQL 17 tools and start a socket-only temporary cluster using the last merged Root Contract layout; no retained Root, owner Keychain or vendor is reached. `arbol-builds build arbol --root <root>` packages its own pinned Python and hash-locked binary dependencies and runs the private Backend checks. The package carries the exact contract test input and a payload hash manifest. Installed changes come only from merged sources.
 
 - The Product Specification, which states what Arbol does: `~/Artifacts/arbol_deprecated_v1/product-spec/` (start at `01-overview-and-scope.md`).
 - The Arbol Design System, which states how Arbol looks and is operated: `sylvan-stack/arbol-design-system`.
