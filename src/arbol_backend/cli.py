@@ -6,6 +6,8 @@ import os
 import sys
 from pathlib import Path
 
+from arbol_radar.cli import run as vigor
+
 from .model import Refused, identity, parse
 from .server import Backend
 
@@ -15,7 +17,10 @@ def main(args: list[str], package: Path) -> int:
         for key in list(os.environ):
             if key.startswith("PG"):
                 del os.environ[key]
-        selected = identity(package, parse(args))
+        parsed = parse(args)
+        selected = identity(package, parsed)
+        if parsed["verb"] == "vigor":  # the read of Subscriptions Vigor; the command line works while no backend runs
+            return asyncio.run(vigor(selected, parsed))
         return asyncio.run(Backend(selected).run())
     except Refused as error:
         print(json.dumps({"error": {"code": error.code, "message": str(error)}}, separators=(",", ":")), flush=True)

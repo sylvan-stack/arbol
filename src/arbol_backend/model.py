@@ -13,6 +13,10 @@ from typing import Any
 ROOT_ID = re.compile(r"[a-z0-9]+\Z", re.ASCII)
 BUILD_ID = re.compile(r"[1-9a-f][0-9a-f]*\Z", re.ASCII)
 OPTIONS = {"--root", "--root-dir", "--bin-dir", "--settings-dir", "--database"}
+FLAGS = {"--text"}  # the options of `arbol vigor` without a value (SGM-D28)
+OPTIONAL = {"--refresh"}  # the options of `arbol vigor` whose value may be absent
+VERBS = ("backend", "vigor")
+USAGE = "Usage: arbol [--root <root>] backend [isolation options] | vigor [--refresh [<driver>/<subscription>]] [--text]."
 
 
 class Refused(Exception):
@@ -41,15 +45,26 @@ def parse(args: list[str]) -> dict[str, str]:
                 raise Refused("invalid_input", "An option is repeated or lacks its value.")
             options[word] = args[i + 1]
             i += 2
+        elif word in FLAGS or word in OPTIONAL:
+            if word in options:
+                raise Refused("invalid_input", "An option is repeated or lacks its value.")
+            value = ""
+            if word in OPTIONAL and i + 1 < len(args) and args[i + 1] and not args[i + 1].startswith("-"):
+                value = args[i + 1]
+            options[word] = value
+            i += 2 if value else 1
         elif word.startswith("-"):
             raise Refused("invalid_input", "Unknown option.")
         else:
             words.append(word)
             i += 1
-    if words != ["backend"]:
-        raise Refused("invalid_input", "Usage: arbol [--root <root>] backend [isolation options].")
+    if len(words) != 1 or words[0] not in VERBS:
+        raise Refused("invalid_input", USAGE)
+    if words == ["backend"] and options.keys() & (FLAGS | OPTIONAL):
+        raise Refused("invalid_input", "--refresh and --text belong to arbol vigor.")
     if "--root-dir" in options and not {"--bin-dir", "--database"} <= options.keys():
         raise Refused("invalid_input", "--root-dir requires --bin-dir and --database.")
+    options["verb"] = words[0]
     return options
 
 

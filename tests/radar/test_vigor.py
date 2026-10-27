@@ -587,16 +587,27 @@ class Advisory(unittest.TestCase):
             "arbol_radar.vigor",
             "uuid",
         },
-        # The rollup (SYL-298) reaches the records only for the shape of a loss row in the JSON answer.
+        # The rollup (SYL-298) reaches the records only for the shape of a loss row in the JSON answer; the command
+        # line `arbol vigor` reaches the launchers, the database and standard output, and nothing else.
         "rollup.py": {"arbol_radar.records"},
+        "cli.py": {
+            "json",
+            "arbol_backend.database",
+            "arbol_backend.model",
+            "arbol_backend.process",
+            "arbol_radar.drivers",
+            "arbol_radar.records",
+            "arbol_radar.rollup",
+        },
     }
+    PRINTS = {"cli.py"}  # the one module that answers on standard output
 
     def test_the_package_imports_nothing_that_runs_a_program_or_writes_a_file(self) -> None:
         """radar.advisory-imports"""
         files = sorted((ROOT / "src/arbol_radar").glob("*.py"))
         self.assertEqual(
             [path.name for path in files],
-            ["__init__.py", "drivers.py", "model.py", "records.py", "rollup.py", "vigor.py"],
+            ["__init__.py", "cli.py", "drivers.py", "model.py", "records.py", "rollup.py", "vigor.py"],
         )
         for path in files:
             allowed = self.ALLOWED_IMPORTS | self.REACHES.get(path.name, set())
@@ -609,7 +620,8 @@ class Advisory(unittest.TestCase):
                     self.assertEqual(node.level, 0, f"{path.name} has a relative import")
                     self.assertIn(node.module, allowed, f"{path.name} imports from {node.module}")
                 elif isinstance(node, ast.Name):
-                    self.assertNotIn(node.id, self.FORBIDDEN_NAMES, f"{path.name} uses {node.id}")
+                    forbidden = self.FORBIDDEN_NAMES - ({"print"} if path.name in self.PRINTS else set())
+                    self.assertNotIn(node.id, forbidden, f"{path.name} uses {node.id}")
 
     def test_the_same_inputs_give_the_same_result_and_change_nothing(self) -> None:
         """radar.advisory-pure"""
