@@ -3,11 +3,16 @@
   "entry": "bin/arbol",
   "build": [
     "uv sync --locked --group dev",
-    "uv run --no-sync ruff check src tests scripts bin/builds_entry.py bin/roots_entry.py bin/arbol_entry.py database conformance",
+    "uv run --no-sync ruff check src tests scripts tools bin/builds_entry.py bin/roots_entry.py bin/arbol_entry.py database conformance",
     "uv run --no-sync mypy",
+    "uv run --no-sync mypy --strict tools/bridge_relay.py tools/sync_elma_design.py tools/elma_bundle.py tests/ui",
     "uv run --no-sync python -B scripts/package_backend.py"
   ],
   "checks": [
-    {"name": "unit", "kind": "unit", "command": "\"$ARBOL_BUILD_DIR/runtime/python/bin/python3.14\" -I -B \"$ARBOL_BUILD_DIR/scripts/check_backend.py\""}
+    {
+      "name": "unit",
+      "kind": "unit",
+      "command": "\"$ARBOL_BUILD_DIR/runtime/python/bin/python3.14\" -I -B \"$ARBOL_BUILD_DIR/scripts/check_backend.py\""
+    }
   ]
 }

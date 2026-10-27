@@ -13,6 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from backend_package import ROOT, destination, digest, metadata, source, verify, write_manifest  # noqa: E402
 from build_support import archive, pin, target  # noqa: E402
 
+sys.path.insert(0, str(ROOT))
+from tools.elma_bundle import package as package_elma  # noqa: E402
+
 
 def package(root: Path = ROOT) -> Path:
     folder = destination(root)
@@ -32,7 +35,13 @@ def package(root: Path = ROOT) -> Path:
         raise ValueError("The unpacked interpreter differs from its pin.")
     ignore = shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store")
     shutil.copytree(root / "src/arbol_backend", folder / "src/arbol_backend", ignore=ignore)
+    shutil.copytree(root / "src/arbol_radar", folder / "src/arbol_radar", ignore=ignore)
     shutil.copytree(root / "tests/backend", folder / "tests/backend", ignore=ignore)
+    shutil.copytree(root / "tests/radar", folder / "tests/radar", ignore=ignore)
+    shutil.copytree(root / "tests/ui", folder / "tests/ui", ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.mjs"))
+    (folder / "tools").mkdir()
+    for name in ("__init__.py", "bridge_relay.py", "elma_bundle.py"):
+        shutil.copy2(root / "tools" / name, folder / "tools" / name)
     shutil.copy2(root / "tests/test_backend.py", folder / "tests/test_backend.py")
     (folder / "scripts").mkdir()
     for name in ("backend_package.py", "check_backend.py", "python-distribution.json"):
@@ -85,6 +94,7 @@ def package(root: Path = ROOT) -> Path:
         timeout=120,
     )
     record = json.loads((folder / "build.json").read_text())
+    renderer = package_elma(root, folder / "ui/elma", record["build"])
     write_manifest(
         folder,
         {
@@ -104,6 +114,8 @@ def package(root: Path = ROOT) -> Path:
                 "sha256": digest(interpreter),
             },
             "contractLayoutSha256": digest(contract),
+            "renderer": {"path": "ui/elma", "build": record["build"], "bundleSha256": digest(folder / "ui/elma/bundle.json"),
+                         "designSystem": renderer["designSystem"]},
         },
     )
     verify(folder)
