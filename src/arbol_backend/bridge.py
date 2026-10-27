@@ -8,7 +8,7 @@ import json
 import math
 import re
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
@@ -238,10 +238,8 @@ class Connection:
         self.closed = False
         self.slow = False
 
-    def task(self, work: Awaitable[None]) -> asyncio.Task[None]:
-        async def run() -> None:
-            await work
-        task = asyncio.create_task(run())
+    def task(self, work: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
+        task = asyncio.create_task(work)
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
         return task
