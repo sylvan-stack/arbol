@@ -2,7 +2,7 @@
   import TextField from '../components/TextField.svelte';
   import KbdHint from '../components/KbdHint.svelte';
   export interface CommandRow {id:string;label:string;detail?:string;shortcut?:string;disabled?:boolean}
-  let {commands=['Seqoya · Dashboard','Seqoya · Organizations','Seqoya · Repos','Elma · New chat','Willo · Stations','Willo · Telegram','Oaken · Swimlanes','Oaken · Grafts'],rows,title='Go to page',searchable=true,numbered=true,onselect}: {commands?:string[];rows?:CommandRow[];title?:string;searchable?:boolean;numbered?:boolean;onselect?:(id:string)=>void}=$props();
+  let {commands=['Seqoya · Dashboard','Seqoya · Organizations','Seqoya · Repos','Elma · New chat','Willo · Stations','Willo · Telegram','Oaken · Swimlanes','Oaken · Grafts'],rows,title='Go to page',emptyLabel='No matching commands.',searchable=true,numbered=true,onselect}: {commands?:string[];rows?:CommandRow[];title?:string;emptyLabel?:string;searchable?:boolean;numbered?:boolean;onselect?:(id:string)=>void}=$props();
   let query=$state(''),selected=$state(''),index=$state(0),root:HTMLElement;
   const visible=$derived((rows??commands.map((label):CommandRow=>({id:label,label}))).filter(row=>(row.label+' '+(row.detail??'')).toLowerCase().includes(query.toLowerCase())));
   $effect(()=>{if(index>=visible.length)index=Math.max(0,visible.length-1);});
@@ -23,7 +23,7 @@
   {#if searchable}<TextField label="Search destinations" bind:value={query} type="search"/>{/if}
   {#if searchable}<p class="eyebrow">{query?'Results':'Recent & suggested'}</p>{/if}
   <div class="stack" style="gap:4px">
-    {#each visible as row,i(row.id)}<button data-command-row class:active={i===index} disabled={row.disabled} onfocus={()=>index=i} onclick={()=>choose(row)}><span class="entry"><span>{row.label}</span>{#if row.detail}<span class="detail">{row.detail}</span>{/if}</span>{#if row.shortcut||numbered&&i<10}<kbd>{row.shortcut??(i===9?'0':String(i+1))}</kbd>{/if}</button>{:else}<p class="muted">No matching commands.</p>{/each}
+    {#each visible as row,i(row.id)}<button data-command-row class:active={i===index} disabled={row.disabled} onfocus={()=>index=i} onclick={()=>choose(row)}><span class="entry"><span>{row.label}</span>{#if row.detail}<span class="detail">{row.detail}</span>{/if}</span>{#if row.shortcut||numbered&&i<10}<kbd>{row.shortcut??(i===9?'0':String(i+1))}</kbd>{/if}</button>{:else}<p class="muted">{emptyLabel}</p>{/each}
   </div>
   <KbdHint keys={['↑','↓','↵']} label="Choose"/>{#if selected}<p class="notice" role="status">Selected {selected}</p>{/if}
 </section>

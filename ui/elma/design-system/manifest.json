@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/sylvan-stack/arbol-design-system",
-  "commit": "f956a98ba91b36c27c13f7327c05c893ae6750b7",
+  "commit": "da3435da5e853d9d16f55a2bee606d9c47a2daa3",
   "files": {
     "docs/licenses/Hanken-Grotesk-OFL.txt": "f45f60ca871850c58d8dc9c973bd6fcad40c137e9d037172b961e8ca68c87ef7",
     "docs/licenses/Spline-Sans-Mono-OFL.txt": "3127290ccd196ec0c4ffa60296845224a034b92c81de8231b0916278ed7607e1",
@@ -16,7 +16,7 @@
     "src/entities.ts": "85a15407512163cfcaca957f947516bd6089473509ce629cff4285ce4f238f10",
     "src/json.ts": "9101532d0ae7e1c0ed89b6eaf3bbe00b7c1727b5946e7429fe5d24a34ad75396",
     "src/markdown.ts": "3879de5cdf3bb5c48a2f29639e3237a41d700d487f88571181a908b27c2d1e0e",
-    "src/patterns/CommandPalette.svelte": "9e84887adf56035d6173260498e8babaf9c07202223a47ab02b5a372926cb924",
+    "src/patterns/CommandPalette.svelte": "3fa5b088d36a64d26c1281169d5938f01559df1bc1a81a99b9b69049ac7633d2",
     "src/patterns/ConfirmAction.svelte": "105af94d18ae735133ce670385c390eb235f57c7822f1927b60823cb344f380b",
     "src/patterns/EntityPicker.svelte": "7a95b85208eba0ae70e531ac6091895c8e751654c35d943096541f4ef6023389",
     "src/patterns/EntityReference.svelte": "feb9f0593ba320b896311b48afcd6d0a7ab0a53241e503febcb42c58079b3737",

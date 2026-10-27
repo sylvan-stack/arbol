@@ -172,6 +172,8 @@ class Fixture:
                         )
                     elif message["topic"] == "draft":
                         event = {"kind": "snapshot", "draft": self.drafts.get(self.draft_key(sub["params"]))}
+                    elif message["topic"] == "chats" and "chats" not in self.scenario.get("topics", {}):
+                        event = {"kind": "snapshot", "chats": []}
                     await self.send(writer, {"type": "event", "id": message["id"], "seq": 1, "event": event})
                     if message["topic"] == "chat":
                         for replay in self.scenario.get("replay", {}).get(sub["params"].get("chat"), []):
