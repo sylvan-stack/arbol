@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import unittest
@@ -10,6 +11,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tests"))
+from backend.recovery_support import offline, online  # noqa: E402
 from backend.support import Cluster, cluster_environment  # noqa: E402
 
 
@@ -55,6 +57,19 @@ class Locale(unittest.TestCase):
             self.assertNotIn(b"multithreaded", cluster.log.read_bytes())
         finally:
             cluster.close()
+
+
+class Restart(unittest.IsolatedAsyncioTestCase):
+    async def test_restart_after_an_outage_drill_starts_without_a_locale(self) -> None:
+        """backend.cluster-restart-without-locale"""
+        with mock.patch.dict(os.environ, without_locale(), clear=True):
+            cluster = await asyncio.to_thread(Cluster)
+            try:
+                await offline(cluster)
+                await online(cluster)
+                self.assertNotIn(b"multithreaded", cluster.log.read_bytes())
+            finally:
+                cluster.close()
 
 
 if __name__ == "__main__":
