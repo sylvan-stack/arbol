@@ -15,6 +15,7 @@ from pathlib import Path
 launcher=Path(sys.argv.pop(1));base=launcher.parent;args=sys.argv[1:]
 root,kind=args[1],args[2]
 all=json.loads((base/'manager-behavior.json').read_text());option=all.get(root,{}).get(kind,{})
+if kind=='stop' and '--force' in args:option=all.get(root,{}).get('force',option)
 record={'root':root,'kind':kind,'args':args,'pid':os.getpid(),'pgid':os.getpgrp(),'phase':'start','at':time.monotonic()}
 def log(value):
  fd=os.open(base/'manager-calls.jsonl',os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600)

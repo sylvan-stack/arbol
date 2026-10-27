@@ -27,6 +27,7 @@ from .notes import Notes
 from .process import Programs
 from .roots import Roots
 from .settling import Settling
+from .stuck import Stuck
 
 
 class Backend:
@@ -49,13 +50,19 @@ class Backend:
         self.controls = Controls(self.programs, self.dispatch, self.live, self.registry)
         self.settling = Settling(self.programs, self.database, self.live)
         self.listings = Listings(self.programs, self.database)
-        self.listings.on_rows = self.settling.listed
+        self.stuck = Stuck(identity, self.listings, self.controls, self.notes, self.chats.attention)
+        self.listings.on_rows = self.listed
+        self.listings.on_failed = self.stuck.failed
         self.settling.read_listing = self.listings.get
         self.discovery = Discovery(self.roots, self.listings, self.registry)
         self.migration = Migration(identity, self.programs, self.chats, self.registry, self.record)
         self.windows: set[asyncio.StreamWriter] = set()
         self.tasks: set[asyncio.Task[None]] = set()
         self.stopped = asyncio.Event()
+
+    def listed(self, root: str, value: dict[str, Any]) -> None:
+        self.settling.listed(root, value)
+        self.stuck.observe(root, value)
 
     def task(self, work: Coroutine[Any, Any, None]) -> None:
         task = asyncio.create_task(work)
@@ -147,6 +154,7 @@ class Backend:
             self.notes.start()
             self.task(self.initial_work())
             self.task(self.initial_catalogue())
+            self.stuck.start()
             self.task(self.monitor())
             await self.stopped.wait()
             return 0
@@ -166,12 +174,13 @@ class Backend:
                 await asyncio.gather(*self.tasks, return_exceptions=True)
             if server is not None:
                 await server.wait_closed()
+            await self.stuck.close()
+            await self.health.close()
+            await self.controls.close()
             await self.discovery.close()
+            await self.settling.close()
             await self.listings.close()
             await self.notes.close()
-            await self.health.close()
-            await self.settling.close()
-            await self.controls.close()
             await self.live.close()
             await self.dispatch.close()
             await self.migration.close()

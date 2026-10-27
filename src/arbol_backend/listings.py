@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -26,6 +27,7 @@ class Listings:
         self.capacity = asyncio.Semaphore(capacity)
         self.closed = False
         self.tasks: dict[str, asyncio.Task[Params | Error]] = {}
+        self.started: dict[str, float] = {}
         self.on_rows: Callable[[str, Params], None] | None = None
         self.on_failed: Callable[[str], None] | None = None
 
@@ -97,10 +99,13 @@ class Listings:
                 pass
         return result
 
-    async def get(self, root: str) -> Params:
+    async def get(self, root: str, *, after: float | None = None) -> Params:
         if self.closed:
             raise Error("ended", source="root-manager")
         task = self.tasks.get(root)
+        if task is not None and not task.done() and after is not None and self.started.get(root, 0) < after:
+            await asyncio.shield(task)
+            return await self.get(root, after=after)
         if task is None or task.done():
             await self.capacity.acquire()
             if self.closed:
@@ -110,6 +115,7 @@ class Listings:
             if task is not None and not task.done():
                 self.capacity.release()
             else:
+                self.started[root] = time.monotonic()
                 task = asyncio.create_task(self.run(root))
                 self.tasks[root] = task
                 task.add_done_callback(lambda _: self.capacity.release())
@@ -122,6 +128,7 @@ class Listings:
         for root, task in list(self.tasks.items()):
             if root not in roots and task.done():
                 self.tasks.pop(root, None)
+                self.started.pop(root, None)
 
     async def close(self) -> None:
         self.closed = True
@@ -130,3 +137,4 @@ class Listings:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         self.tasks.clear()
+        self.started.clear()

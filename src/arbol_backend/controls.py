@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from .answers import Answers, answer_params
@@ -17,6 +18,14 @@ from .process import Programs
 
 START_WAIT = 120.0
 STOP_WAIT = 90.0
+class ForceCancelled(Error):
+    """Internal proof cancellation, distinct from a manager's future refusal code."""
+
+    def __init__(self) -> None:
+        super().__init__("not_stuck")
+
+
+Guard = Callable[[], Awaitable[bool]]
 ENDED = {"completed", "failed", "cancelled", "interrupted", "saved", "none"}
 
 
@@ -37,6 +46,7 @@ class Controls:
         self.start_wait, self.stop_wait = start_wait, stop_wait
         self.answers = Answers(live.folders)
         self.tasks: dict[tuple[str, str], asyncio.Task[Params | Error]] = {}
+        self.force_tasks: dict[tuple[str, str], asyncio.Task[Params | Error]] = {}
         registry.method("exchange.stop", self.stop, stop_params)
         registry.method("exchange.answer", self.answers.write, answer_params)
 
@@ -93,13 +103,15 @@ class Controls:
                 raise Error("no_answer")
             await asyncio.sleep(min(0.01, max(0, deadline-time.monotonic())))
 
-    async def run(self, exchange: str, root: str) -> Params | Error:
+    async def run(self, exchange: str, root: str, *, force: bool = False, before: Guard | None = None, chat: str = "") -> Params | Error:
         try:
             own = root == self.live.identity.root
             if own:
-                await self.notice(exchange)
+                if not force:
+                    await self.notice(exchange)
                 await self.start_done(exchange)
-                await self.notice(exchange)  # A pending start may just have published its row/folder.
+                if not force:
+                    await self.notice(exchange)  # A pending start may just have published its row/folder.
             deadline = time.monotonic() + self.stop_wait
             while True:
                 self.programs.reap()
@@ -110,7 +122,12 @@ class Controls:
                     return Error("no_answer")
                 await asyncio.sleep(min(0.01, max(0, deadline-time.monotonic())))
             async with asyncio.timeout(max(0, deadline-time.monotonic())):
-                value = await self.programs.call("arbol-root", ["stop", exchange], kind="stop", key=exchange, root=root)
+                if before is not None and not await before():
+                    return ForceCancelled()  # Internal cancellation, never an invented Root ended reply.
+                if force and own and chat:
+                    self.live.mark_stopping(exchange, chat)
+                args = ["stop", *(["--force"] if force else []), exchange]
+                value = await self.programs.call("arbol-root", args, kind="stop", key=exchange, root=root)
             result = self.result(value, exchange, root=root)
             if own and result["ended"] == "none":
                 # none confirms no current folder; no inferred completed/cancelled state is emitted.
@@ -133,6 +150,13 @@ class Controls:
             if not any(row["root"] == root for row in catalogue):
                 raise Forwarded("unknown_root", "root-manager", "The requested Root is not in the catalogue.")
         key = (root, exchange)
+        forced = self.force_tasks.get(key)
+        if forced is not None and not forced.done():
+            result = await asyncio.shield(forced)
+            if not isinstance(result, ForceCancelled):
+                if isinstance(result, Error):
+                    raise result
+                return result
         task = self.tasks.get(key)
         if task is None or task.done():
             task = asyncio.create_task(self.run(exchange, root))
@@ -146,9 +170,34 @@ class Controls:
             raise result
         return result
 
+    async def run_force(self, exchange: str, chat: str, before: Guard) -> Params | Error:
+        key = (self.live.identity.root, exchange)
+        previous = self.tasks.get(key)
+        if previous is not None and not previous.done():
+            result = await asyncio.shield(previous)
+            if not isinstance(result, Error):
+                return ForceCancelled()  # The pending manual stop confirmed an end; it was not our force.
+        return await self.run(exchange, self.live.identity.root, force=True, before=before, chat=chat)
+
+    async def force(self, exchange: str, chat: str, before: Guard) -> Params:
+        key = (self.live.identity.root, exchange)
+        task = self.force_tasks.get(key)
+        if task is None or task.done():
+            task = asyncio.create_task(self.run_force(exchange, chat, before))
+            self.force_tasks[key] = task
+            if len(self.force_tasks) > 1024:
+                for id, previous in list(self.force_tasks.items()):
+                    if id != key and previous.done():
+                        self.force_tasks.pop(id)
+        result = await asyncio.shield(task)
+        if isinstance(result, Error):
+            raise result
+        return result
+
     async def close(self) -> None:
-        tasks = list(self.tasks.values())
+        tasks = [*self.tasks.values(), *self.force_tasks.values()]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         self.tasks.clear()
+        self.force_tasks.clear()
