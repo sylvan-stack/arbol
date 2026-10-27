@@ -1,6 +1,7 @@
 /** One revision-fenced editor per Root/chat or Root/folder; backend Drafts are canonical. */
 import { Refusal, type Bridge, type Fields } from './bridge';
 import { parseWire, stringifyWire, sameRevision, validRevision, type Revision } from './wire-json';
+import { Pastes } from './pastes.svelte';
 
 export type DraftScope = {chat:string;folder?:never}|{folder:string;chat?:never};
 export interface Draft {text:string;revision:Revision;updatedAt?:string;sentAs?:string;sentRequest?:Fields}
@@ -12,6 +13,7 @@ function decode(value:unknown):Draft|null {
 }
 const body=(draft:Draft|null)=>draft?.text??'';
 export class DraftEditor {
+ readonly pastes:Pastes;
  text=$state('');ready=$state(false);dirty=$state(false);saving=$state(false);problem=$state('');
  canonical=$state<Draft|null>(null);conflict=$state<{mine:string;theirs:string}|null>(null);recovery=$state<string|null>(null);storageProblem=$state('');
  private editBase:Revision|null=null;private recovered?:{text:string;baseRevision:Revision|null};
@@ -19,6 +21,7 @@ export class DraftEditor {
  private pending?:Promise<void>;private captured?:Saving;private observation=0;private version=0;private closed=false;
  private subscription:{close:()=>void;retry:()=>void};
  constructor(private bridge:Bridge,readonly scope:DraftScope,private storageKey:string){
+  this.pastes=new Pastes(bridge,this);
   try{const raw=sessionStorage.getItem(storageKey);if(raw){const value=parseWire(raw) as {text?:unknown;baseRevision?:unknown};if(typeof value?.text==='string'&&(value.baseRevision===null||validRevision(value.baseRevision)))this.recovered={text:value.text,baseRevision:value.baseRevision};else sessionStorage.removeItem(storageKey);}}
   catch{this.storageProblem='Unsaved-text recovery is unavailable in this window.';}
   this.subscription=bridge.subscribe('draft',scope,event=>{
@@ -48,9 +51,10 @@ export class DraftEditor {
   }else{this.conflict={mine:this.text,theirs:body(next)};this.problem='';this.cancel();}
   this.persist();
  }
- input(text:string){
+ input(text:string,edit?:{start:number;end:number}){
   if(!this.ready||this.closed||this.recovery!==null)return;
   if(!this.dirty)this.editBase=this.revision;
+  this.pastes.change(this.text,text,edit);
   this.version++;this.text=text;this.dirty=text!==body(this.canonical)||!!this.captured&&text!==this.captured.text;
   if(this.conflict)this.conflict={mine:text,theirs:body(this.canonical)};
   clearTimeout(this.timer);
@@ -60,6 +64,7 @@ export class DraftEditor {
  }
  async flush():Promise<void>{
   clearTimeout(this.timer);
+  if(this.pastes.pending)await this.pastes.wait();
   if(this.closed||!this.ready||!this.dirty||this.conflict)return;
   if(this.pending){await this.pending;if(this.dirty&&!this.problem&&!this.conflict)await this.flush();return;}
   clearTimeout(this.retry);
@@ -92,14 +97,14 @@ export class DraftEditor {
   if(this.dirty)this.retry=setTimeout(()=>void this.flush(),5000);
  }
  keepMine(){if(!this.conflict)return;this.conflict=null;this.problem='';this.editBase=this.revision;this.dirty=this.text!==body(this.canonical);this.persist();void this.flush();}
- takeTheirs(){this.cancel();this.text=body(this.canonical);this.editBase=this.revision;this.dirty=false;this.conflict=null;this.problem='';this.persist();}
+ takeTheirs(){this.cancel();this.pastes.cancel();this.text=body(this.canonical);this.editBase=this.revision;this.dirty=false;this.conflict=null;this.problem='';this.persist();}
  restore(){if(this.recovery===null)return;const text=this.recovery;this.recovery=null;this.recovered=undefined;this.input(text);}
  discardRecovery(){this.recovery=null;this.recovered=undefined;this.persist();}
  private persist(){
   try{if(this.recovered&&(!this.ready||this.recovery!==null))sessionStorage.setItem(this.storageKey,stringifyWire(this.recovered));else if(this.dirty)sessionStorage.setItem(this.storageKey,stringifyWire({text:this.text,baseRevision:this.editBase}));else sessionStorage.removeItem(this.storageKey);this.storageProblem='';}
   catch{this.storageProblem='Unsaved text is held in this page, but could not be kept for a reload.';}
  }
- close(){this.persist();this.closed=true;this.cancel();this.subscription.close();}
+ close(){this.persist();this.closed=true;this.cancel();this.pastes.close();this.subscription.close();}
 }
 
 export class Drafts {

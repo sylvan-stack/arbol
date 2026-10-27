@@ -33,7 +33,7 @@
     empty = false,
   }: {
     onsend?: (text: string) => void;
-    oninput?: (text: string) => void;
+    oninput?: (text: string,edit?:{start:number;end:number}) => void;
     onblur?: () => void;
     onpaste?: (event: ClipboardEvent, selection: { start: number; end: number }) => void;
     onTop?: () => void;
@@ -63,6 +63,18 @@
     firstInput = $state<HTMLTextAreaElement>();
   let priorContext: string | undefined,
     priorText = false;
+  let beforeEdit:{start:number;end:number;length:number}|undefined;
+  $effect.pre(()=>{
+    const next=value,input=firstInput;
+    if(!firstSapling||!input||input.value===next||document.activeElement!==input)return;
+    const previous=input.value;let start=0,tail=0;
+    while(start<previous.length&&start<next.length&&previous[start]===next[start])start++;
+    while(tail<previous.length-start&&tail<next.length-start&&previous[previous.length-1-tail]===next[next.length-1-tail])tail++;
+    const oldEnd=previous.length-tail,newEnd=next.length-tail;
+    const move=(position:number)=>position<start?position:position>=oldEnd?position+next.length-previous.length:newEnd;
+    const a=move(input.selectionStart),b=move(input.selectionEnd);
+    void tick().then(()=>{if(input===firstInput&&input.value===next&&document.activeElement===input)input.setSelectionRange(a,b);});
+  });
   $effect(() => {
     if (!firstSapling) return;
     const hasText = value.length > 0;
@@ -102,7 +114,6 @@
     if (firstSapling) {
       if (onsend) {
         onsend(value);
-        expanded = false;
       }
       return;
     }
@@ -143,9 +154,12 @@
         bind:value
         {disabled}
         readonly={readOnly || busy}
+        onbeforeinput={event=>beforeEdit={start:event.currentTarget.selectionStart,end:event.currentTarget.selectionEnd,length:event.currentTarget.value.length}}
         oninput={(event) => {
           value = event.currentTarget.value;
-          oninput?.(value);
+          const edit=beforeEdit;beforeEdit=undefined;
+          if(edit&&edit.start===edit.end&&value.length<edit.length){if(event instanceof InputEvent&&event.inputType.includes('Backward'))edit.start+=value.length-edit.length;else edit.end+=edit.length-value.length;}
+          oninput?.(value,edit);
         }}
         onblur={() => onblur?.()}
         onpaste={(event) =>

@@ -13,6 +13,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 TOOL = Path(__file__).resolve().parents[2] / "tools/bridge_relay.py"
 spec = importlib.util.spec_from_file_location("browser_test_relay", TOOL)
@@ -30,6 +31,7 @@ class Fixture:
         self.tasks: set[asyncio.Task[None]] = set()
         self.drafts: dict[str, dict[str, Any]] = dict(scenario.get("drafts", {}))
         self.draft_revision = int(scenario.get("draftRevision", 9007199254740993))
+        self.paste_dir: Path | None = None
 
     @staticmethod
     def draft_key(params: dict[str, Any]) -> str:
@@ -111,6 +113,7 @@ class Fixture:
                                         "exchange": message.get("params", {}).get("exchange"),
                                         "position": message.get("params", {}).get("position"),
                                         **({"params": message.get("params", {})} if method.startswith("draft.") else {}),
+                                        **({"characters": len(message["params"]["text"])} if method == "paste.save" else {}),
                                     }
                                 )
                                 + "\n"
@@ -141,6 +144,12 @@ class Fixture:
                         value = {"root": ROOT, "layoutComplete": True}
                     elif method == "draft.get":
                         value = self.drafts.get(self.draft_key(message["params"]))
+                    elif method == "paste.save":
+                        assert self.paste_dir is not None
+                        path = self.paste_dir / (str(uuid4()) + ".txt")
+                        with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as out:
+                            out.write(message["params"]["text"])
+                        value = {"path": str(path)}
                     elif method == "draft.save":
                         params = message["params"]
                         key = self.draft_key(params)
@@ -205,6 +214,8 @@ async def main() -> None:
         scenario["build"] = args.build
     fixture = Fixture(scenario, args.record)
     with tempfile.TemporaryDirectory(prefix="eb-", dir="/tmp") as folder:
+        fixture.paste_dir = Path(folder) / "Private Root" / "pastes"
+        fixture.paste_dir.mkdir(parents=True, mode=0o700)
         socket = Path(folder) / "b.sock"
         backend = await asyncio.start_unix_server(fixture.client, path=socket, limit=relay.LIMIT)
         host = relay.Relay(Path(args.bundle), socket)
