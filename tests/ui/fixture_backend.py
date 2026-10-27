@@ -74,6 +74,10 @@ class Fixture:
                             },
                         )
                     await self.send(writer, {"type": "event", "id": message["id"], "seq": 1, "event": event})
+                    if message["topic"] == "chat":
+                        for replay in self.scenario.get("replay", {}).get(sub["params"].get("chat"), []):
+                            sub["seq"] += 1
+                            await self.send(writer, {"type": "event", "id": message["id"], "seq": sub["seq"], "event": replay})
                 elif message["type"] == "unsubscribe":
                     self.windows[writer].pop(message["id"], None)
                 elif message["type"] == "call":
@@ -133,6 +137,8 @@ class Fixture:
         if value["kind"] == "disconnect":
             for writer in tuple(self.windows):
                 writer.close()
+        elif value["kind"] == "scenario":
+            self.scenario.update(value["value"])
         elif value["kind"] == "publish":
             for writer, subs in tuple(self.windows.items()):
                 for id, s in tuple(subs.items()):
