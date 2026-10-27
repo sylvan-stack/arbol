@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import signal
 import socket
+import subprocess
 import sys
 import time
 import unittest
@@ -561,14 +562,18 @@ class Diagnostics(unittest.TestCase):
         """backend.child-cancel-race"""
         from arbol_backend.process import Child, Programs
         process = mock.Mock()
-        process.poll.side_effect = [None, 0]
+        process.poll.return_value = None
+        process.wait.return_value = 0
         child = Child(process, True, mock.Mock())
         with mock.patch("os.killpg", side_effect=PermissionError("private-secret")):
             Programs.kill(child)
-        process.poll.side_effect = [None, None]
+        process.wait.assert_called_once_with(timeout=0.01)
+        process.wait.reset_mock()
+        process.wait.side_effect = subprocess.TimeoutExpired("private-child", 0.01)
         with mock.patch("os.killpg", side_effect=PermissionError("private-secret")):
             with self.assertRaises(Refused) as caught:
                 Programs.kill(child)
+        self.assertEqual(process.wait.call_count, 3)
         self.assertNotIn("private-secret", str(caught.exception))
         self.assertEqual(caught.exception.code, "no_answer")
 

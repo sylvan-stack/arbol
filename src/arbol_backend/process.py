@@ -171,16 +171,23 @@ class Programs:
 
     @staticmethod
     def kill(child: Child) -> None:
-        if child.process.poll() is not None:
-            return
-        try:
-            os.killpg(child.process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        except PermissionError as error:
-            # macOS can report EPERM for a group whose final child just exited.
-            if child.process.poll() is None:
-                raise Refused("no_answer", "The listing process group could not be stopped.") from error
+        # macOS may refuse a group signal before waitpid can report its final exit.
+        # Reap that bounded transition instead of turning clean shutdown into another stdout reply.
+        for grace in (0.01, 0.04, 0.15):
+            if child.process.poll() is not None:
+                return
+            try:
+                os.killpg(child.process.pid, signal.SIGKILL)
+                return
+            except ProcessLookupError:
+                return
+            except PermissionError:
+                try:
+                    child.process.wait(timeout=grace)
+                    return
+                except subprocess.TimeoutExpired:
+                    continue
+        raise Refused("no_answer", "The listing process group could not be stopped.")
 
     async def current_root(self) -> dict[str, Any] | None:
         value = await self.call("arbol-roots", ["list"], kind="list", key="catalogue")
