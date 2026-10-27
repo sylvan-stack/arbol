@@ -15,6 +15,9 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
+BUILD = json.loads((ROOT / "build.json").read_text()) if (ROOT / "build.json").exists() else {}
+TEST_ROOT = BUILD.get("root", "t1")
+TEST_BUILD = BUILD.get("build", "0")
 PG = Path("/opt/homebrew/opt/postgresql@17/bin")
 if not PG.is_dir():
     PG = Path("/usr/local/opt/postgresql@17/bin")
@@ -26,7 +29,7 @@ base=launcher.parent
 name=launcher.name
 config=json.loads((base/'behavior.json').read_text()).get(name,{})
 record={'program':name,'args':sys.argv[1:],'pid':os.getpid(),'pgid':os.getpgrp(),
-        'path':os.environ['PATH'],'cwd':os.getcwd()}
+        'path':os.environ['PATH'],'cwd':os.getcwd(),'pgOverrides':[k for k in os.environ if k.startswith('PG')]}
 fd=os.open(base/'calls.jsonl',os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600)
 os.write(fd,(json.dumps(record)+'\\n').encode());os.close(fd)
 if config.get('fork'):
@@ -53,7 +56,7 @@ class Frame:
         for folder in (self.home, self.root, self.bin, self.settings):
             folder.mkdir(mode=0o700)
         self.record = {
-            "root": "t1",
+            "root": TEST_ROOT,
             "name": "Test Root",
             "status": "preparing",
             "database": "arbol_test",
@@ -85,7 +88,7 @@ class Frame:
     def options(self, database: str | None = None) -> list[str]:
         return [
             "--root",
-            "t1",
+            TEST_ROOT,
             "backend",
             "--root-dir",
             str(self.root),

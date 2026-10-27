@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "runtime/site-packages"))
 sys.path.insert(0, str(ROOT / "tests"))
-from backend.support import Cluster, Frame  # noqa: E402
+from backend.support import TEST_BUILD, TEST_ROOT, Cluster, Frame  # noqa: E402
 
 from arbol_backend import database  # noqa: E402
 from arbol_backend.lifetime import Lifetime  # noqa: E402
@@ -49,7 +49,7 @@ class Process(unittest.TestCase):
         ready = f.line(first)
         self.assertEqual(
             {k: ready[k] for k in ("ready", "root", "build", "pid")},
-            {"ready": True, "root": "t1", "build": "0", "pid": first.pid},
+            {"ready": True, "root": TEST_ROOT, "build": TEST_BUILD, "pid": first.pid},
         )
         self.assertEqual(stat.S_IMODE((f.root / "backend.sock").stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE((f.root / "backend.lock").stat().st_mode), 0o600)
@@ -99,9 +99,8 @@ class Process(unittest.TestCase):
         for state in ("preparing", "working", "failed"):
             f.record["status"] = state
             f.save_root()
-            self.assertEqual(self.selected().root, "t1")
+            self.assertEqual(self.selected().root, TEST_ROOT)
         for args in (
-            ["backend"],
             ["--root", "T1", "backend"],
             ["--root", "t1", "backend", "--root-dir", str(f.root)],
             ["--root", "t1", "backend", "--root", "t1"],
@@ -111,6 +110,12 @@ class Process(unittest.TestCase):
             result = f.line(child)
             self.assertEqual(result["error"]["code"], "invalid_input")
             self.assertEqual(child.wait(timeout=2), 1)
+        development = f.base / "development"
+        development.mkdir()
+        options = parse(f.options())
+        options.pop("--root")
+        with self.assertRaises(Refused):
+            identity(development, options, home=f.home)
         (f.root / "root.json").write_text("{}")
         child = f.start()
         self.assertEqual(f.line(child)["error"]["code"], "unknown_root")
@@ -142,7 +147,13 @@ class Process(unittest.TestCase):
         package = f.base / "package"
         package.mkdir()
         (package / "package.json").write_text('{"version":"2.0.0"}')
-        record = {"component": "arbol", "entry": "bin/arbol", "root": "t1", "build": "a", "packageVersion": "2.0.0"}
+        record = {
+            "component": "arbol",
+            "entry": "bin/arbol",
+            "root": TEST_ROOT,
+            "build": "a",
+            "packageVersion": "2.0.0",
+        }
         (package / "build.json").write_text(json.dumps(record))
         options = parse(f.options())
         options.pop("--root")
@@ -208,13 +219,15 @@ class AsyncFoundation(unittest.IsolatedAsyncioTestCase):
             ("arbol-roots", ["list"], "list"),
             ("arbol-pi-driver", ["subscriptions", "list"], "account"),
         ]:
-            await p.call(program, args, kind=kind)
+            with mock.patch.dict(os.environ, {"PGPASSWORD": "fictional", "PGSERVICE": "fictional"}):
+                await p.call(program, args, kind=kind)
         for row in self.frame.calls():
             self.assertEqual(row["pid"], row["pgid"])
             self.assertNotEqual(row["pgid"], os.getpgrp())
             self.assertEqual(row["path"].split(os.pathsep)[0], str(self.frame.bin))
+            self.assertEqual(row["pgOverrides"], [])
             if row["program"] == "arbol-root":
-                self.assertEqual(row["args"], ["--root", "t1", "list"])
+                self.assertEqual(row["args"], ["--root", TEST_ROOT, "list"])
         with self.assertRaises(Refused):
             await p.call("arbol-pi-driver", ["run"], kind="account")
         with self.assertRaises(Refused):
