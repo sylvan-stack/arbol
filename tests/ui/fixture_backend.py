@@ -7,6 +7,7 @@ import asyncio
 import contextlib
 import importlib.util
 import json
+import os
 import signal
 import sys
 import tempfile
@@ -22,8 +23,9 @@ ROOT = {"root": "t1", "name": "Fixture Root", "status": "working", "current": Tr
 
 
 class Fixture:
-    def __init__(self, scenario: dict[str, Any]):
+    def __init__(self, scenario: dict[str, Any], record: Path | None = None):
         self.scenario = scenario
+        self.record = record
         self.windows: dict[asyncio.StreamWriter, dict[str, dict[str, Any]]] = {}
         self.tasks: set[asyncio.Task[None]] = set()
 
@@ -77,6 +79,25 @@ class Fixture:
                 elif message["type"] == "call":
                     method = message["method"]
                     value: dict[str, Any]
+                    if self.record:
+                        with os.fdopen(os.open(self.record, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "w") as out:
+                            out.write(
+                                json.dumps(
+                                    {
+                                        "method": method,
+                                        "beforeNumber": message.get("params", {}).get("beforeNumber"),
+                                        "limit": message.get("params", {}).get("limit"),
+                                    }
+                                )
+                                + "\n"
+                            )
+                    delay = self.scenario.get("delays", {}).get(method, 0)
+                    if delay:
+                        await asyncio.sleep(delay)
+                    failures = self.scenario.get("callErrors", {}).get(method, [])
+                    if failures:
+                        await self.send(writer, {"type": "reply", "id": message["id"], "error": failures.pop(0)})
+                        continue
                     if method == "subscriptions.check":
                         value = {
                             "subscriptions": [{"id": id, "seq": s["seq"]} for id, s in self.windows[writer].items()]
@@ -88,6 +109,10 @@ class Fixture:
                         }
                     elif method == "accounts.list" and method not in self.scenario.get("calls", {}):
                         value = {"drivers": []}
+                    elif method == "chat.exchanges" and "exchangePages" in self.scenario:
+                        value = self.scenario["exchangePages"].get(
+                            str(message.get("params", {}).get("beforeNumber")), {"exchanges": [], "more": False}
+                        )
                     elif method == "root.get":
                         value = {"root": ROOT, "layoutComplete": True}
                     else:
@@ -118,9 +143,10 @@ async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bundle", required=True)
     parser.add_argument("--scenario")
+    parser.add_argument("--record", type=Path)
     args = parser.parse_args()
     scenario = json.loads(Path(args.scenario).read_text()) if args.scenario else {}
-    fixture = Fixture(scenario)
+    fixture = Fixture(scenario, args.record)
     with tempfile.TemporaryDirectory(prefix="eb-", dir="/tmp") as folder:
         socket = Path(folder) / "b.sock"
         backend = await asyncio.start_unix_server(fixture.client, path=socket, limit=relay.LIMIT)

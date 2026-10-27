@@ -8,11 +8,11 @@ interface ChatSnapshot {kind:string;chat:ChatInfo;exchanges:ElmaExchange[];more:
 export class ElmaWindow {
  root=$state<RootInfo>({root:'',name:'…',status:'working',current:false});
  connection=$state('Connecting…');problem=$state('');info=$state<ChatInfo|null>(null);exchanges=$state<ElmaExchange[]>([]);
- selected=$state<string|null>(null);more=$state(false);settings=$state<ChatSnapshot['settings']>({});ongoing=$state(false);
+ selected=$state<string|null>(null);more=$state(false);pageBusy=$state(false);pageProblem=$state('');historyOpen=$state(false);settings=$state<ChatSnapshot['settings']>({});ongoing=$state(false);
  repositories=$state<Repository[]>([]);folder=$state('');defaultRoute=$state<ElmaRoute>({});routes=$state<{driver:string;subscription:string;unavailable?:string}[]>([]);
  accountProblems=$state<string[]>([]);
  preferences=$state<Preferences>(readPreferences(''));bridge:Bridge;app=new AppChannel();
- private generation=0;private chatSub?:{close:()=>void;retry:()=>void};private bootstrapGeneration=0;private closed=false;private cancelOpening?:()=>void;
+ private pageTicket=0;private generation=0;private chatSub?:{close:()=>void;retry:()=>void};private bootstrapGeneration=0;private closed=false;private cancelOpening?:()=>void;
  constructor(){this.bridge=new Bridge({build:__ARBOL_BUILD__,onstate:s=>this.connection=s,onhello:(root)=>{this.root=root;this.preferences=readPreferences(root.root);void this.bootstrap();void this.loadAccounts();}});
   this.bridge.subscribe('root',{},event=>{if(event.root)this.root=event.root as unknown as RootInfo;},e=>this.failure(e));
  }
@@ -55,7 +55,7 @@ export class ElmaWindow {
    this.chatSub=this.bridge.subscribe('chat',{chat},event=>{
     if(this.closed||generation!==this.generation)return;
     if(event.kind==='snapshot'){
-     const snapshot=event as unknown as ChatSnapshot;
+     const snapshot=event as unknown as ChatSnapshot;this.pageTicket++;this.pageBusy=false;this.pageProblem='';
      if(!snapshot.chat||!snapshot.chat.createdAt&&snapshot.chat.exchangeCount===0){if(!settled){settled=true;resolve(false);}return;}
      this.info=snapshot.chat;this.exchanges=snapshot.exchanges;this.more=snapshot.more;this.settings=snapshot.settings;this.ongoing=snapshot.marks.ongoing;this.selected=this.exchanges.some(e=>e.exchange===this.selected)?this.selected:this.exchanges.at(-1)?.exchange??null;
      this.folder=this.settings.workingFolder??this.exchange?.workingFolder??this.folder;
@@ -67,6 +67,20 @@ export class ElmaWindow {
    },error=>{this.failure(error);if(!settled){settled=true;reject(new Refusal(error??{code:'ended',message:'The chat subscription ended.'}));}});
   });
  }
- private clear(){this.cancelOpening?.();this.chatSub?.close();this.chatSub=undefined;this.generation++;this.info=null;this.exchanges=[];this.selected=null;this.settings={};this.ongoing=false;}
+ get prompt(){const item=this.exchange?.items.find(item=>item.kind==='message'&&item.role==='user');return item?.kind==='message'?item.text:'';}
+ get history(){return this.exchanges.map((exchange,i)=>{const item=exchange.items.find(item=>item.kind==='message'&&item.role==='user');return{id:exchange.exchange,number:(this.info?.exchangeCount??0)-(this.exchanges.length-1-i),message:item?.kind==='message'?item.text:''};});}
+ selectExchange(id:string){if(this.exchanges.some(e=>e.exchange===id)){this.selected=id;this.historyOpen=false;}}
+ async older(){if(this.pageBusy)return;const chosen=this.exchange?.exchange;if(!chosen)return;let index=this.exchanges.findIndex(e=>e.exchange===chosen);if(index===0&&this.more){await this.page();if(this.selected!==chosen)return;index=this.exchanges.findIndex(e=>e.exchange===chosen);}if(index>0)this.selected=this.exchanges[index-1].exchange;}
+ newer(){if(this.pageBusy)return;const index=this.exchanges.findIndex(e=>e.exchange===this.exchange?.exchange);if(index>=0&&index<this.exchanges.length-1)this.selected=this.exchanges[index+1].exchange;}
+ async page(){
+  if(this.pageBusy||!this.more||!this.info||!this.exchanges.length)return;
+  const ticket=++this.pageTicket,generation=this.generation,chat=this.info.chat,beforeNumber=Math.min(...this.exchanges.map(e=>e.number));this.pageBusy=true;this.pageProblem='';
+  try{const result=await this.bridge.call<{exchanges:ElmaExchange[];more:boolean}>('chat.exchanges',{chat,beforeNumber,limit:12});
+   if(this.closed||generation!==this.generation||ticket!==this.pageTicket)return;
+   const rows=new Map(this.exchanges.map(e=>[e.exchange,e]));for(const exchange of result.exchanges)rows.set(exchange.exchange,exchange);this.exchanges=[...rows.values()].sort((a,b)=>a.number-b.number);this.more=result.more;
+  }catch(e){if(ticket===this.pageTicket&&e instanceof Refusal)this.pageProblem=e.detail.code+': '+e.message;}
+  finally{if(ticket===this.pageTicket)this.pageBusy=false;}
+ }
+ private clear(){this.pageTicket++;this.pageBusy=false;this.pageProblem='';this.historyOpen=false;this.cancelOpening?.();this.chatSub?.close();this.chatSub=undefined;this.generation++;this.info=null;this.exchanges=[];this.selected=null;this.settings={};this.ongoing=false;}
  close(){this.cancelOpening?.();this.closed=true;this.bootstrapGeneration++;this.chatSub?.close();this.bridge.close();this.app.close();}
 }
