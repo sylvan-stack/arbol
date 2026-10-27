@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/sylvan-stack/arbol-design-system",
-  "commit": "778a5c3d24cbc55e8f0f0921f8be645d4ffae3c0",
+  "commit": "317b869a81861d3407926bc7ad5a18217514f871",
   "files": {
     "docs/licenses/Hanken-Grotesk-OFL.txt": "f45f60ca871850c58d8dc9c973bd6fcad40c137e9d037172b961e8ca68c87ef7",
     "docs/licenses/Spline-Sans-Mono-OFL.txt": "3127290ccd196ec0c4ffa60296845224a034b92c81de8231b0916278ed7607e1",
@@ -21,7 +21,7 @@
     "src/patterns/EntitySummary.svelte": "ca45e2cede2b2bc5a17a1bb569276d6dfc77bebe2a7e08852039888fba4ad8aa",
     "src/patterns/Modal.svelte": "6732a9949f94eec50530cc7e92893b69570bedfcf291816356bf53731f74aa6c",
     "src/patterns/WorkspaceShell.svelte": "2260cffb92134f07e2065e9b56dcc13a8450c3fbd233a4a7cb179d2d05ed600c",
-    "src/sections/AskUserQuestion.svelte": "c12f71431c86d3e028ef92c4e9059aa34fbb553480d7c418a7f5f627d5504a9a",
+    "src/sections/AskUserQuestion.svelte": "40aac40331bb5d7087dc7c0a263564a2bf859669b0ea62335dbae710a96c2d78",
     "src/sections/Composer.svelte": "d9ae9912d8a371093de9e3908b76e87bff2dbb58c84c467a7c9b61a1e37d8d06",
     "src/sections/ElmaFrame.svelte": "cdbdfc79ed2636246f1c681899661d31edb95fa589773841722d361dd49f5e34",
     "src/sections/HistoryTree.svelte": "87c65f8dae23f3d41c100aa283b64bdb98b7f463a8f169f17897291f88eabd67",

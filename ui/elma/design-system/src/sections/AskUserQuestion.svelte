@@ -7,17 +7,18 @@
  const items=$derived(interactiveQuestions(question?.ask));
  const retry=$derived(!!question?.problem);
  const editable=$derived(!!onanswer&&!!question?.open&&(!question.answer||retry)&&!question.pending);
- const complete=$derived(!!items&&items.every(item=>!item.options.length||(choices[item.id]??[]).some(label=>item.options.some(option=>option.label===label))));
+ function selected(id:string){return Object.hasOwn(choices,id)?choices[id]:[];}
+ const complete=$derived(!!items&&items.every(item=>!item.options.length||selected(item.id).some(label=>item.options.some(option=>option.label===label))));
  const hasOptions=$derived(!!items?.some(item=>item.options.length));
- function choose(id:string,label:string,multiple:boolean,checked:boolean){const current=choices[id]??[];choices={...choices,[id]:multiple?checked?[...current.filter(value=>value!==label),label]:current.filter(value=>value!==label):[label]};}
- function submit(){if(!items||!editable||!complete)return;onanswer?.({type:'answers',answers:Object.fromEntries(items.map(item=>[item.id,(choices[item.id]??[]).filter(label=>item.options.some(option=>option.label===label))]))});}
+ function choose(id:string,label:string,multiple:boolean,checked:boolean){const current=selected(id);choices={...choices,[id]:multiple?checked?[...current.filter(value=>value!==label),label]:current.filter(value=>value!==label):[label]};}
+ function submit(){if(!items||!editable||!complete)return;onanswer?.({type:'answers',answers:Object.fromEntries(items.map(item=>[item.id,selected(item.id).filter(label=>item.options.some(option=>option.label===label))]))});}
  let answer=$state('Comfortable'),other=$state(''),submitted=$state(false);
 </script>
 {#if firstSapling&&question}
 <section class="agent-question" aria-label="Agent question">
  <h3>{question.open?'Question from the agent':'Question closed'}</h3>
  {#if items}{#each items as item (item.id)}
-  {#if editable||question.pending}<fieldset disabled={!editable}><legend>{item.header||item.question}</legend>{#if item.header}<p>{item.question}</p>{/if}{#if item.multiple&&item.options.length}<small>You can pick more than one</small>{/if}{#each item.options as option}<label class="option"><input type={item.multiple?'checkbox':'radio'} name={question.id+':'+item.id} checked={(choices[item.id]??[]).includes(option.label)} onchange={event=>choose(item.id,option.label,item.multiple,event.currentTarget.checked)}/><span>{option.label}{option.description?' · '+option.description:''}</span></label>{/each}</fieldset>
+  {#if editable||question.pending}<fieldset disabled={!editable}><legend>{item.header||item.question}</legend>{#if item.header}<p>{item.question}</p>{/if}{#if item.multiple&&item.options.length}<small>You can pick more than one</small>{/if}{#each item.options as option}<label class="option"><input type={item.multiple?'checkbox':'radio'} name={question.id+':'+item.id} checked={selected(item.id).includes(option.label)} onchange={event=>choose(item.id,option.label,item.multiple,event.currentTarget.checked)}/><span>{option.label}{option.description?' · '+option.description:''}</span></label>{/each}</fieldset>
   {:else}<p>{item.header?item.header+': ':''}{item.question}</p><ul>{#each item.options as option}<li>{option.label}{option.description?' · '+option.description:''}</li>{/each}</ul>{/if}
  {/each}{:else}<p>This Build does not recognize this question format. Its data is kept below.</p><pre>{pretty(question.ask)}</pre>{/if}
  {#if question.answer!==undefined}<h4>Your answer</h4><p>{answerLabels(question.answer)}</p>{/if}
