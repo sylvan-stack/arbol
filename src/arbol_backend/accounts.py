@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable
+from functools import partial
 from typing import Any
 
 from .account_data import CODE, Public
-from .bridge import MAX_LINE, Error, Params, Registry, encode
+from .bridge import MAX_LINE, Error, Params, Registry, driver_id, encode
 from .dispatch import Forwarded
 from .migration import message
 from .process import Programs
@@ -23,9 +25,12 @@ class Accounts:
         self.programs, self.catalogues, self.secrets = programs, catalogues, secrets
         self.total, self.capacity = total, asyncio.Semaphore(capacity)
         self.raws: dict[str, asyncio.Task[list[Any] | Error]] = {}
+        self.actions: dict[tuple[str, str, str], asyncio.Task[Params | Error]] = {}
         self.closed = False
         catalogues.fetch = self.raw
         registry.method("accounts.list", self.list)
+        for operation in ("check", "usage", "models"):
+            registry.method("accounts."+operation, partial(self.action, operation), self.target)
 
     def scan(self) -> list[str]:
         drivers = self.programs.find_drivers()
@@ -119,11 +124,66 @@ class Accounts:
             await asyncio.gather(*workers, return_exceptions=True)
         return {"drivers": rows}
 
+    async def target(self, params: Params) -> Params:
+        driver = driver_id(params.get("driver"), set(self.scan()))
+        try:
+            subscription = Public(self.secrets()).id(params.get("subscription"))
+        except Error as error:
+            raise Error("invalid_input") from error
+        return {"driver": driver, "subscription": subscription}
+
+    async def action_outcome(self, key: tuple[str, str, str]) -> Params | Error:
+        operation, driver, subscription = key
+        try:
+            async with asyncio.timeout(self.total), self.capacity:
+                value = await self.programs.call("arbol-"+driver+"-driver", ["subscriptions", operation, subscription],
+                    kind="account", key="accounts-action-"+json.dumps(key, separators=(",", ":")))
+            self.refused(value)
+            public = Public(self.secrets())
+            if operation == "check":
+                result = public.subscription(value)
+                if result["id"] != subscription:
+                    raise Error("no_answer", source="driver")
+                return result
+            return public.usage(value) if operation == "usage" else public.models(value)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            return error if isinstance(error, Error) else Error("no_answer", source="driver")
+
+    def forget_action(self, key: tuple[str, str, str], task: asyncio.Task[Params | Error]) -> None:
+        if self.actions.get(key) is task:
+            self.actions.pop(key, None)
+
+    async def action(self, operation: str, params: Params) -> Params:
+        if operation not in ("check", "usage", "models"):
+            raise Error("invalid_input")
+        try:
+            async with asyncio.timeout(self.total):
+                raw = await self.raw(params["driver"])
+                public = Public(self.secrets())
+                rows = [public.subscription(row) for row in raw]
+                if not any(row["id"] == params["subscription"] for row in rows):
+                    raise Error("invalid_input")
+                key = (operation, params["driver"], params["subscription"])
+                task = self.actions.get(key)
+                if task is None or task.done():
+                    task = asyncio.create_task(self.action_outcome(key))
+                    self.actions[key] = task
+                    task.add_done_callback(lambda done: self.forget_action(key, done))
+                result = await asyncio.shield(task)
+                if isinstance(result, Error):
+                    raise result
+                return result
+        except TimeoutError as error:
+            raise Error("no_answer", source="driver") from error
+
     async def close(self) -> None:
         self.closed = True
         self.catalogues.fetch = None
-        tasks = list(self.raws.values())
+        tasks = [*self.raws.values(), *self.actions.values()]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         self.raws.clear()
+        self.actions.clear()

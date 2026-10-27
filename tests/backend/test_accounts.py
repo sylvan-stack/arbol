@@ -18,7 +18,7 @@ from backend.account_support import install, subscription, usage  # noqa: E402
 from backend.test_chat_wire import WindowFixture  # noqa: E402
 
 
-class Listing(WindowFixture):
+class AccountFixture(WindowFixture):
     async def asyncSetUp(self) -> None:
         await super().asyncSetUp()
         for driver in ("claude", "codex", "pi"):
@@ -27,6 +27,8 @@ class Listing(WindowFixture):
     def driver_calls(self, *, after: int = 0) -> list[dict[str, Any]]:
         return [row for row in self.frame.calls()[after:] if row["program"].endswith("-driver")]
 
+
+class Listing(AccountFixture):
     async def test_listing_finds_new_launchers_and_only_runs_subscription_list(self) -> None:
         """accounts.launcher-inventory; accounts.list-only; accounts.driver-records"""
         install(self.frame, "future", {"list": {"output": [subscription("future-one", state="signed_out")]}})
