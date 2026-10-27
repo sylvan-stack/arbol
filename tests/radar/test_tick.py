@@ -250,6 +250,9 @@ class Advisory(unittest.TestCase):
                 if isinstance(node, ast.ImportFrom):
                     self.assertNotIn(node.module, self.BACKEND_WRITERS, f"{path.name} imports {node.module}")
             for statement in re.findall(r'"(INSERT INTO|UPDATE|DELETE FROM|CREATE|ALTER|DROP)\s+(\w+)', text):
+                if statement[0] == "UPDATE":  # the owner's approval of a profile, in its row (SGM-1.11), alone
+                    self.assertEqual((path.name, statement[1]), ("records.py", "vigor_profiles"))
+                    continue
                 self.assertEqual(statement[0], "INSERT INTO", f"{path.name}: {statement}")
                 self.assertIn(statement[1], ("vigor_profiles", "vigor_reports", "vigor_results"))
         self.assertEqual((LIST, USAGE), (["subscriptions", "list"], ["subscriptions", "usage"]))

@@ -95,7 +95,7 @@ def profile_row(profile: Profile) -> list[dict[str, Any]]:
     """The learned gate weights of a profile as the `gates` column holds them, with their marking (SGM-1.11).
 
     A learned weight carries the trusted pairs it rests on and their spread, and the profile's learning values it was
-    learned with: the estimator, the store's threshold and the pairs needed (SGM-D35).
+    learned with: the estimator, the store's threshold and the pairs needed (SGM-D36).
     """
     rows: list[dict[str, Any]] = []
     for (family, label), weight in profile.gates.items():
@@ -193,7 +193,7 @@ class Records:
         return [(self._profile(int(row[6]), row), row[5]) for row in rows]
 
     async def in_use(self, first: Profile = FIRST_PROFILE) -> Profile:
-        """The profile the calculation uses: the highest approved version, else the first profile (SGM-D36).
+        """The profile the calculation uses: the highest approved version, else the first profile (SGM-D37).
 
         A proposed profile is never in use, the first excepted, which stands for the chapter's placeholder until the
         owner approves a profile; the learner proposes and only the owner's `arbol vigor approve` approves (SGM-D17).
@@ -389,7 +389,7 @@ class Records:
     async def calculate(self, subscription: Subscription, profile: Profile, now: datetime) -> Result:
         """Compute the Subscription's Vigor at `now` over its last recorded report by `profile`, and record it.
 
-        A proposed profile is refused, the first excepted while no profile is approved (SGM-D36): the calculation never
+        A proposed profile is refused, the first excepted while no profile is approved (SGM-D37): the calculation never
         uses a learned profile the owner has not approved. The tick and `--refresh` pass the profile in use.
         """
         if profile.approval == "proposed" and profile.version != FIRST_PROFILE.version:

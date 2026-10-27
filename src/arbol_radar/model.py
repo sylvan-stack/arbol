@@ -242,7 +242,7 @@ class Weight:
 
 @dataclass(frozen=True)
 class Learning:
-    """How gate weights are learned from report pairs (SGM-1.11): profile values with proposed defaults (SGM-D35).
+    """How gate weights are learned from report pairs (SGM-1.11): profile values with proposed defaults (SGM-D36).
 
     A pair is trusted only when the store moved by at least `threshold` percentage points; a gate's weight is
     calibrated once `pairs` trusted pairs exist, as the `estimator` of their ratios. Reports give whole percentages,
@@ -267,10 +267,10 @@ class Profile:
     stale_rule: str = "shortest-window"  # stale after the shortest window that is summed or can exhaust (SGM-1.8, D31)
     store_weight: float = 1.0  # the store's weight is 1 (SGM-1.4)
     tick_minutes: float = 3.0  # the backend recomputes every three minutes and no faster (SGM-1.14, SGM-D30)
-    learning: Learning = field(default_factory=Learning)  # how its gate weights are learned (SGM-1.11, SGM-D35)
+    learning: Learning = field(default_factory=Learning)  # how its gate weights are learned (SGM-1.11, SGM-D36)
 
     def __post_init__(self) -> None:
-        # The calculation knows the first profile and the versions the Root's own table records (SGM-D36); a version
+        # The calculation knows the first profile and the versions the Root's own table records (SGM-D37); a version
         # the table does not hold is refused where it is asked for, `Records.profile`.
         if isinstance(self.version, bool) or not isinstance(self.version, int) or self.version < 1:
             raise Rejected("version", f"A profile version is a whole number from 1, not {self.version!r}.")
@@ -310,7 +310,7 @@ class Profile:
 
 # The first profile: proposed, the even pace, the placeholder 0.1 for every gate, stale after the shortest window that
 # is summed or can exhaust the Subscription, recomputed every three minutes, gate weights learned by the proposed
-# defaults. The profile in use until the owner approves one (SGM-D36).
+# defaults. The profile in use until the owner approves one (SGM-D37).
 FIRST_PROFILE = Profile(version=1, approval="proposed", pace="even", placeholder=Weight(0.1, "placeholder"))
 
 

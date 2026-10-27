@@ -156,7 +156,7 @@ class Records(unittest.TestCase):
     def test_a_profile_version_the_calculation_does_not_know_is_rejected(self) -> None:
         """radar.reject-profile-version"""
         # A version is a whole number from 1; one the Root's table does not record is refused where it is asked for
-        # (`radar.learn-approve-refusals`), since a learned profile is recorded there (SGM-D36).
+        # (`radar.learn-approve-refusals`), since a learned profile is recorded there (SGM-D37).
         for version in (0, -1, True):
             with self.subTest(version=version):
                 self.rejected("version", Profile, version, "proposed", "even", Weight(0.1))

@@ -17,9 +17,21 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "runtime/site-packages"))
 sys.path.insert(0, str(ROOT / "tests"))
-from arbol_radar.learning import Observation, estimate, observations, observe, pairs, runs_between  # noqa: E402
-from arbol_radar.model import Learning, Report, Subscription  # noqa: E402
-from radar.fixture import RecordFixture, usage  # noqa: E402
+from arbol_backend.model import Refused  # noqa: E402
+from arbol_radar.drivers import Listed, Listing  # noqa: E402
+from arbol_radar.learning import (  # noqa: E402
+    Observation,
+    Series,
+    estimate,
+    learn,
+    observations,
+    observe,
+    pairs,
+    runs_between,
+)
+from arbol_radar.model import FIRST_PROFILE, Learning, Report, Subscription, Weight  # noqa: E402
+from arbol_radar.tick import recompute  # noqa: E402
+from radar.fixture import RecordFixture, record, usage  # noqa: E402
 from radar.support import CLAUDE, CODEX, KIMI, MONDAY, at, codex, kimi, report, window  # noqa: E402
 
 LEARNING = Learning()  # the proposed defaults: a store change of 2 points, 10 pairs, the median
@@ -201,8 +213,8 @@ class TheEstimate(unittest.TestCase):
         )
 
 
-class TheRuns(RecordFixture):
-    """The runs of this Mac between two fetch times, from the Root's chat tables, and the observations over the records."""
+class ChatRecords(RecordFixture):
+    """The check's database with the chat tables emptied, one chat, and its Exchanges added by the check."""
 
     async def asyncSetUp(self) -> None:
         await super().asyncSetUp()
@@ -229,6 +241,10 @@ class TheRuns(RecordFixture):
                 ended,
             ],
         )
+
+
+class TheRuns(ChatRecords):
+    """The runs of this Mac between two fetch times, from the Root's chat tables, and the observations over the records."""
 
     async def test_the_runs_between_two_fetch_times_are_the_routed_exchanges_that_ended_between(self) -> None:
         """radar.learn-runs-between"""
@@ -266,3 +282,153 @@ class TheRuns(RecordFixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+RATIOS = TheEstimate.RATIOS
+
+
+class TheProfiles(ChatRecords):
+    """A learned profile written as proposed, the profile in use, approval, and a calculation that never uses a proposal."""
+
+    async def history(self, ratios: tuple[float, ...]) -> None:
+        """One trusted pair a day around one run: 10 % of five hours at 10:00, 2 points more of the week at 11:00.
+
+        The pair from one day's 11:00 to the next day's 10:00 spans a reset of the five hours and no run, so it is
+        observed and not trusted.
+        """
+        for day, ratio in enumerate(ratios):
+            five_resets = at(days=day, hours=4)
+            for hours, five, week in ((0, 10, 20 + 2 * day), (1, 10 + 2 / ratio, 22 + 2 * day)):
+                windows = [
+                    window("session", "Five hours", used=five, resets=five_resets, minutes=300),
+                    window("weekly", "Seven days", used=week, resets=at(days=20), minutes=10080),
+                ]
+                moment = MONDAY + timedelta(days=day, hours=hours)
+                await self.records.record_report(CLAUDE, usage(windows, fetched=at(days=day, hours=hours)), now=moment)
+            await self.exchange(MONDAY + timedelta(days=day, minutes=30))
+
+    def listing(self) -> Listing:
+        latest = usage(claude_windows(40, 50, five_resets=at(days=12)), fetched=at(days=11))
+        return Listing(("claude",), (Listed(CLAUDE, record(CLAUDE, latest)),))
+
+    async def test_enough_trusted_pairs_write_a_proposed_profile_one_version_above_the_highest(self) -> None:
+        """radar.learn-propose"""
+        await self.history(RATIOS)
+        now = MONDAY + timedelta(days=11)
+        learned = await learn(self.records, now)
+        self.assertEqual(learned.profile, FIRST_PROFILE)  # learned by the values of the profile in use
+        self.assertEqual(learned.series, (Series(CLAUDE, 20, 19),))
+        (gate,) = learned.estimates
+        self.assertEqual((gate.trusted, gate.untrusted, gate.missing), (10, 9, 0))
+        proposed = learned.proposed
+        assert proposed is not None
+        self.assertEqual((proposed.version, proposed.approval), (2, "proposed"))
+        weight = proposed.gates[("anthropic", "Five hours")]
+        self.assertEqual((weight.source, weight.pairs), ("learned", 10))
+        self.assertAlmostEqual(weight.value, 0.1)
+        self.assertAlmostEqual(weight.low or 0, 0.08)
+        self.assertAlmostEqual(weight.high or 0, 0.13)
+        carried = (FIRST_PROFILE.pace, FIRST_PROFILE.placeholder, FIRST_PROFILE.stale_rule, FIRST_PROFILE.learning)
+        self.assertEqual((proposed.pace, proposed.placeholder, proposed.stale_rule, proposed.learning), carried)
+        self.assertEqual(await self.records.profile(2), proposed)
+        rows = {row[0]: row for row in await self.db.execute("SELECT version, approval, gates FROM vigor_profiles", [])}
+        self.assertEqual(sorted(rows), [1, 2])
+        self.assertEqual(rows[2][1], "proposed")
+        (entry,) = rows[2][2]
+        self.assertEqual(
+            {key: entry[key] for key in ("family", "label", "source", "pairs", "estimator", "threshold", "needed")},
+            {
+                "family": "anthropic",
+                "label": "Five hours",
+                "source": "learned",
+                "pairs": 10,
+                "estimator": "median",
+                "threshold": 2.0,
+                "needed": 10,
+            },
+        )
+        again = await learn(self.records, now)
+        assert again.proposed is not None
+        self.assertEqual(again.proposed.version, 3)  # one above the highest, approved or not
+
+    async def test_too_few_trusted_pairs_write_nothing_and_say_how_many_are_missing(self) -> None:
+        """radar.learn-nothing-proposed"""
+        await self.history(RATIOS[:3])
+        learned = await learn(self.records, MONDAY + timedelta(days=3))
+        self.assertIsNone(learned.proposed)
+        (gate,) = learned.estimates
+        self.assertEqual((gate.trusted, gate.missing, gate.value), (3, 7, None))
+        self.assertEqual(await self.count("vigor_profiles"), 1)  # the first profile alone
+        self.assertEqual(await self.records.in_use(), FIRST_PROFILE)
+
+    async def test_a_calculation_uses_the_profile_in_use_and_never_a_proposed_one(self) -> None:
+        """radar.learn-never-proposed"""
+        await self.history(RATIOS)
+        now = MONDAY + timedelta(days=11)
+        proposed = (await learn(self.records, now)).proposed
+        assert proposed is not None
+        self.assertEqual(await self.records.in_use(), FIRST_PROFILE)
+        tick = await recompute(self.records, self.listing(), FIRST_PROFILE, now)
+        self.assertEqual([result.profile for result in tick.results], [1])
+        with self.assertRaises(Refused) as caught:
+            await self.records.calculate(CLAUDE, proposed, now)
+        self.assertEqual(caught.exception.code, "profile_not_approved")
+        approved = await self.records.approve(2, now)
+        self.assertEqual((approved.version, approved.approval), (2, "approved"))
+        self.assertEqual(await self.records.in_use(), approved)
+        later = await recompute(self.records, self.listing(), FIRST_PROFILE, now + timedelta(minutes=3))
+        (result,) = later.results
+        self.assertEqual(result.profile, 2)
+        five = next(entry for entry in result.windows if entry.label == "Five hours")
+        self.assertAlmostEqual(five.weight or 0, 0.1)
+        self.assertEqual(
+            [row[0] for row in await self.db.execute("SELECT profile FROM vigor_results ORDER BY moment", [])], [1, 2]
+        )
+
+    async def test_a_replay_takes_any_recorded_version_a_proposed_one_included(self) -> None:
+        """radar.learn-replay-any"""
+        await self.history(RATIOS)
+        now = MONDAY + timedelta(days=11)
+        await recompute(self.records, self.listing(), FIRST_PROFILE, now)
+        await learn(self.records, now)
+        proposed = await self.records.profile(2)
+        assert proposed is not None and proposed.approval == "proposed"
+        (replay,) = await self.records.replay(CLAUDE, proposed)
+        self.assertEqual((replay.recorded.profile, replay.replayed.profile), (1, 2))
+        self.assertFalse(replay.same)
+        self.assertEqual(await self.count("vigor_results"), 1)  # a replay writes nothing
+
+    async def test_approval_refuses_an_unknown_an_approved_and_an_older_profile(self) -> None:
+        """radar.learn-approve-refusals"""
+        now = MONDAY + timedelta(days=11)
+        cases: list[tuple[int, str]] = [(7, "unknown_profile")]
+        with self.assertRaises(Refused) as caught:
+            await self.records.approve(7, now)
+        self.assertEqual(caught.exception.code, "unknown_profile")
+        self.assertIsNone(await self.records.profile(7))
+        await self.history(RATIOS)
+        await learn(self.records, now)
+        await learn(self.records, now)
+        await self.records.approve(3, now)
+        for version, code in [(3, "already_approved"), (2, "older_profile"), *cases]:
+            with self.subTest(version=version):
+                with self.assertRaises(Refused) as caught:
+                    await self.records.approve(version, now)
+                self.assertEqual(caught.exception.code, code)
+        self.assertEqual((await self.records.in_use()).version, 3)
+
+    async def test_the_first_profile_can_be_approved_and_learned_weights_carry_into_a_proposal(self) -> None:
+        """radar.learn-carried"""
+        now = MONDAY + timedelta(days=11)
+        first = await self.records.approve(1, now)
+        self.assertEqual((first.version, first.approval), (1, "approved"))
+        self.assertEqual(await self.records.in_use(), first)
+        anthropic = {("anthropic", "Five hours"): Weight(0.11, "learned", 12, 0.09, 0.14)}
+        second = await self.records.propose(anthropic, first, now)
+        await self.records.approve(second.version, now)
+        chatgpt = {("chatgpt", "5-hour window"): Weight(0.2, "learned", 10, 0.15, 0.3)}
+        third = await self.records.propose(chatgpt, await self.records.in_use(), now)
+        self.assertEqual((third.version, third.approval), (3, "proposed"))
+        self.assertEqual(dict(third.gates), anthropic | chatgpt)
+        self.assertEqual(await self.records.profile(3), third)
+        self.assertEqual([profile.version for profile, _ in await self.records.profiles()], [1, 2, 3])

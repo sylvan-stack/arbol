@@ -206,7 +206,20 @@ class TheRecords(RecordFixture):
         self.assertTrue(await self.records.ensure_profile(learned, MONDAY))
         self.assertEqual(
             (await self.rows("vigor_profiles"))[0]["gates"],
-            [{"family": "anthropic", "label": "Five hours", "value": 0.12, "source": "learned"}],
+            [
+                {
+                    "family": "anthropic",
+                    "label": "Five hours",
+                    "value": 0.12,
+                    "source": "learned",
+                    "pairs": None,
+                    "low": None,
+                    "high": None,
+                    "estimator": "median",
+                    "threshold": 2.0,
+                    "needed": 10,
+                }
+            ],
         )
         self.assertEqual(await self.records.profile(1), learned)
 
