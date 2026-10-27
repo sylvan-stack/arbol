@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/sylvan-stack/arbol-design-system",
-  "commit": "317b869a81861d3407926bc7ad5a18217514f871",
+  "commit": "e767f7e5c0abeda5f92a6ead62bfa5c2faf2b01a",
   "files": {
     "docs/licenses/Hanken-Grotesk-OFL.txt": "f45f60ca871850c58d8dc9c973bd6fcad40c137e9d037172b961e8ca68c87ef7",
     "docs/licenses/Spline-Sans-Mono-OFL.txt": "3127290ccd196ec0c4ffa60296845224a034b92c81de8231b0916278ed7607e1",
@@ -30,7 +30,7 @@
     "src/sections/ResponseReader.svelte": "3cafa52b98c4c5c25c0de67974469b849536ab22f29a4bee1df70c07ed07128b",
     "src/sections/ToolCall.svelte": "1f52031314d7095f28d0525da8b9c6ed7dde9af6077e1d1b92cca2a156fffd3a",
     "src/sections/TurnNavigator.svelte": "774bc0a9a1f67e5c2dfbc8de9fab3c5441b05b2ed71ce1acef9bb76d5106ef90",
-    "src/sections/elma-response.ts": "956aef17ec5c8effa3233f547bf2b478e25716f2747c2cc8c9bdef86f7d24744",
+    "src/sections/elma-response.ts": "036beba5c2237bd10302707e908165e6c1f638a8d60230ccbaa12b0e0f515ab9",
     "src/sections/elma-types.ts": "53199f27384908b5197b692393752905145982bed7c20f04c8f50640f2f19088",
     "src/styles/legacy-tokens.css": "54bac8ebf24bf5092b04bfa79832b0391895db0f44518a8f1e87566d8b499705",
     "src/styles/system.css": "2ad2d5c3ad36925863f2037ef450c07b5d547cb4ff492e07a8a7a032cb1e0d15",
