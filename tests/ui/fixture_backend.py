@@ -334,6 +334,9 @@ async def main() -> None:
     scenario = json.loads(Path(args.scenario).read_text()) if args.scenario else {}
     if args.build:
         scenario["build"] = args.build
+    elif os.environ.get("ELMA_TEST_BUILD"):
+        scenario["build"] = os.environ["ELMA_TEST_BUILD"]
+    bundle = Path(os.environ.get("ELMA_TEST_BUNDLE", args.bundle))
     fixture = Fixture(scenario, args.record)
     with tempfile.TemporaryDirectory(prefix="eb-", dir="/tmp") as folder:
         fixture.paste_dir = Path(folder) / "Private Root" / "pastes"
@@ -341,7 +344,7 @@ async def main() -> None:
         socket = Path(folder) / "b.sock"
         backend = await asyncio.start_unix_server(fixture.client, path=socket, limit=relay.LIMIT)
         selection = argparse.Namespace(root="t1", registry_dir=args.registry_dir, root_dir=folder, bundle=None, socket=None)
-        host = relay.Relay(relay.paths(selection)[0] if args.registry_dir else Path(args.bundle), socket,
+        host = relay.Relay(relay.paths(selection)[0] if args.registry_dir else bundle, socket,
                            refresh=(lambda: relay.paths(selection)[0]) if args.registry_dir else None)
         await host.start()
         print("http://" + host.host + "/?token=" + host.token, flush=True)
