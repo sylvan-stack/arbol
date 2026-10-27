@@ -170,7 +170,7 @@ class TheNextChange(unittest.TestCase):
         self.assertEqual(codex_result.next_change, MONDAY + timedelta(hours=2, minutes=30))
         self.assertAlmostEqual(codex_result.next_value, 0.3 - 1290 / 10080)
 
-    def test_a_subscription_still_exhausted_at_the_next_change_has_the_value_0(self) -> None:
+    def test_an_exhausted_subscription_recovers_when_its_last_reached_gating_window_resets(self) -> None:
         """radar.next-change-exhausted-still"""
         windows = [
             window("session", "5-hour window", resource=None, used=50, resets=at(hours=2, minutes=30), minutes=300),
@@ -178,11 +178,45 @@ class TheNextChange(unittest.TestCase):
         ]
         result = compute(report(CODEX, windows), FIRST_PROFILE, MONDAY)
         self.assertEqual((result.exhausted, result.vigor), (True, 0.0))
-        self.assertEqual((result.next_change, result.next_value), (MONDAY + timedelta(hours=2, minutes=30), 0.0))
+        # Not the unreached five-hour window's reset at 12:30, where the week still gates it: the week's reset (SGM-D34).
+        self.assertEqual(result.next_change, MONDAY + timedelta(days=1))
         at_week = compute(report(CODEX, windows), FIRST_PROFILE, MONDAY + timedelta(days=1))
         assert at_week.vigor is not None
         self.assertEqual((at_week.exhausted, at_week.predicted), (False, True))  # the week predicted fresh
         self.assertAlmostEqual(at_week.vigor, 0.1 * (1 - 210 / 300))  # the five-hour window, fresh since 08:30
+        self.assertEqual(result.next_value, at_week.vigor)
+        both = [
+            window("session", "5-hour window", resource=None, used=100, resets=at(hours=2, minutes=30), reached=True),
+            window("weekly", "Weekly window", resource=None, used=100, resets=at(days=1), minutes=10080, reached=True),
+        ]
+        two = compute(report(CODEX, both), FIRST_PROFILE, MONDAY)
+        self.assertEqual((two.exhausted, two.next_change), (True, MONDAY + timedelta(days=1)))  # the last to reset
+        self.assertEqual(two.next_value, at_week.vigor)
+
+    def test_a_reached_store_with_an_unreached_shorter_gate_recovers_at_the_store_reset(self) -> None:
+        """radar.next-change-reached-store"""
+        windows = [
+            window("session", "Five hours", used=35, resets=at(hours=3, minutes=20), minutes=300),
+            window("weekly", "Seven days", used=100, resets=at(days=3), minutes=10080, reached=True),
+        ]
+        result = compute(report(CLAUDE, windows, extra={"isUsingOverage": False}), FIRST_PROFILE, MONDAY)
+        self.assertEqual((result.exhausted, result.vigor), (True, 0.0))
+        self.assertEqual(result.next_change, MONDAY + timedelta(days=3))  # the store's reset, never the gate's 13:20
+        self.assertNotEqual(result.next_change, RESET)
+        at_store = compute(
+            report(CLAUDE, windows, extra={"isUsingOverage": False}), FIRST_PROFILE, MONDAY + timedelta(days=3)
+        )
+        assert at_store.vigor is not None and result.next_value is not None
+        self.assertEqual((at_store.exhausted, at_store.predicted), (False, True))
+        # The week fresh loses nothing; the five-hour window predicted fresh at 11:20 has 80 minutes left.
+        self.assertAlmostEqual(at_store.vigor, 0.1 * (1 - 80 / 300))
+        self.assertEqual(result.next_value, at_store.vigor)
+        still = compute(report(CLAUDE, windows, extra={"isUsingOverage": False}), FIRST_PROFILE, RESET)
+        self.assertEqual((still.exhausted, still.vigor, still.next_change), (True, 0.0, MONDAY + timedelta(days=3)))
+        unreached = compute(report(CLAUDE, claude()), FIRST_PROFILE, MONDAY)
+        self.assertEqual(unreached.next_change, RESET)  # not exhausted: the earliest reset stays the rule
+        overage = compute(report(CLAUDE, windows, extra={"isUsingOverage": True}), FIRST_PROFILE, MONDAY)
+        self.assertEqual((overage.exhausted, overage.next_change), (False, RESET))  # spending goes on: earliest reset
 
     def test_a_predicted_window_sets_the_next_change_too(self) -> None:
         """radar.next-change-predicted"""
