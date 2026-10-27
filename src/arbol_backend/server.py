@@ -31,6 +31,7 @@ from .recovery import Recovery
 from .roots import Roots
 from .settling import Settling
 from .stuck import Stuck
+from .workspace import Workspace
 
 
 class Backend:
@@ -41,6 +42,7 @@ class Backend:
         self.database = Database(identity)
         self.record = root_record(identity.folder, identity.root)
         self.registry = Registry()
+        self.workspace = Workspace(identity, self.settings, self.registry)
         self.roots = Roots(identity, self.programs, self.database)
         self.roots.register(self.registry)
         self.chats = Chats(identity, self.database, self.programs, self.roots, self.registry,
