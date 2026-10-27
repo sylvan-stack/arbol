@@ -284,6 +284,10 @@ class Loss:
     weight: float | None
     contribution: float | None  # weight × loss for a summed window
     reason: str | None  # why a window is shown and not summed
+    predicted: bool = False  # the window was predicted fresh after a reset without a newer report (SGM-1.7)
+    used_percent: float | None = None  # the window as used: its share, reset time and length, predicted or delivered
+    resets_at: datetime | None = None
+    window_minutes: float | None = None
 
 
 @dataclass(frozen=True)
