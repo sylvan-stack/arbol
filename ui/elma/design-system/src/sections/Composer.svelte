@@ -1,0 +1,284 @@
+<script lang="ts">
+  import TextArea from '../components/TextArea.svelte';
+  import { tick } from 'svelte';
+  import Button from '../components/Button.svelte';
+  import EntityReference from '../patterns/EntityReference.svelte';
+  import EntityPicker from '../patterns/EntityPicker.svelte';
+  import Modal from '../patterns/Modal.svelte';
+  import type { ElmaRoute } from './elma-types';
+  let {
+    onsend,
+    oninput,
+    onblur,
+    onpaste,
+    onTop,
+    onBottom,
+    value = $bindable(''),
+    expanded = $bindable(false),
+    repository = 'repository',
+    route = {} as ElmaRoute,
+    disabled = false,
+    readOnly = false,
+    busy = false,
+    status = '',
+    problem = '',
+    context = '',
+    firstSapling = false,
+    empty = false,
+  }: {
+    onsend?: (text: string) => void;
+    oninput?: (text: string) => void;
+    onblur?: () => void;
+    onpaste?: (event: ClipboardEvent, selection: { start: number; end: number }) => void;
+    onTop?: () => void;
+    onBottom?: () => void;
+    value?: string;
+    expanded?: boolean;
+    repository?: string;
+    route?: ElmaRoute;
+    disabled?: boolean;
+    readOnly?: boolean;
+    busy?: boolean;
+    status?: string;
+    problem?: string;
+    context?: string;
+    firstSapling?: boolean;
+    empty?: boolean;
+  } = $props();
+  let attached = $state(false),
+    picker = $state(false),
+    feedback = $state(''),
+    firstInput = $state<HTMLTextAreaElement>();
+  let priorContext: string | undefined,
+    priorText = false;
+  $effect(() => {
+    if (!firstSapling) return;
+    const hasText = value.length > 0;
+    if (context !== priorContext) {
+      priorContext = context;
+      expanded = empty || hasText;
+    } else if (hasText && !priorText) expanded = true;
+    priorText = hasText;
+  });
+  $effect(() => {
+    if (firstSapling && (empty || expanded) && !readOnly && !disabled && !busy)
+      void tick().then(() => {
+        if (!document.querySelector('dialog[open]')) firstInput?.focus();
+      });
+  });
+  function firstKeys(event: KeyboardEvent) {
+    if (!firstSapling || empty || event.defaultPrevented || document.querySelector('dialog[open]'))
+      return;
+    if (
+      event.key === 'Enter' &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      !event.shiftKey &&
+      !event.altKey &&
+      !expanded &&
+      !(
+        event.target instanceof Element &&
+        event.target.closest('button,a,input,textarea,select,[contenteditable=true]')
+      )
+    ) {
+      event.preventDefault();
+      expanded = true;
+    }
+  }
+  function send() {
+    if (!value.trim() || disabled || readOnly || busy) return;
+    if (firstSapling) {
+      if (onsend) {
+        onsend(value);
+        expanded = false;
+      }
+      return;
+    }
+    onsend?.(value);
+    value = '';
+    feedback = 'Message sent locally';
+  }
+  function handleKeys(event: KeyboardEvent) {
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.altKey) {
+      event.preventDefault();
+      send();
+    } else if (
+      firstSapling &&
+      event.key === 'Escape' &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      !empty
+    ) {
+      event.preventDefault();
+      expanded = false;
+      onblur?.();
+    }
+  }
+</script>
+
+<svelte:window onkeydown={firstKeys} />
+{#if firstSapling}
+  <section class="first-composer" class:empty aria-label="Message composer">
+    {#if empty}<p class="context-line">
+        {repository} · {route.driver ?? '—'} · {route.subscription ?? '—'} · model: {route.model ??
+          '—'} · thinking: {route.effort ?? '—'}
+      </p>{/if}
+    {#if empty || expanded}<textarea
+        bind:this={firstInput}
+        aria-label="Message"
+        placeholder={'Message ' + repository + '…'}
+        rows={empty ? 10 : 3}
+        bind:value
+        {disabled}
+        readonly={readOnly || busy}
+        oninput={(event) => {
+          value = event.currentTarget.value;
+          oninput?.(value);
+        }}
+        onblur={() => onblur?.()}
+        onpaste={(event) =>
+          onpaste?.(event, {
+            start: event.currentTarget.selectionStart,
+            end: event.currentTarget.selectionEnd,
+          })}
+        onkeydown={handleKeys}></textarea><small class="muted"
+        >{status || (onsend ? '⌘⏎ to Send' : '')}{!empty && !busy
+          ? ' · Esc to collapse'
+          : ''}</small
+      >
+    {:else}<div class="closed">
+        <button class="start-message" onclick={() => (expanded = true)}
+          >Press Enter to start new message ⏎</button
+        ><button
+          class="scroll"
+          aria-label="Scroll to top"
+          title="Scroll to top"
+          disabled={!onTop}
+          onclick={onTop}>↑</button
+        ><button
+          class="scroll"
+          aria-label="Scroll to bottom"
+          title="Scroll to bottom"
+          disabled={!onBottom}
+          onclick={onBottom}>↓</button
+        >
+      </div>{/if}
+    {#if !empty && !expanded && status}<small class="muted" role="status">{status}</small>{/if}
+    {#if problem}<p class="problem" role="alert">{problem}</p>{/if}
+  </section>
+{:else}
+  <section class="panel stack" aria-label="Message composer">
+    <TextArea
+      onkeydown={handleKeys}
+      label="Message"
+      bind:value
+      rows={3}
+      placeholder="Write a follow-up or add context…"
+    />{#if attached}<div class="row">
+        <EntityReference title="Design System" /><Button
+          label="Remove context"
+          tone="ghost"
+          onclick={() => (attached = false)}
+        />
+      </div>{/if}
+    <div class="row spread">
+      <div class="row">
+        <Button label="Add context" onclick={() => (picker = true)} /><small class="muted"
+          >⌘/Ctrl + Enter to send</small
+        >
+      </div>
+      <Button label="Send" tone="primary" disabled={disabled || !value.trim()} onclick={send} />
+    </div>
+    <small role="status" class="muted"
+      >{feedback || 'Local preview draft · Preserved while this composer remains mounted'}</small
+    >
+  </section>
+  {#if picker}<Modal title="Add context" onclose={() => (picker = false)}
+      ><EntityPicker
+        onselect={() => {
+          attached = true;
+          picker = false;
+        }}
+      /></Modal
+    >{/if}
+{/if}
+
+<style>
+  .first-composer {
+    padding: 12px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+    flex-shrink: 0;
+    width: 100%;
+    max-width: var(--elma-reading-width, 720px);
+    margin: 0 auto;
+  }
+  .first-composer.empty {
+    flex: 1;
+    min-height: 0;
+    justify-content: center;
+  }
+  .context-line {
+    margin: 0 0 6px;
+    color: var(--muted);
+    font-size: 0.9em;
+    overflow-wrap: anywhere;
+  }
+  .first-composer textarea {
+    width: 100%;
+    min-width: 0;
+    resize: vertical;
+    background: var(--inset);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 12px;
+    font: inherit;
+    line-height: 1.5;
+  }
+  .first-composer textarea:read-only {
+    opacity: 0.8;
+  }
+  .first-composer textarea:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+  .closed {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+  .start-message {
+    flex: 1;
+    background: none;
+    border: 0;
+    padding: 4px;
+    color: var(--muted);
+    font: inherit;
+    text-align: left;
+    min-width: 0;
+  }
+  .scroll {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--panel);
+    color: var(--text);
+    font: inherit;
+    min-width: 30px;
+    min-height: 30px;
+  }
+  .problem {
+    margin: 0;
+    color: var(--failure);
+    font-size: 0.9em;
+    overflow-wrap: anywhere;
+  }
+  @media (max-width: 600px) {
+    .first-composer {
+      padding: 12px;
+    }
+  }
+</style>

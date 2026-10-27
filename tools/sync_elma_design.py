@@ -18,6 +18,7 @@ ENTRIES = [
     "src/sections/ResponseReader.svelte",
     "src/sections/PinnedMessage.svelte",
     "src/sections/HistoryTree.svelte",
+    "src/sections/Composer.svelte",
     "src/patterns/Modal.svelte",
     "src/sections/elma-types.ts",
     "src/styles/tokens.css",
