@@ -45,7 +45,7 @@ def preview(value: Any) -> tuple[Any, bool]:
 def metadata(value: Any) -> Any:
     """Drop credential fields from producer metadata; transcript/tool payloads are untouched."""
     if isinstance(value, dict):
-        secret_names = {"key", "apikey", "jevkey", "password", "authorization", "accesstoken", "refreshtoken", "secret"}
+        secret_names = {"key", "apikey", "jevkey", "password", "authorization", "accesstoken", "refreshtoken", "secret", "token"}
         return {key: metadata(item) for key, item in value.items()
                 if "".join(c for c in key.lower() if c.isalnum()) not in secret_names}
     if isinstance(value, list):
