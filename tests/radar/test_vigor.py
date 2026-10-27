@@ -576,19 +576,35 @@ class Advisory(unittest.TestCase):
     }
     FORBIDDEN_NAMES = {"open", "exec", "eval", "compile", "__import__", "input", "print"}
 
+    # The two modules that reach outside the calculation, each pinned to its one reach (SYL-297): the Drivers through
+    # the backend's launcher calls, and the records through the backend's bounded database connection.
+    REACHES = {
+        "drivers.py": {"arbol_backend.model", "arbol_backend.process"},
+        "records.py": {
+            "arbol_backend.database",
+            "arbol_backend.model",
+            "psycopg.types.json",
+            "arbol_radar.vigor",
+            "uuid",
+        },
+    }
+
     def test_the_package_imports_nothing_that_runs_a_program_or_writes_a_file(self) -> None:
         """radar.advisory-imports"""
         files = sorted((ROOT / "src/arbol_radar").glob("*.py"))
-        self.assertEqual([path.name for path in files], ["__init__.py", "model.py", "vigor.py"])
+        self.assertEqual(
+            [path.name for path in files], ["__init__.py", "drivers.py", "model.py", "records.py", "vigor.py"]
+        )
         for path in files:
+            allowed = self.ALLOWED_IMPORTS | self.REACHES.get(path.name, set())
             tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
                     for alias in node.names:
-                        self.assertIn(alias.name, self.ALLOWED_IMPORTS, f"{path.name} imports {alias.name}")
+                        self.assertIn(alias.name, allowed, f"{path.name} imports {alias.name}")
                 elif isinstance(node, ast.ImportFrom):
                     self.assertEqual(node.level, 0, f"{path.name} has a relative import")
-                    self.assertIn(node.module, self.ALLOWED_IMPORTS, f"{path.name} imports from {node.module}")
+                    self.assertIn(node.module, allowed, f"{path.name} imports from {node.module}")
                 elif isinstance(node, ast.Name):
                     self.assertNotIn(node.id, self.FORBIDDEN_NAMES, f"{path.name} uses {node.id}")
 
