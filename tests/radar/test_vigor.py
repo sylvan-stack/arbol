@@ -446,5 +446,121 @@ class LossOfAWindow(unittest.TestCase):
                 self.assertFalse(w.known)
 
 
+class WorkedExamples(unittest.TestCase):
+    """The chapter's worked examples: Claude 0.37, Codex 0.16, Kimi Code 0.47, and 0.39 at 13:20 (SGM-1.1, SGM-1.4)."""
+
+    def test_claude_loses_more_than_a_third_of_its_week(self) -> None:
+        """radar.example-claude"""
+        result = compute(report(CLAUDE, claude(), extra={"isUsingOverage": False}), FIRST_PROFILE, MONDAY)
+        self.assertEqual((result.subscription, result.moment, result.report, result.profile), (CLAUDE, MONDAY, "r1", 1))
+        five, week = by_label(result)["Five hours"], by_label(result)["Seven days"]
+        self.assertEqual((five.role, five.weight, five.loss, five.contribution), ("gate", 0.1, 0.0, 0.0))
+        self.assertEqual((week.role, week.weight), ("store", 1.0))
+        assert week.loss is not None and week.contribution is not None and result.vigor is not None
+        self.assertAlmostEqual(week.loss, 0.8 - 4320 / 10080)
+        self.assertEqual(round(week.loss, 2), 0.37)
+        self.assertEqual(round(week.contribution, 2), 0.37)
+        self.assertEqual(round(result.vigor, 2), 0.37)
+        self.assertFalse(result.exhausted)
+        self.assertEqual((result.notes, result.unknown, result.stale, result.predicted), ((), None, None, False))
+        self.assertEqual((result.next_change, result.next_value), (None, None))
+
+    def test_codex_week_with_a_day_to_go_counts_its_windows_as_tokens(self) -> None:
+        """radar.example-codex"""
+        result = compute(report(CODEX, codex()), FIRST_PROFILE, MONDAY)
+        five, week = by_label(result)["5-hour window"], by_label(result)["Weekly window"]
+        self.assertEqual(
+            (five.resource, five.counted_as, five.assumed, five.role, five.loss), (None, "tokens", True, "gate", 0.0)
+        )
+        self.assertEqual((week.counted_as, week.assumed, week.role), ("tokens", True, "store"))
+        assert week.loss is not None and result.vigor is not None
+        self.assertEqual(round(week.loss, 2), 0.16)
+        self.assertEqual(round(result.vigor, 2), 0.16)
+        self.assertEqual(
+            result.notes,
+            (
+                "5-hour window: the chatgpt report names no resource; counted as tokens",
+                "Weekly window: the chatgpt report names no resource; counted as tokens",
+            ),
+        )
+
+    def test_kimi_month_loses_nearly_half_with_calls_and_the_total_shown_only(self) -> None:
+        """radar.example-kimi"""
+        result = compute(report(KIMI, kimi()), FIRST_PROFILE, MONDAY)
+        entries = by_label(result)
+        calls, code, total = entries["Five hours"], entries["Monthly, Kimi Code"], entries["Monthly, all Kimi products"]
+        self.assertEqual((calls.counted_as, calls.role, calls.weight, calls.contribution), (None, "shown", None, None))
+        assert calls.loss is not None and code.loss is not None and result.vigor is not None
+        self.assertEqual(round(calls.loss, 2), 0.10)
+        self.assertEqual(calls.reason, "counts calls; shown, not summed")
+        self.assertEqual((code.role, code.weight, code.counted_as), ("store", 1.0, "credits"))
+        self.assertEqual(round(code.loss, 2), 0.47)
+        self.assertEqual((total.role, total.contribution), ("shown", None))
+        self.assertEqual(round(result.vigor, 2), 0.47)
+        self.assertFalse(result.exhausted)
+
+    def test_a_fresh_five_hour_window_at_13_20_gives_0_39(self) -> None:
+        """radar.example-13-20"""
+        later = MONDAY + timedelta(hours=3, minutes=20)
+        windows = [
+            window("session", "Five hours", used=0, resets=at(hours=8, minutes=20), minutes=300),
+            window("weekly", "Seven days", used=20, resets=at(days=3), minutes=10080),
+        ]
+        result = compute(report(CLAUDE, windows, fetched=at(hours=3, minutes=20)), FIRST_PROFILE, later)
+        assert result.vigor is not None
+        self.assertEqual(by_label(result)["Five hours"].loss, 0.0)
+        self.assertAlmostEqual(result.vigor, 0.8 - 4120 / 10080)
+        self.assertEqual(round(result.vigor, 2), 0.39)
+
+    def test_the_three_subscriptions_rank_kimi_claude_codex(self) -> None:
+        """radar.example-ranking"""
+        reports = (
+            ("Kimi Code", report(KIMI, kimi())),
+            ("Claude", report(CLAUDE, claude())),
+            ("Codex", report(CODEX, codex())),
+        )
+        values = {name: compute(r, FIRST_PROFILE, MONDAY).vigor for name, r in reports}
+        ranked = sorted(values, key=lambda name: values[name] or 0, reverse=True)
+        self.assertEqual(ranked, ["Kimi Code", "Claude", "Codex"])
+        self.assertEqual([round(values[name] or 0, 2) for name in ranked], [0.47, 0.37, 0.16])
+
+
+class Weights(unittest.TestCase):
+    """The weights and the capped sum (SGM-1.4, SGM-D15)."""
+
+    def test_each_gate_takes_the_profile_weight_and_the_store_1(self) -> None:
+        """radar.gate-weights"""
+        learned = Profile(
+            1, "proposed", "even", Weight(0.1), gates={("anthropic", "Five hours"): Weight(0.25, "learned")}
+        )
+        windows = [
+            window("session", "Five hours", used=0, resets=at(minutes=1), minutes=300),
+            window("weekly", "Seven days", used=50, resets=at(minutes=1), minutes=10080),
+        ]
+        result = compute(report(CLAUDE, windows), learned, MONDAY)
+        five, week = by_label(result)["Five hours"], by_label(result)["Seven days"]
+        assert five.contribution is not None and week.contribution is not None and result.vigor is not None
+        self.assertEqual(five.weight, 0.25)
+        self.assertAlmostEqual(five.contribution, 0.25 * (1 - 1 / 300))
+        self.assertEqual(week.weight, 1.0)
+        self.assertAlmostEqual(week.contribution, 0.5 - 1 / 10080)
+        self.assertAlmostEqual(result.vigor, five.contribution + week.contribution)
+        self.assertEqual(learned.gate_weight("anthropic", "Five hours"), Weight(0.25, "learned"))
+        self.assertEqual(learned.gate_weight("anthropic", "Seven days"), Weight(0.1, "placeholder"))
+        placeholder = compute(report(CLAUDE, windows), FIRST_PROFILE, MONDAY)
+        self.assertEqual(by_label(placeholder)["Five hours"].weight, 0.1)
+
+    def test_the_sum_is_capped_at_1(self) -> None:
+        """radar.sum-cap"""
+        windows = [
+            window("session", "Five hours", used=0, resets=at(minutes=1), minutes=300),
+            window("weekly", "Seven days", used=0, resets=at(minutes=1), minutes=10080),
+        ]
+        result = compute(report(CLAUDE, windows), FIRST_PROFILE, MONDAY)
+        total = sum(entry.contribution or 0 for entry in result.windows)
+        self.assertGreater(total, 1)
+        self.assertEqual(result.vigor, 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()
