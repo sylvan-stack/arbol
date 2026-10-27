@@ -119,9 +119,7 @@ def _calculate(
                 window_minutes=window.window_minutes,
             )
         )
-    # Exhausted while any window that gates inference is reached, whatever it counts, unless the account spends overage;
-    # a window scoped to one tool gates only that tool (SGM-1.5, SGM-D27).
-    exhausted = any(window.limit_reached and window.scope != "tool" for window in windows) and not report.overage
+    exhausted = bool(exhausted_by(report, windows))
     if exhausted:
         vigor: float | None = 0.0
     elif store is None:
@@ -131,19 +129,32 @@ def _calculate(
     return tuple(losses), vigor, exhausted, tuple(notes)
 
 
+def exhausted_by(report: Report, windows: tuple[Window, ...]) -> list[Window]:
+    """The windows that exhaust the Subscription: reached, gating inference, and no overage (SGM-1.5, SGM-D27).
+
+    Every reached window not scoped to one tool gates inference, whatever it counts; a reached window with paid overage
+    switched on does not exhaust the Subscription, since the account keeps spending. Empty while it can be used.
+    """
+    if report.overage:
+        return []
+    return [window for window in windows if window.limit_reached and window.scope != "tool"]
+
+
 def next_change(
     report: Report, windows: tuple[Window, ...], profile: Profile, now: datetime
 ) -> tuple[datetime | None, float | None]:
-    """The earliest reset among the windows used and the Vigor at that moment, on the windows predicted for it (SGM-1.6).
+    """The next change of the Subscription's Vigor and its value then, on the windows predicted for that moment (SGM-1.6).
 
-    Vigor jumps at a reset: a store's unspent share is lost, a gate opens again. For an exhausted Subscription this is
-    its recovery, "0 now, 0.39 at 13:20" (SGM-1.5, SGM-D16); the value is 0 while another reached window still gates it.
-    None when no window names a reset time.
+    Vigor jumps at a reset: a store's unspent share is lost, a gate opens again. The moment is the earliest reset among
+    the windows used. While the Subscription is exhausted it is instead the moment its last reached inference-gating
+    window resets, the latest reset among them, since nothing can be spent before (SGM-D34): this is its recovery,
+    "0 now, 0.39 at 13:20" (SGM-1.5, SGM-D16). None when no window names a reset time.
     """
     resets = [window.resets_at for window in windows if window.resets_at is not None and window.resets_at > now]
     if not resets:
         return None, None
-    moment = min(resets)
+    gating = [window.resets_at for window in exhausted_by(report, windows) if window.resets_at is not None]
+    moment = max(gating) if gating else min(resets)
     then = tuple(predict(window, moment) for window in windows)
     _, value, _, _ = _calculate(report, then, profile, moment)
     return moment, value
