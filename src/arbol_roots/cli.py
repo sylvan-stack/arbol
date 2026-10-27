@@ -11,11 +11,11 @@ from .sql import layout, migrate
 
 USAGE = ("arbol-roots create <root> --name <text> [--from <root>] [--root-contract <version>] "
          "[--database-name <name>] | list | show [<root>] | ready <root> | fail <root> --reason <text> "
-         "| app <root> <build> | remove <root> | layout <root> | migrate <root>; "
+         "| app <root> <build> | remove <root> | layout <root> | migrate <root> [--check | --chat <uuid>]; "
          "options: --roots-dir <folder>, --settings-dir <folder>, "
          "--registry-dir <folder>, --database-config <file>, --psql <program>, --security <program>")
 GLOBAL = ("--roots-dir", "--settings-dir", "--registry-dir", "--database-config", "--psql", "--security")
-LOCAL = {"create": ("--name", "--from", "--root-contract", "--database-name"), "fail": ("--reason",)}
+LOCAL = {"create": ("--name", "--from", "--root-contract", "--database-name"), "fail": ("--reason",), "migrate": ("--check","--chat")}
 COUNTS = {"create": (1,), "list": (0,), "show": (0, 1), "ready": (1,), "fail": (1,), "app": (2,), "remove": (1,),
           "layout": (1,), "migrate": (1,)}
 
@@ -25,7 +25,7 @@ def main(args: list[str]) -> int:
         if args == ["--help"]:
             write_all(1, json_line({"usage": USAGE}))
             return 0
-        words, values = options(args, [*GLOBAL, "--name", "--from", "--root-contract", "--database-name", "--reason"])
+        words, values = options(args, [*GLOBAL, "--name", "--from", "--root-contract", "--database-name", "--reason", "--check", "--chat"], flags={"--check"})
         command = words[0] if words else ""
         arguments = words[1:]
         if command not in COUNTS or len(arguments) not in COUNTS[command]:
@@ -54,7 +54,7 @@ def main(args: list[str]) -> int:
         elif command == "layout":
             result = layout(paths, arguments[0])
         elif command == "migrate":
-            result = migrate(paths, arguments[0])
+            result = migrate(paths, arguments[0], check="--check" in values, chat=values.get("--chat"))
         else:
             raise Refused("invalid_input", f"The {command} command is not available in this development step.")
         write_all(1, json_line(result))
