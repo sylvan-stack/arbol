@@ -10,6 +10,7 @@ import time
 import unittest
 from collections import defaultdict
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -277,6 +278,54 @@ class Windows(unittest.IsolatedAsyncioTestCase):
         result = await self.call(reader, writer, "root.get")
         self.assertTrue(result["result"]["layoutComplete"])
         self.assertEqual((await self.event(reader, "attention", "closed"))["id"], "layout_incomplete")
+
+    async def test_backend_needs_no_schema_or_history_write_permission(self) -> None:
+        """chats.read-only-contract; chats.no-ddl"""
+        exchange = chat(990)
+        await self.db.execute(
+            "INSERT INTO exchanges(id,chat_id,number,state,trunk,build,route,working_folder,accepted_at,ended_at) "
+            "VALUES(%s,%s,1,'completed','trivial','1','{}','/private/work',now(),now())", [exchange, chat(1)])
+        await self.db.execute("INSERT INTO messages VALUES(%s,0,'user','immutable message')", [exchange])
+        await self.db.execute("INSERT INTO runs(exchange_id,run_id,kind,outcome,usage,ended_at) "
+                              "VALUES(%s,'r','agent','completed','{}',now())", [exchange])
+        before_rows = [await self.db.execute("SELECT to_jsonb(t)::text FROM " + table + " t ORDER BY 1")
+                       for table in ("exchanges", "messages", "tool_calls", "runs")]
+        before_header = await self.db.execute("SELECT id,created_at FROM chats ORDER BY id")
+        schema_sql = ("SELECT table_name,column_name,data_type,is_nullable,column_default FROM information_schema.columns "
+                      "WHERE table_schema='public' ORDER BY table_name,ordinal_position")
+        before_schema = await self.db.execute(schema_sql)
+        before_indexes = await self.db.execute("SELECT indexdef FROM pg_indexes WHERE schemaname='public' ORDER BY indexname")
+        await self.db.execute("CREATE ROLE backend_app LOGIN; GRANT USAGE ON SCHEMA public TO backend_app; "
+                              "GRANT SELECT ON ALL TABLES IN SCHEMA public TO backend_app; "
+                              "GRANT UPDATE(title) ON chats TO backend_app; "
+                              "GRANT INSERT,UPDATE,DELETE ON drafts,chat_settings,chat_marks,exchange_notes TO backend_app; "
+                              "GRANT USAGE ON SEQUENCE drafts_revision TO backend_app")
+        # Restart only this disposable backend, using a role that cannot change the schema/history.
+        self.backend.stopped.set()
+        await self.running
+        selected = replace(self.backend.identity, database=self.cluster.address.replace("postgresql://bkd@", "postgresql://backend_app@"))
+        self.backend = Backend(selected)
+        self.running = asyncio.create_task(self.backend.run())
+        for _ in range(100):
+            if (self.frame.root / "backend.sock").exists():
+                break
+            await asyncio.sleep(0.01)
+        assert self.backend.chats.catalogues.task
+        await self.backend.chats.catalogues.task
+        reader, writer = await self.open()
+        self.assertIn("result", await self.call(reader, writer, "root.get"))
+        self.assertIn("result", await self.call(reader, writer, "chats.page"))
+        snapshot = await self.subscribe(reader, writer, "a", "chat", {"chat": chat(1)})
+        self.assertEqual(snapshot["exchanges"][0]["items"][0]["text"], "immutable message")
+        self.assertIn("result", await self.call(reader, writer, "chat.rename", {"chat": chat(1), "title": "new title"}))
+        self.assertIn("result", await self.call(reader, writer, "chat.settings", {"chat": chat(1), "workingFolder": str(self.frame.root)}))
+        self.assertIn("result", await self.call(reader, writer, "chat.mark", {"chat": chat(1), "ongoing": True}))
+        after_rows = [await self.db.execute("SELECT to_jsonb(t)::text FROM " + table + " t ORDER BY 1")
+                      for table in ("exchanges", "messages", "tool_calls", "runs")]
+        self.assertEqual(after_rows, before_rows)
+        self.assertEqual(await self.db.execute("SELECT id,created_at FROM chats ORDER BY id"), before_header)
+        self.assertEqual(await self.db.execute(schema_sql), before_schema)
+        self.assertEqual(await self.db.execute("SELECT indexdef FROM pg_indexes WHERE schemaname='public' ORDER BY indexname"), before_indexes)
 
     async def test_wire_paste_keeps_exact_utf8_and_no_other_request_fields(self) -> None:
         """chats.paste-wire"""

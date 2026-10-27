@@ -249,7 +249,7 @@ class AsyncFoundation(unittest.IsolatedAsyncioTestCase):
             await p.call("arbol-pi-driver", ["run"], kind="account")
         with self.assertRaises(Refused):
             await p.call("arbol-pi-driver", ["subscriptions", "sign-in", "secret"], kind="account")
-        self.assertEqual(LIMITS, {"start": 25, "stop": 90, "settle": 120, "list": 10, "account": 10})
+        self.assertEqual(LIMITS, {"start": 25, "stop": 90, "settle": 120, "list": 10, "account": 10, "migrate-check": 90, "reimport": 90})
 
     async def test_listing_group_killed_and_mutation_tracked(self) -> None:
         """backend.child-deadlines"""

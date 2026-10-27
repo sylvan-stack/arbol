@@ -159,7 +159,7 @@ class Chats:
         return Snapshot(snapshot.version, {"kind": "snapshot", "chats": self.visible(snapshot.event)[:100]})
 
     async def page(self, params: Params) -> Params:
-        if self.on_list_open:
+        if self.on_list_open and "before" not in params:
             self.on_list_open()
         snapshot = await self.list_view.snapshot({})
         rows = self.visible(snapshot.event)

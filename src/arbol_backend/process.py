@@ -12,10 +12,11 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from typing import Any, BinaryIO
+from uuid import UUID
 
 from .model import Identity, Refused
 
-LIMITS = {"start": 25.0, "stop": 90.0, "settle": 120.0, "list": 10.0, "account": 10.0}
+LIMITS = {"start": 25.0, "stop": 90.0, "settle": 120.0, "list": 10.0, "account": 10.0, "migrate-check": 90.0, "reimport": 90.0}
 DRIVERS = {"claude", "codex", "pi"}
 ACCOUNT_COMMANDS = {"check", "usage", "models"}
 MAX_OUTPUT = 1024 * 1024
@@ -82,8 +83,17 @@ class Programs:
             if kind != "account" or not account:
                 raise Refused("invalid_input", "Only Driver account/catalogue commands are allowed.")
         elif program == "arbol-roots":
-            if kind != "list" or args != ["list"]:
-                raise Refused("invalid_input", "Only the Root catalogue listing is available here.")
+            valid = kind == "list" and args == ["list"]
+            if kind == "migrate-check" and args == ["migrate", self.identity.root, "--check"]:
+                valid, key = True, self.identity.root
+            if kind == "reimport" and len(args) == 4 and args[:3] == ["migrate", self.identity.root, "--chat"]:
+                try:
+                    valid = str(UUID(args[3])) == args[3]
+                except ValueError:
+                    valid = False
+                key = args[3]
+            if not valid:
+                raise Refused("invalid_input", "Unsupported own-Root catalogue or migration command.")
         elif kind not in ("start", "stop", "settle", "list") or not args or args[0] != kind:
             raise Refused("invalid_input", "Root command and deadline must agree.")
         if "--root" in args:
@@ -104,6 +114,7 @@ class Programs:
             arguments += ["--root", self.identity.root]
         arguments += args
         env = {key: value for key, value in os.environ.items() if not key.startswith("PG")}
+        env["HOME"] = str(self.identity.home)
         env["PATH"] = str(self.identity.bin_dir) + os.pathsep + env.get("PATH", "/usr/bin:/bin")
         output = tempfile.TemporaryFile(mode="w+b")
         try:
@@ -131,10 +142,15 @@ class Programs:
                 child.read()
                 status = child.process.poll()
                 if status is not None and child.eof:
-                    if status != 0 or child.overflow:
+                    if child.overflow:
                         raise Refused("no_answer", "The launcher returned no bounded successful reply.")
                     try:
-                        return json.loads(child.data)
+                        value = json.loads(child.data)
+                        structured_refusal = (kind in ("migrate-check", "reimport") and status == 1
+                                              and isinstance(value, dict) and isinstance(value.get("error"), dict))
+                        if status != 0 and not structured_refusal:
+                            raise Refused("no_answer", "The launcher returned no bounded successful reply.")
+                        return value
                     except (ValueError, UnicodeError) as error:
                         raise Refused("no_answer", "The launcher returned no valid JSON reply.") from error
                 if time.monotonic() >= deadline:
