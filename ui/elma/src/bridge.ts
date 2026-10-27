@@ -2,6 +2,7 @@
 export type Fields = Record<string, unknown>;
 export interface RootInfo {root:string;name:string;status:'preparing'|'working'|'failed';current:boolean;failed?:{at:string;reason:string}}
 export interface BridgeError {code:string;message:string;source?:string;[key:string]:unknown}
+export function describe(detail:BridgeError):string{return detail.code+': '+(detail.code==='unknown_method'?'This needs a newer Build. ':'')+detail.message;}
 export class Refusal extends Error { constructor(public detail:BridgeError){super(detail.message);this.name=detail.code;} }
 interface Pending {resolve:(value:unknown)=>void;reject:(error:Refusal)=>void;timer:ReturnType<typeof setTimeout>}
 interface Subscription {id:string;topic:string;params:Fields;seq:number;active:boolean;failure?:string;receive:(event:Fields)=>void;ended:(error?:BridgeError)=>void}

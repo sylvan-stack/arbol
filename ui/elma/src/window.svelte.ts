@@ -1,11 +1,13 @@
-import { Bridge, Refusal, type BridgeError, type Fields, type RootInfo } from './bridge';
+import { Bridge, Refusal, describe, type BridgeError, type Fields, type RootInfo } from './bridge';
 import { AppChannel } from './app-channel';
 import { readPreferences, savePreferences, type Preferences } from './preferences';
 import type { ElmaExchange, ElmaRoute } from '../design-system/src/sections/elma-types';
+import type { ResponseBlock,ToolView,ToolDetails } from '../design-system/src/sections/elma-response';
 export interface ChatInfo {chat:string;title:string|null;firstMessage?:string;createdAt?:string;exchangeCount:number;usage:{inputTokens:number;outputTokens:number}}
 export interface Repository {name:string;folder:string;route:ElmaRoute}
 interface ChatSnapshot {kind:string;chat:ChatInfo;exchanges:ElmaExchange[];more:boolean;settings:{route?:ElmaRoute;workingFolder?:string};marks:{ongoing:boolean};draft:unknown}
 export class ElmaWindow {
+ now=$state(Date.now());private clock=setInterval(()=>{this.now=Date.now();},1000);
  root=$state<RootInfo>({root:'',name:'…',status:'working',current:false});
  connection=$state('Connecting…');problem=$state('');info=$state<ChatInfo|null>(null);exchanges=$state<ElmaExchange[]>([]);
  selected=$state<string|null>(null);more=$state(false);pageBusy=$state(false);pageProblem=$state('');historyOpen=$state(false);settings=$state<ChatSnapshot['settings']>({});ongoing=$state(false);
@@ -24,7 +26,7 @@ export class ElmaWindow {
  get turn(){return this.info?this.info.exchangeCount-this.exchanges.filter(e=>e.number>(this.exchange?.number??Infinity)).length:0;}
  get working(){return this.exchanges.some(e=>['open','accepting','running','stopping','ending','unsaved','gone'].includes(e.state));}
  savePreferences(){savePreferences(this.root.root,this.preferences);}
- private failure(error?:BridgeError){if(error)this.problem=(error.code==='unknown_method'?'This needs a newer Build. ':error.code+': ')+error.message;}
+ private failure(error?:BridgeError){if(error)this.problem=describe(error);}
  private async loadAccounts(){
   try{const data=await this.bridge.call<{drivers:{driver:string;subscriptions?:{id:string;state:string}[];error?:BridgeError}[]}>('accounts.list');
    if(this.closed)return;
@@ -46,7 +48,7 @@ export class ElmaWindow {
    let opened=false;for(const chat of [...new Set(candidates)]){if(generation!==this.bootstrapGeneration)return;if(await this.openChat(chat)){opened=true;break;}}if(generation!==this.bootstrapGeneration)return;
    if(!opened){this.clear();if(typeof request.folder==='string')this.folder=request.folder;}
    this.problem='';
-  }catch(e){this.problem=e instanceof Refusal?e.detail.code+': '+e.message:'The chat could not be read.';}
+  }catch(e){this.problem=e instanceof Refusal?describe(e.detail):'The chat could not be read.';}
  }
  async openChat(chat:string):Promise<boolean>{
   this.cancelOpening?.();const generation=++this.generation;this.chatSub?.close();
@@ -67,6 +69,13 @@ export class ElmaWindow {
    },error=>{this.failure(error);if(!settled){settled=true;reject(new Refusal(error??{code:'ended',message:'The chat subscription ended.'}));}});
   });
  }
+ get response():ResponseBlock[]{return(this.exchange?.items??[]).flatMap((item):ResponseBlock[]=>item.kind==='message'?(item.role==='assistant'?[{id:'message:'+item.position,kind:'text',text:item.text}]:[]):[{id:'tool:'+item.position,kind:'tool',tool:{id:this.exchange!.exchange+':'+item.position,name:item.name,input:item.input,result:item.result,error:item.error,state:item.interrupted?'Interrupted':item.ok?'Complete':'Failed',truncated:item.truncated,cut:item.cut,position:item.position}}]);}
+ get complete(){return !!this.exchange&&['completed','failed','cancelled','interrupted'].includes(this.exchange.state);}
+ get startedAt(){return this.exchange?.runs.map(run=>run.started?.at).filter((value):value is string=>typeof value==='string'&&Number.isFinite(Date.parse(value))).sort((a,b)=>Date.parse(a)-Date.parse(b))[0];}
+ get statusLabel(){const exchange=this.exchange;if(!exchange)return '';return exchange.state==='failed'?'Failed':exchange.state==='stopping'?'Stopping…':exchange.state==='completed'?'Completed':exchange.state==='cancelled'?'Canceled':exchange.state==='interrupted'?(exchange.note?.kind==='ended_stuck'?'Ended because it was stuck':'Interrupted'):`${exchange.route.driver??'Driver'} · ${exchange.route.subscription??'Subscription'} is working…`;}
+ get responseNotes(){return this.exchange?.state==='interrupted'?[this.exchange.note?.kind==='ended_stuck'?'Ended because it was stuck. What had arrived is kept.':"Interrupted: the agent's process ended before the answer was finished. What had arrived is kept."]:[];}
+ async loadTool(tool:ToolView):Promise<ToolDetails>{const exchange=this.exchange?.exchange;if(!exchange||tool.position===undefined)throw new Error('not_found: The tool call is unavailable.');try{return await this.bridge.call<ToolDetails>('toolCall.get',{exchange,position:tool.position});}catch(e){throw new Error(e instanceof Refusal?describe(e.detail):'The tool details could not be read.');}}
+ async openLink(url:string){try{return await this.app.call('app.openLink',{url});}catch(e){throw new Error(e instanceof Refusal?describe(e.detail):'The link could not be opened.');}}
  get prompt(){const item=this.exchange?.items.find(item=>item.kind==='message'&&item.role==='user');return item?.kind==='message'?item.text:'';}
  get history(){return this.exchanges.map((exchange,i)=>{const item=exchange.items.find(item=>item.kind==='message'&&item.role==='user');return{id:exchange.exchange,number:(this.info?.exchangeCount??0)-(this.exchanges.length-1-i),message:item?.kind==='message'?item.text:''};});}
  selectExchange(id:string){if(this.exchanges.some(e=>e.exchange===id)){this.selected=id;this.historyOpen=false;}}
@@ -78,9 +87,9 @@ export class ElmaWindow {
   try{const result=await this.bridge.call<{exchanges:ElmaExchange[];more:boolean}>('chat.exchanges',{chat,beforeNumber,limit:12});
    if(this.closed||generation!==this.generation||ticket!==this.pageTicket)return;
    const rows=new Map(this.exchanges.map(e=>[e.exchange,e]));for(const exchange of result.exchanges)rows.set(exchange.exchange,exchange);this.exchanges=[...rows.values()].sort((a,b)=>a.number-b.number);this.more=result.more;
-  }catch(e){if(ticket===this.pageTicket&&e instanceof Refusal)this.pageProblem=e.detail.code+': '+e.message;}
+  }catch(e){if(ticket===this.pageTicket&&e instanceof Refusal)this.pageProblem=describe(e.detail);}
   finally{if(ticket===this.pageTicket)this.pageBusy=false;}
  }
  private clear(){this.pageTicket++;this.pageBusy=false;this.pageProblem='';this.historyOpen=false;this.cancelOpening?.();this.chatSub?.close();this.chatSub=undefined;this.generation++;this.info=null;this.exchanges=[];this.selected=null;this.settings={};this.ongoing=false;}
- close(){this.cancelOpening?.();this.closed=true;this.bootstrapGeneration++;this.chatSub?.close();this.bridge.close();this.app.close();}
+ close(){clearInterval(this.clock);this.cancelOpening?.();this.closed=true;this.bootstrapGeneration++;this.chatSub?.close();this.bridge.close();this.app.close();}
 }

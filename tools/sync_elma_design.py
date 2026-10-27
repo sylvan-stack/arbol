@@ -14,6 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ENTRIES = [
     "src/sections/ElmaFrame.svelte",
+    "src/sections/Response.svelte",
     "src/sections/PinnedMessage.svelte",
     "src/sections/HistoryTree.svelte",
     "src/patterns/Modal.svelte",

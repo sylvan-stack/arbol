@@ -87,6 +87,8 @@ class Fixture:
                                         "method": method,
                                         "beforeNumber": message.get("params", {}).get("beforeNumber"),
                                         "limit": message.get("params", {}).get("limit"),
+                                        "exchange": message.get("params", {}).get("exchange"),
+                                        "position": message.get("params", {}).get("position"),
                                     }
                                 )
                                 + "\n"
