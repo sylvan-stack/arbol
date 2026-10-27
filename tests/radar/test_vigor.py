@@ -598,7 +598,10 @@ class Advisory(unittest.TestCase):
             "arbol_radar.drivers",
             "arbol_radar.records",
             "arbol_radar.rollup",
+            "arbol_radar.tick",
         },
+        # The tick reaches the Drivers' listing and the records, and nothing else.
+        "tick.py": {"arbol_backend.process", "arbol_radar.drivers", "arbol_radar.records"},
     }
     PRINTS = {"cli.py"}  # the one module that answers on standard output
 
@@ -607,7 +610,7 @@ class Advisory(unittest.TestCase):
         files = sorted((ROOT / "src/arbol_radar").glob("*.py"))
         self.assertEqual(
             [path.name for path in files],
-            ["__init__.py", "cli.py", "drivers.py", "model.py", "records.py", "rollup.py", "vigor.py"],
+            ["__init__.py", "cli.py", "drivers.py", "model.py", "records.py", "rollup.py", "tick.py", "vigor.py"],
         )
         for path in files:
             allowed = self.ALLOWED_IMPORTS | self.REACHES.get(path.name, set())

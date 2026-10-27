@@ -148,3 +148,9 @@ class RecordFixture(unittest.IsolatedAsyncioTestCase):
     async def count(self, table: str) -> int:
         rows = await self.db.execute(f"SELECT count(*) FROM {table}")
         return int(rows[0][0])
+
+    def vigor(self, *extra: str) -> list[str]:
+        """The command line of `arbol vigor` against the check's Root, launchers and database."""
+        words = self.frame.options(self.cluster.address)
+        words[words.index("backend")] = "vigor"
+        return words + list(extra)

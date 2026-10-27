@@ -19,10 +19,13 @@ from datetime import UTC, datetime
 from arbol_backend.database import Database
 from arbol_backend.model import Identity, Refused
 from arbol_backend.process import Programs
-from arbol_radar.drivers import Listed, list_subscriptions
-from arbol_radar.model import FIRST_PROFILE, Profile
+from arbol_radar.drivers import Listed, Listing, list_subscriptions
+from arbol_radar.model import FIRST_PROFILE, Profile, Rejected
 from arbol_radar.records import Records
 from arbol_radar.rollup import Entry, Rollup, as_json, as_text, rollup
+from arbol_radar.tick import recompute
+
+USAGE = ["subscriptions", "usage"]
 
 
 @dataclass(frozen=True)
@@ -52,13 +55,55 @@ def label_of(listed: Listed) -> str:
     return value if isinstance(value, str) and value.strip() else listed.subscription.id
 
 
+async def refresh(
+    programs: Programs, records: Records, listing: Listing, target: tuple[str, str] | None, now: datetime
+) -> dict[str, str]:
+    """Fetch a fresh report of every listed Subscription, or of the one named, through `subscriptions usage` (SGM-D20).
+
+    Each report is recorded as it arrives, whatever its outcome, so a sign-in need or an unreachable vendor shows as
+    unknown with the Driver's message. A Subscription whose fetch failed is named with the reason; one that no Driver
+    lists is refused before anything runs, unless its Driver failed to list, which the listing already says.
+    """
+    chosen = [
+        item
+        for item in listing.subscriptions
+        if target is None or (item.subscription.driver, item.subscription.id) == target
+    ]
+    if target is not None and not chosen and target[0] not in listing.failures:
+        raise Refused("invalid_input", f"No Driver among the launchers lists the Subscription {target[0]}/{target[1]}.")
+    failures: dict[str, str] = {}
+    for item in chosen:
+        subscription = item.subscription
+        name = f"{subscription.driver}/{subscription.id}"
+        try:
+            value = await programs.call(
+                f"arbol-{subscription.driver}-driver",
+                [*USAGE, subscription.id],
+                kind="account",
+                key=subscription.driver,
+            )
+        except Refused as error:
+            failures[name] = f"{error.code}: {error}"
+            continue
+        if not isinstance(value, Mapping):
+            failures[name] = "invalid_reply: the Driver did not answer with a usage report"
+            continue
+        try:
+            await records.record_report(subscription, value, now=now)
+        except Rejected as error:
+            failures[name] = f"invalid_report: {error}"
+    return failures
+
+
 async def read(
     selected: Identity, choice: Options, *, now: datetime | None = None, profile: Profile = FIRST_PROFILE
 ) -> Rollup:
     """The rollup of the latest records of every Subscription of every Driver among the launchers (SGM-1.13).
 
-    A plain read recomputes nothing and contacts no vendor (SGM-D30). A Subscription without a record is listed as
-    such; a Root whose database lacks the Vigor tables refuses with `layout_incomplete` before any Driver is run.
+    A plain read recomputes nothing and contacts no vendor (SGM-D30). With `refresh`, the fresh reports are recorded
+    first and every Subscription is recomputed and recorded, as a tick does, so a report the vendor just gave replaces
+    every predicted window (SGM-D20). A Subscription without a record is listed as such; a Root whose database lacks
+    the Vigor tables refuses with `layout_incomplete` before any Driver is run.
     """
     moment = now or datetime.now(UTC)
     programs = Programs(selected)
@@ -69,7 +114,8 @@ async def read(
         listing = await list_subscriptions(programs)
         failures = dict(listing.failures)
         if choice.refresh:
-            raise Refused("invalid_input", "--refresh is not available yet.")
+            failures.update(await refresh(programs, records, listing, choice.target, moment))
+            failures.update((await recompute(records, listing, profile, moment)).failures)
         entries = [
             Entry(item.subscription, label_of(item), await records.last_result(item.subscription))
             for item in listing.subscriptions

@@ -247,6 +247,7 @@ class Profile:
     gates: Mapping[tuple[str, str], Weight] = field(default_factory=dict)  # learned weights by (family, label)
     stale_rule: str = "shortest-window"  # stale after the shortest window that is summed or can exhaust (SGM-1.8, D31)
     store_weight: float = 1.0  # the store's weight is 1 (SGM-1.4)
+    tick_minutes: float = 3.0  # the backend recomputes every three minutes and no faster (SGM-1.14, SGM-D30)
 
     def __post_init__(self) -> None:
         if self.version not in VERSIONS:
@@ -264,6 +265,10 @@ class Profile:
             raise Rejected(
                 "staleRule", f"The calculation knows the stale rules {STALE_RULES}, not {self.stale_rule!r}."
             )
+        if not (math.isfinite(self.tick_minutes) and self.tick_minutes > 0):
+            raise Rejected(
+                "tickMinutes", f"The recompute interval is a positive number of minutes, not {self.tick_minutes}."
+            )
 
     def gate_weight(self, family: str, label: str) -> Weight:
         """The weight of a gate: the learned one for this family and window, else the placeholder."""
@@ -271,7 +276,8 @@ class Profile:
 
 
 # The first profile: proposed, the even pace, the placeholder 0.1 for every gate, stale after the shortest window that
-# is summed or can exhaust the Subscription. The one profile the calculation knows until a learned one is approved.
+# is summed or can exhaust the Subscription, recomputed every three minutes. The one profile the calculation knows
+# until a learned one is approved.
 FIRST_PROFILE = Profile(version=1, approval="proposed", pace="even", placeholder=Weight(0.1, "placeholder"))
 
 
