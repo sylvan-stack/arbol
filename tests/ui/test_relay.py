@@ -257,10 +257,31 @@ class RelayChecks(unittest.IsolatedAsyncioTestCase):
             line = await child.stdout.readline()
         self.assertTrue(line.startswith(b"http://127.0.0.1:"))
         self.assertIn(b"/?token=", line)
-        child.terminate()
-        async with asyncio.timeout(3):
-            out, err = await child.communicate()
-        self.assertEqual((child.returncode, out, err), (0, b"", b""))
+        url = urlsplit(line.decode().strip())
+        reader, writer = await asyncio.open_connection("127.0.0.1", url.port)
+        self.writers.append(writer)
+        token = parse_qs(url.query)["token"][0]
+        key = base64.b64encode(secrets.token_bytes(16)).decode()
+        writer.write((f"GET /bridge HTTP/1.1\r\nHost: {url.netloc}\r\n"
+                      f"Cookie: arbol_relay_{url.port}={token}\r\nOrigin: http://{url.netloc}\r\n"
+                      f"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                      f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+        await writer.drain()
+        try:
+            async with asyncio.timeout(2):
+                self.assertIn(b"101 Switching Protocols", await reader.readuntil(b"\r\n\r\n"))
+                self.assertEqual(json.loads((await read_frame(reader))[1])["type"], "hello")
+            child.terminate()
+            async with asyncio.timeout(2):
+                out, err = await child.communicate()
+                self.assertEqual(await reader.read(), b"")
+            self.assertEqual((child.returncode, out, err), (0, b"", b""))
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            if child.returncode is None:
+                child.kill()
+                await child.wait()
 
     async def test_document_refresh_keeps_only_old_assets_not_old_documents(self) -> None:
         newer = self.root / "newer"

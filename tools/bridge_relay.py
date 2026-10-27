@@ -143,12 +143,13 @@ class Relay:
     async def close(self) -> None:
         if self.server:
             self.server.close()
-            await self.server.wait_closed()
         for writer in tuple(self.writers):
             writer.close()
         for task in tuple(self.clients):
             task.cancel()
         await asyncio.gather(*tuple(self.clients), return_exceptions=True)
+        if self.server:
+            await self.server.wait_closed()
 
     def authorized(self, headers: dict[str, str]) -> bool:
         pairs = [part.strip().split("=", 1) for part in headers.get("cookie", "").split(";")]
