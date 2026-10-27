@@ -155,7 +155,9 @@ class Records(unittest.TestCase):
 
     def test_a_profile_version_the_calculation_does_not_know_is_rejected(self) -> None:
         """radar.reject-profile-version"""
-        for version in (0, 2):
+        # A version is a whole number from 1; one the Root's table does not record is refused where it is asked for
+        # (`radar.learn-approve-refusals`), since a learned profile is recorded there (SGM-D37).
+        for version in (0, -1, True):
             with self.subTest(version=version):
                 self.rejected("version", Profile, version, "proposed", "even", Weight(0.1))
 
@@ -596,12 +598,22 @@ class Advisory(unittest.TestCase):
             "arbol_backend.model",
             "arbol_backend.process",
             "arbol_radar.drivers",
+            "arbol_radar.learning",
             "arbol_radar.records",
             "arbol_radar.rollup",
             "arbol_radar.tick",
+            "arbol_radar.vigor",
         },
         # The tick reaches the Drivers' listing and the records, and nothing else.
         "tick.py": {"arbol_backend.process", "arbol_radar.drivers", "arbol_radar.records"},
+        # The learner (SYL-299) reaches the records and the Root's chat tables through the bounded connection.
+        "learning.py": {
+            "arbol_backend.database",
+            "arbol_radar.records",
+            "arbol_radar.vigor",
+            "itertools",
+            "statistics",
+        },
     }
     PRINTS = {"cli.py"}  # the one module that answers on standard output
 
@@ -610,7 +622,17 @@ class Advisory(unittest.TestCase):
         files = sorted((ROOT / "src/arbol_radar").glob("*.py"))
         self.assertEqual(
             [path.name for path in files],
-            ["__init__.py", "cli.py", "drivers.py", "model.py", "records.py", "rollup.py", "tick.py", "vigor.py"],
+            [
+                "__init__.py",
+                "cli.py",
+                "drivers.py",
+                "learning.py",
+                "model.py",
+                "records.py",
+                "rollup.py",
+                "tick.py",
+                "vigor.py",
+            ],
         )
         for path in files:
             allowed = self.ALLOWED_IMPORTS | self.REACHES.get(path.name, set())
