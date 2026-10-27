@@ -121,6 +121,12 @@ def verify(folder: Path) -> None:
         or manifest["contractLayoutSha256"] != digest(folder / "tests/backend/layout.sql")
     ):
         raise ValueError("The packaged Python or contract test input changed.")
+    sys.path.insert(0, str(folder))
+    from tools.elma_bundle import verify as verify_renderer
+    renderer = verify_renderer(folder / "ui/elma", record["build"])
+    if manifest.get("renderer") != {"path": "ui/elma", "build": record["build"],
+            "bundleSha256": digest(folder / "ui/elma/bundle.json"), "designSystem": renderer["designSystem"]}:
+        raise ValueError("The packaged renderer provenance changed.")
     lock = tomllib.loads((folder / "uv.lock").read_text())
     pins = {p["name"]: p["version"] for p in lock["package"]}
     if any(pins.get(name) != version for name, version in manifest["dependencies"].items()):

@@ -217,7 +217,11 @@ class Reader:
                 for key in totals:
                     if isinstance(value, dict) and type(value.get(key)) is int and value[key] >= 0:
                         totals[key] += value[key]
-            info: Params = {"chat": chat, "title": headers[0][0] if headers else None,
+            first = await session.execute(
+                "SELECT left(m.text,200) FROM exchanges e JOIN messages m ON m.exchange_id=e.id AND m.position=0 "
+                "WHERE e.chat_id=%s AND e.replaced_by IS NULL ORDER BY e.number LIMIT 1", [chat]
+            )
+            info: Params = {"chat": chat, "firstMessage": first[0][0] if first else "", "title": headers[0][0] if headers else None,
                             "exchangeCount": counts[0][0], "usage": totals}
             if headers:
                 info["createdAt"] = iso(headers[0][1])
