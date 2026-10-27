@@ -132,8 +132,26 @@ def _calculate(
     return tuple(losses), vigor, exhausted, tuple(notes)
 
 
+def next_change(
+    report: Report, windows: tuple[Window, ...], profile: Profile, now: datetime
+) -> tuple[datetime | None, float | None]:
+    """The earliest reset among the windows used and the Vigor at that moment, on the windows predicted for it (SGM-1.6).
+
+    Vigor jumps at a reset: a store's unspent share is lost, a gate opens again. For an exhausted Subscription this is
+    its recovery, "0 now, 0.39 at 13:20" (SGM-1.5, SGM-D16); the value is 0 while another reached window still gates it.
+    None when no window names a reset time.
+    """
+    resets = [window.resets_at for window in windows if window.resets_at is not None and window.resets_at > now]
+    if not resets:
+        return None, None
+    moment = min(resets)
+    then = tuple(predict(window, moment) for window in windows)
+    _, value, _, _ = _calculate(report, then, profile, moment)
+    return moment, value
+
+
 def compute(report: Report, profile: Profile, now: datetime) -> Result:
-    """The Vigor of the report's Subscription at `now` by `profile` (SGM-1.1 to 1.5), on the windows predicted for `now`."""
+    """The Vigor of the report's Subscription at `now` by `profile` (SGM-1.1 to 1.7), on the windows predicted for `now`."""
     if now.tzinfo is None:
         raise Rejected("clock", "The clock names no time zone.")
     family = report.subscription.family
@@ -150,6 +168,7 @@ def compute(report: Report, profile: Profile, now: datetime) -> Result:
         )
     windows = tuple(predict(window, now) for window in report.windows)
     losses, vigor, exhausted, notes = _calculate(report, windows, profile, now)
+    moment, value = next_change(report, windows, profile, now)
     return Result(
         subscription=report.subscription,
         moment=now,
@@ -160,4 +179,6 @@ def compute(report: Report, profile: Profile, now: datetime) -> Result:
         exhausted=exhausted,
         notes=notes,
         predicted=any(window.predicted for window in windows),
+        next_change=moment,
+        next_value=value,
     )

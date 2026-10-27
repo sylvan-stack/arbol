@@ -11,8 +11,21 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tests"))
 from arbol_radar.model import FIRST_PROFILE, Window  # noqa: E402
-from arbol_radar.vigor import compute, predict  # noqa: E402
-from radar.support import CLAUDE, MONDAY, at, by_label, claude, report, window  # noqa: E402
+from arbol_radar.vigor import compute, next_change, predict  # noqa: E402
+from radar.support import (  # noqa: E402
+    CLAUDE,
+    CODEX,
+    KIMI,
+    MONDAY,
+    ZAI,
+    at,
+    by_label,
+    claude,
+    codex,
+    kimi,
+    report,
+    window,
+)
 
 RESET = MONDAY + timedelta(hours=3, minutes=20)  # the worked example's five-hour reset, 13:20
 FIVE_HOURS = timedelta(hours=5)
@@ -119,6 +132,88 @@ class PredictedWindows(unittest.TestCase):
         self.assertEqual((result.predicted, result.report), (False, "r2"))
         self.assertEqual((five.predicted, five.used_percent, five.resets_at), (False, 12.0, RESET + 2 * FIVE_HOURS))
         self.assertEqual(by_label(old)["Five hours"].resets_at, five.resets_at)  # the prediction had the same reset
+
+
+class TheNextChange(unittest.TestCase):
+    """The earliest reset among the windows and the Vigor at that moment on the predicted windows (SGM-1.6, SGM-D16)."""
+
+    def test_the_claude_example_changes_at_13_20_to_0_39(self) -> None:
+        """radar.next-change-claude"""
+        result = compute(report(CLAUDE, claude(), extra={"isUsingOverage": False}), FIRST_PROFILE, MONDAY)
+        assert result.vigor is not None and result.next_value is not None
+        self.assertEqual((round(result.vigor, 2), result.exhausted, result.next_change), (0.37, False, RESET))
+        self.assertAlmostEqual(result.next_value, 0.8 - 4120 / 10080)
+        self.assertEqual(round(result.next_value, 2), 0.39)
+        self.assertFalse(result.predicted)  # the prediction for 13:20 does not mark the result of 10:00
+
+    def test_the_exhausted_claude_example_recovers_at_13_20_to_0_39(self) -> None:
+        """radar.recovery-claude"""
+        reached = report(CLAUDE, claude(100, reached=True), extra={"isUsingOverage": False})
+        result = compute(reached, FIRST_PROFILE, MONDAY)
+        assert result.next_value is not None
+        self.assertEqual((result.exhausted, result.vigor, result.next_change), (True, 0.0, RESET))
+        self.assertAlmostEqual(result.next_value, 0.8 - 4120 / 10080)
+        self.assertEqual(round(result.next_value, 2), 0.39)
+        at_reset = compute(reached, FIRST_PROFILE, RESET)  # the recovery, computed at that moment
+        assert at_reset.vigor is not None
+        self.assertEqual((at_reset.exhausted, at_reset.predicted, round(at_reset.vigor, 2)), (False, True, 0.39))
+        self.assertEqual(result.next_value, at_reset.vigor)
+
+    def test_the_earliest_reset_decides_whatever_the_window_counts(self) -> None:
+        """radar.next-change-earliest"""
+        result = compute(report(KIMI, kimi()), FIRST_PROFILE, MONDAY)
+        assert result.vigor is not None and result.next_value is not None
+        self.assertEqual((round(result.vigor, 2), result.next_change), (0.47, MONDAY + timedelta(hours=1)))
+        self.assertAlmostEqual(result.next_value, 0.6 - 5700 / 43200)  # the month an hour on; the calls window fresh
+        codex_result = compute(report(CODEX, codex()), FIRST_PROFILE, MONDAY)
+        assert codex_result.next_value is not None
+        self.assertEqual(codex_result.next_change, MONDAY + timedelta(hours=2, minutes=30))
+        self.assertAlmostEqual(codex_result.next_value, 0.3 - 1290 / 10080)
+
+    def test_a_subscription_still_exhausted_at_the_next_change_has_the_value_0(self) -> None:
+        """radar.next-change-exhausted-still"""
+        windows = [
+            window("session", "5-hour window", resource=None, used=50, resets=at(hours=2, minutes=30), minutes=300),
+            window("weekly", "Weekly window", resource=None, used=100, resets=at(days=1), minutes=10080, reached=True),
+        ]
+        result = compute(report(CODEX, windows), FIRST_PROFILE, MONDAY)
+        self.assertEqual((result.exhausted, result.vigor), (True, 0.0))
+        self.assertEqual((result.next_change, result.next_value), (MONDAY + timedelta(hours=2, minutes=30), 0.0))
+        at_week = compute(report(CODEX, windows), FIRST_PROFILE, MONDAY + timedelta(days=1))
+        assert at_week.vigor is not None
+        self.assertEqual((at_week.exhausted, at_week.predicted), (False, True))  # the week predicted fresh
+        self.assertAlmostEqual(at_week.vigor, 0.1 * (1 - 210 / 300))  # the five-hour window, fresh since 08:30
+
+    def test_a_predicted_window_sets_the_next_change_too(self) -> None:
+        """radar.next-change-predicted"""
+        now = MONDAY + timedelta(hours=4)
+        result = compute(report(CLAUDE, claude()), FIRST_PROFILE, now)
+        assert result.next_value is not None
+        self.assertEqual((result.predicted, result.next_change), (True, RESET + FIVE_HOURS))
+        self.assertAlmostEqual(result.next_value, 0.8 - 3820 / 10080)  # the week at 18:20; the five-hour window fresh
+
+    def test_the_store_reset_drops_the_value(self) -> None:
+        """radar.next-change-store-reset"""
+        windows = [
+            window("session", "Five hours", used=0, resets=at(hours=3), minutes=300),
+            window("weekly", "Seven days", used=0, resets=at(hours=2), minutes=10080),
+        ]
+        result = compute(report(CLAUDE, windows), FIRST_PROFILE, MONDAY)
+        assert result.next_value is not None
+        self.assertEqual(result.vigor, 1.0)
+        self.assertEqual(result.next_change, MONDAY + timedelta(hours=2))
+        self.assertAlmostEqual(result.next_value, 0.1 * (1 - 60 / 300))  # the week fresh, the five-hour window alone
+
+    def test_no_reset_time_means_no_next_change(self) -> None:
+        """radar.next-change-none"""
+        windows = [window("other", "MCP", resource="calls", used=10, resets=None, minutes=43200)]
+        result = compute(report(ZAI, windows), FIRST_PROFILE, MONDAY)
+        self.assertEqual((result.next_change, result.next_value), (None, None))
+        self.assertEqual(
+            next_change(report(ZAI, windows), report(ZAI, windows).windows, FIRST_PROFILE, MONDAY), (None, None)
+        )
+        empty = compute(report(ZAI, [], outcome="unsupported", message="no allowance reading"), FIRST_PROFILE, MONDAY)
+        self.assertEqual((empty.next_change, empty.next_value), (None, None))
 
 
 if __name__ == "__main__":

@@ -379,7 +379,10 @@ class WorkedExamples(unittest.TestCase):
         self.assertEqual(round(result.vigor, 2), 0.37)
         self.assertFalse(result.exhausted)
         self.assertEqual((result.notes, result.unknown, result.stale, result.predicted), ((), None, None, False))
-        self.assertEqual((result.next_change, result.next_value), (None, None))
+        assert result.next_value is not None
+        self.assertEqual(
+            (result.next_change, round(result.next_value, 2)), (MONDAY + timedelta(hours=3, minutes=20), 0.39)
+        )
 
     def test_codex_week_with_a_day_to_go_counts_its_windows_as_tokens(self) -> None:
         """radar.example-codex"""
