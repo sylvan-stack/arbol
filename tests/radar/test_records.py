@@ -7,7 +7,6 @@ tables from `tests/radar/layout.sql`, a copy of what both Roots' own layouts car
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
 import unittest
 from datetime import timedelta
@@ -18,54 +17,15 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "runtime/site-packages"))
 sys.path.insert(0, str(ROOT / "tests"))
-from backend.support import PG, Cluster, Frame  # noqa: E402
-
-from arbol_backend.database import Database  # noqa: E402
-from arbol_backend.model import Refused, identity, parse  # noqa: E402
+from arbol_backend.model import Refused  # noqa: E402
 from arbol_backend.process import Programs  # noqa: E402
 from arbol_radar.drivers import LIST, Listed, Listing, drivers_of, list_subscriptions, records_of  # noqa: E402
-from arbol_radar.model import FIRST_PROFILE, Profile, Rejected, Subscription, Weight  # noqa: E402
-from arbol_radar.records import Records, loss_row  # noqa: E402
+from arbol_radar.model import FIRST_PROFILE, Profile, Rejected, Weight  # noqa: E402
+from arbol_radar.records import loss_row  # noqa: E402
+from radar.fixture import LAYOUT, LISTING, TABLES, RecordFixture, record, usage  # noqa: E402
 from radar.support import CLAUDE, CODEX, FETCHED, KIMI, MONDAY, ZAI, at, claude, codex, kimi, window  # noqa: E402
 
-LAYOUT = ROOT / "tests/radar/layout.sql"
 MERGED = Path.home() / "repos/sylvan-stack/readonly/arbol-root"
-TABLES = ("vigor_profiles", "vigor_reports", "vigor_results")
-
-
-def usage(
-    windows: list[dict[str, Any]], *, fetched: str = FETCHED, extra: dict[str, Any] | None = None
-) -> dict[str, Any]:
-    """A `UsageReport` as a Driver stores it with the Subscription (DRV-1.18)."""
-    value: dict[str, Any] = {"outcome": "ok", "fetchedAt": fetched, "windows": windows}
-    if extra is not None:
-        value["extra"] = extra
-    return value
-
-
-def record(subscription: Subscription, last_usage: dict[str, Any] | None = None, **more: Any) -> dict[str, Any]:
-    """A Subscription record as `subscriptions list` delivers it (DRV-1, `Subscription`), never a secret."""
-    value: dict[str, Any] = {
-        "id": subscription.id,
-        "family": subscription.family,
-        "label": subscription.id.title(),
-        "auth": "vendor_login",
-        "state": "signed_in",
-        "settings": {},
-        "createdAt": "2026-10-01T00:00:00Z",
-        "updatedAt": "2026-10-26T09:55:00Z",
-        **more,
-    }
-    if last_usage is not None:
-        value["lastUsage"] = last_usage
-    return value
-
-
-LISTING = {
-    "arbol-claude-driver": {"output": [record(CLAUDE, usage(claude(), extra={"isUsingOverage": False}))]},
-    "arbol-codex-driver": {"output": [record(CODEX, usage(codex()))]},
-    "arbol-pi-driver": {"output": [record(KIMI, usage(kimi())), record(ZAI)]},
-}
 
 
 class LayoutCopy(unittest.TestCase):
@@ -86,59 +46,6 @@ class LayoutCopy(unittest.TestCase):
                 layout = path.read_text(encoding="utf-8")
                 self.assertTrue(layout.endswith("\n" + text), f"the {root} layout does not end with the copy")
                 self.assertLess(layout.index("exchange_notes"), layout.index("vigor_profiles"))
-
-
-class RecordFixture(unittest.IsolatedAsyncioTestCase):
-    """A private cluster with the chat tables and the Vigor tables, a private Root folder and stand-in launchers."""
-
-    cluster: Cluster
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.cluster = Cluster()
-        try:
-            subprocess.run(
-                [
-                    str(PG / "psql"),
-                    "-X",
-                    "-v",
-                    "ON_ERROR_STOP=1",
-                    "-h",
-                    str(cls.cluster.socket),
-                    "-p",
-                    "5432",
-                    "-U",
-                    "bkd",
-                    "-d",
-                    "arbol_test",
-                ],
-                input=LAYOUT.read_bytes(),
-                capture_output=True,
-                check=True,
-                timeout=10,
-            )
-        except BaseException:
-            cls.cluster.close()
-            raise
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        cls.cluster.close()
-
-    async def asyncSetUp(self) -> None:
-        self.frame = Frame()
-        self.selected = identity(ROOT, parse(self.frame.options(self.cluster.address)), home=self.frame.home)
-        self.db = Database(self.selected)
-        self.records = Records(self.db)
-        await self.db.execute("TRUNCATE vigor_results, vigor_reports, vigor_profiles")
-
-    async def asyncTearDown(self) -> None:
-        await self.db.close()
-        self.frame.close()
-
-    async def count(self, table: str) -> int:
-        rows = await self.db.execute(f"SELECT count(*) FROM {table}")
-        return int(rows[0][0])
 
 
 class TheDatabase(RecordFixture):

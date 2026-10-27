@@ -10,6 +10,9 @@ import stat
 from collections.abc import Coroutine
 from typing import Any
 
+from arbol_radar.records import Records
+from arbol_radar.tick import Ticker
+
 from .accounts import Accounts
 from .bridge import MAX_LINE, Connection, Registry
 from .chats import Chats
@@ -45,6 +48,7 @@ class Backend:
         self.workspace = Workspace(identity, self.settings, self.registry)
         self.roots = Roots(identity, self.programs, self.database)
         self.roots.register(self.registry)
+        self.ticker = Ticker(self.programs, Records(self.database))  # Subscriptions Vigor every three minutes (SGM-1.14)
         self.chats = Chats(identity, self.database, self.programs, self.roots, self.registry,
                            lineage=isinstance(self.record.get("grewFrom"), str))
         self.health = Health(self.database, self.chats.attention)
@@ -99,6 +103,10 @@ class Backend:
         while True:
             await asyncio.sleep(4)
             self.programs.reap()
+            try:
+                await self.ticker.wake()  # ticks once the interval has passed, no faster (SGM-D30)
+            except Refused:
+                pass  # a Root without the Vigor tables, or a database away: the backend runs on without Vigor
             if self.windows:
                 try:
                     await self.roots.refresh()
