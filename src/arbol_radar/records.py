@@ -203,6 +203,13 @@ class Records:
             subscription, value, report_id=str(identifier), arrived_at=arrived, run=str(run) if run else None
         )
 
+    async def reported(self) -> list[Subscription]:
+        """Every Subscription with a recorded report, by its Driver and identifier."""
+        rows = await self.database.execute(
+            "SELECT DISTINCT driver, subscription, family FROM vigor_reports ORDER BY driver, subscription, family", []
+        )
+        return [Subscription(str(driver), str(identifier), str(family)) for driver, identifier, family in rows]
+
     async def reports(self, subscription: Subscription) -> list[Report]:
         """Every recorded report of the Subscription, oldest first."""
         rows = await self.database.execute(
