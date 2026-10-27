@@ -29,7 +29,7 @@ base=launcher.parent
 name=launcher.name
 config=json.loads((base/'behavior.json').read_text()).get(name,{})
 record={'program':name,'args':sys.argv[1:],'pid':os.getpid(),'pgid':os.getpgrp(),
-        'path':os.environ['PATH'],'cwd':os.getcwd(),'pgOverrides':[k for k in os.environ if k.startswith('PG')]}
+        'path':os.environ['PATH'],'cwd':os.getcwd(),'home':os.environ.get('HOME'),'pgOverrides':[k for k in os.environ if k.startswith('PG')]}
 fd=os.open(base/'calls.jsonl',os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600)
 os.write(fd,(json.dumps(record)+'\\n').encode());os.close(fd)
 if config.get('fork'):
