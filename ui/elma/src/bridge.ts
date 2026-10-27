@@ -75,7 +75,7 @@ export class Bridge {
    this.lost(false);if(m.bridge!==1){this.versionOk=false;this.state('This window cannot work with this Bridge version.');return;}
    if(!m.root||typeof m.root!=='object'||typeof m.build!=='string')return;
    this.versionOk=true;this.online=true;this.backendBuild=m.build;this.state('Connected');this.options.onhello?.(m.root as unknown as RootInfo,m.build);
-   for(const sub of this.topics)this.start(sub);
+   for(const sub of this.topics)if(!sub.active)this.start(sub);
    void this.reloadFor(m.build);return;
   }
   if(!this.online)return;

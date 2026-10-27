@@ -5,7 +5,7 @@ const server=await createServer({root:new URL('../../ui/elma',import.meta.url).p
 const browser=await chromium.launch({headless:true}),page=await browser.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
 try{
  await page.clock.install();await page.addInitScript(()=>{window.posts=[];window.webkit={messageHandlers:{arbol:{postMessage:raw=>window.posts.push(raw)}}};});
- await page.goto(server.resolvedUrls.local[0]+'tests/drafts.html');await page.waitForFunction(()=>window.fixture);
+ await page.goto(server.resolvedUrls.local[0]+'tests/drafts.html');await page.waitForFunction(()=>window.fixture);await page.clock.pauseAt(new Date((await page.evaluate(()=>Date.now()))+1000));
  const setup=await page.evaluate(()=>{
   const {Bridge,Drafts,parseWire,stringifyWire}=window.fixture;window.receive=x=>window.arbolBridge.receive(stringifyWire(x));window.bridge=new Bridge({build:'development'});window.receive({type:'hello',bridge:1,root:{root:'t1',name:'Test',status:'working',current:true},build:'development'});window.drafts=new Drafts(window.bridge);window.editor=window.drafts.select('t1',{folder:'/fictional/one'});window.sub=parseWire(window.posts.at(-1)).id;window.seq=0;window.publish=draft=>window.receive({type:'event',id:window.sub,seq:++window.seq,event:{kind:'snapshot',draft}});window.saves=()=>window.posts.map(parseWire).filter(m=>m.method==='draft.save');return window.editor.ready;
  });assert.equal(setup,false);

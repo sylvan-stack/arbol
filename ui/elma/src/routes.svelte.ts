@@ -67,6 +67,7 @@ export class Routing {
   finally{if(context===this.context&&choice===this.choice)this.saving=false;}
  }
  async retryModels(){this.catalogs.delete(key(this.value));await this.loadModels();}
+ preview(route:ElmaRoute){this.choice++;this.chosen={...route};this.resolve();}
  async settle(){await this.pending;if(this.saving)await this.settle();}
  close(){this.closed=true;this.accountGeneration++;this.generation++;}
 }

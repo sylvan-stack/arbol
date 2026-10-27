@@ -11,6 +11,7 @@ import os
 import signal
 import sys
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -32,6 +33,54 @@ class Fixture:
         self.drafts: dict[str, dict[str, Any]] = dict(scenario.get("drafts", {}))
         self.draft_revision = int(scenario.get("draftRevision", 9007199254740993))
         self.paste_dir: Path | None = None
+        self.accepted: dict[str, dict[str, Any]] = {}
+        self.requests: dict[str, dict[str, Any]] = {}
+
+    async def chat_changed(self, chat: str) -> None:
+        for writer, subscriptions in tuple(self.windows.items()):
+            for id, subscription in tuple(subscriptions.items()):
+                if subscription["topic"] == "chat" and subscription["params"].get("chat") == chat:
+                    subscription["seq"] += 1
+                    await self.send(writer, {"type": "event", "id": id, "seq": subscription["seq"],
+                                             "event": self.scenario["chats"][chat]})
+
+    async def start_message(self, params: dict[str, Any]) -> dict[str, Any]:
+        exchange, chat = params["exchange"], params["chat"]
+        if exchange in self.accepted:
+            if self.requests[exchange] != params:
+                return {"error": {"code": "invalid_input", "message": "Changed request"}}
+            return {**self.accepted[exchange], "duplicate": True}
+        chats = self.scenario.setdefault("chats", {})
+        snapshot = chats.get(chat)
+        if snapshot and any(row["state"] not in ("completed", "failed", "cancelled", "interrupted") for row in snapshot["exchanges"]):
+            return {"error": {"code": "chat_busy", "message": "Another message of this chat is running"}}
+        selected = params.get("draft", {})
+        scope = {"folder": selected["folder"]} if "folder" in selected else {"chat": chat}
+        draft = self.drafts.get(self.draft_key(scope))
+        if selected and (draft is None or draft["revision"] != selected["revision"] or draft["text"] != params["message"]):
+            return {"error": {"code": "draft_conflict", "message": "Changed elsewhere", "draft": draft}}
+        at = datetime.now(UTC).isoformat()
+        if snapshot is None:
+            snapshot = {"kind": "snapshot", "chat": {"chat": chat, "title": None, "firstMessage": params["message"][:200],
+                        "createdAt": at, "exchangeCount": 0, "usage": {"inputTokens": 0, "outputTokens": 0}},
+                        "exchanges": [], "more": False, "settings": {}, "marks": {"ongoing": True}, "draft": None}
+            chats[chat] = snapshot
+        number = snapshot["chat"]["exchangeCount"] + 1
+        snapshot["chat"]["exchangeCount"] = number
+        snapshot["marks"]["ongoing"] = True
+        snapshot["exchanges"].append({"exchange": exchange, "number": number, "state": "open", "route": params["route"],
+            "workingFolder": params["workingFolder"], "acceptedAt": at,
+            "items": [{"kind": "message", "role": "user", "position": 0, "text": params["message"]}], "runs": []})
+        self.requests[exchange] = params
+        self.accepted[exchange] = {"accepted": True, "duplicate": False, "chat": chat, "exchange": exchange, "number": number}
+        if self.record:
+            with os.fdopen(os.open(self.record, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "w") as out:
+                out.write(json.dumps({"method": "fixture.start", "chat": chat, "exchange": exchange}) + "\n")
+        if selected:
+            self.drafts.pop(self.draft_key(scope), None)
+            await self.draft_changed(scope)
+        await self.chat_changed(chat)
+        return self.accepted[exchange]
 
     @staticmethod
     def draft_key(params: dict[str, Any]) -> str:
@@ -47,8 +96,13 @@ class Fixture:
                                              "event": {"kind": "draft", "draft": current}})
 
     async def send(self, writer: asyncio.StreamWriter, value: dict[str, Any]) -> None:
-        writer.write((json.dumps(value, ensure_ascii=False) + "\n").encode())
-        await writer.drain()
+        if writer.is_closing():
+            return
+        try:
+            writer.write((json.dumps(value, ensure_ascii=False) + "\n").encode())
+            await writer.drain()
+        except OSError:
+            pass  # A disconnected window must not prevent another window's publication.
 
     async def client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         task = asyncio.current_task()
@@ -112,7 +166,7 @@ class Fixture:
                                         "limit": message.get("params", {}).get("limit"),
                                         "exchange": message.get("params", {}).get("exchange"),
                                         "position": message.get("params", {}).get("position"),
-                                        **({"params": message.get("params", {})} if method.startswith(("draft.", "accounts.")) or method == "chat.settings" else {}),
+                                        **({"params": message.get("params", {})} if method.startswith(("draft.", "accounts.")) or method in ("chat.settings", "chat.send", "exchange.stop", "exchange.sendAgain") else {}),
                                         **({"characters": len(message["params"]["text"])} if method == "paste.save" else {}),
                                     }
                                 )
@@ -159,6 +213,16 @@ class Fixture:
                         )
                     elif method == "root.get":
                         value = {"root": ROOT, "layoutComplete": True}
+                    elif method == "chat.send":
+                        value = await self.start_message(message["params"])
+                        if "error" in value:
+                            await self.send(writer, {"type": "reply", "id": message["id"], "error": value["error"]})
+                            continue
+                        if self.scenario.get("dropSendReplies", 0):
+                            self.scenario["dropSendReplies"] -= 1
+                            return
+                    elif method == "exchange.stop":
+                        value = self.scenario.get("calls", {}).get(method, {"ended": "cancelled"})
                     elif method == "draft.get":
                         value = self.drafts.get(self.draft_key(message["params"]))
                     elif method == "paste.save":
@@ -204,6 +268,10 @@ class Fixture:
         elif value["kind"] == "scenario":
             self.scenario.update(value["value"])
         elif value["kind"] == "publish":
+            if value["topic"] == "chat" and value["event"].get("kind") == "saved":
+                saved = value["event"]["exchange"]
+                for snapshot in self.scenario.get("chats", {}).values():
+                    snapshot["exchanges"] = [saved if row["exchange"] == saved["exchange"] else row for row in snapshot["exchanges"]]
             for writer, subs in tuple(self.windows.items()):
                 for id, s in tuple(subs.items()):
                     if s["topic"] == value["topic"]:
@@ -216,7 +284,8 @@ class Fixture:
             else:
                 self.drafts[key] = value["draft"]
                 self.draft_revision = max(self.draft_revision, value["draft"]["revision"])
-            await self.draft_changed(value["scope"])
+            if not value.get("silent"):
+                await self.draft_changed(value["scope"])
 
 
 async def main() -> None:
@@ -225,6 +294,7 @@ async def main() -> None:
     parser.add_argument("--scenario")
     parser.add_argument("--record", type=Path)
     parser.add_argument("--build")
+    parser.add_argument("--registry-dir")
     args = parser.parse_args()
     scenario = json.loads(Path(args.scenario).read_text()) if args.scenario else {}
     if args.build:
@@ -235,7 +305,9 @@ async def main() -> None:
         fixture.paste_dir.mkdir(parents=True, mode=0o700)
         socket = Path(folder) / "b.sock"
         backend = await asyncio.start_unix_server(fixture.client, path=socket, limit=relay.LIMIT)
-        host = relay.Relay(Path(args.bundle), socket)
+        selection = argparse.Namespace(root="t1", registry_dir=args.registry_dir, root_dir=folder, bundle=None, socket=None)
+        host = relay.Relay(relay.paths(selection)[0] if args.registry_dir else Path(args.bundle), socket,
+                           refresh=(lambda: relay.paths(selection)[0]) if args.registry_dir else None)
         await host.start()
         print("http://" + host.host + "/?token=" + host.token, flush=True)
         stop = asyncio.Event()

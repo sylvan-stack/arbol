@@ -77,6 +77,7 @@
   });
   $effect(() => {
     if (!firstSapling) return;
+    if(busy){expanded=false;return;}
     const hasText = value.length > 0;
     if (context !== priorContext) {
       priorContext = context;
@@ -91,7 +92,7 @@
       });
   });
   function firstKeys(event: KeyboardEvent) {
-    if (!firstSapling || empty || event.defaultPrevented || document.querySelector('dialog[open]'))
+    if (!firstSapling || empty || busy || disabled || event.defaultPrevented || document.querySelector('dialog[open]'))
       return;
     if (
       event.key === 'Enter' &&
@@ -146,7 +147,7 @@
         {repository} · {route.driver ?? '—'} · {route.subscription ?? '—'} · model: {route.model ??
           '—'} · thinking: {route.effort ?? '—'}
       </p>{/if}
-    {#if empty || expanded}<textarea
+    {#if empty || expanded&&!busy}<textarea
         bind:this={firstInput}
         aria-label="Message"
         placeholder={'Message ' + repository + '…'}
@@ -173,7 +174,7 @@
           : ''}</small
       >
     {:else}<div class="closed">
-        <button class="start-message" onclick={() => (expanded = true)}
+        <button class="start-message" disabled={busy} onclick={() => (expanded = true)}
           >Press Enter to start new message ⏎</button
         ><button
           class="scroll"

@@ -14,19 +14,19 @@ function decode(value:unknown):Draft|null {
 const body=(draft:Draft|null)=>draft?.text??'';
 export class DraftEditor {
  readonly pastes:Pastes;
- text=$state('');ready=$state(false);dirty=$state(false);saving=$state(false);problem=$state('');
+ text=$state('');ready=$state(false);dirty=$state(false);saving=$state(false);pendingSend=$state(false);problem=$state('');sendProblem=$state('');
  canonical=$state<Draft|null>(null);conflict=$state<{mine:string;theirs:string}|null>(null);recovery=$state<string|null>(null);storageProblem=$state('');
  private editBase:Revision|null=null;private recovered?:{text:string;baseRevision:Revision|null};
  private timer?:ReturnType<typeof setTimeout>;private retry?:ReturnType<typeof setTimeout>;
  private pending?:Promise<void>;private captured?:Saving;private observation=0;private version=0;private closed=false;
  private subscription:{close:()=>void;retry:()=>void};
- constructor(private bridge:Bridge,readonly scope:DraftScope,private storageKey:string){
+ constructor(private bridge:Bridge,readonly scope:DraftScope,private storageKey:string,onCanonical?:(editor:DraftEditor)=>void){
   this.pastes=new Pastes(bridge,this);
   try{const raw=sessionStorage.getItem(storageKey);if(raw){const value=parseWire(raw) as {text?:unknown;baseRevision?:unknown};if(typeof value?.text==='string'&&(value.baseRevision===null||validRevision(value.baseRevision)))this.recovered={text:value.text,baseRevision:value.baseRevision};else sessionStorage.removeItem(storageKey);}}
   catch{this.storageProblem='Unsaved-text recovery is unavailable in this window.';}
   this.subscription=bridge.subscribe('draft',scope,event=>{
    if(!['snapshot','draft'].includes(String(event.kind)))return;
-   try{this.observe(decode(event.draft));}catch(e){this.problem=e instanceof Error?e.message:'The Draft could not be read.';}
+   try{this.observe(decode(event.draft));onCanonical?.(this);}catch(e){this.problem=e instanceof Error?e.message:'The Draft could not be read.';}
   },error=>{this.problem='Draft not loaded: '+(error?.message??'The subscription ended.');});
  }
  get revision(){return this.canonical?.revision??null;}
@@ -100,6 +100,9 @@ export class DraftEditor {
  takeTheirs(){this.cancel();this.pastes.cancel();this.text=body(this.canonical);this.editBase=this.revision;this.dirty=false;this.conflict=null;this.problem='';this.persist();}
  restore(){if(this.recovery===null)return;const text=this.recovery;this.recovery=null;this.recovered=undefined;this.input(text);}
  discardRecovery(){this.recovery=null;this.recovered=undefined;this.persist();}
+ receiveDraft(value:unknown){this.observe(decode(value));}
+ rereadAfterSend(){if(!this.dirty)this.ready=false;this.subscription.retry();}
+ restoreMessage(text:string,base:Revision|null){this.cancel();this.pastes.cancel();this.text=text;this.editBase=base;this.recovery=null;this.recovered=undefined;this.dirty=text!==body(this.canonical);this.conflict=this.dirty?{mine:text,theirs:body(this.canonical)}:null;this.problem='';this.persist();}
  private persist(){
   try{if(this.recovered&&(!this.ready||this.recovery!==null))sessionStorage.setItem(this.storageKey,stringifyWire(this.recovered));else if(this.dirty)sessionStorage.setItem(this.storageKey,stringifyWire({text:this.text,baseRevision:this.editBase}));else sessionStorage.removeItem(this.storageKey);this.storageProblem='';}
   catch{this.storageProblem='Unsaved text is held in this page, but could not be kept for a reload.';}
@@ -109,17 +112,17 @@ export class DraftEditor {
 
 export class Drafts {
  private editors=new Map<string,DraftEditor>();private root='';private sends=new Set<Promise<unknown>>();current=$state<DraftEditor>();
- constructor(private bridge:Bridge){}
- rootChanged(root:string){if(this.root&&root!==this.root){for(const editor of this.editors.values())editor.close();this.editors.clear();this.current=undefined;}this.root=root;}
+ constructor(private bridge:Bridge,private onCanonical?:(root:string,editor:DraftEditor)=>void){}
+ rootChanged(root:string){if(this.root&&root!==this.root){for(const editor of this.editors.values())editor.close();this.editors.clear();this.sends.clear();this.current=undefined;}this.root=root;}
+ owner(root:string,scope:DraftScope){if(root!==this.root)throw new Error('The Draft belongs to a different Root.');const key=root+':'+JSON.stringify(scope);const editor=this.editors.get(key)??new DraftEditor(this.bridge,scope,'elma.unsaved.v1:'+key,value=>this.onCanonical?.(root,value));this.editors.set(key,editor);return editor;}
  select(root:string,scope:DraftScope){
   this.rootChanged(root);
-  const key=root+':'+JSON.stringify(scope);
-  const next=this.editors.get(key)??new DraftEditor(this.bridge,scope,'elma.unsaved.v1:'+key);this.editors.set(key,next);
+  const next=this.owner(root,scope);
   const previous=this.current;this.current=next;
   if(next!==previous)void previous?.flush().then(()=>this.prune());this.prune();
   return next;
  }
- private prune(){for(const [key,editor]of this.editors)if(editor!==this.current&&editor.ready&&!editor.dirty&&!editor.saving&&editor.recovery===null){editor.close();this.editors.delete(key);}}
+ private prune(){for(const [key,editor]of this.editors)if(editor!==this.current&&editor.ready&&!editor.pendingSend&&!editor.dirty&&!editor.saving&&editor.recovery===null){editor.close();this.editors.delete(key);}}
  holdSend(completion:Promise<unknown>){this.sends.add(completion);const remove=()=>this.sends.delete(completion);void completion.then(remove,remove);}
  async beforeReload(){
   while(this.sends.size)await Promise.all([...this.sends].map(p=>p.catch(()=>undefined)));
