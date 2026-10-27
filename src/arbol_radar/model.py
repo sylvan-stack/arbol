@@ -7,7 +7,7 @@ hold no behaviour beyond what the Interface rejects and the used-share rules; th
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Literal
@@ -20,6 +20,7 @@ OUTCOMES = ("ok", "needs_sign_in", "unavailable", "unsupported")
 KINDS = ("session", "weekly", "other")
 SUMMED = ("tokens", "credits")  # the resources whose windows take part in the sum (SGM-1.2, SGM-D24)
 VERSIONS = (1,)  # the profile versions the calculation knows; a learned profile adds its own
+STALE_RULES = ("shortest-window",)  # the stale rules the calculation knows (SGM-1.8, SGM-D31)
 
 # What the calculation knows of a family's windows beyond the contract's fields, by the window's label: which window is
 # scoped to the coding product the Subscription serves, the store among equal-length longest windows (SGM-D25), and
@@ -259,6 +260,10 @@ class Profile:
                 raise Rejected("weight", f"The weight of {name} lies within [0, 1], not {weight.value}.")
         if self.store_weight != 1:
             raise Rejected("storeWeight", f"The store's weight is 1, not {self.store_weight}.")
+        if self.stale_rule not in STALE_RULES:
+            raise Rejected(
+                "staleRule", f"The calculation knows the stale rules {STALE_RULES}, not {self.stale_rule!r}."
+            )
 
     def gate_weight(self, family: str, label: str) -> Weight:
         """The weight of a gate: the learned one for this family and window, else the placeholder."""
@@ -268,6 +273,22 @@ class Profile:
 # The first profile: proposed, the even pace, the placeholder 0.1 for every gate, stale after the shortest window that
 # is summed or can exhaust the Subscription. The one profile the calculation knows until a learned one is approved.
 FIRST_PROFILE = Profile(version=1, approval="proposed", pace="even", placeholder=Weight(0.1, "placeholder"))
+
+
+def stale_after(profile: Profile, windows: Iterable[Window]) -> timedelta | None:
+    """How old a report may be before a result on it is stale, by the profile's stale rule (SGM-1.8, SGM-D31).
+
+    `shortest-window`: the Subscription's shortest window that takes part in the sum (tokens or credits, or no resource
+    and counted as tokens) or can exhaust it (any window not scoped to one tool), five hours for every family today.
+    None when no such window has a length: nothing then says the report is stale.
+    """
+    lengths = [
+        window.window_minutes
+        for window in windows
+        if window.window_minutes is not None
+        and (window.scope != "tool" or window.resource is None or window.resource in SUMMED)
+    ]
+    return timedelta(minutes=min(lengths)) if lengths else None
 
 
 @dataclass(frozen=True)
@@ -284,6 +305,10 @@ class Loss:
     weight: float | None
     contribution: float | None  # weight × loss for a summed window
     reason: str | None  # why a window is shown and not summed
+    predicted: bool = False  # the window was predicted fresh after a reset without a newer report (SGM-1.7)
+    used_percent: float | None = None  # the window as used: its share, reset time and length, predicted or delivered
+    resets_at: datetime | None = None
+    window_minutes: float | None = None
 
 
 @dataclass(frozen=True)
@@ -292,7 +317,7 @@ class Result:
 
     subscription: Subscription
     moment: datetime
-    report: str  # the id of the report used
+    report: str | None  # the id of the report used; None while there is no report yet (SGM-1.9)
     profile: int  # the profile version used
     windows: tuple[Loss, ...]
     vigor: float | None
