@@ -51,12 +51,14 @@ class Following:
     tracked: set[str] = field(default_factory=set)
     statuses: dict[str, Params] = field(default_factory=dict)
     sent_at: float = 0
+    notes: dict[str, Params] = field(default_factory=dict)
 
     def reset(self) -> None:
         for cursor in self.cursors.values():
             cursor.close()
         self.cursors.clear()
         self.statuses.clear()
+        self.notes.clear()
 
 
 class Lines:
@@ -119,6 +121,7 @@ class Live:
         self.failed = False
         self.ready = asyncio.Event()
         self.stopping: dict[str, str] = {}
+        self.notes: dict[str, tuple[str, Params, bool]] = {}
         self.followers: dict[Subscription, asyncio.Task[None]] = {}
         self.states: dict[Subscription, Following] = {}
         self.row_cache: dict[str, dict[str, tuple[str, int, Any]]] = {}
@@ -138,6 +141,11 @@ class Live:
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
         return task
+
+    def note(self, chat: str, value: Params, *, committed: bool = False) -> None:
+        previous = self.notes.get(value["exchange"])
+        committed |= previous is not None and previous[1] == value and previous[2]
+        self.notes[value["exchange"]] = (chat, value, committed)
 
     def mark_stopping(self, exchange: str, chat: str) -> None:
         self.stopping[exchange] = chat
@@ -355,6 +363,11 @@ class Live:
                 self.stopping.pop(exchange, None)
                 if cursor := state.cursors.pop(exchange, None):
                     cursor.close()
+        for exchange, (chat, note, _) in list(self.notes.items()):
+            if chat == params["chat"] and state.notes.get(exchange) != note:
+                self.check(sub, state)
+                sub.send({"kind": "note", "note": note})
+                state.notes[exchange] = note
 
     async def follow(self, sub: Subscription) -> None:
         state = Following()
@@ -424,6 +437,13 @@ class Live:
                     task.cancel()
                 self.saved_cache.pop(key, None)
                 self.saved_at.pop(key, None)
+            for exchange, (chat, note, committed) in list(self.notes.items()):
+                snapshot = self.chats.chat_view.states.get(self.chats.chat_view.key({"chat": chat}), {})
+                in_snapshot = any(row.get("note") == note for row in snapshot.get("exchanges", []))
+                delivered = all(sub in self.states and self.states[sub].notes.get(exchange) == note
+                                for sub in listeners if sub.params["chat"] == chat)
+                if committed and (chat not in chats or in_snapshot and delivered):
+                    self.notes.pop(exchange, None)
             await asyncio.sleep(0.05)
 
     def start(self) -> None:

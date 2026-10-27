@@ -21,6 +21,7 @@ from .lifetime import Lifetime
 from .live import Live
 from .migration import Migration
 from .model import Identity, Refused, root_record, settings
+from .notes import Notes
 from .process import Programs
 from .roots import Roots
 from .settling import Settling
@@ -42,6 +43,7 @@ class Backend:
         self.drafts = Drafts(self.chats, self.registry)
         self.dispatch = Dispatch(identity, self.programs, self.chats, self.drafts, self.registry, self.settings)
         self.live = Live(identity, self.chats, self.dispatch)
+        self.notes = Notes(identity, self.database, self.chats, self.live)
         self.controls = Controls(self.programs, self.dispatch, self.live, self.registry)
         self.settling = Settling(self.programs, self.database, self.live)
         self.migration = Migration(identity, self.programs, self.chats, self.registry, self.record)
@@ -136,6 +138,7 @@ class Backend:
             self.dispatch.start()
             self.chats.start()
             self.live.start()
+            self.notes.start()
             self.task(self.initial_work())
             self.task(self.initial_catalogue())
             self.task(self.monitor())
@@ -157,6 +160,7 @@ class Backend:
                 await asyncio.gather(*self.tasks, return_exceptions=True)
             if server is not None:
                 await server.wait_closed()
+            await self.notes.close()
             await self.health.close()
             await self.settling.close()
             await self.controls.close()
