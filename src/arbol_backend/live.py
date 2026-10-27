@@ -253,11 +253,14 @@ class Live:
         if any(self.known[id].chat == params["chat"] for id in self.unreadable if id in self.known):
             raise Error("no_answer")
         rows = {row["exchange"]: row for row in snapshot.event["exchanges"]}
-        ids = {id for id, record in self.records.items() if record.chat == params["chat"]} | state.tracked
+        ids = ({id for id, record in self.records.items() if record.chat == params["chat"]} | state.tracked
+               | {id for id, chat in self.stopping.items() if chat == params["chat"]})
         actual = await self.row_states(params["chat"], ids)
         self.check(sub, state)
         for exchange, chat in list(self.stopping.items()):
-            if chat == params["chat"] and (exchange not in rows or rows[exchange]["state"] == "open"):
+            if chat == params["chat"] and exchange in actual and actual[exchange][0] != "open":
+                self.stopping.pop(exchange, None)
+            elif chat == params["chat"] and (exchange not in rows or rows[exchange]["state"] == "open"):
                 self.status(sub, state, {"exchange": exchange, "state": "stopping"})
         secret = (self.chats.database.parameters or {}).get("password", "")
         for exchange, observed in list(self.records.items()):
