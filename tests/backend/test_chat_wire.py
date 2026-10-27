@@ -62,6 +62,8 @@ class WindowFixture(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.01)
         assert self.backend.chats.catalogues.task
         await self.backend.chats.catalogues.task
+        if self.backend.measurements.task is not None:
+            await asyncio.wait_for(asyncio.shield(self.backend.measurements.task), 3)
 
     async def asyncTearDown(self) -> None:
         for writer in self.writers:

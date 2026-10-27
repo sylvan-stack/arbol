@@ -62,6 +62,7 @@ class Backend:
         self.settling.read_listing = self.listings.get
         self.discovery = Discovery(self.roots, self.listings, self.registry)
         self.recovery = Recovery(self.health, self.chats, self.registry, self.settling, self.notes, self.discovery, self.stuck)
+        self.recovery.on_returned = self.measurements.returned
         self.migration = Migration(identity, self.programs, self.chats, self.registry, self.record)
         self.windows: set[asyncio.StreamWriter] = set()
         self.tasks: set[asyncio.Task[None]] = set()
@@ -148,6 +149,7 @@ class Backend:
                 flush=True,
             )
             self.health.start()
+            self.measurements.start()
             self.dispatch.start()
             self.chats.start()
             self.live.start()

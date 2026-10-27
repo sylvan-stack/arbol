@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 from .bridge import Registry, Subscription
 from .chats import Chats
@@ -20,6 +20,7 @@ class Recovery:
                  notes: Notes, discovery: Discovery, stuck: Stuck, *, retry: float = RETRY) -> None:
         self.health, self.chats, self.registry = health, chats, registry
         self.settling, self.notes, self.discovery, self.stuck = settling, notes, discovery, stuck
+        self.on_returned: Callable[[], None] | None = None
         self.closed = False
         self.retry = retry
         self.looks: set[asyncio.Task[None]] = set()
@@ -78,6 +79,11 @@ class Recovery:
         if not self.valid(epoch):
             return
         self.pause()
+        if self.on_returned:
+            try:
+                self.on_returned()
+            except Exception:
+                pass  # Storage observation cannot prevent this epoch's return snapshots.
         self.settling.request()
         self.notes.request()
         self.stuck.retry_notes()
@@ -93,6 +99,7 @@ class Recovery:
 
     async def close(self) -> None:
         self.closed = True
+        self.on_returned = None
         self.health.on_return = None
         self.health.on_away = None
         self.settling.on_settled = None
