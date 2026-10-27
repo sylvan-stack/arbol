@@ -8,7 +8,7 @@
  import Composer from '../design-system/src/sections/Composer.svelte';
  import { ElmaWindow } from './window.svelte';
  let view=$state<ElmaWindow>();
- let composerText=$state(''),composerOpen=$state(false),reader=$state<{scrollToEdge:(edge:'top'|'bottom')=>void}>();
+ let composerOpen=$state(false),reader=$state<{scrollToEdge:(edge:'top'|'bottom')=>void}>();
  onMount(()=>{const model=new ElmaWindow();view=model;return()=>model.close();});
  function keys(event:KeyboardEvent){if(!view||!event.metaKey||event.altKey)return;if(event.key.toLowerCase()==='p'){event.preventDefault();if(view.info)view.historyOpen=!view.historyOpen;}else if(!view.historyOpen&&(event.key==='['||event.code==='BracketLeft')){event.preventDefault();void view.older();}else if(!view.historyOpen&&(event.key===']'||event.code==='BracketRight')){event.preventDefault();view.newer();}}
 </script>
@@ -21,7 +21,7 @@
   <section class="chat" aria-label="Chat">
    {#if view.exchange}<PinnedMessage text={view.prompt} index={view.turn} total={view.info?.exchangeCount??0} busy={view.pageBusy} onolder={()=>void view?.older()} onnewer={()=>view?.newer()} onhistory={()=>{if(view)view.historyOpen=true;}}/><ResponseReader bind:this={reader} identity={(view.info?.chat??'')+':'+view.exchange.exchange} snapshot={view.snapshotRevision} positions={view.readingPositions} response={{blocks:view.response,streaming:!view.complete,statusLabel:view.statusLabel,acceptedAt:view.exchange.acceptedAt,startedAt:view.startedAt,endedAt:view.exchange.endedAt,now:view.now,error:view.error,questions:view.questions,notes:view.responseNotes,openTools:view.openTools,onToolOpen:(id,open)=>{if(view)view.openTools[id]=open;},onloadTool:tool=>view!.loadTool(tool),onopenLink:url=>view!.openLink(url)}}/>
    {:else if view.restoring}<p class="empty" role="status">Restoring selected turn…</p>{/if}
-   <Composer firstSapling empty={!view.info} repository={view.repository} route={view.route} context={view.info?.chat??view.folder} bind:value={composerText} bind:expanded={composerOpen} readOnly status="Loading Draft…" onTop={()=>reader?.scrollToEdge('top')} onBottom={()=>reader?.scrollToEdge('bottom')}/>
+   {#if view.drafts.current}{@const draft=view.drafts.current}<Composer firstSapling empty={!view.info} repository={view.repository} route={view.route} context={view.info?.chat??view.folder} value={draft.text} bind:expanded={composerOpen} readOnly={!draft.ready} status={draft.status} problem={draft.problem} conflict={draft.conflict} oninput={text=>draft.input(text)} onblur={()=>void draft.flush()} onKeepMine={()=>draft.keepMine()} onTakeTheirs={()=>draft.takeTheirs()} onTop={()=>reader?.scrollToEdge('top')} onBottom={()=>reader?.scrollToEdge('bottom')}/>{/if}
   </section>
 
  {#if view.historyOpen}<Modal title={`History · ${view.info?.exchangeCount??0} turns`} onclose={()=>{if(view)view.historyOpen=false;}} initialFocus="button[data-history-row]"><HistoryTree items={view.history} selected={view.selected??''} problem={view.pageProblem} more={view.more} busy={view.pageBusy} onselect={id=>view?.selectExchange(id)} onmore={()=>void view?.page()}/></Modal>{/if}

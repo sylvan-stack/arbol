@@ -23,6 +23,9 @@
     status = '',
     problem = '',
     context = '',
+    conflict,
+    onKeepMine,
+    onTakeTheirs,
     firstSapling = false,
     empty = false,
   }: {
@@ -42,6 +45,9 @@
     status?: string;
     problem?: string;
     context?: string;
+    conflict?: {mine:string;theirs:string}|null;
+    onKeepMine?:()=>void;
+    onTakeTheirs?:()=>void;
     firstSapling?: boolean;
     empty?: boolean;
   } = $props();
@@ -165,6 +171,7 @@
       </div>{/if}
     {#if !empty && !expanded && status}<small class="muted" role="status">{status}</small>{/if}
     {#if problem}<p class="problem" role="alert">{problem}</p>{/if}
+    {#if conflict}<section class="conflict" aria-label="Changed elsewhere"><strong>Changed elsewhere</strong><div class="versions"><div><b>Your text</b><pre>{conflict.mine||'(empty)'}</pre></div><div><b>Other text</b><pre>{conflict.theirs||'(removed)'}</pre></div></div><div class="choices"><button onclick={onKeepMine} disabled={!onKeepMine}>Keep mine</button><button onclick={onTakeTheirs} disabled={!onTakeTheirs}>Take theirs</button></div></section>{/if}
   </section>
 {:else}
   <section class="panel stack" aria-label="Message composer">
@@ -276,7 +283,9 @@
     font-size: 0.9em;
     overflow-wrap: anywhere;
   }
+  .conflict{border:1px solid var(--warning);padding:12px;border-radius:4px;max-height:40vh;overflow:auto}.versions{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:8px 0}.versions>div{min-width:0}.versions pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;margin:4px 0}.choices{display:flex;gap:8px}.choices button{font:inherit;color:var(--text);background:var(--panel);border:1px solid var(--border);border-radius:4px;padding:6px 10px}.choices button:focus-visible{outline:2px solid var(--focus)}
   @media (max-width: 600px) {
+    .versions{grid-template-columns:1fr}
     .first-composer {
       padding: 12px;
     }

@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/sylvan-stack/arbol-design-system",
-  "commit": "0f5cf63160f1ef094425124377a1179692b479af",
+  "commit": "71b65208af812f5381aafcd12e20bf3d6bac13d5",
   "files": {
     "docs/licenses/Hanken-Grotesk-OFL.txt": "f45f60ca871850c58d8dc9c973bd6fcad40c137e9d037172b961e8ca68c87ef7",
     "docs/licenses/Spline-Sans-Mono-OFL.txt": "3127290ccd196ec0c4ffa60296845224a034b92c81de8231b0916278ed7607e1",
@@ -20,7 +20,7 @@
     "src/patterns/EntitySummary.svelte": "ca45e2cede2b2bc5a17a1bb569276d6dfc77bebe2a7e08852039888fba4ad8aa",
     "src/patterns/Modal.svelte": "6732a9949f94eec50530cc7e92893b69570bedfcf291816356bf53731f74aa6c",
     "src/patterns/WorkspaceShell.svelte": "2260cffb92134f07e2065e9b56dcc13a8450c3fbd233a4a7cb179d2d05ed600c",
-    "src/sections/Composer.svelte": "24a2b5e34c49ad67056bb01d9257977ac82cf4753fa59c09f8b9e2673938be52",
+    "src/sections/Composer.svelte": "32b696b4db60a18883b1ca9a969492d1bbec5401183445cc6071b6259e1c662b",
     "src/sections/ElmaFrame.svelte": "4ff3135f85731930357dd2165d4e7aaa710ff569e6b41d9ff64a6effd980170b",
     "src/sections/HistoryTree.svelte": "87c65f8dae23f3d41c100aa283b64bdb98b7f463a8f169f17897291f88eabd67",
     "src/sections/PinnedMessage.svelte": "06bd36f23fcb76b80aa3947a368cf6d9f63ecfa44a2ea315eb7c80da55223caf",
