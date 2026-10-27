@@ -1,0 +1,84 @@
+@import './legacy-tokens.css';
+:root {
+  --font-scale: 1;
+  --font-ui: 'Hanken Grotesk', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: 'Spline Sans Mono', 'SF Mono', Menlo, monospace;
+  --text: #f9f5f0;
+  --muted: #d9d0c6;
+  --disabled: #9d9994;
+  --canvas: var(--arbol-color-bg);
+  --panel: var(--arbol-color-surface);
+  --inset: var(--arbol-color-surface-2);
+  --border: var(--arbol-color-border);
+  --accent: var(--arbol-color-accent);
+  --selected: color-mix(in srgb, var(--accent) 15%, var(--panel));
+  --action-ink: #171210;
+  --link: #f2c9ac;
+  --success: #b9e5c4;
+  --warning: #ffe0a0;
+  --failure: #ffb6b0;
+  --focus: #ffe2b8;
+  --radius-sm: 5px;
+  --radius-md: 9px;
+  --radius-lg: 16px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --control-height: 36px;
+  --row-height: 56px;
+  --table-height: 44px;
+  --motion-fast: 120ms;
+  --motion-normal: 160ms;
+  --motion-panel: 200ms;
+  --shadow: 0 12px 40px #0003;
+  color-scheme: dark;
+}
+/* Mid-ladder surfaces are darker than the archive: readable metadata takes precedence. */
+[data-theme='cedar'],
+[data-theme='evergreen'],
+[data-theme='driftwood'] {
+  --panel: color-mix(in oklch, var(--arbol-color-surface) 72%, #111);
+  --inset: color-mix(in oklch, var(--arbol-color-surface-2) 65%, #111);
+}
+[data-theme='amber'],
+[data-theme='sandstone'],
+[data-theme='oat'],
+[data-theme='birch'],
+[data-theme='paper'] {
+  --text: #231e19;
+  --muted: #342b23;
+  --disabled: #72685e;
+  --action-ink: #fff;
+  --link: #482611;
+  --success: #17371f;
+  --warning: #483003;
+  --failure: #5b1414;
+  --focus: #65361c;
+  color-scheme: light;
+}
+[data-density='compact'] {
+  --control-height: 32px;
+  --row-height: 44px;
+  --table-height: 36px;
+}
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 0ms;
+    --motion-normal: 0ms;
+    --motion-panel: 0ms;
+  }
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+[data-theme='driftwood'] {
+  --canvas: color-mix(in oklch, var(--arbol-color-bg) 88%, #111);
+  --failure: #ffd0ca;
+}

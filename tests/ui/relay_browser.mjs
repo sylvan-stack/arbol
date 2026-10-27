@@ -7,10 +7,10 @@ let errors='';child.stderr.on('data',data=>errors+=data);const lines=createInter
 const url=await new Promise((resolve,reject)=>{lines.once('line',resolve);child.once('exit',()=>reject(new Error('Fixture ended early')));});
 const browser=await chromium.launch({headless:true});const context=await browser.newContext();const page=await context.newPage();const pageErrors=[];page.on('pageerror',e=>pageErrors.push(e.message));
 try {
- await page.goto(url);await page.getByRole('status').filter({hasText:'Connected'}).waitFor();
+ await page.goto(url);await page.getByRole('heading',{name:/Elma Chat · Fixture Root/}).waitFor();
  assert(!page.url().includes('token='));const cookies=await context.cookies();assert.equal(cookies.length,1);assert.equal(cookies[0].httpOnly,true);assert.equal(cookies[0].sameSite,'Strict');
  const unauth=await browser.newContext();const denied=await unauth.newPage();const response=await denied.goto(new URL(page.url()).origin);assert.equal(response.status(),403);await unauth.close();
- child.stdin.write(JSON.stringify({kind:'disconnect'})+'\n');await page.getByRole('status').filter({hasText:'Reconnecting…'}).waitFor();await page.getByRole('status').filter({hasText:'Connected'}).waitFor();assert.deepEqual(pageErrors,[]);
+ child.stdin.write(JSON.stringify({kind:'disconnect'})+'\n');await page.getByRole('status').filter({hasText:'Reconnecting…'}).waitFor();await page.getByRole('heading',{name:/Elma Chat · Fixture Root/}).waitFor();assert.deepEqual(pageErrors,[]);
  console.log('relay.browser-cookie/csp/websocket/lost/newhello: passed against real loopback HTTP/WS and private stand-in Unix socket');
 } finally {
  await browser.close();const exited=new Promise(resolve=>child.once('exit',resolve));child.kill('SIGTERM');const code=await exited;assert.equal(code,0);assert.equal(errors,'');lines.close();

@@ -51,6 +51,26 @@ class Fixture:
                         if message["topic"] == "root"
                         else {"kind": "snapshot", "items": []},
                     )
+                    if message["topic"] == "chat":
+                        chat = message.get("params", {}).get("chat", "")
+                        event = self.scenario.get("chats", {}).get(
+                            chat,
+                            {
+                                "kind": "snapshot",
+                                "chat": {
+                                    "chat": chat,
+                                    "title": None,
+                                    "firstMessage": "",
+                                    "exchangeCount": 0,
+                                    "usage": {"inputTokens": 0, "outputTokens": 0},
+                                },
+                                "exchanges": [],
+                                "more": False,
+                                "settings": {},
+                                "marks": {"ongoing": False},
+                                "draft": None,
+                            },
+                        )
                     await self.send(writer, {"type": "event", "id": message["id"], "seq": 1, "event": event})
                 elif message["type"] == "unsubscribe":
                     self.windows[writer].pop(message["id"], None)
@@ -61,6 +81,13 @@ class Fixture:
                         value = {
                             "subscriptions": [{"id": id, "seq": s["seq"]} for id, s in self.windows[writer].items()]
                         }
+                    elif method == "workspace.get" and method not in self.scenario.get("calls", {}):
+                        value = {
+                            "repositories": [{"name": "sylvan-stack", "folder": "/fictional/readonly", "route": {}}],
+                            "route": {},
+                        }
+                    elif method == "accounts.list" and method not in self.scenario.get("calls", {}):
+                        value = {"drivers": []}
                     elif method == "root.get":
                         value = {"root": ROOT, "layoutComplete": True}
                     else:

@@ -9,6 +9,8 @@
     "test:bridge": "node ../../tests/ui/bridge.mjs"
   },
   "dependencies": {
+    "@fontsource/hanken-grotesk": "5.3.0",
+    "@fontsource/spline-sans-mono": "5.3.0",
     "svelte": "5.56.4"
   },
   "devDependencies": {

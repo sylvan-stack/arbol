@@ -1,0 +1,503 @@
+/* @arbol/design-system — design tokens (ux-ui-guide.md §1.7), warm/organic re-skin.
+ * 12-step BRIGHTNESS LADDER, dark→light. Layout/spacing/radius/type are
+ * theme-invariant (defined once in :root); only color tokens are redefined per
+ * [data-theme]. Token NAMES are stable (--arbol-*) so every consumer keeps working.
+ *
+ * Theme switching: set data-theme="<id>" on the document root. All colors cascade.
+ * Generated values authored in oklch so the ladder stays perceptually even. */
+
+/* Remote font import omitted for the offline specimen. */
+
+:root {
+  /* Named layout dimensions (theme-invariant) */
+  --arbol-control-bar-height: 40px; /* CONTROL_BAR_HEIGHT — Header + Status Bar */
+  --arbol-navigation-panel-width: 248px; /* NAVIGATION_PANEL_WIDTH */
+  /* Left gutter in the Header so content clears the macOS traffic-light buttons. */
+  --arbol-traffic-light-gutter: 98px;
+  /* Reading widths — the centered text column (Elma chat) and the chat column
+   * cap that drives the wide-screen two-column breakpoint. */
+  --arbol-text-area-max-width: 720px; /* TEXT_AREA_MAX_WIDTH */
+  --arbol-max-chat-area-width: 820px; /* MAX_CHAT_AREA_WIDTH */
+
+  /* Spacing scale */
+  --arbol-space-1: 4px;
+  --arbol-space-2: 8px;
+  --arbol-space-3: 12px;
+  --arbol-space-4: 16px;
+  --arbol-space-5: 24px;
+  --arbol-space-6: 32px;
+  --arbol-row-gap: var(--arbol-space-3);
+
+  /* Radii */
+  --arbol-radius-s: 5px;
+  --arbol-radius-m: 9px;
+  --arbol-radius-l: 16px;
+
+  /* Type. Two independent scale factors (default 1 → unchanged): UI chrome grows
+   * with --arbol-font-scale; the agent-response body grows further on its own
+   * --arbol-content-font-scale. Apps that don't scale simply leave both at 1. */
+  --arbol-font-ui: 'Hanken Grotesk', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --arbol-font-mono: 'Spline Sans Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  --arbol-font-scale: 1;
+  --arbol-content-font-scale: 1;
+  --arbol-type-label: calc(11.5px * var(--arbol-font-scale));
+  --arbol-type-body: calc(13.5px * var(--arbol-font-scale));
+  --arbol-type-title: calc(16px * var(--arbol-font-scale));
+  --arbol-type-display: calc(22px * var(--arbol-font-scale));
+  --arbol-content-font-size: calc(13.5px * var(--arbol-content-font-scale));
+
+  /* Shadows (resolve against the per-theme --arbol-color-shadow) */
+  --arbol-shadow-1: 0 1px 0 var(--arbol-color-hairline), 0 1px 2px rgba(0, 0, 0, 0.16);
+  --arbol-shadow-2: 0 4px 16px -4px var(--arbol-color-shadow);
+  --arbol-shadow-pop: 0 18px 50px -12px var(--arbol-color-shadow);
+
+  /* Default color schema when no data-theme is set (mirrors Redwood, #03).
+   * `data-theme` is set on the document root, so :root must hold these AND
+   * stay first — every [data-theme] block below has equal specificity and
+   * wins purely by coming later in source order. (Without a standalone :root
+   * default, themes listed before Redwood would be overridden by it.) */
+  --arbol-color-bg: oklch(0.235 0.013 42);
+  --arbol-color-surface: oklch(0.28 0.013 42);
+  --arbol-color-surface-2: oklch(0.325 0.013 42);
+  --arbol-color-border: oklch(0.385 0.016 42);
+  --arbol-color-hairline: oklch(0.365 0.013 42 / 0.45);
+  --arbol-color-text: oklch(0.945 0.013 74);
+  --arbol-color-text-muted: oklch(0.7 0.015 66);
+  --arbol-color-shadow: oklch(0.075 0.02 42 / 0.55);
+  --arbol-color-accent: oklch(0.665 0.142 42);
+  --arbol-color-accent-ink: oklch(0.19 0.045 42);
+  --arbol-color-accent-soft: oklch(0.665 0.142 42 / 0.15);
+  --arbol-color-link: oklch(0.745 0.135 248);
+  --arbol-color-ok: oklch(0.74 0.125 152);
+  --arbol-color-warn: oklch(0.8 0.125 80);
+  --arbol-color-err: oklch(0.665 0.165 28);
+  --arbol-brief-pane-bg-silver: linear-gradient(
+    150deg,
+    oklch(0.865 0.035 42) 0%,
+    oklch(0.74 0.058 42) 48%,
+    oklch(0.6 0.078 42) 100%
+  );
+  --arbol-brief-pane-fg: oklch(0.245 0.06 42);
+  --arbol-brief-ring: oklch(0.4 0.09 42 / 0.55);
+}
+
+@keyframes arbol-rebuild-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 01 Ironbark — dark · bg L 0.150 · hue 33 */
+[data-theme='ironbark'] {
+  --arbol-color-bg: oklch(0.15 0.013 33);
+  --arbol-color-surface: oklch(0.195 0.013 33);
+  --arbol-color-surface-2: oklch(0.24 0.013 33);
+  --arbol-color-border: oklch(0.3 0.016 33);
+  --arbol-color-hairline: oklch(0.28 0.013 33 / 0.45);
+  --arbol-color-text: oklch(0.945 0.013 74);
+  --arbol-color-text-muted: oklch(0.7 0.015 66);
+  --arbol-color-shadow: oklch(0.075 0.02 33 / 0.55);
+  --arbol-color-accent: oklch(0.665 0.142 33);
+  --arbol-color-accent-ink: oklch(0.19 0.045 33);
+  --arbol-color-accent-soft: oklch(0.665 0.142 33 / 0.15);
+  --arbol-color-ok: oklch(0.74 0.125 152);
+  --arbol-color-warn: oklch(0.8 0.125 80);
+  --arbol-color-err: oklch(0.665 0.165 28);
+  --arbol-brief-pane-bg-silver: linear-gradient(
+    150deg,
+    oklch(0.865 0.035 33) 0%,
+    oklch(0.74 0.058 33) 48%,
+    oklch(0.6 0.078 33) 100%
+  );
+  --arbol-brief-pane-fg: oklch(0.245 0.06 33);
+  --arbol-brief-ring: oklch(0.4 0.09 33 / 0.55);
+}
+
+/* 02 Bloodwood — dark · bg L 0.190 · hue 20 */
+[data-theme='bloodwood'] {
+  --arbol-color-bg: oklch(0.19 0.013 20);
+  --arbol-color-surface: oklch(0.235 0.013 20);
+  --arbol-color-surface-2: oklch(0.28 0.013 20);
+  --arbol-color-border: oklch(0.34 0.016 20);
+  --arbol-color-hairline: oklch(0.32 0.013 20 / 0.45);
+  --arbol-color-text: oklch(0.945 0.013 74);
+  --arbol-color-text-muted: oklch(0.7 0.015 66);
+  --arbol-color-shadow: oklch(0.075 0.02 20 / 0.55);
+  --arbol-color-accent: oklch(0.665 0.142 20);
+  --arbol-color-accent-ink: oklch(0.19 0.045 20);
+  --arbol-color-accent-soft: oklch(0.665 0.142 20 / 0.15);
+  --arbol-color-ok: oklch(0.74 0.125 152);
+  --arbol-color-warn: oklch(0.8 0.125 80);
+  --arbol-color-err: oklch(0.665 0.165 28);
+  --arbol-brief-pane-bg-silver: linear-gradient(
+    150deg,
+    oklch(0.865 0.035 20) 0%,
+    oklch(0.74 0.058 20) 48%,
+    oklch(0.6 0.078 20) 100%
+  );
+  --arbol-brief-pane-fg: oklch(0.245 0.06 20);
+  --arbol-brief-ring: oklch(0.4 0.09 20 / 0.55);
+}
+
+/* 03 Redwood (default) — dark · bg L 0.235 · hue 42 */
+[data-theme='redwood'] {
+  --arbol-color-bg: oklch(0.235 0.013 42);
+  --arbol-color-surface: oklch(0.28 0.013 42);
+  --arbol-color-surface-2: oklch(0.325 0.013 42);
+  --arbol-color-border: oklch(0.385 0.016 42);
+  --arbol-color-hairline: oklch(0.365 0.013 42 / 0.45);
+  --arbol-color-text: oklch(0.945 0.013 74);
+  --arbol-color-text-muted: oklch(0.7 0.015 66);
+  --arbol-color-shadow: oklch(0.075 0.02 42 / 0.55);
+  --arbol-color-accent: oklch(0.665 0.142 42);
+  --arbol-color-accent-ink: oklch(0.19 0.045 42);
+  --arbol-color-accent-soft: oklch(0.665 0.142 42 / 0.15);
+  --arbol-color-link: oklch(0.745 0.135 248);
+  --arbol-color-ok: oklch(0.74 0.125 152);
+  --arbol-color-warn: oklch(0.8 0.125 80);
+  --arbol-color-err: oklch(0.665 0.165 28);
+  --arbol-brief-pane-bg-silver: linear-gradient(
+    150deg,
+    oklch(0.865 0.035 42) 0%,
+    oklch(0.74 0.058 42) 48%,
+    oklch(0.6 0.078 42) 100%
+  );
+  --arbol-brief-pane-fg: oklch(0.245 0.06 42);
+  --arbol-brief-ring: oklch(0.4 0.09 42 / 0.55);
+}
+
+/* 04 Mahogany — dark · bg L 0.285 · hue 66 */
+[data-theme='mahogany'] {
+  --arbol-color-bg: oklch(0.285 0.013 66);
+  --arbol-color-surface: oklch(0.33 0.013 66);
+  --arbol-color-surface-2: oklch(0.375 0.013 66);
+  --arbol-color-border: oklch(0.435 0.016 66);
+  --arbol-color-hairline: oklch(0.415 0.013 66 / 0.45);
+  --arbol-color-text: oklch(0.945 0.013 74);
+  --arbol-color-text-muted: oklch(0.7 0.015 66);
+  --arbol-color-shadow: oklch(0.075 0.02 66 / 0.55);
+  --arbol-color-accent: oklch(0.665 0.142 66);
+  --arbol-color-accent-ink: oklch(0.19 0.045 66);
+  --arbol-color-accent-soft: oklch(0.665 0.142 66 / 0.15);
+  --arbol-color-ok: oklch(0.74 0.125 152);
+  --arbol-color-warn: oklch(0.8 0.125 80);
+  --arbol-color-err: oklch(0.665 0.165 28);
+  --arbol-brief-pane-bg-silver: linear-gradient(
+    150deg,
+    oklch(0.865 0.035 66) 0%,
+    oklch(0.74 0.058 66) 48%,
+    oklch(0.6 0.078 66) 100%
+  );
+  --arbol-brief-pane-fg: oklch(0.245 0.06 66);
+  --arbol-brief-ring: oklch(0.4 0.09 66 / 0.55);
+}
+
+/* 05 Cedar — dark · bg L 0.345 · hue 98 */
+[data-theme='cedar'] {
+  --arbol-color-bg: oklch(0.345 0.013 98);
+  --arbol-color-surface: oklch(0.39 0.013 98);
+  --arbol-color-surface-2: oklch(0.435 0.013 98);
+  --arbol-color-border: oklch(0.495 0.016 98);
+  --arbol-color-hairline: oklch(0.475 0.013 98 / 0.45);
+  --arbol-color-text: oklch(0.945 0.013 74);
+  --arbol-color-text-muted: oklch(0.7 0.015 66);
+  --arbol-color-shadow: oklch(0.075 0.02 98 / 0.55);
+  --arbol-color-accent: oklch(0.665 0.142 98);
+  --arbol-color-accent-ink: oklch(0.19 0.045 98);
+  --arbol-color-accent-soft: oklch(0.665 0.142 98 / 0.15);
+  --arbol-color-ok: oklch(0.74 0.125 152);
+  --arbol-color-warn: oklch(0.8 0.125 80);
+  --arbol-color-err: oklch(0.665 0.165 28);
+  --arbol-brief-pane-bg-silver: linear-gradient(
+    150deg,
+    oklch(0.865 0.035 98) 0%,
+    oklch(0.74 0.058 98) 48%,
+    oklch(0.6 0.078 98) 100%
+  );
+  --arbol-brief-pane-fg: oklch(0.245 0.06 98);
+  --arbol-brief-ring: oklch(0.4 0.09 98 / 0.55);
+}
+
+/* 06 Evergreen — dark · bg L 0.408 · hue 152 */
+[data-theme='evergreen'] {
+  --arbol-color-bg: oklch(0.408 0.013 152);
+  --arbol-color-surface: oklch(0.453 0.013 152);
+  --arbol-color-surface-2: oklch(0.498 0.013 152);
+  --arbol-color-border: oklch(0.558 0.016 152);
+  --arbol-color-hairline: oklch(0.538 0.013 152 / 0.45);
+  --arbol-color-text: oklch(0.945 0.013 74);
+  --arbol-color-text-muted: oklch(0.7 0.015 66);
+  --arbol-color-shadow: oklch(0.075 0.02 152 / 0.55);
+  --arbol-color-accent: oklch(0.665 0.142 152);
+  --arbol-color-accent-ink: oklch(0.19 0.045 152);
+  --arbol-color-accent-soft: oklch(0.665 0.142 152 / 0.15);
+  --arbol-color-ok: oklch(0.74 0.125 152);
+  --arbol-color-warn: oklch(0.8 0.125 80);
+  --arbol-color-err: oklch(0.665 0.165 28);
+  --arbol-brief-pane-bg-silver: linear-gradient(
+    150deg,
+    oklch(0.865 0.035 152) 0%,
+    oklch(0.74 0.058 152) 48%,
+    oklch(0.6 0.078 152) 100%
+  );
+  --arbol-brief-pane-fg: oklch(0.245 0.06 152);
+  --arbol-brief-ring: oklch(0.4 0.09 152 / 0.55);
+}
+
+/* 07 Driftwood — dark · bg L 0.478 · hue 196 */
+[data-theme='driftwood'] {
+  --arbol-color-bg: oklch(0.478 0.013 196);
+  --arbol-color-surface: oklch(0.523 0.013 196);
+  --arbol-color-surface-2: oklch(0.568 0.013 196);
+  --arbol-color-border: oklch(0.628 0.016 196);
+  --arbol-color-hairline: oklch(0.608 0.013 196 / 0.45);
+  --arbol-color-text: oklch(0.945 0.013 74);
+  --arbol-color-text-muted: oklch(0.7 0.015 66);
+  --arbol-color-shadow: oklch(0.075 0.02 196 / 0.55);
+  --arbol-color-accent: oklch(0.665 0.142 196);
+  --arbol-color-accent-ink: oklch(0.19 0.045 196);
+  --arbol-color-accent-soft: oklch(0.665 0.142 196 / 0.15);
+  --arbol-color-ok: oklch(0.74 0.125 152);
+  --arbol-color-warn: oklch(0.8 0.125 80);
+  --arbol-color-err: oklch(0.665 0.165 28);
+  --arbol-brief-pane-bg-silver: linear-gradient(
+    150deg,
+    oklch(0.865 0.035 196) 0%,
+    oklch(0.74 0.058 196) 48%,
+    oklch(0.6 0.078 196) 100%
+  );
+  --arbol-brief-pane-fg: oklch(0.245 0.06 196);
+  --arbol-brief-ring: oklch(0.4 0.09 196 / 0.55);
+}
+
+/* 08 Amber — light · bg L 0.700 · hue 62 (lower bg chroma so the tint stays clean) */
+[data-theme='amber'] {
+  --arbol-color-bg: oklch(0.7 0.014 62);
+  --arbol-color-surface: oklch(0.742 0.014 62);
+  --arbol-color-surface-2: oklch(0.79 0.014 62);
+  --arbol-color-border: oklch(0.535 0.017 62);
+  --arbol-color-hairline: oklch(0.61 0.014 62 / 0.45);
+  --arbol-color-text: oklch(0.15 0.012 70);
+  --arbol-color-text-muted: oklch(0.365 0.016 58);
+  --arbol-color-shadow: oklch(0.48 0.04 62 / 0.22);
+  --arbol-color-accent: oklch(0.48 0.155 62);
+  --arbol-color-accent-ink: oklch(0.985 0.012 62);
+  --arbol-color-accent-soft: oklch(0.48 0.155 62 / 0.18);
+  --arbol-color-link: oklch(0.48 0.165 262);
+  --arbol-color-ok: oklch(0.495 0.14 150);
+  --arbol-color-warn: oklch(0.535 0.145 62);
+  --arbol-color-err: oklch(0.505 0.19 28);
+  --arbol-brief-pane-bg-silver: linear-gradient(
+    150deg,
+    oklch(0.7 0.058 62) 0%,
+    oklch(0.58 0.08 62) 50%,
+    oklch(0.47 0.094 62) 100%
+  );
+  --arbol-brief-pane-fg: oklch(0.985 0.018 62);
+  --arbol-brief-ring: oklch(0.98 0.03 62 / 0.5);
+}
+
+/* 09 Sandstone — light · bg L 0.740 · hue 34 */
+[data-theme='sandstone'] {
+  --arbol-color-bg: oklch(0.74 0.02 34);
+  --arbol-color-surface: oklch(0.782 0.02 34);
+  --arbol-color-surface-2: oklch(0.83 0.02 34);
+  --arbol-color-border: oklch(0.575 0.023 34);
+  --arbol-color-hairline: oklch(0.65 0.02 34 / 0.45);
+  --arbol-color-text: oklch(0.15 0.012 70);
+  --arbol-color-text-muted: oklch(0.365 0.016 58);
+  --arbol-color-shadow: oklch(0.48 0.04 34 / 0.22);
+  --arbol-color-accent: oklch(0.48 0.155 34);
+  --arbol-color-accent-ink: oklch(0.985 0.012 34);
+  --arbol-color-accent-soft: oklch(0.48 0.155 34 / 0.18);
+  --arbol-color-link: oklch(0.48 0.165 262);
+  --arbol-color-ok: oklch(0.495 0.14 150);
+  --arbol-color-warn: oklch(0.535 0.145 62);
+  --arbol-color-err: oklch(0.505 0.19 28);
+  --arbol-brief-pane-bg-silver: linear-gradient(
+    150deg,
+    oklch(0.7 0.058 34) 0%,
+    oklch(0.58 0.08 34) 50%,
+    oklch(0.47 0.094 34) 100%
+  );
+  --arbol-brief-pane-fg: oklch(0.985 0.018 34);
+  --arbol-brief-ring: oklch(0.98 0.03 34 / 0.5);
+}
+
+/* 10 Oat — light · bg L 0.808 · hue 88 */
+[data-theme='oat'] {
+  --arbol-color-bg: oklch(0.808 0.02 88);
+  --arbol-color-surface: oklch(0.85 0.02 88);
+  --arbol-color-surface-2: oklch(0.898 0.02 88);
+  --arbol-color-border: oklch(0.643 0.023 88);
+  --arbol-color-hairline: oklch(0.718 0.02 88 / 0.45);
+  --arbol-color-text: oklch(0.15 0.012 70);
+  --arbol-color-text-muted: oklch(0.365 0.016 58);
+  --arbol-color-shadow: oklch(0.48 0.04 88 / 0.22);
+  --arbol-color-accent: oklch(0.48 0.155 88);
+  --arbol-color-accent-ink: oklch(0.985 0.012 88);
+  --arbol-color-accent-soft: oklch(0.48 0.155 88 / 0.18);
+  --arbol-color-link: oklch(0.48 0.165 262);
+  --arbol-color-ok: oklch(0.495 0.14 150);
+  --arbol-color-warn: oklch(0.535 0.145 62);
+  --arbol-color-err: oklch(0.505 0.19 28);
+  --arbol-brief-pane-bg-silver: linear-gradient(
+    150deg,
+    oklch(0.7 0.058 88) 0%,
+    oklch(0.58 0.08 88) 50%,
+    oklch(0.47 0.094 88) 100%
+  );
+  --arbol-brief-pane-fg: oklch(0.985 0.018 88);
+  --arbol-brief-ring: oklch(0.98 0.03 88 / 0.5);
+}
+
+/* 11 Birch — light · bg L 0.888 · hue 44 */
+[data-theme='birch'] {
+  --arbol-color-bg: oklch(0.888 0.02 44);
+  --arbol-color-surface: oklch(0.93 0.02 44);
+  --arbol-color-surface-2: oklch(0.978 0.02 44);
+  --arbol-color-border: oklch(0.723 0.023 44);
+  --arbol-color-hairline: oklch(0.798 0.02 44 / 0.45);
+  --arbol-color-text: oklch(0.15 0.012 70);
+  --arbol-color-text-muted: oklch(0.365 0.016 58);
+  --arbol-color-shadow: oklch(0.48 0.04 44 / 0.22);
+  --arbol-color-accent: oklch(0.48 0.155 44);
+  --arbol-color-accent-ink: oklch(0.985 0.012 44);
+  --arbol-color-accent-soft: oklch(0.48 0.155 44 / 0.18);
+  --arbol-color-link: oklch(0.48 0.165 262);
+  --arbol-color-ok: oklch(0.495 0.14 150);
+  --arbol-color-warn: oklch(0.535 0.145 62);
+  --arbol-color-err: oklch(0.505 0.19 28);
+  --arbol-brief-pane-bg-silver: linear-gradient(
+    150deg,
+    oklch(0.7 0.058 44) 0%,
+    oklch(0.58 0.08 44) 50%,
+    oklch(0.47 0.094 44) 100%
+  );
+  --arbol-brief-pane-fg: oklch(0.985 0.018 44);
+  --arbol-brief-ring: oklch(0.98 0.03 44 / 0.5);
+}
+
+/* 12 Paper — light · bg L 0.964 · hue 32 */
+[data-theme='paper'] {
+  --arbol-color-bg: oklch(0.964 0.02 32);
+  --arbol-color-surface: oklch(0.997 0.02 32);
+  --arbol-color-surface-2: oklch(0.999 0.02 32);
+  --arbol-color-border: oklch(0.799 0.023 32);
+  --arbol-color-hairline: oklch(0.874 0.02 32 / 0.45);
+  --arbol-color-text: oklch(0.15 0.012 70);
+  --arbol-color-text-muted: oklch(0.365 0.016 58);
+  --arbol-color-shadow: oklch(0.48 0.04 32 / 0.22);
+  --arbol-color-accent: oklch(0.48 0.155 32);
+  --arbol-color-accent-ink: oklch(0.985 0.012 32);
+  --arbol-color-accent-soft: oklch(0.48 0.155 32 / 0.18);
+  --arbol-color-link: oklch(0.48 0.165 262);
+  --arbol-color-ok: oklch(0.495 0.14 150);
+  --arbol-color-warn: oklch(0.535 0.145 62);
+  --arbol-color-err: oklch(0.505 0.19 28);
+  --arbol-brief-pane-bg-silver: linear-gradient(
+    150deg,
+    oklch(0.7 0.058 32) 0%,
+    oklch(0.58 0.08 32) 50%,
+    oklch(0.47 0.094 32) 100%
+  );
+  --arbol-brief-pane-fg: oklch(0.985 0.018 32);
+  --arbol-brief-ring: oklch(0.98 0.03 32 / 0.5);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--arbol-color-bg);
+  color: var(--arbol-color-text);
+  font-family: var(--arbol-font-ui);
+  font-size: var(--arbol-type-body);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--arbol-color-accent-soft);
+}
+input[type='checkbox'] {
+  accent-color: var(--arbol-color-accent);
+}
+
+/* Hyperlink color (--arbol-color-link) is set per-theme alongside the other
+ * color tokens above: a bright blue on dark themes, a deeper blue on light
+ * ones, so links stay legible against any background. Used by all clickable
+ * links / file-path chips. */
+.arbol-link {
+  color: var(--arbol-color-link);
+  cursor: pointer;
+  text-decoration: none;
+  text-underline-offset: 2px;
+}
+.arbol-link:hover {
+  text-decoration: underline;
+}
+
+*::-webkit-scrollbar {
+  width: 11px;
+  height: 11px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--arbol-color-border);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+  border-radius: 99px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--arbol-color-text-muted);
+}
+
+/* Shared animations (referenced by Meter, Dot pulse, Modal, command palette). */
+@keyframes arbolpulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklch, var(--arbol-color-ok) 55%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 5px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+@keyframes arbolfade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes arbolpop {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* Honor reduced-motion: drop the meter/entrance transitions (§ interactions). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

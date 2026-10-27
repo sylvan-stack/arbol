@@ -1,3 +1,10 @@
 import { mount } from 'svelte';
+import '@fontsource/hanken-grotesk/latin-400.css';
+import '@fontsource/hanken-grotesk/latin-500.css';
+import '@fontsource/hanken-grotesk/latin-600.css';
+import '@fontsource/hanken-grotesk/latin-700.css';
+import '@fontsource/spline-sans-mono/latin-400.css';
+import '../design-system/src/styles/tokens.css';
+import '../design-system/src/styles/system.css';
 import App from './App.svelte';
 mount(App,{target:document.getElementById('app')!});
