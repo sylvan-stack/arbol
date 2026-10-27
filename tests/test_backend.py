@@ -100,6 +100,11 @@ class Process(unittest.TestCase):
             f.record["status"] = state
             f.save_root()
             self.assertEqual(self.selected().root, TEST_ROOT)
+            child = f.start()
+            self.assertTrue(f.line(child)["ready"])
+            child.send_signal(signal.SIGTERM)
+            out, err = child.communicate(timeout=2)
+            self.assertEqual((child.returncode, out, err), (0, b"", b""))
         for args in (
             ["--root", "T1", "backend"],
             ["--root", "t1", "backend", "--root-dir", str(f.root)],
@@ -130,6 +135,18 @@ class Process(unittest.TestCase):
         args[args.index("--root-dir") + 1] = str(long)
         child = f.start(args=args)
         self.assertEqual(f.line(child)["error"]["code"], "invalid_input")
+        length = 103 - len(os.fsencode(f.base)) - 1 - len("/backend.sock")
+        boundary = f.base / ("b" * length)
+        boundary.mkdir()
+        (boundary / "root.json").write_text(json.dumps(f.record))
+        args = f.options()
+        args[args.index("--root-dir") + 1] = str(boundary)
+        child = f.start(args=args)
+        ready = f.line(child)
+        self.assertTrue(ready["ready"])
+        self.assertEqual(len(os.fsencode(ready["socket"])), 103)
+        child.send_signal(signal.SIGTERM)
+        self.assertEqual(child.communicate(timeout=2), (b"", b""))
         path = f.root / "backend.sock"
         path.write_text("keep")
         child = f.start()
