@@ -3,8 +3,9 @@
 This is the first Arbol 2 conversation window, using Svelte 5 and a committed,
 SHA256-verified snapshot of maintained `arbol-design-system` source. Production
 Bridge/app adapters live in `src/`; fictional browser services live in
-`tests/ui/` at the repository root. The composer, Draft/send controls and chat
-actions are the subsequent implementation Beats.
+`tests/ui/` at the repository root. The controlled composer, versioned Drafts, route/repository controls and
+receipt-owned send/stop/question/failure actions are implemented. Chat actions,
+latest-chat selection and queued external open notices remain SYL-256.
 
 Install the exact dependency lock with `npm ci --ignore-scripts`, then use
 `npm run check`, `npm run build` and `npm test`. The browser checks use the pinned
@@ -43,4 +44,43 @@ arbol:tools/bridge_relay.py
 arbol:scripts/package_backend.py#package
 arbol:tests/ui/test_bundle.py#Bundle
 arbol:tests/ui/relay_browser.mjs
+-->
+
+Composer controllers preserve exact numeric revisions, revision-fenced Drafts,
+unsaved-only recovery and one cached unconfirmed send request per composition.
+Normal sends consume their selected canonical Draft; failure Continue sends
+proceed without a selector and leaves independent composed text intact. Retry
+replaces only the last saved failed turn in its original folder. Control replies
+do not invent recorded question answers or saved terminal outcomes. The Build
+reload barrier waits for Drafts and unconfirmed send receipts/reconciliation.
+
+The complete renderer suite has22 contract/browser scripts, including actual
+private separately compiled Builds for pending-send reloads. These use explicit
+stand-in backends/accounts and never call a vendor or the owner’s installation.
+Mycel coverage and Source Refs are prepared; ingest/index/embedding/retrieval
+remain deferred until the owner’s first ingest.
+
+<!-- sources:
+arbol:ui/elma/src/wire-json.ts
+arbol:ui/elma/src/drafts.svelte.ts
+arbol:ui/elma/src/pastes.svelte.ts
+arbol:ui/elma/src/routes.svelte.ts
+arbol:ui/elma/src/sending.svelte.ts
+arbol:ui/elma/src/window.svelte.ts
+arbol:ui/elma/src/live.ts
+arbol:tests/ui/run.mjs
+arbol:tests/ui/drafts.mjs
+arbol:tests/ui/draft_browser.mjs
+arbol:tests/ui/draft_recovery.mjs
+arbol:tests/ui/pastes.mjs
+arbol:tests/ui/paste_browser.mjs
+arbol:tests/ui/routes.mjs
+arbol:tests/ui/route_browser.mjs
+arbol:tests/ui/repository_browser.mjs
+arbol:tests/ui/sending.mjs
+arbol:tests/ui/send_browser.mjs
+arbol:tests/ui/send_reload_browser.mjs
+arbol:tests/ui/stop_browser.mjs
+arbol:tests/ui/question_browser.mjs
+arbol:tests/ui/failure_browser.mjs
 -->
