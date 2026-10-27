@@ -19,6 +19,7 @@ interface ArchiveIntent {root:string;chat:string;generation:number;folder:string
 interface PendingMessage {intent:SendIntent;editor:DraftEditor;generation:number;exchange:string}
 interface ChatSnapshot {kind:string;chat:ChatInfo;exchanges:ElmaExchange[];more:boolean;settings:{route?:ElmaRoute;workingFolder?:string};marks:{ongoing:boolean};draft:unknown}
 export class ElmaWindow {
+ private accountsVisible=()=>{if(document.visibilityState==='visible'&&this.root.root)void this.routing.refresh(this.root.root);};
  private live=new Map<string,LiveExchange>();private revision=$state(0);snapshotRevision=$state(0);openTools=$state<Record<string,boolean>>({});readonly readingPositions=new Map<string,{top:number;following:boolean}>();restoring=$state(false);
  now=$state(Date.now());private clock=setInterval(()=>{this.now=Date.now();},1000);
  root=$state<RootInfo>({root:'',name:'…',status:'working',current:false});
@@ -37,6 +38,7 @@ export class ElmaWindow {
   this.chats=new Chats(this.bridge);
   this.drafts=new Drafts(this.bridge,(root,editor)=>this.sending?.marked(root,editor,this.drafts.current===editor));this.sending=new Sending(this.bridge,(root,scope)=>this.drafts.owner(root,scope),done=>this.drafts.holdSend(done),{provisional:op=>this.provisional(op),accepted:(op,result)=>this.accepted(op,result),refused:(op,error)=>this.refused(op,error)});this.routing=new Routing(this.bridge,(chat,route)=>this.saveSettings(chat,{route}));
   this.opening=new Opening(this.app,async done=>{const root=this.root.root,editor=this.drafts.current;if(!editor)throw new Error('Wait for the workspace and Draft to be read.');await editor.waitReady();await this.drafts.settleCurrent(done);if(root!==this.root.root)throw new Error('The Root changed before opening the request.');},async target=>{if(target.chat){const opened=await this.openChat(target.chat);if(opened){this.latestOpen=false;this.historyOpen=false;}return opened;}this.newChat(target.folder!);return true;},done=>this.drafts.holdSend(done));
+  document.addEventListener('visibilitychange',this.accountsVisible);window.addEventListener('focus',this.accountsVisible);
   this.bridge.subscribe('root',{},event=>{if(event.root)this.root=event.root as unknown as RootInfo;},e=>this.failure(e));
   this.bridge.subscribe('attention',{},()=>{});
  }
@@ -293,5 +295,5 @@ export class ElmaWindow {
  private clear(){this.latestOpen=false;this.quickOpen=false;this.archive=null;this.notifyState();this.rename=null;this.actionNotice='';this.actionProblem='';this.answerStates={};this.cancelQueued();this.repositoryChange=null;this.repositoryNotice='';this.restoring=false;this.live.clear();this.revision++;this.pageTicket++;this.pageBusy=false;this.pageProblem='';this.historyOpen=false;this.cancelOpening?.();this.chatSub?.close();this.chatSub=undefined;this.generation++;this.info=null;this.exchanges=[];this.selected=null;this.settings={};this.ongoing=false;}
  private selectDraft(canonical=false){if(this.root.root&&(this.info||this.folder)){const pending=this.info?this.sending.forChat(this.info.chat):undefined;this.drafts.select(this.root.root,pending&&!canonical?pending.intent.scope:this.info?{chat:this.info.chat}:{folder:this.folder});this.sending.select(this.root.root,this.drafts.current);}}
 
- close(){clearInterval(this.clock);this.cancelOpening?.();this.closed=true;this.notifyState();this.bootstrapGeneration++;this.chatSub?.close();this.cancelQueued();this.sending.close();this.opening.close();this.mutations.close();this.chats.close();this.drafts.close();this.routing.close();this.bridge.close();this.app.close();}
+ close(){document.removeEventListener('visibilitychange',this.accountsVisible);window.removeEventListener('focus',this.accountsVisible);clearInterval(this.clock);this.cancelOpening?.();this.closed=true;this.notifyState();this.bootstrapGeneration++;this.chatSub?.close();this.cancelQueued();this.sending.close();this.opening.close();this.mutations.close();this.chats.close();this.drafts.close();this.routing.close();this.bridge.close();this.app.close();}
 }
