@@ -7,7 +7,7 @@ import { Routing } from './routes.svelte';
 import { LiveExchange,savedBlocks } from './live';
 import { readPreferences, savePreferences, type Preferences } from './preferences';
 import type { ElmaExchange, ElmaRoute } from '../design-system/src/sections/elma-types';
-import type { ResponseBlock,ToolView,ToolDetails } from '../design-system/src/sections/elma-response';
+import type { ResponseBlock,ToolView,ToolDetails,QuestionView,Answer } from '../design-system/src/sections/elma-response';
 export interface ChatInfo {chat:string;title:string|null;firstMessage?:string;createdAt?:string;exchangeCount:number;usage:{inputTokens:number;outputTokens:number}}
 export interface Repository {name:string;folder:string;route:ElmaRoute}
 interface PendingMessage {intent:SendIntent;editor:DraftEditor;generation:number;exchange:string}
@@ -20,7 +20,7 @@ export class ElmaWindow {
  selected=$state<string|null>(null);more=$state(false);pageBusy=$state(false);pageProblem=$state('');historyOpen=$state(false);settings=$state<ChatSnapshot['settings']>({});ongoing=$state(false);
  repositories=$state<Repository[]>([]);folder=$state('');defaultRoute=$state<ElmaRoute>({});private workspaceRoute:ElmaRoute={};routing:Routing;private settingsQueues=new Map<string,Promise<unknown>>();
  preferences=$state<Preferences>(readPreferences(''));bridge:Bridge;app=new AppChannel();drafts:Drafts;
- composerOpen=$state(false);sendWait=$state('');stopping=$state<string[]>([]);sending:Sending;stopConfirmation=$state<PendingMessage|null>(null);private stopQueue?:PendingMessage&{finish:()=>void};private previousSelection=new Map<string,string|null>();private stopCalls=new Map<string,Promise<void>>();
+ composerOpen=$state(false);sendWait=$state('');stopping=$state<string[]>([]);sending:Sending;stopConfirmation=$state<PendingMessage|null>(null);private stopQueue?:PendingMessage&{finish:()=>void};private previousSelection=new Map<string,string|null>();private stopCalls=new Map<string,Promise<void>>();private answerSerial=0;private answerStates=$state<Record<string,{token:number;pending:boolean;problem:string;after:number}>>({});
  repositoryNotice=$state('');repositoryChange=$state<{root:string;chat:string;folder:string;generation:number}|null>(null);
  private pageTicket=0;private generation=0;private settingsObservation=0;private chatSub?:{close:()=>void;retry:()=>void};private bootstrapGeneration=0;private closed=false;private cancelOpening?:()=>void;
  constructor(){this.bridge=new Bridge({build:__ARBOL_BUILD__,onstate:s=>{this.connection=s;if(s==='Reconnecting…'||s==='Connecting…'||s.includes('Bridge version'))this.sending?.offline();},beforeReload:()=>this.drafts.beforeReload(),onhello:(root)=>{if(this.root.root&&this.root.root!==root.root){this.clear();this.folder='';this.stopping=[];this.stopCalls.clear();}this.drafts?.rootChanged(root.root);this.root=root;this.sending?.hello(root.root);this.preferences=readPreferences(root.root);void this.bootstrap();void this.loadAccounts();const rootId=root.root;setTimeout(()=>{if(this.root.root===rootId)for(const id of this.stopping)void this.stopExchange(id,true);},0);}});
@@ -81,7 +81,7 @@ export class ElmaWindow {
      if(desired&&!this.exchanges.some(e=>e.exchange===desired)&&this.more){this.restoring=true;void this.restoreSelection(desired,generation,this.snapshotRevision);}
      if(!settled){settled=true;resolve(true);}
     }else if(event.kind==='exchange'){const status=event.exchange as Fields;const row=this.exchanges.find(e=>e.exchange===status.exchange);if(row){this.projection(row).status(status);this.revision++;}}
-    else if(event.kind==='lines'){const row=this.exchanges.find(e=>e.exchange===event.exchange);if(row&&Array.isArray(event.lines)){this.projection(row).apply(event.lines);this.revision++;}}
+    else if(event.kind==='lines'){const row=this.exchanges.find(e=>e.exchange===event.exchange);if(row&&Array.isArray(event.lines)){this.projection(row).apply(event.lines);this.settleAnswerReceipts(row);this.revision++;}}
     else if(event.kind==='saved'){const row=event.exchange as unknown as ElmaExchange;const old=this.exchanges.find(e=>e.exchange===row.exchange);if(old){this.projection(old).reconcile(row);this.exchanges=this.exchanges.map(e=>e.exchange===row.exchange?row:e);this.revision++;this.afterChatState();}}
     else if(event.kind==='note'){const note=event.note as Fields;const row=this.exchanges.find(e=>e.exchange===note.exchange);if(row){row.note=note as unknown as ElmaExchange['note'];this.revision++;}}
     else if(event.kind==='title'&&this.info)this.info.title=event.title as string|null;
@@ -93,7 +93,7 @@ export class ElmaWindow {
  private projection(row:ElmaExchange){let live=this.live.get(row.exchange);if(!live){live=new LiveExchange(row);this.live.set(row.exchange,live);}return live;}
  get currentLive(){this.revision;return this.exchange?this.live.get(this.exchange.exchange):undefined;}
  get response():ResponseBlock[]{const copy=(blocks:ResponseBlock[]):ResponseBlock[]=>blocks.map(b=>b.kind==='tool'?{...b,tool:{...b.tool,parallel:b.tool.parallel?{...b.tool.parallel}:undefined,children:b.tool.children?copy(b.tool.children):undefined}}:{...b});return this.currentLive?.blocks.length?copy(this.currentLive.blocks):this.exchange?savedBlocks(this.exchange):[];}
- get questions(){return this.currentLive?.questions.map(q=>({...q}))??[];}
+ get questions(){const row=this.exchange;if(!row)return[];const saved:QuestionView[]=row.items.flatMap(item=>item.kind==='tool'&&item.ask!==undefined?[{id:'saved:'+item.position,ask:item.ask,answer:item.answer,open:false,recorded:true}]:[]);return(!this.complete&&this.currentLive?.questions.length?this.currentLive.questions:saved).map(q=>{const state=this.answerStates[this.answerKey(row.exchange,q.id)];return{...q,pending:state?.pending??false,problem:q.problem||state?.problem};});}
  get usage(){this.revision;const total={inputTokens:this.info?.usage.inputTokens??0,outputTokens:this.info?.usage.outputTokens??0};for(const live of this.live.values()){const delta=live.usageDelta;total.inputTokens+=delta.inputTokens;total.outputTokens+=delta.outputTokens;}return{inputTokens:Math.max(0,total.inputTokens),outputTokens:Math.max(0,total.outputTokens)};}
  get complete(){return !!this.exchange&&['completed','failed','cancelled','interrupted'].includes(this.exchange.state);}
  get startedAt(){return this.currentLive?.startedAt??this.exchange?.runs.map(run=>run.started?.at).filter((value):value is string=>typeof value==='string'&&Number.isFinite(Date.parse(value))).sort((a,b)=>Date.parse(a)-Date.parse(b))[0];}
@@ -103,6 +103,12 @@ export class ElmaWindow {
  async loadTool(tool:ToolView):Promise<ToolDetails>{const exchange=this.exchange?.exchange;if(!exchange||tool.position===undefined)throw new Error('not_found: The tool call is unavailable.');try{return await this.bridge.call<ToolDetails>('toolCall.get',{exchange,position:tool.position});}catch(e){throw new Error(e instanceof Refusal?describe(e.detail):'The tool details could not be read.');}}
  async openLink(url:string){try{return await this.app.call('app.openLink',{url});}catch(e){throw new Error(e instanceof Refusal?describe(e.detail):'The link could not be opened.');}}
  get prompt(){const item=this.exchange?.items.find(item=>item.kind==='message'&&item.role==='user');return item?.kind==='message'?item.text:'';}
+ private answerKey(exchange:string,id:string){return JSON.stringify([this.root.root,exchange,id]);}
+ private settleAnswerReceipts(row:ElmaExchange){for(const q of this.live.get(row.exchange)?.questions??[]){const key=this.answerKey(row.exchange,q.id),state=this.answerStates[key];if(state&&(!q.open||Math.max(q.answerPosition??0,q.refusalPosition??0)>state.after))delete this.answerStates[key];}}
+ async answer(question:QuestionView,answer:Answer){const row=this.exchange;if(!row||!question.open||!question.askId||this.complete)return;const key=this.answerKey(row.exchange,question.id);if(this.answerStates[key]?.pending)return;const token=++this.answerSerial;this.answerStates[key]={token,pending:true,problem:'',after:Math.max(question.answerPosition??0,question.refusalPosition??0)};const original=this.live.get(row.exchange)?.questions.find(q=>q.id===question.id);if(original)original.problem=undefined;
+  try{await this.bridge.call('exchange.answer',{exchange:row.exchange,askId:question.askId,answer});}
+  catch(e){if(this.answerStates[key]?.token===token)this.answerStates[key]={...this.answerStates[key],pending:false,problem:e instanceof Refusal?describe(e.detail):'The answer could not be sent.'};}
+ }
  get composerBusy(){return !!this.drafts.current?.pendingSend||!!(this.info&&this.sending.forChat(this.info.chat));}
  get composerStatus(){return(this.info?this.sending.forChat(this.info.chat)?.status:undefined)||this.sendWait||this.drafts.current?.pastes.status||this.drafts.current?.status||'';}
  requestSend(){const editor=this.drafts.current;if(!editor?.ready||editor.pendingSend||this.composerBusy||!editor.text.trim())return;const generation=this.generation;editor.sendProblem='';editor.pastes.requestSend(()=>void this.prepareSend(editor,generation));}
@@ -191,7 +197,7 @@ export class ElmaWindow {
   }catch(e){if(ticket===this.pageTicket&&e instanceof Refusal)this.pageProblem=describe(e.detail);}
   finally{if(ticket===this.pageTicket)this.pageBusy=false;}
  }
- private clear(){this.cancelQueued();this.repositoryChange=null;this.repositoryNotice='';this.restoring=false;this.live.clear();this.revision++;this.pageTicket++;this.pageBusy=false;this.pageProblem='';this.historyOpen=false;this.cancelOpening?.();this.chatSub?.close();this.chatSub=undefined;this.generation++;this.info=null;this.exchanges=[];this.selected=null;this.settings={};this.ongoing=false;}
+ private clear(){this.answerStates={};this.cancelQueued();this.repositoryChange=null;this.repositoryNotice='';this.restoring=false;this.live.clear();this.revision++;this.pageTicket++;this.pageBusy=false;this.pageProblem='';this.historyOpen=false;this.cancelOpening?.();this.chatSub?.close();this.chatSub=undefined;this.generation++;this.info=null;this.exchanges=[];this.selected=null;this.settings={};this.ongoing=false;}
  private selectDraft(canonical=false){if(this.root.root&&(this.info||this.folder)){const pending=this.info?this.sending.forChat(this.info.chat):undefined;this.drafts.select(this.root.root,pending&&!canonical?pending.intent.scope:this.info?{chat:this.info.chat}:{folder:this.folder});this.sending.select(this.root.root,this.drafts.current);}}
 
  close(){clearInterval(this.clock);this.cancelOpening?.();this.closed=true;this.bootstrapGeneration++;this.chatSub?.close();this.cancelQueued();this.sending.close();this.drafts.close();this.routing.close();this.bridge.close();this.app.close();}

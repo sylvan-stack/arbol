@@ -166,18 +166,19 @@ class Fixture:
                                         "limit": message.get("params", {}).get("limit"),
                                         "exchange": message.get("params", {}).get("exchange"),
                                         "position": message.get("params", {}).get("position"),
-                                        **({"params": message.get("params", {})} if method.startswith(("draft.", "accounts.")) or method in ("chat.settings", "chat.send", "exchange.stop", "exchange.sendAgain") else {}),
+                                        **({"params": message.get("params", {})} if method.startswith(("draft.", "accounts.")) or method in ("chat.settings", "chat.send", "exchange.stop", "exchange.sendAgain", "exchange.answer") else {}),
                                         **({"characters": len(message["params"]["text"])} if method == "paste.save" else {}),
                                     }
                                 )
                                 + "\n"
                             )
+                    failures = self.scenario.get("callErrors", {}).get(method, [])
+                    failure = failures.pop(0) if failures else None
                     delay = self.scenario.get("delays", {}).get(method, 0)
                     if delay:
                         await asyncio.sleep(delay)
-                    failures = self.scenario.get("callErrors", {}).get(method, [])
-                    if failures:
-                        await self.send(writer, {"type": "reply", "id": message["id"], "error": failures.pop(0)})
+                    if failure:
+                        await self.send(writer, {"type": "reply", "id": message["id"], "error": failure})
                         continue
                     if method == "subscriptions.check":
                         value = {

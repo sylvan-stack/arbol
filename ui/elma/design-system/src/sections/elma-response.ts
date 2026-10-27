@@ -1,5 +1,13 @@
 import {stringifyJson} from '../json';
-export interface QuestionView {id:string;askId?:string;ask:unknown;at?:string;answer?:unknown;open:boolean}
+export interface QuestionView {id:string;askId?:string;ask:unknown;at?:string;answer?:unknown;answerPosition?:number;refusalPosition?:number;pending?:boolean;problem?:string;recorded?:boolean;open:boolean}
+export type Answer={type:'answers';answers:Record<string,string[]>}|{type:'decline'};
+export interface AskItem {id:string;header?:string;question:string;multiple:boolean;options:{label:string;description?:string}[]}
+export function interactiveQuestions(ask:unknown):AskItem[]|undefined {
+ if(!ask||typeof ask!=='object'||!('callId' in ask)||typeof ask.callId!=='string'||!ask.callId||!('questions' in ask)||!Array.isArray(ask.questions)||!ask.questions.length)return;
+ const ids=new Set<string>(),result:AskItem[]=[];
+ for(const raw of ask.questions){if(!raw||typeof raw!=='object'||typeof raw.id!=='string'||!raw.id||ids.has(raw.id)||typeof raw.question!=='string'||typeof raw.multiple!=='boolean'||!Array.isArray(raw.options)||raw.header!==undefined&&typeof raw.header!=='string')return;ids.add(raw.id);const labels=new Set<string>();for(const option of raw.options){if(!option||typeof option!=='object'||typeof option.label!=='string'||!option.label||labels.has(option.label)||option.description!==undefined&&typeof option.description!=='string')return;labels.add(option.label);}result.push(raw as AskItem);}
+ return result;
+}
 export interface ToolDetails {input:unknown;result?:unknown;error?:string}
 export interface ToolView extends ToolDetails {id:string;name:string;state:'Running'|'Complete'|'Failed'|'Interrupted';startedAt?:string;endedAt?:string;truncated?:boolean;cut?:boolean;outputDelta?:string;parallel?:{running:number;total:number};children?:ResponseBlock[];position?:number}
 export type ResponseBlock={id:string;kind:'text'|'thinking'|'notice';text:string}|{id:string;kind:'tool';tool:ToolView};
@@ -10,4 +18,4 @@ export function duration(start?:string,end?:string,now=Date.now()):string {if(!s
 export function lifecycle(accepted?:string,started?:string,ended?:string):{label:string;at:string}[][] {const groups:{label:string;at:string}[][]=[];for(const [label,at] of [['Message sent',accepted],['Agent started responding',started],['Agent responded',ended]]){if(!at||!Number.isFinite(Date.parse(at)))continue;const last=groups.at(-1);if(last&&Math.abs(Date.parse(at)-Date.parse(last[0].at))<=3000)last.push({label:label!,at});else groups.push([{label:label!,at}]);}return groups;}
 
 export function askQuestions(ask:unknown):{id:string;question:string;options:{label:string;description?:string}[]}[]{if(!ask||typeof ask!=='object'||!Array.isArray((ask as {questions?:unknown}).questions))return[];return (ask as {questions:unknown[]}).questions.flatMap((q,i)=>{if(!q||typeof q!=='object'||typeof(q as {question?:unknown}).question!=='string')return[];const value=q as {id?:unknown;question:string;options?:unknown};return[{id:typeof value.id==='string'?value.id:String(i),question:value.question,options:Array.isArray(value.options)?value.options.flatMap(o=>o&&typeof o==='object'&&typeof(o as {label?:unknown}).label==='string'?[o as {label:string;description?:string}]:[]):[]}];});}
-export function answerLabels(answer:unknown):string {if(!answer||typeof answer!=='object')return pretty(answer);const value=answer as {type?:unknown;answers?:unknown};if(value.type==='decline')return 'Declined';if(value.answers&&typeof value.answers==='object')return Object.values(value.answers).flatMap(v=>Array.isArray(v)?v.filter(v=>typeof v==='string'):[]).join(', ');return pretty(answer);}
+export function answerLabels(answer:unknown):string {if(!answer||typeof answer!=='object')return pretty(answer);const value=answer as {type?:unknown;answers?:unknown};if(value.type==='decline')return 'Declined';if(value.answers&&typeof value.answers==='object')return Object.values(value.answers).flatMap(v=>Array.isArray(v)?v.filter(v=>typeof v==='string'):[]).join(', ')||'Continued';return pretty(answer);}
