@@ -13,6 +13,7 @@
  function release(){desired=null;following=false;}
  function scroll(){if(!area)return;if(!programmatic){desired=null;following=bottom()-area.scrollTop<=2;save();}const marker=area.querySelector<HTMLElement>('[data-answer-threshold]');beacon=!response.streaming&&!!marker&&marker.getBoundingClientRect().top>=area.getBoundingClientRect().bottom;}
  function jumpAnswer(){release();const top=answerTop();if(top!==null)move(top);measure();}
+ export function scrollToEdge(edge:'top'|'bottom'){release();following=edge==='bottom'&&!!response.streaming;move(edge==='top'?0:bottom());measure();}
  function keys(event:KeyboardEvent){if(!area||event.defaultPrevented||document.querySelector('dialog[open]')||!event.metaKey||!event.shiftKey||!event.altKey||!['Digit7','Digit8'].includes(event.code))return;event.preventDefault();release();const stops=[0,answerTop(),bottom()].filter((v):v is number=>v!==null).sort((a,b)=>a-b).filter((v,i,values)=>i===0||v-values[i-1]>1);const current=area.scrollTop;move(event.code==='Digit7'?(stops.find(v=>v>current+2)??bottom()):([...stops].reverse().find(v=>v<current-2)??0));measure();}
  $effect.pre(()=>{identity;snapshot;if(area&&active)save();});
  $effect(()=>{const key=identity,nextGeneration=snapshot,complete=!response.streaming;response.blocks;if(!area)return;

@@ -20,6 +20,7 @@ import re
 import secrets
 import signal
 import struct
+from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import parse_qsl, unquote, urlencode, urlsplit
 
@@ -115,10 +116,12 @@ class WebSocket:
 
 
 class Relay:
-    def __init__(self, bundle: Path, socket: Path):
+    def __init__(self, bundle: Path, socket: Path, refresh: Callable[[], Path] | None = None):
         self.bundle, self.socket = bundle.resolve(strict=True), socket
         if not (self.bundle / "index.html").is_file():
             raise ValueError("The Build has no Elma renderer bundle.")
+        self.refresh = refresh
+        self.bundles = [self.bundle]
         self.token = secrets.token_urlsafe(16)
         self.port = 0
         self.server: asyncio.Server | None = None
@@ -263,14 +266,28 @@ class Relay:
                 await writer.drain()
                 await self.bridge(WebSocket(reader, writer))
                 return
-            path = (self.bundle / unquote(target.path, errors="strict").lstrip("/")).resolve()
-            if path == self.bundle:
-                path = path / "index.html"
-            if (
-                self.bundle not in path.parents
-                or not path.is_file()
-                or any(part.startswith(".") for part in path.relative_to(self.bundle).parts)
-            ):
+            document = target.path in ("/", "/index.html")
+            if document and self.refresh:
+                try:
+                    selected = self.refresh().resolve(strict=True)
+                    if not (selected / "index.html").is_file():
+                        raise ValueError("The Build has no renderer.")
+                    self.bundle = selected
+                    if selected not in self.bundles:
+                        self.bundles.insert(0, selected)
+                except (OSError, ValueError):
+                    await self.response(writer, "503 Service Unavailable")
+                    return
+            relative = "index.html" if document else unquote(target.path, errors="strict").lstrip("/")
+            roots = self.bundles if relative.startswith("assets/") else [self.bundle]
+            path = None
+            for bundle in roots:
+                candidate = (bundle / relative).resolve()
+                if (bundle in candidate.parents and candidate.is_file()
+                        and not any(part.startswith(".") for part in candidate.relative_to(bundle).parts)):
+                    path = candidate
+                    break
+            if path is None:
                 await self.response(writer, "404 Not Found")
                 return
             if path.stat().st_size > 32 * 1024 * 1024:
@@ -393,7 +410,7 @@ def paths(args: argparse.Namespace) -> tuple[Path, Path]:
 
 async def main(args: argparse.Namespace) -> None:
     bundle, socket = paths(args)
-    relay = Relay(bundle, socket)
+    relay = Relay(bundle, socket, refresh=None if args.bundle else lambda: paths(args)[0])
     await relay.start(args.port)
     print(f"http://{relay.host}/?token={relay.token}", flush=True)
     stop = asyncio.Event()

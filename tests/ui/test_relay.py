@@ -14,6 +14,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 TOOL = Path(__file__).resolve().parents[2] / "tools/bridge_relay.py"
 spec = importlib.util.spec_from_file_location("relay_under_test", TOOL)
@@ -260,6 +261,69 @@ class RelayChecks(unittest.IsolatedAsyncioTestCase):
         async with asyncio.timeout(3):
             out, err = await child.communicate()
         self.assertEqual((child.returncode, out, err), (0, b"", b""))
+
+    async def test_document_refresh_keeps_only_old_assets_not_old_documents(self) -> None:
+        newer = self.root / "newer"
+        (newer / "assets").mkdir(parents=True)
+        (self.bundle / "assets").mkdir()
+        (self.bundle / "assets/old-hash.js").write_text("OLD ASSET")
+        (newer / "assets/new-hash.js").write_text("NEW ASSET")
+        (newer / "index.html").write_text("NEW BUILD DOCUMENT")
+        (self.bundle / "old-private.txt").write_text("OLD PRIVATE")
+        selected = self.bundle
+        self.host.refresh = lambda: selected
+        self.assertIn(b"Fixture", await self.http("/", {"Cookie": self.cookie}))
+        selected = newer
+        self.assertIn(b"NEW BUILD DOCUMENT", await self.http("/?reloadedFor=2", {"Cookie": self.cookie}))
+        self.assertIn(b"NEW ASSET", await self.http("/assets/new-hash.js", {"Cookie": self.cookie}))
+        self.assertIn(b"OLD ASSET", await self.http("/assets/old-hash.js", {"Cookie": self.cookie}))
+        self.assertIn(b"404 Not Found", await self.http("/old-private.txt", {"Cookie": self.cookie}))
+        (newer / "index.html").unlink()
+        self.assertIn(b"503 Service Unavailable", await self.http("/", {"Cookie": self.cookie}))
+
+    async def test_running_process_reselects_numbered_root_build(self) -> None:
+        registry = self.root / "rotation-registry"
+
+        def build(number: str) -> None:
+            folder = registry / "arbol" / number
+            (folder / "bin").mkdir(parents=True)
+            (folder / "bin/arbol").write_text("#!/bin/sh\n")
+            (folder / "bin/arbol").chmod(0o700)
+            (folder / "ui/elma").mkdir(parents=True)
+            (folder / "ui/elma/index.html").write_text("PRIVATE BUILD " + number)
+            (folder / "build.json").write_text(json.dumps({"component": "arbol", "root": "t1",
+                "build": number, "status": "working", "entry": "bin/arbol"}))
+
+        build("1")
+        child = await asyncio.create_subprocess_exec(sys.executable, "-I", "-B", str(TOOL),
+            "--root", "t1", "--registry-dir", str(registry), "--root-dir", str(self.root / "root"),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        assert child.stdout is not None
+        try:
+            async with asyncio.timeout(3):
+                url = urlsplit((await child.stdout.readline()).decode().strip())
+
+            async def document() -> bytes:
+                reader, writer = await asyncio.open_connection("127.0.0.1", url.port)
+                try:
+                    token = parse_qs(url.query)["token"][0]
+                    writer.write((f"GET / HTTP/1.1\r\nHost: {url.netloc}\r\n"
+                                  f"Cookie: arbol_relay_{url.port}={token}\r\n\r\n").encode())
+                    await writer.drain()
+                    return await reader.read()
+                finally:
+                    writer.close()
+                    await writer.wait_closed()
+
+            self.assertTrue((await document()).endswith(b"PRIVATE BUILD 1"))
+            build("2")
+            self.assertTrue((await document()).endswith(b"PRIVATE BUILD 2"))
+            self.assertEqual(self.count, 0, "Reading Build metadata must start no backend")
+        finally:
+            child.terminate()
+            async with asyncio.timeout(3):
+                out, err = await child.communicate()
+            self.assertEqual((child.returncode, out, err), (0, b"", b""))
 
     def test_newest_working_root_build_selection(self) -> None:
         reg = self.root / "registry"

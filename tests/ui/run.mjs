@@ -2,5 +2,5 @@
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 const root=fileURLToPath(new URL('../../',import.meta.url));
-for(const file of ['bridge','relay_browser','frame','navigation','response','live','live_browser','reading'])await new Promise((resolve,reject)=>{const child=spawn(process.execPath,['tests/ui/'+file+'.mjs'],{cwd:root,stdio:'inherit'});child.once('error',reject);child.once('exit',code=>code===0?resolve():reject(new Error(file+' failed with '+code)));});
+for(const file of ['bridge','relay_browser','frame','navigation','response','live','live_browser','reading','drafts','draft_browser','draft_recovery','pastes','paste_browser','routes','route_browser','repository_browser','sending','send_browser','send_reload_browser','stop_browser','question_browser','failure_browser'])await new Promise((resolve,reject)=>{const child=spawn(process.execPath,['tests/ui/'+file+'.mjs'],{cwd:root,stdio:'inherit'});child.once('error',reject);child.once('exit',code=>code===0?resolve():reject(new Error(file+' failed with '+code)));});
 console.log('Complete Elma renderer suite passed');
