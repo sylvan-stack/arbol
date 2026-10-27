@@ -20,6 +20,7 @@ ENTRIES = [
     "src/sections/HistoryTree.svelte",
     "src/sections/Composer.svelte",
     "src/patterns/Modal.svelte",
+    "src/patterns/CommandPalette.svelte",
     "src/patterns/ConfirmAction.svelte",
     "src/sections/elma-types.ts",
     "src/styles/tokens.css",

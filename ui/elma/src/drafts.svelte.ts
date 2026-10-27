@@ -124,12 +124,22 @@ export class Drafts {
  }
  private prune(){for(const [key,editor]of this.editors)if(editor!==this.current&&editor.ready&&!editor.pendingSend&&!editor.dirty&&!editor.saving&&editor.recovery===null){editor.close();this.editors.delete(key);}}
  holdSend(completion:Promise<unknown>){this.sends.add(completion);const remove=()=>this.sends.delete(completion);void completion.then(remove,remove);}
- async beforeReload(){
-  while(this.sends.size)await Promise.all([...this.sends].map(p=>p.catch(()=>undefined)));
+ private async waitPending(except?:Promise<unknown>){
+  while([...this.sends].some(p=>p!==except))await Promise.all([...this.sends].filter(p=>p!==except).map(p=>p.catch(()=>undefined)));
+ }
+ async settleCurrent(except?:Promise<unknown>){
+  await this.waitPending(except);const editor=this.current;
+  if(!editor?.ready)throw new Error('Wait for the current Draft to be read.');
+  do{await editor.flush();}while(editor.dirty&&!editor.problem&&!editor.conflict&&editor.ready);
+  if(editor!==this.current||editor.dirty||editor.conflict||editor.recovery!==null)throw new Error('Unsaved Draft text needs attention before continuing.');
+ }
+ async settle(){
+  await this.waitPending();
   for(const editor of this.editors.values()){
    do{await editor.flush();}while(editor.dirty&&!editor.problem&&!editor.conflict&&editor.ready);
    if(editor.dirty||editor.conflict||editor.recovery!==null)throw new Error('Unsaved Draft text needs attention before reloading.');
   }
  }
+ async beforeReload(){await this.settle();}
  close(){for(const editor of this.editors.values())editor.close();this.editors.clear();}
 }

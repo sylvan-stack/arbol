@@ -13,6 +13,7 @@ import type { ResponseBlock,ToolView,ToolDetails,QuestionView,Answer } from '../
 export interface ChatInfo {chat:string;title:string|null;firstMessage?:string;createdAt?:string;exchangeCount:number;usage:{inputTokens:number;outputTokens:number}}
 export interface Repository {name:string;folder:string;route:ElmaRoute}
 interface RenameEditor {root:string;chat:string;generation:number;value:string;busy:boolean;problem:string}
+interface ArchiveIntent {root:string;chat:string;generation:number;folder:string;phase:'confirm'|'preparing'|'stopping'|'marking'}
 interface PendingMessage {intent:SendIntent;editor:DraftEditor;generation:number;exchange:string}
 interface ChatSnapshot {kind:string;chat:ChatInfo;exchanges:ElmaExchange[];more:boolean;settings:{route?:ElmaRoute;workingFolder?:string};marks:{ongoing:boolean};draft:unknown}
 export class ElmaWindow {
@@ -24,6 +25,7 @@ export class ElmaWindow {
  repositories=$state<Repository[]>([]);folder=$state('');defaultRoute=$state<ElmaRoute>({});private workspaceRoute:ElmaRoute={};routing:Routing;private settingsQueues=new Map<string,Promise<unknown>>();
  preferences=$state<Preferences>(readPreferences(''));bridge:Bridge;app=new AppChannel();drafts:Drafts;
  rename=$state<RenameEditor|null>(null);actionNotice=$state('');actionProblem=$state('');mutations:Mutations;private titleObservation=0;private marksObservation=0;
+ quickOpen=$state(false);archive=$state<ArchiveIntent|null>(null);private stateWaiters=new Set<()=>void>();
  composerOpen=$state(false);sendWait=$state('');stopping=$state<string[]>([]);sending:Sending;stopConfirmation=$state<PendingMessage|null>(null);private stopQueue?:PendingMessage&{finish:()=>void};private previousSelection=new Map<string,string|null>();private replacements=new Map<string,ElmaExchange>();private stopCalls=new Map<string,Promise<void>>();private answerSerial=0;private answerStates=$state<Record<string,{token:number;pending:boolean;problem:string;after:number}>>({});
  repositoryNotice=$state('');repositoryChange=$state<{root:string;chat:string;folder:string;generation:number}|null>(null);
  private pageTicket=0;private generation=0;private settingsObservation=0;private chatSub?:{close:()=>void;retry:()=>void};private bootstrapGeneration=0;private closed=false;private cancelOpening?:()=>void;
@@ -45,9 +47,34 @@ export class ElmaWindow {
  savePreferences(){savePreferences(this.root.root,this.preferences);}
  private failure(error?:BridgeError){if(error)this.problem=describe(error);}
  get metadataBusy(){return !!this.info&&this.mutations.forChat(this.info.chat).length>0;}
+ openQuick(){if(!this.info){this.actionNotice='Start a chat before using chat actions';return;}this.quickOpen=true;}
+ quickAction(id:string){this.quickOpen=false;if(id==='rename')this.startRename();else if(id==='archive')this.startArchive();else if(id==='copy')void this.copySession();}
+ async copySession(){const chat=this.info?.chat,root=this.root.root,generation=this.generation;if(!chat){this.actionNotice='Start a chat before copying its session ID';return;}try{await navigator.clipboard.writeText(chat);if(root===this.root.root&&generation===this.generation)this.actionNotice='Session ID copied';}catch{if(root===this.root.root&&generation===this.generation)this.actionProblem='The session ID could not be copied.';}}
+ startArchive(){if(!this.info){this.actionNotice='Start a chat before archiving';return;}if(this.archive||this.metadataBusy)return;this.actionNotice='';this.actionProblem='';this.archive={root:this.root.root,chat:this.info.chat,generation:this.generation,folder:this.settings.workingFolder??this.exchange?.workingFolder??this.folder,phase:'confirm'};}
+ cancelArchive(){if(this.archive?.phase==='marking')return;this.archive=null;this.notifyState();}
+ private notifyState(){for(const check of [...this.stateWaiters])check();}
+ private archiveCurrent(intent:ArchiveIntent){return !this.closed&&this.archive===intent&&intent.root===this.root.root&&intent.chat===this.info?.chat&&intent.generation===this.generation;}
+ private savedEnd(intent:ArchiveIntent,exchange:string){return new Promise<boolean>(resolve=>{const check=()=>{const row=this.exchanges.find(row=>row.exchange===exchange);if(!this.archiveCurrent(intent)||row&&['completed','failed','cancelled','interrupted'].includes(row.state)){this.stateWaiters.delete(check);resolve(this.archiveCurrent(intent));}};this.stateWaiters.add(check);check();});}
+ async confirmArchive(){
+  const intent=this.archive;if(!intent||intent.phase!=='confirm'||!this.archiveCurrent(intent))return;intent.phase='preparing';
+  let finish!:()=>void;const done=new Promise<void>(resolve=>finish=resolve);this.drafts.holdSend(done);
+  try{
+   await this.drafts.settleCurrent(done);if(!this.archiveCurrent(intent))return;
+   const editor=this.drafts.current;if(!editor?.ready||editor.dirty||editor.conflict||editor.recovery!==null)throw new Error('Save or resolve the Draft before archiving.');
+   const running=[...this.exchanges].reverse().find(row=>!['completed','failed','cancelled','interrupted'].includes(row.state));
+   if(running){intent.phase='stopping';await this.stopExchange(running.exchange);if(!this.archiveCurrent(intent))return;if(!this.stopping.includes(running.exchange)&&!['completed','failed','cancelled','interrupted'].includes(this.exchanges.find(row=>row.exchange===running.exchange)?.state??''))throw new Error(this.problem||'The response could not be stopped.');if(!await this.savedEnd(intent,running.exchange))return;}
+   if(!this.archiveCurrent(intent))return;if(this.working)throw new Error('Another response started. Confirm Archive again after it finishes.');
+   await editor.flush();if(!this.archiveCurrent(intent))return;if(editor.dirty||editor.conflict||editor.recovery!==null)throw new Error('Save or resolve the Draft before archiving.');
+   intent.phase='marking';await this.mutations.start('chat.mark',{chat:intent.chat,archived:true}).result;
+   if(intent.root!==this.root.root)return;
+   if(this.preferences.lastChat===intent.chat)delete this.preferences.lastChat;for(const [repo,chat]of Object.entries(this.preferences.repositoryChats))if(chat===intent.chat)delete this.preferences.repositoryChats[repo];this.preferences.recentChats=this.preferences.recentChats.filter(chat=>chat!==intent.chat);this.savePreferences();
+   if(this.archiveCurrent(intent)){this.archive=null;this.newChat(intent.folder);this.actionNotice='Chat archived';}
+  }catch(error){if(this.archiveCurrent(intent))this.actionProblem=error instanceof Refusal?describe(error.detail):error instanceof Error?error.message:'The chat could not be archived.';}
+  finally{if(this.archive===intent)this.archive=null;finish();this.notifyState();}
+ }
  startRename(){
   if(!this.info?.exchangeCount||!this.info.createdAt){this.actionNotice='Start a chat before renaming';return;}
-  if(this.metadataBusy)return;
+  if(this.metadataBusy||this.archive)return;
   this.rename={root:this.root.root,chat:this.info.chat,generation:this.generation,value:this.info.title??'',busy:false,problem:''};
   this.actionNotice='';
  }
@@ -66,7 +93,7 @@ export class ElmaWindow {
   finally{edit.busy=false;}
  }
  async toggleOngoing(){
-  const chat=this.info?.chat,root=this.root.root,generation=this.generation;if(!chat||this.metadataBusy)return;
+  const chat=this.info?.chat,root=this.root.root,generation=this.generation;if(!chat||this.metadataBusy||this.archive)return;
   const observed=this.marksObservation;this.actionNotice='';this.actionProblem='';
   try{
    const result=await this.mutations.start('chat.mark',{chat,ongoing:!this.ongoing}).result;
@@ -86,10 +113,10 @@ export class ElmaWindow {
   finally{if(this.settingsQueues.get(key)===operation)this.settingsQueues.delete(key);}
  }
  private async bootstrap(){
-  const generation=++this.bootstrapGeneration;
+  const generation=++this.bootstrapGeneration,context=this.generation;
   try{
    const request=await this.app.call('app.takeOpen');const workspace=await this.bridge.call<{repositories:Repository[];route:ElmaRoute}>('workspace.get');
-   if(this.closed||generation!==this.bootstrapGeneration)return;
+   if(this.closed||generation!==this.bootstrapGeneration||context!==this.generation)return;
    this.workspaceRoute=workspace.route;this.repositories=[...workspace.repositories];const recent=this.preferences.recentRepositories;
    this.repositories=[...this.repositories.slice(0,1),...this.repositories.slice(1).sort((a,b)=>{const ai=recent.indexOf(a.name),bi=recent.indexOf(b.name);return(ai<0?Infinity:ai)-(bi<0?Infinity:bi);})];
    this.folder=this.folder||this.repositories[0]?.folder||'';this.defaultRoute=this.repositories.find(r=>r.folder===this.folder)?.route??workspace.route;
@@ -102,7 +129,7 @@ export class ElmaWindow {
   }catch(e){this.problem=e instanceof Refusal?describe(e.detail):'The chat could not be read.';}
  }
  async openChat(chat:string,canonicalDraft=false):Promise<boolean>{
-  this.rename=null;this.actionNotice='';this.actionProblem='';this.cancelOpening?.();const generation=++this.generation;this.chatSub?.close();
+  this.quickOpen=false;this.archive=null;this.notifyState();this.rename=null;this.actionNotice='';this.actionProblem='';this.cancelOpening?.();const generation=++this.generation;this.chatSub?.close();
   return new Promise<boolean>((resolve,reject)=>{
    let settled=false;this.cancelOpening=()=>{if(!settled){settled=true;resolve(false);}};
    this.chatSub=this.bridge.subscribe('chat',{chat},event=>{
@@ -151,7 +178,7 @@ export class ElmaWindow {
   try{await this.bridge.call('exchange.answer',{exchange:row.exchange,askId:question.askId,answer});}
   catch(e){if(this.answerStates[key]?.token===token)this.answerStates[key]={...this.answerStates[key],pending:false,problem:e instanceof Refusal?describe(e.detail):'The answer could not be sent.'};}
  }
- get composerBusy(){return !!this.drafts.current?.pendingSend||!!(this.info&&this.sending.forChat(this.info.chat));}
+ get composerBusy(){return !!this.archive&&this.archive.phase!=='confirm'||!!this.drafts.current?.pendingSend||!!(this.info&&this.sending.forChat(this.info.chat));}
  get composerStatus(){return(this.info?this.sending.forChat(this.info.chat)?.status:undefined)||this.sendWait||this.drafts.current?.pastes.status||this.drafts.current?.status||'';}
  async recoverFailure(continueFrom=false){
   const row=this.exchange,editor=this.drafts.current,chat=this.info?.chat,root=this.root.root,generation=this.generation;
@@ -209,7 +236,7 @@ export class ElmaWindow {
   let finish!:()=>void;const done=new Promise<void>(resolve=>finish=resolve);this.stopQueue={...pending,finish};this.drafts.holdSend(done);this.sendWait='Waiting for the current response to be saved…';this.composerOpen=false;this.afterChatState();if(this.stopQueue)await this.stopExchange(pending.exchange);
  }
  private cancelQueued(){const pending=this.stopConfirmation;this.stopConfirmation=null;if(pending){pending.editor.pendingSend=false;pending.editor.sendProblem='The queued message is kept in its Draft.';}if(this.stopQueue){this.stopQueue.editor.pendingSend=false;this.stopQueue.editor.sendProblem='The queued message is kept in its Draft.';this.stopQueue.finish();this.stopQueue=undefined;}this.sendWait='';}
- private afterChatState(){this.stopping=this.stopping.filter(id=>!this.exchanges.some(row=>row.exchange===id&&['completed','failed','cancelled','interrupted'].includes(row.state)));const queued=this.stopQueue;if(!queued)return;const row=this.exchanges.find(row=>row.exchange===queued.exchange);if(!row||!['completed','failed','cancelled','interrupted'].includes(row.state))return;this.stopQueue=undefined;this.sendWait='';queued.editor.pendingSend=false;try{this.sending.start(queued.intent);}catch(e){queued.editor.sendProblem=e instanceof Error?e.message:'Not sent';this.composerOpen=true;}queued.finish();}
+ private afterChatState(){this.notifyState();this.stopping=this.stopping.filter(id=>!this.exchanges.some(row=>row.exchange===id&&['completed','failed','cancelled','interrupted'].includes(row.state)));const queued=this.stopQueue;if(!queued)return;const row=this.exchanges.find(row=>row.exchange===queued.exchange);if(!row||!['completed','failed','cancelled','interrupted'].includes(row.state))return;this.stopQueue=undefined;this.sendWait='';queued.editor.pendingSend=false;try{this.sending.start(queued.intent);}catch(e){queued.editor.sendProblem=e instanceof Error?e.message:'Not sent';this.composerOpen=true;}queued.finish();}
  stopCurrent(){const row=[...this.exchanges].reverse().find(value=>!['completed','failed','cancelled','interrupted'].includes(value.state));if(row)void this.stopExchange(row.exchange);}
  async stopExchange(exchange:string,retry=false):Promise<void>{
   const root=this.root.root,previous=this.stopCalls.get(exchange);if(previous){await previous;if(retry&&root===this.root.root&&this.stopping.includes(exchange)){if(this.stopCalls.get(exchange)===previous)this.stopCalls.delete(exchange);await this.stopExchange(exchange,true);}return;}
@@ -252,8 +279,8 @@ export class ElmaWindow {
   }catch(e){if(ticket===this.pageTicket&&e instanceof Refusal)this.pageProblem=describe(e.detail);}
   finally{if(ticket===this.pageTicket)this.pageBusy=false;}
  }
- private clear(){this.rename=null;this.actionNotice='';this.actionProblem='';this.answerStates={};this.cancelQueued();this.repositoryChange=null;this.repositoryNotice='';this.restoring=false;this.live.clear();this.revision++;this.pageTicket++;this.pageBusy=false;this.pageProblem='';this.historyOpen=false;this.cancelOpening?.();this.chatSub?.close();this.chatSub=undefined;this.generation++;this.info=null;this.exchanges=[];this.selected=null;this.settings={};this.ongoing=false;}
+ private clear(){this.quickOpen=false;this.archive=null;this.notifyState();this.rename=null;this.actionNotice='';this.actionProblem='';this.answerStates={};this.cancelQueued();this.repositoryChange=null;this.repositoryNotice='';this.restoring=false;this.live.clear();this.revision++;this.pageTicket++;this.pageBusy=false;this.pageProblem='';this.historyOpen=false;this.cancelOpening?.();this.chatSub?.close();this.chatSub=undefined;this.generation++;this.info=null;this.exchanges=[];this.selected=null;this.settings={};this.ongoing=false;}
  private selectDraft(canonical=false){if(this.root.root&&(this.info||this.folder)){const pending=this.info?this.sending.forChat(this.info.chat):undefined;this.drafts.select(this.root.root,pending&&!canonical?pending.intent.scope:this.info?{chat:this.info.chat}:{folder:this.folder});this.sending.select(this.root.root,this.drafts.current);}}
 
- close(){clearInterval(this.clock);this.cancelOpening?.();this.closed=true;this.bootstrapGeneration++;this.chatSub?.close();this.cancelQueued();this.sending.close();this.mutations.close();this.drafts.close();this.routing.close();this.bridge.close();this.app.close();}
+ close(){clearInterval(this.clock);this.cancelOpening?.();this.closed=true;this.notifyState();this.bootstrapGeneration++;this.chatSub?.close();this.cancelQueued();this.sending.close();this.mutations.close();this.drafts.close();this.routing.close();this.bridge.close();this.app.close();}
 }

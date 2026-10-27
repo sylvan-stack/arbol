@@ -50,6 +50,7 @@ export class Mutations {
    const value=await this.bridge.call<Fields>(op.method,op.params);
    if(!op.pending||this.closed)return;
    if(!value||typeof value!=='object'||Array.isArray(value)||(op.method==='chat.rename'?value.title!==null&&typeof value.title!=='string':typeof value.ongoing!=='boolean'))throw new Refusal({code:'no_answer',message:'The backend did not return a valid action receipt.'});
+   if(op.method==='chat.mark'&&op.params.archived===true&&(typeof value.archivedAt!=='string'||!Number.isFinite(Date.parse(value.archivedAt))))throw new Refusal({code:'no_answer',message:'The backend did not acknowledge the archived mark.'});
    this.complete(op,undefined,value);
   }catch(error){
    if(!op.pending||this.closed)return;
