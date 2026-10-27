@@ -129,6 +129,19 @@ class Frame:
         self.temp.cleanup()
 
 
+def cluster_environment() -> dict[str, str]:
+    """The inherited environment with a locale set.
+
+    Without `LANG` or `LC_ALL` the postmaster on macOS becomes multithreaded during startup and exits, with the hint
+    to set `LC_ALL`; sessions of the Claude desktop app carry no locale. The cluster is made with `--no-locale`, so any
+    set locale serves, and one the session has is kept.
+    """
+    environment = dict(os.environ)
+    if "LC_ALL" not in environment and "LANG" not in environment:
+        environment["LC_ALL"] = "C.UTF-8"
+    return environment
+
+
 class Cluster:
     def __init__(self) -> None:
         if not (PG / "initdb").is_file():
@@ -154,6 +167,7 @@ class Cluster:
                 stdin=subprocess.DEVNULL,
                 stdout=self.stream,
                 stderr=subprocess.STDOUT,
+                env=cluster_environment(),
                 start_new_session=True,
             )
             for _ in range(200):

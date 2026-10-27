@@ -6,7 +6,7 @@ import asyncio
 import subprocess
 import time
 
-from backend.support import PG, Cluster
+from backend.support import PG, Cluster, cluster_environment
 
 
 async def offline(cluster: Cluster) -> None:
@@ -22,7 +22,8 @@ async def online(cluster: Cluster) -> None:
     assert cluster.child is not None and cluster.child.poll() is not None
     cluster.child = subprocess.Popen(
         [str(PG / "postgres"), "-D", str(cluster.data), "-k", str(cluster.socket), "-h", "", "-p", "5432", "-F"],
-        stdin=subprocess.DEVNULL, stdout=cluster.stream, stderr=subprocess.STDOUT, start_new_session=True)
+        stdin=subprocess.DEVNULL, stdout=cluster.stream, stderr=subprocess.STDOUT, env=cluster_environment(),
+        start_new_session=True)
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         result = await asyncio.to_thread(subprocess.run,
