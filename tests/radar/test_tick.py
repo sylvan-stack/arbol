@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import json
 import re
 import subprocess
 import sys
@@ -261,9 +262,17 @@ class Advisory(unittest.TestCase):
 
     def test_a_build_of_arbol_carries_the_radar_and_its_checks(self) -> None:
         """radar.packaged"""
-        text = (ROOT / "scripts/package_backend.py").read_text(encoding="utf-8")
-        for folder in ("src/arbol_radar", "tests/radar"):
-            self.assertIn(f'root / "{folder}", folder / "{folder}"', text)  # copied into the Build as the backend is
+        script = ROOT / "scripts/package_backend.py"
+        if script.is_file():  # a checkout: the packaging copies both folders into the Build as it copies the backend
+            text = script.read_text(encoding="utf-8")
+            for folder in ("src/arbol_radar", "tests/radar"):
+                self.assertIn(f'root / "{folder}", folder / "{folder}"', text)
+        else:  # a packaged Build: its manifest lists every payload file, the radar's and its checks' among them
+            manifest = json.loads((ROOT / "package-manifest.json").read_text(encoding="utf-8"))
+            files = set(manifest["files"])
+            self.assertIn("src/arbol_radar/tick.py", files)
+            self.assertIn("tests/radar/test_tick.py", files)
+            self.assertIn("tests/radar/layout.sql", files)
         check = (ROOT / "scripts/check_backend.py").read_text(encoding="utf-8")
         self.assertIn('"-p", "test*.py"', check)  # the Build's unit check runs every packaged test, the radar's too
 
