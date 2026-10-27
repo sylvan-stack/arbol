@@ -6,7 +6,8 @@
   "scripts": {
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "build": "vite build",
-    "test:bridge": "node ../../tests/ui/bridge.mjs"
+    "test:bridge": "node ../../tests/ui/bridge.mjs",
+    "test": "node ../../tests/ui/run.mjs"
   },
   "dependencies": {
     "@fontsource/hanken-grotesk": "5.3.0",

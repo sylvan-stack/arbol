@@ -377,6 +377,8 @@ def paths(args: argparse.Namespace) -> tuple[Path, Path]:
                 record.get("component") == "arbol"
                 and record.get("root") == args.root
                 and record.get("status") == "working"
+                and record.get("entry") == "bin/arbol"
+                and record.get("prunedAt") is None
                 and re.fullmatch("[1-9a-f][0-9a-f]*", record.get("build", ""))
                 and file.parent.name == record["build"]
                 and os.access(file.parent / "bin/arbol", os.X_OK)

@@ -152,8 +152,11 @@ async def main() -> None:
     parser.add_argument("--bundle", required=True)
     parser.add_argument("--scenario")
     parser.add_argument("--record", type=Path)
+    parser.add_argument("--build")
     args = parser.parse_args()
     scenario = json.loads(Path(args.scenario).read_text()) if args.scenario else {}
+    if args.build:
+        scenario["build"] = args.build
     fixture = Fixture(scenario, args.record)
     with tempfile.TemporaryDirectory(prefix="eb-", dir="/tmp") as folder:
         socket = Path(folder) / "b.sock"

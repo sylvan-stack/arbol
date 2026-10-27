@@ -270,6 +270,8 @@ class RelayChecks(unittest.IsolatedAsyncioTestCase):
             ("2", "t1", "withdrawn"),
             ("3", "other", "working"),
             ("4", "t1", "working"),
+            ("5", "t1", "working"),
+            ("6", "t1", "working"),
         ]:
             folder = a / build
             (folder / "bin").mkdir(parents=True)
@@ -277,7 +279,9 @@ class RelayChecks(unittest.IsolatedAsyncioTestCase):
             exe.write_text("#!/bin/sh\n")
             exe.chmod(0o700)
             (folder / "build.json").write_text(
-                json.dumps({"component": "arbol", "root": root, "status": status, "build": build})
+                json.dumps({"component": "arbol", "root": root, "status": status, "build": build,
+                            "entry": "bin/other" if build == "6" else "bin/arbol",
+                            **({"prunedAt": "2026-10-27T00:00:00Z"} if build == "5" else {})})
             )
         args = argparse.Namespace(
             root="t1", bundle=None, socket=None, registry_dir=str(reg), root_dir=str(self.root / "root")
