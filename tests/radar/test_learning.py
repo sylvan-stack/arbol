@@ -6,6 +6,7 @@ database of the check's own, as `tests/radar/fixture.py` makes it.
 
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 import uuid
@@ -287,8 +288,8 @@ if __name__ == "__main__":
 RATIOS = TheEstimate.RATIOS
 
 
-class TheProfiles(ChatRecords):
-    """A learned profile written as proposed, the profile in use, approval, and a calculation that never uses a proposal."""
+class ProfileRecords(ChatRecords):
+    """A recorded history of the Claude Subscription with one trusted pair a day, and its listing."""
 
     async def history(self, ratios: tuple[float, ...]) -> None:
         """One trusted pair a day around one run: 10 % of five hours at 10:00, 2 points more of the week at 11:00.
@@ -310,6 +311,10 @@ class TheProfiles(ChatRecords):
     def listing(self) -> Listing:
         latest = usage(claude_windows(40, 50, five_resets=at(days=12)), fetched=at(days=11))
         return Listing(("claude",), (Listed(CLAUDE, record(CLAUDE, latest)),))
+
+
+class TheProfiles(ProfileRecords):
+    """A learned profile written as proposed, the profile in use, approval, and a calculation that never uses a proposal."""
 
     async def test_enough_trusted_pairs_write_a_proposed_profile_one_version_above_the_highest(self) -> None:
         """radar.learn-propose"""
@@ -432,3 +437,91 @@ class TheProfiles(ChatRecords):
         self.assertEqual(dict(third.gates), anthropic | chatgpt)
         self.assertEqual(await self.records.profile(3), third)
         self.assertEqual([profile.version for profile, _ in await self.records.profiles()], [1, 2, 3])
+
+
+class TheCommands(ProfileRecords):
+    """`arbol vigor learn`, `arbol vigor profiles` and `arbol vigor approve <version>` as the program answers them."""
+
+    def answer(self, *extra: str) -> tuple[int, str]:
+        child = self.frame.start(args=self.vigor(*extra))
+        out, err = child.communicate(timeout=20)
+        self.assertEqual(err.decode(), "")
+        return child.returncode, out.decode()
+
+    def document(self, *extra: str) -> dict[str, Any]:
+        status, out = self.answer(*extra)
+        self.assertEqual((status, out.count("\n")), (0, 1), out)  # one JSON document, one line
+        value: dict[str, Any] = json.loads(out)
+        return value
+
+    def refused(self, code: str, *extra: str) -> None:
+        status, out = self.answer(*extra)
+        self.assertEqual((status, json.loads(out)["error"]["code"]), (1, code), out)
+
+    async def test_learn_profiles_and_approve_answer_as_json_and_text(self) -> None:
+        """radar.learn-commands"""
+        await self.history(RATIOS)
+        listed = self.document("profiles")
+        self.assertEqual(listed["inUse"], 1)
+        self.assertEqual(
+            [(p["version"], p["approval"], p["inUse"], p["recordedAt"]) for p in listed["profiles"]],
+            [(1, "proposed", True, None)],
+        )
+        status, out = self.answer("learn", "--text")
+        self.assertEqual(status, 0)
+        lines = out.splitlines()
+        self.assertEqual(
+            lines[0],
+            "Gate weights learned by profile 1's values: a store change of at least 2 points, 10 trusted pairs, the median",
+        )
+        self.assertIn("claude/anthropic: 20 reports, 19 pairs", lines)
+        self.assertIn("anthropic Five hours: 0.10 from 10 trusted pairs, 0.08 to 0.13; 9 not trusted", lines)
+        self.assertIn("Proposed: profile 2, not in use until the owner approves it with arbol vigor approve 2", lines)
+        learned = self.document("learn")
+        self.assertEqual(
+            (learned["profile"], learned["proposed"]["version"], learned["proposed"]["approval"]), (1, 3, "proposed")
+        )
+        self.assertFalse(learned["proposed"]["inUse"])
+        self.assertEqual(learned["subscriptions"], [{"subscription": "claude/anthropic", "reports": 20, "pairs": 19}])
+        self.assertEqual(len(learned["observations"]), 19)
+        self.assertEqual(sum(o["trusted"] for o in learned["observations"]), 10)
+        self.assertEqual([v["subscription"] for v in learned["vigor"]], ["claude/anthropic"])
+        status, out = self.answer("profiles", "--text")
+        lines = out.splitlines()
+        self.assertTrue(
+            lines[0].startswith(
+                "Profile 1 · proposed · in use · even pace, placeholder 0.1 for every other gate · recorded "
+            ),
+            lines[0],
+        )
+        self.assertTrue(
+            lines[1].startswith(
+                "Profile 2 · proposed · even pace, placeholder 0.1 for every other gate · anthropic Five hours 0.10 learned from 10 pairs, 0.08 to 0.13 · recorded "
+            ),
+            lines[1],
+        )
+        self.assertEqual(self.document("approve", "2"), {"approved": 2, "inUse": 2})
+        self.assertEqual(self.document("profiles")["inUse"], 2)
+        status, out = self.answer("approve", "3", "--text")
+        self.assertEqual(
+            (status, out), (0, "Profile 3 approved: the calculation uses it from the next tick or refresh.\n")
+        )
+
+    async def test_what_the_profile_commands_refuse(self) -> None:
+        """radar.learn-command-refusals"""
+        await self.history(RATIOS[:3])
+        self.assertIsNone(self.document("learn")["proposed"])  # too few pairs: nothing written
+        self.assertEqual(await self.count("vigor_profiles"), 1)
+        for value in ("x", "0", "02", "-1"):
+            with self.subTest(value=value):
+                self.refused("invalid_input", "approve", value)
+        self.refused("unknown_profile", "approve", "9")
+        self.refused("invalid_input", "learn", "--refresh")
+        self.refused("invalid_input", "approve")
+        self.assertEqual(self.document("approve", "1"), {"approved": 1, "inUse": 1})
+        self.refused("already_approved", "approve", "1")
+        await self.db.execute("DROP TABLE vigor_results")
+        try:
+            self.refused("layout_incomplete", "profiles")
+        finally:
+            await self.db.execute((ROOT / "tests/radar/layout.sql").read_text(encoding="utf-8"))

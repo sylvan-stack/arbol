@@ -598,9 +598,11 @@ class Advisory(unittest.TestCase):
             "arbol_backend.model",
             "arbol_backend.process",
             "arbol_radar.drivers",
+            "arbol_radar.learning",
             "arbol_radar.records",
             "arbol_radar.rollup",
             "arbol_radar.tick",
+            "arbol_radar.vigor",
         },
         # The tick reaches the Drivers' listing and the records, and nothing else.
         "tick.py": {"arbol_backend.process", "arbol_radar.drivers", "arbol_radar.records"},
