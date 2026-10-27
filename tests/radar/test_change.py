@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tests"))
-from arbol_radar.model import FIRST_PROFILE, Window  # noqa: E402
+from arbol_radar.model import FIRST_PROFILE, Profile, Rejected, Weight, Window, stale_after  # noqa: E402
 from arbol_radar.vigor import compute, next_change, predict  # noqa: E402
 from radar.support import (  # noqa: E402
     CLAUDE,
@@ -214,6 +214,69 @@ class TheNextChange(unittest.TestCase):
         )
         empty = compute(report(ZAI, [], outcome="unsupported", message="no allowance reading"), FIRST_PROFILE, MONDAY)
         self.assertEqual((empty.next_change, empty.next_value), (None, None))
+
+
+class Stale(unittest.TestCase):
+    """A result on a report older than the shortest window that is summed or can exhaust the Subscription (SGM-1.8)."""
+
+    def test_a_claude_result_is_stale_after_five_idle_hours_and_still_computed(self) -> None:
+        """radar.stale-claude-five-hours"""
+        now = MONDAY + timedelta(hours=5)  # 15:00; the report is from 09:55
+        result = compute(report(CLAUDE, claude()), FIRST_PROFILE, now)
+        self.assertEqual(result.stale, timedelta(hours=5, minutes=5))
+        assert result.vigor is not None
+        self.assertEqual(
+            (result.predicted, round(result.vigor, 2)), (True, 0.42)
+        )  # the five-hour window fresh at 13:20
+        self.assertEqual(by_label(result)["Seven days"].used_percent, 20.0)  # the floor the report gives
+        self.assertIsNone(compute(report(CLAUDE, claude()), FIRST_PROFILE, MONDAY).stale)
+
+    def test_stale_begins_when_the_report_is_older_than_the_window_not_at_its_length(self) -> None:
+        """radar.stale-boundary"""
+        exactly = MONDAY + timedelta(hours=4, minutes=55)  # five hours after 09:55
+        self.assertIsNone(compute(report(CLAUDE, claude()), FIRST_PROFILE, exactly).stale)
+        just_after = exactly + timedelta(seconds=1)
+        self.assertEqual(
+            compute(report(CLAUDE, claude()), FIRST_PROFILE, just_after).stale, FIVE_HOURS + timedelta(seconds=1)
+        )
+
+    def test_a_kimi_result_is_stale_after_five_hours_by_its_window_of_calls(self) -> None:
+        """radar.stale-kimi-calls"""
+        now = MONDAY + timedelta(hours=5, minutes=30)
+        result = compute(report(KIMI, kimi()), FIRST_PROFILE, now)
+        self.assertEqual(result.stale, timedelta(hours=5, minutes=35))
+        assert result.vigor is not None
+        self.assertEqual(round(result.vigor, 2), 0.47)
+        self.assertEqual(by_label(result)["Five hours"].predicted, True)  # the calls window reset at 11:00
+        monthly_only = compute(report(KIMI, kimi()[1:]), FIRST_PROFILE, now)
+        self.assertIsNone(monthly_only.stale)  # with its credit windows alone the report is stale after a month
+        self.assertEqual(
+            compute(report(KIMI, kimi()[1:]), FIRST_PROFILE, MONDAY + timedelta(days=30, seconds=1)).stale,
+            timedelta(days=30, minutes=5, seconds=1),
+        )
+
+    def test_the_rule_is_the_shortest_window_that_is_summed_or_can_exhaust(self) -> None:
+        """radar.stale-rule-profile"""
+        self.assertEqual(FIRST_PROFILE.stale_rule, "shortest-window")
+        self.assertEqual(stale_after(FIRST_PROFILE, report(CLAUDE, claude()).windows), FIVE_HOURS)
+        self.assertEqual(stale_after(FIRST_PROFILE, report(CODEX, codex()).windows), FIVE_HOURS)
+        self.assertEqual(stale_after(FIRST_PROFILE, report(KIMI, kimi()).windows), FIVE_HOURS)
+        tool_scoped = report(
+            ZAI,
+            [
+                window("weekly", "Weekly", used=20, resets=at(days=3), minutes=10080),
+                window("other", "MCP", resource="calls", used=10, resets=at(days=20), minutes=43200),
+            ],
+        )
+        self.assertEqual(stale_after(FIRST_PROFILE, tool_scoped.windows), timedelta(days=7))
+        shorter_tool = report(ZAI, [window("other", "MCP", resource="calls", used=10, resets=at(hours=1), minutes=60)])
+        self.assertIsNone(stale_after(FIRST_PROFILE, shorter_tool.windows))  # a tool's window alone sets no rule
+        no_length = report(CLAUDE, [window("session", "Five hours", used=35, resets=at(hours=3), minutes=None)])
+        self.assertIsNone(stale_after(FIRST_PROFILE, no_length.windows))
+        self.assertIsNone(stale_after(FIRST_PROFILE, ()))
+        with self.assertRaises(Rejected) as caught:
+            Profile(1, "proposed", "even", Weight(0.1), stale_rule="fixed")
+        self.assertEqual(caught.exception.field, "staleRule")
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ import math
 from dataclasses import replace
 from datetime import datetime, timedelta
 
-from arbol_radar.model import SUMMED, Loss, Profile, Rejected, Report, Result, Role, Window
+from arbol_radar.model import SUMMED, Loss, Profile, Rejected, Report, Result, Role, Window, stale_after
 
 
 def loss(window: Window, now: datetime) -> float | None:
@@ -151,7 +151,7 @@ def next_change(
 
 
 def compute(report: Report, profile: Profile, now: datetime) -> Result:
-    """The Vigor of the report's Subscription at `now` by `profile` (SGM-1.1 to 1.7), on the windows predicted for `now`."""
+    """The Vigor of the report's Subscription at `now` by `profile` (SGM-1.1 to 1.8), on the windows predicted for `now`."""
     if now.tzinfo is None:
         raise Rejected("clock", "The clock names no time zone.")
     family = report.subscription.family
@@ -169,6 +169,10 @@ def compute(report: Report, profile: Profile, now: datetime) -> Result:
     windows = tuple(predict(window, now) for window in report.windows)
     losses, vigor, exhausted, notes = _calculate(report, windows, profile, now)
     moment, value = next_change(report, windows, profile, now)
+    # Stale when the report is older than the shortest window that is summed or can exhaust the Subscription; the
+    # result is still computed, since the report is a floor the owner's other devices may have spent past (SGM-1.8).
+    age = now - report.fetched_at
+    limit = stale_after(profile, report.windows)
     return Result(
         subscription=report.subscription,
         moment=now,
@@ -179,6 +183,7 @@ def compute(report: Report, profile: Profile, now: datetime) -> Result:
         exhausted=exhausted,
         notes=notes,
         predicted=any(window.predicted for window in windows),
+        stale=age if limit is not None and age > limit else None,
         next_change=moment,
         next_value=value,
     )
