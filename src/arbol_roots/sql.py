@@ -7,9 +7,11 @@ import shutil
 import signal
 import stat
 import tempfile
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 from types import FrameType
 from typing import Any
@@ -49,6 +51,7 @@ def databases(paths: Places, record: dict[str, Any], *, migration: bool = True) 
 class SqlBuild:
     number: str
     files: dict[str, Path]
+    modes: tuple[str, ...] = ()
 
 
 @contextmanager
@@ -73,13 +76,30 @@ def selected_sql(paths: Places, record: dict[str, Any], *, migration: bool) -> I
             raise ValueError("The selected Root Build is no longer working and available.")
         folder = paths.registry / "arbol-root" / build["build"]
         manifest = json.loads(regular(folder / "package-manifest.json"))
+        expected: dict[str, Any] = {"root":record["root"], "rootContract":record["rootContract"],
+                                   "grewFrom":record.get("grewFrom")}
+        modes: tuple[str, ...] = ()
+        if isinstance(manifest, dict) and isinstance(manifest.get("layout"), dict) and "migrationModes" in manifest["layout"]:
+            capability = manifest["layout"]["migrationModes"]
+            path = folder / "layout/migration-modes.json"
+            data = regular(path)
+            if not isinstance(manifest.get("files"), dict):
+                raise ValueError("The copied Build must have a file hash map.")
+            if (not isinstance(capability, dict) or type(capability.get("version")) is not int
+                    or capability != {"version":1,"modes":["check","chat"]} or "grewFrom" not in record
+                    or json.loads(data) != capability
+                    or hashlib.sha256(data).hexdigest() != manifest.get("files",{}).get("layout/migration-modes.json")):
+                raise ValueError("The advertised migration modes must match their verified copied descriptor and lineage.")
+            # JSON booleans compare equal to integers in Python; check the copied type independently.
+            if type(json.loads(data).get("version")) is not int:
+                raise ValueError("The copied migration capability version must be integer 1.")
+            expected["migrationModes"] = capability
+            modes = ("check", "chat")
         if (not isinstance(manifest, dict) or manifest.get("component") != "arbol-root"
                 or manifest.get("root") != record["root"] or manifest.get("build") != build["build"]
                 or not isinstance(manifest.get("layout"), dict)
                 or type(manifest["layout"].get("rootContract")) is not int
-                or manifest.get("layout") != {"root":record["root"], "rootContract":record["rootContract"],
-                                              "grewFrom":record.get("grewFrom")}
-                or not isinstance(manifest.get("files"), dict)):
+                or manifest["layout"] != expected or not isinstance(manifest.get("files"), dict)):
             raise ValueError("The copied SQL manifest must match the Root, Build, contract and lineage.")
         names = ["chat-tables.sql", "root-tables.sql"]
         if migration and "grewFrom" in record:
@@ -88,7 +108,7 @@ def selected_sql(paths: Places, record: dict[str, Any], *, migration: bool) -> I
         for name, path in files.items():
             if hashlib.sha256(regular(path)).hexdigest() != manifest["files"].get("layout/" + name):
                 raise ValueError(f"Copied SQL does not match its qualified manifest: {path}")
-        yield SqlBuild(build["build"], files)
+        yield SqlBuild(build["build"], files, modes)
     except BlockingIOError as error:
         raise Refused("busy", "The selected Root Build is being pruned; try again.") from error
     except (OSError, ValueError, KeyError, TypeError) as error:
@@ -129,7 +149,7 @@ def migration_directory() -> Iterator[Path]:
 
     def interrupted(number: int, _frame: FrameType | None) -> None:
         raise Refused("operation_failed", f"Migration interrupted by {signal.Signals(number).name}; "
-                                         "the Root remains preparing.")
+                                         "the Root record was not changed.")
 
     try:
         for number in previous:
@@ -151,15 +171,73 @@ def migration_directory() -> Iterator[Path]:
                 signal.signal(number, handler)
 
 
-def migrate(paths: Places, root: str) -> dict[str, Any]:
+def chat_uuid(value: str) -> str:
+    try:
+        if str(uuid.UUID(value)) != value:
+            raise ValueError
+    except (ValueError, AttributeError, TypeError) as error:
+        raise Refused("invalid_input", "The chat must be a canonical lower-case UUID.") from error
+    return value
+
+
+def mode_result(raw: str, mode: str, older: str, chat: str | None) -> dict[str, Any]:
+    try:
+        value = json.loads(raw)
+        if not isinstance(value,dict) or value.get("mode") != mode or value.get("fromRoot") != older:
+            raise ValueError("Wrong mode or source Root.")
+        if mode == "check":
+            if (set(value) != {"mode","fromRoot","checked","stale"} or type(value["checked"]) is not int
+                    or value["checked"] < 0 or not isinstance(value["stale"],list)
+                    or any(not isinstance(item,str) or chat_uuid(item) != item for item in value["stale"])
+                    or len(set(value["stale"])) != len(value["stale"]) or len(value["stale"]) > value["checked"]):
+                raise ValueError("Invalid comparison counts or chat identifiers.")
+        else:
+            if (set(value) != {"mode","fromRoot","chat","fromChat","resultChat","action","endedThrough","snapshotAt"}
+                    or value["chat"] != chat or value["action"] not in ("replaced","copied")
+                    or type(value["endedThrough"]) is not int or value["endedThrough"] < 0
+                    or not isinstance(value["snapshotAt"],str)
+                    or datetime.fromisoformat(value["snapshotAt"]).tzinfo is None):
+                raise ValueError("Invalid single-chat result.")
+            for key in ["chat","fromChat","resultChat"]:
+                chat_uuid(value[key])
+            if (value["action"] == "replaced") != (value["resultChat"] == chat):
+                raise ValueError("The result chat does not match the migration action.")
+        return value
+    except (ValueError, TypeError, KeyError, Refused) as error:
+        raise Refused("operation_failed", "The migration returned an invalid result; inspect the copy before trying again.") from error
+
+
+def migrate(paths: Places, root: str, *, check: bool = False, chat: str | None = None) -> dict[str, Any]:
+    if check and chat is not None:
+        raise Refused("invalid_input", "--check and --chat are mutually exclusive.")
+    if chat is not None:
+        chat_uuid(chat)
+    mode = "check" if check else "chat" if chat is not None else None
     with catalogue_lock(paths):
         record = selected(paths, root)
-        if record["status"] != "preparing":
+        if mode is not None and (record["status"] not in ("working","failed") or "grewFrom" not in record):
+            raise Refused("invalid_input", "Comparison or one-chat migration needs a working/failed Root with lineage.")
+        if mode is None and record["status"] != "preparing":
             raise Refused("invalid_input", "Only a preparing Root can be migrated; nothing was changed.")
         target, source = databases(paths, record)
         with selected_sql(paths, record, migration=True) as build:
+            if mode is not None and mode not in build.modes:
+                raise Refused("build_unavailable", "The selected Root Build does not advertise this migration mode.")
             database = database_client(paths)
             with migration_directory() as folder:
+                if mode is not None:
+                    assert source is not None
+                    variables = {"from_database":source,"from_root":record["grewFrom"],
+                                 "arbol_migrate_check" if check else "arbol_migrate_chat":"1" if check else str(chat)}
+                    try:
+                        raw = database.file(target,build.files["migrate.sql"],single=False,variables=variables,cwd=folder)
+                    except DatabaseError as error:
+                        if error.sqlstate == "P0002":
+                            raise Refused("unknown_chat", f"Selected chat {chat} or its original is no longer available.") from error
+                        if error.sqlstate in ("55P03","40P01"):
+                            raise Refused("busy", "The selected chat or provenance is busy; nothing was replaced.") from error
+                        raise
+                    return {"root":root,"rootBuild":build.number,**mode_result(raw,mode,record["grewFrom"],chat)}
                 database.drop(target)
                 database.create(target)
                 for name in ["chat-tables.sql", "root-tables.sql"]:

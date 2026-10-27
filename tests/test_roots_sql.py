@@ -325,3 +325,129 @@ time.sleep(config.get('delay', 0))""")
                     if process.poll() is None:
                         os.killpg(process.pid, signal.SIGKILL)
                     process.communicate(timeout=5)
+
+
+class InUseModes(unittest.TestCase):
+    CHAT = "10000000-0000-4000-8000-000000000001"
+
+    def setUp(self) -> None:
+        self.paths = test_roots.database_fixture(self)
+        self.record = {**test_roots.record("second",state="working"),"grewFrom":"sapling"}
+        for record in [test_roots.record(state="working"),self.record]:
+            (self.paths.roots/record["root"]).mkdir(parents=True)
+            save_record(self.paths,record)
+        self.folder = image(self.paths,root="second",older="sapling")
+        self.capability()
+
+    def capability(self) -> None:
+        value = {"version":1,"modes":["check","chat"]}
+        path = self.folder/"layout/migration-modes.json"
+        path.write_text(json.dumps(value))
+        manifest = json.loads((self.folder/"package-manifest.json").read_text())
+        manifest["layout"]["migrationModes"] = value
+        manifest["files"]["layout/migration-modes.json"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        (self.folder/"package-manifest.json").write_text(json.dumps(manifest))
+
+    def configure(self, value: Any, **extra: Any) -> None:
+        (self.paths.home/"psql.json").write_text(json.dumps({"stdout":json.dumps(value),**extra}))
+
+    def result(self, mode: str = "chat", action: str = "replaced") -> dict[str, Any]:
+        if mode=="check":
+            return {"mode":"check","fromRoot":"sapling","checked":2,"stale":[self.CHAT]}
+        return {"mode":"chat","fromRoot":"sapling","chat":self.CHAT,"fromChat":self.CHAT,
+                "resultChat":self.CHAT if action=="replaced" else "10000000-0000-4000-8000-000000000002",
+                "action":action,"endedThrough":2,"snapshotAt":"2026-10-27T04:00:00+00:00"}
+
+    def test_check_and_chat_run_only_selected_script_without_drop_layout_or_metadata_write(self) -> None:
+        """roots.migrate-in-use"""
+        before = {root:(self.paths.roots/root/"root.json").read_bytes() for root in ["sapling","second"]}
+        for mode in ["check","chat"]:
+            self.configure(self.result(mode))
+            with mock.patch("arbol_roots.database.subprocess.run",wraps=subprocess.run) as calls:
+                reply = migrate(self.paths,"second",check=mode=="check",chat=self.CHAT if mode=="chat" else None)
+            self.assertEqual(reply,{"root":"second","rootBuild":"1",**self.result(mode)})
+            self.assertEqual(len(calls.call_args_list),2)  # Keychain and one psql file, no maintenance connection.
+            called = calls.call_args
+            args = called.args[0]
+            self.assertIn("arbol_migrate_check=1" if mode=="check" else "arbol_migrate_chat="+self.CHAT,args)
+            self.assertIn("from_database=arbol_sapling",args)
+            self.assertNotIn("--single-transaction",args)
+            self.assertFalse(called.kwargs["cwd"].exists())
+        for root,content in before.items():
+            self.assertEqual((self.paths.roots/root/"root.json").read_bytes(),content)
+
+    def test_capability_damage_unknown_versions_and_legacy_modes_refuse_before_any_client(self) -> None:
+        """roots.migrate-capabilities"""
+        path = self.folder/"layout/migration-modes.json"
+        for damage in ["missing","hash","symlink","boolean","unknown","legacy"]:
+            self.capability()
+            if damage=="missing":
+                path.unlink()
+            elif damage=="hash":
+                path.write_text('{"changed":true}')
+            elif damage=="symlink":
+                path.unlink()
+                path.symlink_to(self.paths.home/"psql.json")
+            else:
+                manifest = json.loads((self.folder/"package-manifest.json").read_text())
+                if damage=="legacy":
+                    manifest["layout"].pop("migrationModes")
+                else:
+                    manifest["layout"]["migrationModes"]["version"] = True if damage=="boolean" else 2
+                    path.write_text(json.dumps(manifest["layout"]["migrationModes"]))
+                    manifest["files"]["layout/migration-modes.json"] = hashlib.sha256(path.read_bytes()).hexdigest()
+                (self.folder/"package-manifest.json").write_text(json.dumps(manifest))
+            with self.subTest(damage=damage),self.assertRaises(Refused) as caught:
+                migrate(self.paths,"second",check=True)
+            self.assertEqual(caught.exception.code,"build_unavailable")
+            path.unlink(missing_ok=True)
+        self.assertFalse((self.paths.home/"calls.jsonl").exists())
+
+    def test_mutual_flags_states_lineage_and_noncanonical_uuid_refuse_without_psql(self) -> None:
+        """roots.migrate-mode-input"""
+        for args in [("--check","--chat",self.CHAT),("--chat","ABC"),("--chat",self.CHAT.upper()),
+                     ("--check=true",),("--chat",),("--check","--check")]:
+            if args==("--chat",self.CHAT.upper()) and self.CHAT.upper()==self.CHAT:
+                continue
+            answer = test_roots.roots_command(self.paths,"migrate","second",*args)
+            self.assertEqual(answer.returncode,1)
+            self.assertEqual(json.loads(answer.stdout)["error"]["code"],"invalid_input")
+        for value in [{**self.record,"status":"preparing"},test_roots.record("second",state="working")]:
+            save_record(self.paths,value)
+            with self.assertRaises(Refused):
+                migrate(self.paths,"second",check=True)
+        self.assertFalse((self.paths.home/"calls.jsonl").exists())
+
+    def test_sqlstate_unknown_chat_and_busy_are_structured_and_bad_results_require_inspection(self) -> None:
+        """roots.migrate-mode-errors"""
+        for state,code in [("P0002","unknown_chat"),("55P03","busy"),("40P01","busy"),("42P01","database_unavailable")]:
+            self.configure(None,status=3,stderr=f"psql:/fixture/migrate.sql:35: ERROR:  {state}: fictional refusal\nLOCATION: secret internal")
+            answer = test_roots.roots_command(self.paths,"migrate","second","--chat",self.CHAT)
+            self.assertEqual(answer.returncode,1)
+            error = json.loads(answer.stdout)["error"]
+            self.assertEqual(error["code"],code)
+            if code=="unknown_chat":
+                self.assertIn(self.CHAT,error["message"])
+            self.assertNotIn("LOCATION",error["message"])
+        for result in [None,{**self.result(),"chat":"wrong"},{**self.result(),"action":"copied"},
+                       {**self.result(),"endedThrough":True},{**self.result(),"snapshotAt":"2026-10-27"},
+                       {**self.result("check"),"checked":True},self.result("check")|{"stale":[self.CHAT,self.CHAT]}]:
+            self.configure(result)
+            with self.assertRaises(Refused) as error:
+                migrate(self.paths,"second",check=isinstance(result,dict) and result.get("mode")=="check",
+                        chat=None if isinstance(result,dict) and result.get("mode")=="check" else self.CHAT)
+            self.assertEqual(error.exception.code,"operation_failed")
+            self.assertIn("inspect",str(error.exception))
+        self.configure(self.result(action="copied"))
+        self.assertEqual(migrate(self.paths,"second",chat=self.CHAT)["action"],"copied")
+
+    def test_in_use_file_failure_and_signals_keep_state_neutral_cleanup(self) -> None:
+        """roots.migrate-mode-cleanup"""
+        header = (self.paths.roots/"second/root.json").read_bytes()
+        for failure in [KeyboardInterrupt(),DatabaseError("timeout",uncertain=True),
+                        Refused("operation_failed","Migration interrupted by SIGTERM; the Root record was not changed.")]:
+            with mock.patch.object(Database,"file",side_effect=failure) as call:
+                with self.assertRaises(type(failure)):
+                    migrate(self.paths,"second",check=True)
+            self.assertFalse(call.call_args.kwargs["cwd"].exists())
+            self.assertEqual((self.paths.roots/"second/root.json").read_bytes(),header)

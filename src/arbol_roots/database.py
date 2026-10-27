@@ -13,9 +13,10 @@ SERVICE = "com.sylvan-stack.arbol.database"
 
 
 class DatabaseError(Refused):
-    def __init__(self, message: str, *, uncertain: bool = False) -> None:
+    def __init__(self, message: str, *, uncertain: bool = False, sqlstate: str | None = None) -> None:
         super().__init__("database_unavailable", message)
         self.uncertain = uncertain
+        self.sqlstate = sqlstate
 
 
 def environment(paths: Places, password: str | None = None) -> dict[str, str]:
@@ -79,12 +80,12 @@ class Database:
                              cwd=self.paths.home, seconds=30, changing=changing)
 
     def file(self, name: str, file: Path, *, single: bool = True, variables: dict[str, str] | None = None,
-             cwd: Path | None = None) -> None:
+             cwd: Path | None = None) -> str:
         address = urlsplit(self.address)._replace(path="/" + quote(database_name(name), safe="")).geturl()
         args = ["--single-transaction"] if single else []
         for key, value in (variables or {}).items():
             args += ["--set", key + "=" + value]
-        self._execute([*args, "--file", str(file.resolve()), "--dbname", address],
+        return self._execute([*args, "--file", str(file.resolve()), "--dbname", address],
                       cwd=cwd or self.paths.home, seconds=60, changing=True)
 
     def _execute(self, arguments: list[str], *, cwd: Path, seconds: int, changing: bool) -> str:
@@ -101,12 +102,11 @@ class Database:
             raise DatabaseError("psql returned unreadable output.", uncertain=changing) from error
         if result.returncode != 0:
             detail = (result.stderr or result.stdout).strip()
-            state = re.search(r"(?m)^[^:\n]+:\s+([0-9A-Z]{5}):", detail)
-            confirmed = result.returncode == 3 or (state is not None and not state[1].startswith("08")
-                                                   and state[1] != "40003")
+            state = re.search(r"(?:ERROR|FATAL):\s+([0-9A-Z]{5}):", detail)
+            confirmed = (not state[1].startswith("08") and state[1] != "40003") if state else result.returncode == 3
             detail = "\n".join(line for line in detail.splitlines() if not line.startswith("LOCATION:"))
             if self.password:
                 detail = detail.replace(self.password, "[password removed]")
             raise DatabaseError(f"psql failed with status {result.returncode}: {detail[:4096]}",
-                                uncertain=changing and not confirmed)
+                                uncertain=changing and not confirmed, sqlstate=state[1] if state else None)
         return result.stdout.strip()
