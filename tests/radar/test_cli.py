@@ -208,6 +208,13 @@ class TheVerb(unittest.TestCase):
             {"--refresh": "claude/anthropic", "--text": "", "verb": "vigor"},
         )
         self.assertEqual(parse(["backend"]), {"verb": "backend"})  # the backend's command line as it was
+        # The profile commands of SYL-299 (SGM-1.11).
+        self.assertEqual(parse(["vigor", "learn"]), {"verb": "vigor", "action": "learn"})
+        self.assertEqual(parse(["vigor", "profiles", "--text"]), {"verb": "vigor", "action": "profiles", "--text": ""})
+        self.assertEqual(
+            parse(["--root", "jensen", "vigor", "approve", "2"]),
+            {"--root": "jensen", "verb": "vigor", "action": "approve", "version": "2"},
+        )
         self.assertEqual(options(parse(["vigor"])), Options())
         self.assertEqual(options(parse(["vigor", "--refresh", "--text"])), Options(refresh=True, text=True))
         self.assertEqual(
@@ -228,6 +235,14 @@ class TheVerb(unittest.TestCase):
             ["vigor", "--bogus"],
             ["vigor", "--root-dir", "/tmp/x"],
             ["vigor", "--root"],
+            ["vigor", "teach"],
+            ["vigor", "learn", "now"],
+            ["vigor", "profiles", "1"],
+            ["vigor", "approve"],
+            ["vigor", "approve", "2", "3"],
+            ["backend", "learn"],
+            ["vigor", "learn", "--refresh"],
+            ["vigor", "--refresh", "claude/anthropic", "profiles"],
         ):
             with self.subTest(args=args), self.assertRaises(Refused) as caught:
                 parse(args)

@@ -32,7 +32,12 @@ class Tick:
 
 
 async def recompute(records: Records, listing: Listing, profile: Profile, now: datetime) -> Tick:
-    """Record every listed report newer than the last recorded one, then calculate and record every Subscription."""
+    """Record every listed report newer than the last recorded one, then calculate and record every Subscription.
+
+    The calculation uses the profile in use: the highest approved version the Root records, else `profile`, the first
+    profile, so an approval takes effect at the next tick or refresh and a proposed profile never (SGM-1.11, SGM-D37).
+    """
+    profile = await records.in_use(profile)
     reports: list[Report] = []
     results: list[Result] = []
     failures = dict(listing.failures)

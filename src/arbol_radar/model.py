@@ -19,8 +19,9 @@ Source = Literal["placeholder", "learned"]
 OUTCOMES = ("ok", "needs_sign_in", "unavailable", "unsupported")
 KINDS = ("session", "weekly", "other")
 SUMMED = ("tokens", "credits")  # the resources whose windows take part in the sum (SGM-1.2, SGM-D24)
-VERSIONS = (1,)  # the profile versions the calculation knows; a learned profile adds its own
+APPROVALS = ("proposed", "approved")  # a profile's approval state: proposed until the owner approves it (SGM-D17)
 STALE_RULES = ("shortest-window",)  # the stale rules the calculation knows (SGM-1.8, SGM-D31)
+ESTIMATORS = ("median",)  # the estimators the learner knows over a gate's trusted ratios (SGM-1.11)
 
 # What the calculation knows of a family's windows beyond the contract's fields, by the window's label: which window is
 # scoped to the coding product the Subscription serves, the store among equal-length longest windows (SGM-D25), and
@@ -234,6 +235,24 @@ class Weight:
 
     value: float
     source: Source = "placeholder"
+    pairs: int | None = None  # a learned weight: the trusted report pairs it rests on (SGM-1.11)
+    low: float | None = None  # and the spread of their ratios, the lowest and the highest
+    high: float | None = None
+
+
+@dataclass(frozen=True)
+class Learning:
+    """How gate weights are learned from report pairs (SGM-1.11): profile values with proposed defaults (SGM-D36).
+
+    A pair is trusted only when the store moved by at least `threshold` percentage points; a gate's weight is
+    calibrated once `pairs` trusted pairs exist, as the `estimator` of their ratios. Reports give whole percentages,
+    so a change of 1 point is mostly rounding; at 2 points one ratio is within about half of its value, and the median
+    of 10 such ratios is not moved by up to four bad pairs.
+    """
+
+    threshold: float = 2.0
+    pairs: int = 10
+    estimator: str = "median"
 
 
 @dataclass(frozen=True)
@@ -248,10 +267,15 @@ class Profile:
     stale_rule: str = "shortest-window"  # stale after the shortest window that is summed or can exhaust (SGM-1.8, D31)
     store_weight: float = 1.0  # the store's weight is 1 (SGM-1.4)
     tick_minutes: float = 3.0  # the backend recomputes every three minutes and no faster (SGM-1.14, SGM-D30)
+    learning: Learning = field(default_factory=Learning)  # how its gate weights are learned (SGM-1.11, SGM-D36)
 
     def __post_init__(self) -> None:
-        if self.version not in VERSIONS:
-            raise Rejected("version", f"The calculation knows the profile versions {VERSIONS}, not {self.version}.")
+        # The calculation knows the first profile and the versions the Root's own table records (SGM-D37); a version
+        # the table does not hold is refused where it is asked for, `Records.profile`.
+        if isinstance(self.version, bool) or not isinstance(self.version, int) or self.version < 1:
+            raise Rejected("version", f"A profile version is a whole number from 1, not {self.version!r}.")
+        if self.approval not in APPROVALS:
+            raise Rejected("approval", f"A profile's approval is one of {APPROVALS}, not {self.approval!r}.")
         weights = [
             ("placeholder", self.placeholder),
             *((f"{family} {label}", w) for (family, label), w in self.gates.items()),
@@ -269,6 +293,15 @@ class Profile:
             raise Rejected(
                 "tickMinutes", f"The recompute interval is a positive number of minutes, not {self.tick_minutes}."
             )
+        learning = self.learning
+        if not (math.isfinite(learning.threshold) and learning.threshold > 0):
+            raise Rejected("threshold", f"The store's least change is a positive share, not {learning.threshold}.")
+        if isinstance(learning.pairs, bool) or not isinstance(learning.pairs, int) or learning.pairs < 1:
+            raise Rejected(
+                "pairs", f"A calibrated estimate needs a whole number of pairs from 1, not {learning.pairs!r}."
+            )
+        if learning.estimator not in ESTIMATORS:
+            raise Rejected("estimator", f"The learner knows the estimators {ESTIMATORS}, not {learning.estimator!r}.")
 
     def gate_weight(self, family: str, label: str) -> Weight:
         """The weight of a gate: the learned one for this family and window, else the placeholder."""
@@ -276,8 +309,8 @@ class Profile:
 
 
 # The first profile: proposed, the even pace, the placeholder 0.1 for every gate, stale after the shortest window that
-# is summed or can exhaust the Subscription, recomputed every three minutes. The one profile the calculation knows
-# until a learned one is approved.
+# is summed or can exhaust the Subscription, recomputed every three minutes, gate weights learned by the proposed
+# defaults. The profile in use until the owner approves one (SGM-D37).
 FIRST_PROFILE = Profile(version=1, approval="proposed", pace="even", placeholder=Weight(0.1, "placeholder"))
 
 
