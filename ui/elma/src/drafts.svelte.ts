@@ -20,15 +20,18 @@ export class DraftEditor {
  private timer?:ReturnType<typeof setTimeout>;private retry?:ReturnType<typeof setTimeout>;
  private pending?:Promise<void>;private captured?:Saving;private observation=0;private version=0;private closed=false;
  private subscription:{close:()=>void;retry:()=>void};
+ private readyWaiters=new Set<{resolve:()=>void;reject:(error:Error)=>void}>();
  constructor(private bridge:Bridge,readonly scope:DraftScope,private storageKey:string,onCanonical?:(editor:DraftEditor)=>void){
   this.pastes=new Pastes(bridge,this);
   try{const raw=sessionStorage.getItem(storageKey);if(raw){const value=parseWire(raw) as {text?:unknown;baseRevision?:unknown};if(typeof value?.text==='string'&&(value.baseRevision===null||validRevision(value.baseRevision)))this.recovered={text:value.text,baseRevision:value.baseRevision};else sessionStorage.removeItem(storageKey);}}
   catch{this.storageProblem='Unsaved-text recovery is unavailable in this window.';}
   this.subscription=bridge.subscribe('draft',scope,event=>{
    if(!['snapshot','draft'].includes(String(event.kind)))return;
-   try{this.observe(decode(event.draft));onCanonical?.(this);}catch(e){this.problem=e instanceof Error?e.message:'The Draft could not be read.';}
-  },error=>{this.problem='Draft not loaded: '+(error?.message??'The subscription ended.');});
+   try{this.observe(decode(event.draft));onCanonical?.(this);if(this.ready){for(const waiter of this.readyWaiters)waiter.resolve();this.readyWaiters.clear();}}catch(e){this.problem=e instanceof Error?e.message:'The Draft could not be read.';this.rejectReady();}
+  },error=>{this.problem='Draft not loaded: '+(error?.message??'The subscription ended.');this.rejectReady();});
  }
+ private rejectReady(){for(const waiter of this.readyWaiters)waiter.reject(new Error(this.problem||'The Draft was closed.'));this.readyWaiters.clear();}
+ waitReady(){if(this.ready)return Promise.resolve();if(this.problem||this.closed)return Promise.reject(new Error(this.problem||'The Draft was closed.'));return new Promise<void>((resolve,reject)=>this.readyWaiters.add({resolve,reject}));}
  get revision(){return this.canonical?.revision??null;}
  get status(){return !this.ready?'Loading Draft…':this.saving?'Saving Draft…':this.problem?'Draft not saved':this.dirty?'Draft not saved yet':'';}
  private cancel(){clearTimeout(this.timer);clearTimeout(this.retry);}
@@ -107,7 +110,7 @@ export class DraftEditor {
   try{if(this.recovered&&(!this.ready||this.recovery!==null))sessionStorage.setItem(this.storageKey,stringifyWire(this.recovered));else if(this.dirty)sessionStorage.setItem(this.storageKey,stringifyWire({text:this.text,baseRevision:this.editBase}));else sessionStorage.removeItem(this.storageKey);this.storageProblem='';}
   catch{this.storageProblem='Unsaved text is held in this page, but could not be kept for a reload.';}
  }
- close(){this.persist();this.closed=true;this.cancel();this.pastes.close();this.subscription.close();}
+ close(){this.persist();this.closed=true;this.rejectReady();this.cancel();this.pastes.close();this.subscription.close();}
 }
 
 export class Drafts {

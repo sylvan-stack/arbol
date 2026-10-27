@@ -4,6 +4,7 @@ import { Drafts,type DraftEditor } from './drafts.svelte';
 import { Sending,type SendIntent,type SendOperation,type Accepted } from './sending.svelte';
 import {Mutations} from './mutations.svelte';
 import {Chats,chatTitle,chatDetail} from './chats.svelte';
+import {Opening} from './opening.svelte';
 import type { Revision } from './wire-json';
 import { Routing } from './routes.svelte';
 import { LiveExchange,savedBlocks } from './live';
@@ -27,14 +28,15 @@ export class ElmaWindow {
  preferences=$state<Preferences>(readPreferences(''));bridge:Bridge;app=new AppChannel();drafts:Drafts;
  rename=$state<RenameEditor|null>(null);actionNotice=$state('');actionProblem=$state('');mutations:Mutations;private titleObservation=0;private marksObservation=0;
  quickOpen=$state(false);archive=$state<ArchiveIntent|null>(null);private stateWaiters=new Set<()=>void>();
- latestOpen=$state(false);latestBusy=$state(false);chats:Chats;
+ latestOpen=$state(false);latestBusy=$state(false);chats:Chats;opening:Opening;
  composerOpen=$state(false);sendWait=$state('');stopping=$state<string[]>([]);sending:Sending;stopConfirmation=$state<PendingMessage|null>(null);private stopQueue?:PendingMessage&{finish:()=>void};private previousSelection=new Map<string,string|null>();private replacements=new Map<string,ElmaExchange>();private stopCalls=new Map<string,Promise<void>>();private answerSerial=0;private answerStates=$state<Record<string,{token:number;pending:boolean;problem:string;after:number}>>({});
  repositoryNotice=$state('');repositoryChange=$state<{root:string;chat:string;folder:string;generation:number}|null>(null);
  private pageTicket=0;private generation=0;private settingsObservation=0;private chatSub?:{close:()=>void;retry:()=>void};private bootstrapGeneration=0;private closed=false;private cancelOpening?:()=>void;
- constructor(){this.bridge=new Bridge({build:__ARBOL_BUILD__,onstate:s=>{this.connection=s;if(s==='Reconnecting…'||s==='Connecting…'||s.includes('Bridge version')){this.sending?.offline();this.mutations?.offline();}},beforeReload:()=>this.drafts.beforeReload(),onhello:(root)=>{if(this.root.root&&this.root.root!==root.root){this.clear();this.folder='';this.stopping=[];this.stopCalls.clear();}this.drafts?.rootChanged(root.root);this.root=root;this.sending?.hello(root.root);this.mutations?.hello(root.root);this.chats?.hello(root.root);this.preferences=readPreferences(root.root);void this.bootstrap();void this.loadAccounts();const rootId=root.root;setTimeout(()=>{if(this.root.root===rootId)for(const id of this.stopping)void this.stopExchange(id,true);},0);}});
+ constructor(){this.bridge=new Bridge({build:__ARBOL_BUILD__,onstate:s=>{this.connection=s;if(s==='Reconnecting…'||s==='Connecting…'||s.includes('Bridge version')){this.sending?.offline();this.mutations?.offline();}},beforeReload:async()=>{await this.drafts.beforeReload();this.opening.beforeReload();},onhello:(root)=>{if(this.root.root&&this.root.root!==root.root){this.clear();this.folder='';this.stopping=[];this.stopCalls.clear();}this.drafts?.rootChanged(root.root);this.root=root;this.sending?.hello(root.root);this.mutations?.hello(root.root);this.chats?.hello(root.root);this.opening?.hello(root.root);this.preferences=readPreferences(root.root);void this.bootstrap();void this.loadAccounts();const rootId=root.root;setTimeout(()=>{if(this.root.root===rootId)for(const id of this.stopping)void this.stopExchange(id,true);},0);}});
   this.mutations=new Mutations(this.bridge,done=>this.drafts.holdSend(done));
   this.chats=new Chats(this.bridge);
   this.drafts=new Drafts(this.bridge,(root,editor)=>this.sending?.marked(root,editor,this.drafts.current===editor));this.sending=new Sending(this.bridge,(root,scope)=>this.drafts.owner(root,scope),done=>this.drafts.holdSend(done),{provisional:op=>this.provisional(op),accepted:(op,result)=>this.accepted(op,result),refused:(op,error)=>this.refused(op,error)});this.routing=new Routing(this.bridge,(chat,route)=>this.saveSettings(chat,{route}));
+  this.opening=new Opening(this.app,async done=>{const root=this.root.root,editor=this.drafts.current;if(!editor)throw new Error('Wait for the workspace and Draft to be read.');await editor.waitReady();await this.drafts.settleCurrent(done);if(root!==this.root.root)throw new Error('The Root changed before opening the request.');},async target=>{if(target.chat){const opened=await this.openChat(target.chat);if(opened){this.latestOpen=false;this.historyOpen=false;}return opened;}this.newChat(target.folder!);return true;},done=>this.drafts.holdSend(done));
   this.bridge.subscribe('root',{},event=>{if(event.root)this.root=event.root as unknown as RootInfo;},e=>this.failure(e));
   this.bridge.subscribe('attention',{},()=>{});
  }
@@ -120,28 +122,31 @@ export class ElmaWindow {
  private async bootstrap(){
   const generation=++this.bootstrapGeneration,context=this.generation;
   try{
-   const request=await this.app.call('app.takeOpen');const workspace=await this.bridge.call<{repositories:Repository[];route:ElmaRoute}>('workspace.get');
+   const workspace=await this.bridge.call<{repositories:Repository[];route:ElmaRoute}>('workspace.get');
    if(this.closed||generation!==this.bootstrapGeneration||context!==this.generation)return;
    this.workspaceRoute=workspace.route;this.repositories=[...workspace.repositories];const recent=this.preferences.recentRepositories;
    this.repositories=[...this.repositories.slice(0,1),...this.repositories.slice(1).sort((a,b)=>{const ai=recent.indexOf(a.name),bi=recent.indexOf(b.name);return(ai<0?Infinity:ai)-(bi<0?Infinity:bi);})];
    this.folder=this.folder||this.repositories[0]?.folder||'';this.defaultRoute=this.repositories.find(r=>r.folder===this.folder)?.route??workspace.route;
-   // A live view is reread by its retained subscription on hello, not replaced by convenience state.
-   if(this.info&&!request.chat){this.selectRoute();return;}
-   const first=this.repositories[0];const candidates=[request.chat,this.preferences.lastChat,first&&this.preferences.repositoryChats[first.name]].filter((v):v is string=>typeof v==='string');
-   let opened=false;for(const chat of [...new Set(candidates)]){if(generation!==this.bootstrapGeneration)return;if(await this.openChat(chat)){opened=true;break;}}if(generation!==this.bootstrapGeneration)return;
-   if(!opened){this.clear();if(typeof request.folder==='string')this.folder=request.folder;}
+   this.selectDraft();this.selectRoute();
+   const requested=await this.opening.start();if(this.closed||generation!==this.bootstrapGeneration)return;
+   if(requested||this.info||this.opening.busy||this.opening.pending||this.opening.problem)return;
+   const first=this.repositories[0];const candidates=[this.preferences.lastChat,first&&this.preferences.repositoryChats[first.name]].filter((v):v is string=>typeof v==='string');
+   let opened=false;for(const chat of [...new Set(candidates)]){if(generation!==this.bootstrapGeneration)return;if(await this.openChat(chat)){opened=true;break;}if(this.opening.busy||this.opening.pending||this.opening.problem)return;}if(generation!==this.bootstrapGeneration||this.opening.busy||this.opening.pending||this.opening.problem)return;
+   if(!opened)this.clear();
    this.selectDraft();this.selectRoute();this.problem='';
-  }catch(e){this.problem=e instanceof Refusal?describe(e.detail):'The chat could not be read.';}
+  }catch(e){if(generation===this.bootstrapGeneration)this.problem=e instanceof Refusal?describe(e.detail):'The chat could not be read.';}
  }
  async openChat(chat:string,canonicalDraft=false):Promise<boolean>{
-  this.quickOpen=false;this.archive=null;this.notifyState();this.rename=null;this.actionNotice='';this.actionProblem='';this.cancelOpening?.();const generation=++this.generation;this.chatSub?.close();
+  this.quickOpen=false;this.archive=null;this.notifyState();this.rename=null;this.actionNotice='';this.actionProblem='';this.cancelOpening?.();const previous=this.chatSub,priorGeneration=this.generation,same=!!previous&&this.info?.chat===chat,generation=++this.generation;
   return new Promise<boolean>((resolve,reject)=>{
-   let settled=false;this.cancelOpening=()=>{if(!settled){settled=true;resolve(false);}};
-   this.chatSub=this.bridge.subscribe('chat',{chat},event=>{
+   let settled=false,candidate:{close:()=>void;retry:()=>void};
+   const fail=(error?:BridgeError)=>{if(settled)return;settled=true;if(!same){candidate.close();if(generation===this.generation){this.generation=priorGeneration;this.chatSub=previous;previous?.retry();}}if(error)reject(new Refusal(error));else resolve(false);};
+   this.cancelOpening=()=>fail();
+   candidate=this.bridge.subscribe('chat',{chat},event=>{
     if(this.closed||generation!==this.generation)return;
     if(event.kind==='snapshot'){
-     let snapshot=event as unknown as ChatSnapshot;const pending=this.sending.forChat(chat);if(pending?.outcome==='pending'&&snapshot.chat.createdAt&&!snapshot.exchanges.some(row=>row.exchange===pending.intent.exchange)){const row=this.provisionalRow(pending,Math.max(pending.intent.number,snapshot.chat.exchangeCount+1));snapshot={...snapshot,chat:{...snapshot.chat,exchangeCount:row.number},exchanges:[...snapshot.exchanges,row]};}this.pageTicket++;this.pageBusy=false;this.pageProblem='';
-     if(!snapshot.chat||!snapshot.chat.createdAt&&snapshot.chat.exchangeCount===0){if(!settled){settled=true;resolve(false);}return;}
+     let snapshot=event as unknown as ChatSnapshot;const pending=this.sending.forChat(chat);if(pending?.outcome==='pending'&&snapshot.chat.createdAt&&!snapshot.exchanges.some(row=>row.exchange===pending.intent.exchange)){const row=this.provisionalRow(pending,Math.max(pending.intent.number,snapshot.chat.exchangeCount+1));snapshot={...snapshot,chat:{...snapshot.chat,exchangeCount:row.number},exchanges:[...snapshot.exchanges,row]};}if(!snapshot.chat||!snapshot.chat.createdAt&&snapshot.chat.exchangeCount===0){fail();return;}
+     if(!settled&&!same)previous?.close();this.pageTicket++;this.pageBusy=false;this.pageProblem='';
      const desired=this.info?.chat===snapshot.chat.chat?this.selected:null;for(const [exchange,live]of this.live)for(const block of live.blocks)if(block.kind==='tool'&&block.tool.position!==undefined&&this.openTools[block.tool.id])this.openTools[exchange+':'+block.tool.position]=true;
      this.restoring=false;this.live.clear();this.revision++;this.snapshotRevision++;
      this.titleObservation++;this.marksObservation++;this.info=snapshot.chat;this.exchanges=snapshot.exchanges;this.more=snapshot.more;this.settings=snapshot.settings;this.settingsObservation++;this.ongoing=snapshot.marks.ongoing;this.selected=this.exchanges.some(e=>e.exchange===this.selected)?this.selected:this.exchanges.at(-1)?.exchange??null;
@@ -156,7 +161,8 @@ export class ElmaWindow {
     else if(event.kind==='title'&&this.info){this.info.title=event.title as string|null;this.titleObservation++;}
     else if(event.kind==='settings'){this.settings=event.settings as ChatSnapshot['settings'];this.settingsObservation++;this.selectRoute();}
     else if(event.kind==='marks'){this.ongoing=!!(event.marks as {ongoing:boolean}).ongoing;this.marksObservation++;}
-   },error=>{this.failure(error);if(!settled){settled=true;reject(new Refusal(error??{code:'ended',message:'The chat subscription ended.'}));}});
+   },error=>{if(generation!==this.generation)return;this.failure(error);fail(error??{code:'ended',message:'The chat subscription ended.'});});
+   this.chatSub=candidate;
   });
  }
  private projection(row:ElmaExchange){let live=this.live.get(row.exchange);if(!live){live=new LiveExchange(row);this.live.set(row.exchange,live);}return live;}
@@ -287,5 +293,5 @@ export class ElmaWindow {
  private clear(){this.latestOpen=false;this.quickOpen=false;this.archive=null;this.notifyState();this.rename=null;this.actionNotice='';this.actionProblem='';this.answerStates={};this.cancelQueued();this.repositoryChange=null;this.repositoryNotice='';this.restoring=false;this.live.clear();this.revision++;this.pageTicket++;this.pageBusy=false;this.pageProblem='';this.historyOpen=false;this.cancelOpening?.();this.chatSub?.close();this.chatSub=undefined;this.generation++;this.info=null;this.exchanges=[];this.selected=null;this.settings={};this.ongoing=false;}
  private selectDraft(canonical=false){if(this.root.root&&(this.info||this.folder)){const pending=this.info?this.sending.forChat(this.info.chat):undefined;this.drafts.select(this.root.root,pending&&!canonical?pending.intent.scope:this.info?{chat:this.info.chat}:{folder:this.folder});this.sending.select(this.root.root,this.drafts.current);}}
 
- close(){clearInterval(this.clock);this.cancelOpening?.();this.closed=true;this.notifyState();this.bootstrapGeneration++;this.chatSub?.close();this.cancelQueued();this.sending.close();this.mutations.close();this.chats.close();this.drafts.close();this.routing.close();this.bridge.close();this.app.close();}
+ close(){clearInterval(this.clock);this.cancelOpening?.();this.closed=true;this.notifyState();this.bootstrapGeneration++;this.chatSub?.close();this.cancelQueued();this.sending.close();this.opening.close();this.mutations.close();this.chats.close();this.drafts.close();this.routing.close();this.bridge.close();this.app.close();}
 }

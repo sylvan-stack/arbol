@@ -142,6 +142,10 @@ class Fixture:
             while line := await reader.readline():
                 message = json.loads(line)
                 if message["type"] == "subscribe":
+                    topic_key = message["topic"] + ":" + str(message.get("params", {}).get("chat", ""))
+                    subscription_delay = self.scenario.get("subscriptionDelays", {}).get(topic_key, self.scenario.get("subscriptionDelays", {}).get(message["topic"], 0))
+                    if subscription_delay:
+                        await asyncio.sleep(subscription_delay)
                     sub = {"topic": message["topic"], "params": message.get("params", {}), "seq": 1}
                     self.windows[writer][message["id"]] = sub
                     event = self.scenario.get("topics", {}).get(
@@ -338,13 +342,17 @@ class Fixture:
         elif value["kind"] == "scenario":
             self.scenario.update(value["value"])
         elif value["kind"] == "publish":
+            if value["topic"] == "chat" and value.get("params", {}).get("chat"):
+                snapshot = self.scenario.get("chats", {}).get(value["params"]["chat"])
+                if snapshot and value["event"].get("kind") == "title":
+                    snapshot["chat"]["title"] = value["event"]["title"]
             if value["topic"] == "chat" and value["event"].get("kind") == "saved":
                 saved = value["event"]["exchange"]
                 for snapshot in self.scenario.get("chats", {}).values():
                     snapshot["exchanges"] = [saved if row["exchange"] == saved["exchange"] else row for row in snapshot["exchanges"]]
             for writer, subs in tuple(self.windows.items()):
                 for id, s in tuple(subs.items()):
-                    if s["topic"] == value["topic"]:
+                    if s["topic"] == value["topic"] and all(s["params"].get(key) == expected for key, expected in value.get("params", {}).items()):
                         s["seq"] += value.get("advance", 1)
                         await self.send(writer, {"type": "event", "id": id, "seq": s["seq"], "event": value["event"]})
         elif value["kind"] == "draft":

@@ -5,6 +5,8 @@
  import HistoryTree from '../design-system/src/sections/HistoryTree.svelte';
  import Modal from '../design-system/src/patterns/Modal.svelte';
  import CommandPalette from '../design-system/src/patterns/CommandPalette.svelte';
+ import Notice from '../design-system/src/patterns/Notice.svelte';
+ import Button from '../design-system/src/components/Button.svelte';
  import ConfirmAction from '../design-system/src/patterns/ConfirmAction.svelte';
  import ResponseReader from '../design-system/src/sections/ResponseReader.svelte';
  import Composer from '../design-system/src/sections/Composer.svelte';
@@ -21,6 +23,8 @@
  <ElmaFrame root={view.root} title={view.title} titleIdentity={view.root.root+':'+(view.info?.chat??view.folder)} placeholder={view.placeholder} hasChat={!!view.info} total={view.info?.exchangeCount??0} turn={view.turn} working={view.working} ongoing={view.ongoing} inputTokens={view.usage.inputTokens} outputTokens={view.usage.outputTokens} repository={view.repository} route={view.route} repositories={view.repositories} routes={view.routes} onrepository={folder=>view?.chooseRepository(folder)} onother={()=>void view?.pickOther()} accountProblems={view.accountProblems} routeBusy={view.routing.busy} routeSaving={view.routing.saving} routeProblem={view.routing.problem} onretryRoute={view.routing.modelProblem&&view.routes.some(r=>r.driver===view!.route.driver&&r.subscription===view!.route.subscription&&!r.unavailable)?()=>void view?.routing.retryModels():undefined} onroute={!view.composerBusy?(driver,subscription)=>void view?.routing.choose(driver,subscription):undefined} onmodel={!view.composerBusy&&view.routing.models.length?()=>view?.routing.nextModel():undefined} oneffort={!view.composerBusy&&view.routing.efforts.length?()=>view?.routing.nextEffort():undefined} onolder={()=>void view?.older()} onnewer={()=>view?.newer()} onhistory={()=>{if(view)view.historyOpen=true;}} fitted bind:theme={view.preferences.theme} bind:readingWidth={view.preferences.readingWidth} bind:uiScale={view.preferences.uiScale} bind:contentScale={view.preferences.contentScale} onquick={()=>view?.openQuick()} onrename={()=>view?.startRename()} rename={view.rename} metadataBusy={view.metadataBusy||view.composerBusy} onRenameInput={value=>{if(view?.rename&&!view.rename.busy)view.rename.value=value;}} onRenameSave={()=>void view?.saveRename()} onRenameCancel={()=>view?.cancelRename()} onongoing={view.info?()=>void view?.toggleOngoing():undefined} onpreferences={()=>view?.savePreferences()}>
   {#if view.connection!=='Connected'}<p class="connection" role="status">{view.connection}</p>{/if}
   {#if view.problem||view.pageProblem}<p class="problem" role="alert">{view.problem||view.pageProblem}</p>{/if}
+  {#if view.opening.busy}<Notice message="Saving Draft and opening the requested chat…"/>{/if}
+  {#if view.opening.problem||view.opening.storageProblem}<Notice tone="urgent" role="alert" message={view.opening.problem||view.opening.storageProblem}><Button label="Retry opening" disabled={view.opening.busy} onclick={()=>void view?.opening.start()}/>{#if view.opening.pending}<Button label="Dismiss request" disabled={view.opening.busy} onclick={()=>view?.opening.dismiss()}/>{/if}</Notice>{/if}
   {#if view.repositoryNotice}<p class="connection" role="status">{view.repositoryNotice}</p>{/if}
   {#if view.actionNotice}<p class="connection" role="status">{view.actionNotice}</p>{/if}
   {#if view.actionProblem}<p class="problem" role="alert">{view.actionProblem}</p>{/if}
