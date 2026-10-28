@@ -43,7 +43,7 @@ async def prepare(home: ScenarioHome) -> None:
     )
     equal("Install synthetic native context", result["status"], 0)
     value = json.loads(result["stdout"])
-    check("Pinned fixture native", value["nativeVersion"] in ("0.1.16", "0.1.16-arbol2"), "explicit native pin", value["nativeVersion"])
+    check("Pinned fixture native", value["nativeVersion"] in ("0.1.16", "0.1.16-arbol3"), "explicit native pin", value["nativeVersion"])
     Path(home.tool, "fixture-paths.json").write_text(json.dumps(value))
     home.command = [*home.command, "dev", "stand-in", home.tool, "--", "driver"]
     home.env["PATH"] = value["helperPath"] + ":" + home.env["PATH"]
@@ -393,6 +393,12 @@ async def refusal(home: ScenarioHome) -> None:
 
 
 async def concurrent(home: ScenarioHome) -> None:
+    # Start from stable owner discovery. Otherwise the first native process may
+    # create its project ignore while its sibling is still capturing resources;
+    # refusing that changed capture is the separate F8 boundary.
+    native_config = Path(home.home, ".mimocode")
+    native_config.mkdir()
+    (native_config / ".gitignore").write_text("node_modules\npackage.json\npackage-lock.json\nbun.lock\n.gitignore\n.cron-lock\nscheduled_tasks.json")
     await signed(home)
     await options(home, delayMs=500)
     first, second = await asyncio.gather(
