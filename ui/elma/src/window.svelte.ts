@@ -18,14 +18,14 @@ export interface Repository {name:string;folder:string;route:ElmaRoute}
 interface RenameEditor {root:string;chat:string;generation:number;value:string;busy:boolean;problem:string}
 interface ArchiveIntent {root:string;chat:string;generation:number;folder:string;phase:'confirm'|'preparing'|'stopping'|'marking'}
 interface PendingMessage {intent:SendIntent;editor:DraftEditor;generation:number;exchange:string}
-interface ChatSnapshot {kind:string;chat:ChatInfo;exchanges:ElmaExchange[];more:boolean;settings:{route?:ElmaRoute;workingFolder?:string};marks:{ongoing:boolean};draft:unknown}
+interface ChatSnapshot {kind:string;chat:ChatInfo;exchanges:ElmaExchange[];more:boolean;settings:{route?:ElmaRoute;workingFolder?:string};marks:{ongoing:boolean;archivedAt?:string};draft:unknown}
 export class ElmaWindow {
  private accountsVisible=()=>{if(document.visibilityState==='visible'&&this.root.root)void this.routing.refresh(this.root.root);};
  private live=new Map<string,LiveExchange>();private revision=$state(0);snapshotRevision=$state(0);openTools=$state<Record<string,boolean>>({});readonly readingPositions=new Map<string,{top:number;following:boolean}>();restoring=$state(false);
  now=$state(Date.now());private clock=setInterval(()=>{this.now=Date.now();},1000);
  root=$state<RootInfo>({root:'',name:'…',status:'working',current:false});
  connection=$state('Connecting…');problem=$state('');info=$state<ChatInfo|null>(null);exchanges=$state<ElmaExchange[]>([]);
- selected=$state<string|null>(null);more=$state(false);pageBusy=$state(false);pageProblem=$state('');historyOpen=$state(false);settings=$state<ChatSnapshot['settings']>({});ongoing=$state(false);
+ selected=$state<string|null>(null);more=$state(false);pageBusy=$state(false);pageProblem=$state('');historyOpen=$state(false);settings=$state<ChatSnapshot['settings']>({});ongoing=$state(false);archived=$state(false);
  repositories=$state<Repository[]>([]);folder=$state('');defaultRoute=$state<ElmaRoute>({});private workspaceRoute:ElmaRoute={};routing:Routing;private settingsQueues=new Map<string,Promise<unknown>>();
  preferences=$state<Preferences>(readPreferences(''));bridge:Bridge;app=new AppChannel();drafts:Drafts;
  rename=$state<RenameEditor|null>(null);actionNotice=$state('');actionProblem=$state('');mutations:Mutations;private titleObservation=0;private marksObservation=0;
@@ -53,7 +53,8 @@ export class ElmaWindow {
  get turn(){return this.info?this.info.exchangeCount-this.exchanges.filter(e=>e.number>(this.exchange?.number??Infinity)).length:0;}
  get working(){this.revision;return this.exchanges.some(e=>['open','accepting','running','stopping','ending','unsaved','gone'].includes(e.state));}
  savePreferences(){savePreferences(this.root.root,this.preferences);}
- private rememberChat(){if(!this.info?.createdAt)return;const chat=this.info.chat,repo=this.repositories.find(repo=>repo.folder===this.folder);this.preferences.lastChat=chat;if(repo)this.preferences.repositoryChats[repo.name]=chat;this.preferences.recentChats=[chat,...this.preferences.recentChats.filter(id=>id!==chat)].slice(0,100);this.savePreferences();}
+ private forgetChat(chat:string){if(this.preferences.lastChat===chat)delete this.preferences.lastChat;for(const [repo,id]of Object.entries(this.preferences.repositoryChats))if(id===chat)delete this.preferences.repositoryChats[repo];this.preferences.recentChats=this.preferences.recentChats.filter(id=>id!==chat);this.savePreferences();}
+ private rememberChat(){if(!this.info?.createdAt)return;if(this.archived){this.forgetChat(this.info.chat);return;}const chat=this.info.chat,repo=this.repositories.find(repo=>repo.folder===this.folder);this.preferences.lastChat=chat;if(repo)this.preferences.repositoryChats[repo.name]=chat;this.preferences.recentChats=[chat,...this.preferences.recentChats.filter(id=>id!==chat)].slice(0,100);this.savePreferences();}
  private failure(error?:BridgeError){if(error)this.problem=describe(error);}
  get metadataBusy(){return !!this.info&&this.mutations.forChat(this.info.chat).length>0;}
  sourceRootName(root:string){return root===this.root.root?this.root.name:this.rootNames.find(row=>row.root===root)?.name??root;}
@@ -97,7 +98,7 @@ export class ElmaWindow {
    await editor.flush();if(!this.archiveCurrent(intent))return;if(editor.dirty||editor.conflict||editor.recovery!==null)throw new Error('Save or resolve the Draft before archiving.');
    intent.phase='marking';await this.mutations.start('chat.mark',{chat:intent.chat,archived:true}).result;
    if(intent.root!==this.root.root)return;
-   if(this.preferences.lastChat===intent.chat)delete this.preferences.lastChat;for(const [repo,chat]of Object.entries(this.preferences.repositoryChats))if(chat===intent.chat)delete this.preferences.repositoryChats[repo];this.preferences.recentChats=this.preferences.recentChats.filter(chat=>chat!==intent.chat);this.savePreferences();
+   this.forgetChat(intent.chat);
    if(this.archiveCurrent(intent)){this.archive=null;this.newChat(intent.folder);this.actionNotice='Chat archived';}
   }catch(error){if(this.archiveCurrent(intent))this.actionProblem=error instanceof Refusal?describe(error.detail):error instanceof Error?error.message:'The chat could not be archived.';}
   finally{if(this.archive===intent)this.archive=null;finish();this.notifyState();}
@@ -173,7 +174,7 @@ export class ElmaWindow {
      if(this.problem===this.chatProblem)this.problem='';this.chatProblem='';if(!settled&&!same)previous?.close();this.pageTicket++;this.pageBusy=false;this.pageProblem='';
      const desired=this.info?.chat===snapshot.chat.chat?this.selected:null;for(const [exchange,live]of this.live)for(const block of live.blocks)if(block.kind==='tool'&&block.tool.position!==undefined&&this.openTools[block.tool.id])this.openTools[exchange+':'+block.tool.position]=true;
      this.restoring=false;this.live.clear();this.revision++;this.snapshotRevision++;
-     this.titleObservation++;this.marksObservation++;this.info=snapshot.chat;this.exchanges=snapshot.exchanges;this.more=snapshot.more;this.settings=snapshot.settings;this.settingsObservation++;this.ongoing=snapshot.marks.ongoing;this.selected=this.exchanges.some(e=>e.exchange===this.selected)?this.selected:this.exchanges.at(-1)?.exchange??null;
+     this.titleObservation++;this.marksObservation++;this.info=snapshot.chat;this.exchanges=snapshot.exchanges;this.more=snapshot.more;this.settings=snapshot.settings;this.settingsObservation++;this.ongoing=snapshot.marks.ongoing;this.archived=typeof snapshot.marks.archivedAt==='string';this.selected=this.exchanges.some(e=>e.exchange===this.selected)?this.selected:this.exchanges.at(-1)?.exchange??null;
      this.folder=this.settings.workingFolder??this.exchange?.workingFolder??this.folder;this.selectDraft(canonicalDraft);this.selectRoute();this.afterChatState();
      this.rememberChat();
      if(desired&&!this.exchanges.some(e=>e.exchange===desired)&&this.more){this.restoring=true;void this.restoreSelection(desired,generation,this.snapshotRevision);}
@@ -184,7 +185,7 @@ export class ElmaWindow {
     else if(event.kind==='note'){const note=event.note as Fields;const row=this.exchanges.find(e=>e.exchange===note.exchange);if(row){row.note=note as unknown as ElmaExchange['note'];this.revision++;}}
     else if(event.kind==='title'&&this.info){this.info.title=event.title as string|null;this.titleObservation++;}
     else if(event.kind==='settings'){this.settings=event.settings as ChatSnapshot['settings'];this.settingsObservation++;this.selectRoute();}
-    else if(event.kind==='marks'){this.ongoing=!!(event.marks as {ongoing:boolean}).ongoing;this.marksObservation++;}
+    else if(event.kind==='marks'){const marks=event.marks as ChatSnapshot['marks'];this.ongoing=!!marks.ongoing;this.archived=typeof marks.archivedAt==='string';this.marksObservation++;if(this.info)this.rememberChat();}
    },error=>{if(generation!==this.generation)return;this.chatProblem=error?describe(error):'The chat subscription ended.';this.problem=this.chatProblem;fail(error??{code:'ended',message:'The chat subscription ended.'});});
    this.chatSub=candidate;
   });
@@ -314,7 +315,7 @@ export class ElmaWindow {
   }catch(e){if(ticket===this.pageTicket&&e instanceof Refusal)this.pageProblem=describe(e.detail);}
   finally{if(ticket===this.pageTicket)this.pageBusy=false;}
  }
- private clear(){this.latestProblem='';this.latestOpen=false;this.quickOpen=false;this.archive=null;this.notifyState();this.rename=null;this.actionNotice='';this.actionProblem='';this.answerStates={};this.cancelQueued();this.repositoryChange=null;this.repositoryNotice='';this.restoring=false;this.live.clear();this.revision++;this.pageTicket++;this.pageBusy=false;this.pageProblem='';this.historyOpen=false;this.cancelOpening?.();this.chatSub?.close();this.chatSub=undefined;this.generation++;this.info=null;this.exchanges=[];this.selected=null;this.settings={};this.ongoing=false;}
+ private clear(){this.latestProblem='';this.latestOpen=false;this.quickOpen=false;this.archive=null;this.notifyState();this.rename=null;this.actionNotice='';this.actionProblem='';this.answerStates={};this.cancelQueued();this.repositoryChange=null;this.repositoryNotice='';this.restoring=false;this.live.clear();this.revision++;this.pageTicket++;this.pageBusy=false;this.pageProblem='';this.historyOpen=false;this.cancelOpening?.();this.chatSub?.close();this.chatSub=undefined;this.generation++;this.info=null;this.exchanges=[];this.selected=null;this.settings={};this.ongoing=false;this.archived=false;}
  private selectDraft(canonical=false){if(this.root.root&&(this.info||this.folder)){const pending=this.info?this.sending.forChat(this.info.chat):undefined;this.drafts.select(this.root.root,pending&&!canonical?pending.intent.scope:this.info?{chat:this.info.chat}:{folder:this.folder});this.sending.select(this.root.root,this.drafts.current);}}
 
  close(){document.removeEventListener('visibilitychange',this.accountsVisible);window.removeEventListener('focus',this.accountsVisible);clearInterval(this.clock);this.cancelOpening?.();this.closed=true;this.notifyState();this.bootstrapGeneration++;this.chatSub?.close();this.cancelQueued();this.sending.close();this.opening.close();this.attention.close();this.mutations.close();this.chats.close();this.drafts.close();this.routing.close();this.bridge.close();this.app.close();}
