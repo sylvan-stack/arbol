@@ -36,6 +36,7 @@ export class Opening {
   return opened;
  }
  dismiss(){if(this.busy)return;this.pending=null;this.retain(this.root,null);this.problem='';if(this.wanted)void this.start();}
+ retainResult(root:string,value:OpenTarget,message=''){this.retain(root,value);if(root===this.root){this.pending=value;this.problem=message;}}
  beforeReload(){if(this.pending&&this.storageProblem)throw new Error(this.storageProblem);}
  close(){this.closed=true;this.epoch++;this.unlisten();}
 }

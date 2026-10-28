@@ -132,7 +132,7 @@ export class Drafts {
  }
  async settleCurrent(except?:Promise<unknown>){
   await this.waitPending(except);const editor=this.current;
-  if(!editor?.ready)throw new Error('Wait for the current Draft to be read.');
+  if(!editor)throw new Error('Wait for the current Draft to be read.');await editor.waitReady();
   do{await editor.flush();}while(editor.dirty&&!editor.problem&&!editor.conflict&&editor.ready);
   if(editor!==this.current||editor.dirty||editor.conflict||editor.recovery!==null)throw new Error('Unsaved Draft text needs attention before continuing.');
  }

@@ -11,6 +11,7 @@ import os
 import signal
 import sys
 import tempfile
+from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -208,7 +209,7 @@ class Fixture:
                                         "limit": message.get("params", {}).get("limit"),
                                         "exchange": message.get("params", {}).get("exchange"),
                                         "position": message.get("params", {}).get("position"),
-                                        **({"params": message.get("params", {})} if method.startswith(("draft.", "accounts.")) or method in ("chat.settings", "chat.send", "exchange.stop", "exchange.sendAgain", "exchange.answer", "chat.rename", "chat.mark") else {}),
+                                        **({"params": message.get("params", {})} if method.startswith(("draft.", "accounts.")) or method in ("chat.settings", "chat.send", "exchange.stop", "exchange.sendAgain", "exchange.answer", "chat.rename", "chat.mark", "chat.reimport") else {}),
                                         **({"characters": len(message["params"]["text"])} if method == "paste.save" else {}),
                                     }
                                 )
@@ -235,6 +236,8 @@ class Fixture:
                         }
                     elif method == "accounts.list" and method not in self.scenario.get("calls", {}):
                         value = {"drivers": []}
+                    elif method == "roots.list" and method not in self.scenario.get("calls", {}):
+                        value = {"roots": [{"root": self.scenario.get("root", ROOT)}]}
                     elif method == "accounts.models" and "catalogs" in self.scenario:
                         params = message["params"]
                         value = self.scenario["catalogs"].get(params["driver"] + ":" + params["subscription"], {"models": []})
@@ -282,6 +285,26 @@ class Fixture:
                                 if sub["topic"] == "chat" and sub["params"].get("chat") == params["chat"]:
                                     sub["seq"] += 1
                                     await self.send(peer, {"type": "event", "id": id, "seq": sub["seq"], "event": event})
+                    elif method == "chat.reimport":
+                        imported = self.scenario["reimports"][message["params"]["chat"]]
+                        value = dict(imported["result"])
+                        changed = deepcopy(imported["snapshot"])
+                        self.scenario["chats"][value["chat"]] = changed
+                        await self.chat_changed(value["chat"])
+                        summary = {"chat": value["chat"], "title": changed["chat"]["title"], "firstMessage": changed["chat"].get("firstMessage", ""),
+                                   "activityAt": "2026-10-27T23:00:00Z", "last": {"exchange": changed["exchanges"][-1]["exchange"], "number": 1, "state": changed["exchanges"][-1]["state"]},
+                                   "hasDraft": False, "ongoing": changed["marks"]["ongoing"], "migration": changed["chat"].get("migration"), "route": changed["settings"].get("route"), "workingFolder": changed["settings"].get("workingFolder")}
+                        topics = self.scenario.setdefault("topics", {})
+                        listing = topics.setdefault("chats", {"kind": "snapshot", "chats": []})
+                        listing["chats"] = [row for row in listing["chats"] if row["chat"] != value["chat"]] + [summary]
+                        for peer, subscriptions in tuple(self.windows.items()):
+                            for id, sub in tuple(subscriptions.items()):
+                                if sub["topic"] == "chats":
+                                    sub["seq"] += 1
+                                    await self.send(peer, {"type": "event", "id": id, "seq": sub["seq"], "event": {"kind": "changed", "chats": [summary]}})
+                        if self.scenario.get("dropReimportReplies", 0):
+                            self.scenario["dropReimportReplies"] -= 1
+                            return
                     elif method == "root.get":
                         value = {"root": self.scenario.get("root", ROOT), "layoutComplete": True}
                     elif method == "chat.send":
