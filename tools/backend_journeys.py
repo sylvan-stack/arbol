@@ -164,7 +164,7 @@ class Frame:
         require(isinstance(ready, dict), "The ready receipt must be an object.")
         assert isinstance(ready, dict)
         require(ready.get("ready") is True and ready.get("root") == root, "The installed Backend refused startup.")
-        private_json(self.evidence / "backend-ready.json", ready)
+        private_json(self.evidence / ("backend-ready-" + str(child.pid) + ".json"), ready)
         return ready
 
     def relay(self, folder: Path, root: str = "sapling") -> str:
