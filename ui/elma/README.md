@@ -134,3 +134,7 @@ arbol:tests/ui/accounts_browser.mjs
 arbol:tests/ui/recovery_browser.mjs
 arbol:tests/ui/reimport_browser.mjs
 -->
+
+### Deliberate installed First Sapling qualification
+
+`tools/backend_journeys.py` supplies private immutable receipts, a five-reservation ceiling, test-state forwarding to the real installed CLIs and a correlated installed Unix Bridge client. `tests/backend/test_journeys.py` checks replay/ceiling/journal/locking and forwarding safeguards without contacting a vendor. The `installed_first_path.mjs` browser journey is deliberately absent from `tests/ui/run.mjs`: it requires `ARBOL_INSTALLED_JOURNEY=1`, a private exact-prompt reservation and exclusive per-attempt receipts. It sends one message through the actual installed renderer/relay/Backend/Root/Trunk/test Driver, closes and reopens during streamed text, checks saved completion/answer clipboard and reopens from latest chats. Keep its input, wire frames, outcomes, costs and screenshots outside Git. Inspect a failed or ambiguous existing attempt before deciding any further action; never rerun a script to obtain a fresh submission automatically. Swift delivery remains a separate qualification.
