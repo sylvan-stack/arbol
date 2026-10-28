@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -110,6 +111,58 @@ class Windows(WindowFixture):
             await self.event(r2, "chat2", "exchange")
             await asyncio.sleep(1.4)
         self.assertLessEqual(count, 2)
+
+    async def test_replay_restart_yields_to_other_ready_work(self) -> None:
+        """live.replay-restart-yields"""
+        sub = mock.Mock()
+        sub.active, sub.ready, sub.snapshots = True, True, 1
+        order: list[str] = []
+        peer: asyncio.Task[None] | None = None
+        async def progress() -> None:
+            order.append("peer")
+        async def step(*args: Any) -> None:
+            nonlocal peer
+            order.append("step")
+            if order == ["step"]:
+                peer = asyncio.create_task(progress())
+                from arbol_backend.live import Restart
+                raise Restart()
+            sub.active = False
+        self.backend.live.ready.set()
+        with mock.patch.object(self.backend.live, "step", side_effect=step):
+            await self.backend.live.follow(sub)
+        assert peer is not None
+        await peer
+        self.assertEqual(order[:3], ["step", "peer", "step"])
+
+    async def test_atomic_record_retirement_keeps_the_subscription_through_saved_completion(self) -> None:
+        """live.retired-record-subscription; live.retired-record-saved"""
+        trunk = await Trunk.make(self.frame, chat(1))
+        await trunk.accept(self.db)
+        trunk.event("text_delta", text="Before replacement")
+        r, w = await self.open()
+        await self.subscribe(r, w, "chat", "chat", {"chat": chat(1)})
+        await self.lines(r, "chat", 1)
+        opened = os.open
+        retired: list[int] = []
+        def raced(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+            fd = opened(path, flags, *args, **kwargs)
+            if path == "record.json" and not retired:
+                trunk.save_record()
+                self.assertEqual(os.fstat(fd).st_nlink, 0)
+                retired.append(fd)
+            return fd
+        with mock.patch("arbol_backend.exchange_files.os.open", side_effect=raced):
+            await self.backend.live.scan()
+        self.assertEqual(len(retired), 1)
+        self.assertNotIn(trunk.exchange, self.backend.live.unreadable)
+        trunk.event("text_delta", text="After replacement")
+        await self.lines(r, "chat", 2)
+        trunk.end()
+        await trunk.save(self.db, answer="Saved after an atomic metadata replacement")
+        saved = (await self.event(r, "chat", "saved"))["exchange"]
+        self.assertEqual(saved["state"], "completed")
+        self.assertEqual(saved["items"][-1]["text"], "Saved after an atomic metadata replacement")
 
     async def test_saved_rows_follow_folder_removal_and_old_ended_folders_never_regress(self) -> None:
         """live.saved; live.row-first; live.old-ended-folder"""

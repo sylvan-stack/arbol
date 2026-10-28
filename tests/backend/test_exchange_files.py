@@ -76,6 +76,35 @@ class Files(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(Error):
             self.reader.read(self.exchange)
 
+    async def test_atomically_retired_record_events_and_control_are_transient_missing(self) -> None:
+        """live.retired-inode; live.retired-control-no-append"""
+        opened = os.open
+        fstat = os.fstat
+        for name in ("record.json", "events.jsonl", "control"):
+            retired: list[int] = []
+            def raced(path: Any, flags: int, *args: Any, _name: str = name, _retired: list[int] = retired, **kwargs: Any) -> int:
+                fd = opened(path, flags, *args, **kwargs)
+                if path == _name and not _retired:
+                    current = self.folder / _name
+                    replacement = self.folder / (_name + ".replacement")
+                    replacement.write_bytes(current.read_bytes())
+                    replacement.chmod(0o600)
+                    replacement.replace(current)
+                    self.assertEqual(fstat(fd).st_nlink, 0)
+                    _retired.append(fd)
+                return fd
+            folder = self.reader.open(self.exchange)
+            try:
+                with self.subTest(file=name), mock.patch("arbol_backend.exchange_files.os.open", side_effect=raced):
+                    with self.assertRaises(FileNotFoundError):
+                        folder.open(name, append=name == "control")
+                self.assertEqual(len(retired), 1)
+                with self.assertRaises(OSError):
+                    fstat(retired[0])
+            finally:
+                folder.close()
+        self.assertEqual(self.reader.read(self.exchange).chat, self.chat)
+
     async def test_identifier_mode_symlink_fifo_hardlink_and_dot_boundaries(self) -> None:
         """live.private-files"""
         for name in (".ignored", "not-a-uuid"):
