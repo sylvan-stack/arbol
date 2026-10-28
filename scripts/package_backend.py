@@ -40,7 +40,7 @@ def package(root: Path = ROOT) -> Path:
     shutil.copytree(root / "tests/radar", folder / "tests/radar", ignore=ignore)
     shutil.copytree(root / "tests/ui", folder / "tests/ui", ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.mjs"))
     (folder / "tools").mkdir()
-    for name in ("__init__.py", "bridge_relay.py", "elma_bundle.py"):
+    for name in ("__init__.py", "bridge_relay.py", "elma_bundle.py", "backend_journeys.py"):
         shutil.copy2(root / "tools" / name, folder / "tools" / name)
     shutil.copy2(root / "tests/test_backend.py", folder / "tests/test_backend.py")
     (folder / "scripts").mkdir()
