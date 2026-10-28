@@ -40,3 +40,5 @@ For a method under `tests/backend`, use its `backend.test_…` module name. The 
 4. Update both inventories to reflect the selection. Run only the requested scope, record actual results, then return mid-tier code to comments when the task finishes unless the owner asked to retain it active. Promotion to top tier needs a concrete, individually reviewed reason.
 
 Broad build/qualification checks refuse while their implementation is commented. Preserve that refusal until the requested qualification has its necessary tests restored. A top-only run does not satisfy an old full-suite gate. Metadata verification, production validation, fixture helpers, Storybook examples and historical result records are not test passes and remain separate.
+
+SYL-314 explicit testing task (28 October 2026): the shared runner is temporarily restored for the reviewed Mimo adapter. Existing Claude/Codex/Pi scenario bodies remain commented. This restoration grants no release pass and will return to comments when testing ends.
