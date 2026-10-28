@@ -43,7 +43,7 @@ async def prepare(home: ScenarioHome) -> None:
     )
     equal("Install synthetic native context", result["status"], 0)
     value = json.loads(result["stdout"])
-    check("Pinned fixture native", value["nativeVersion"] in ("0.1.16", "0.1.16-arbol3"), "explicit native pin", value["nativeVersion"])
+    check("Pinned fixture native", value["nativeVersion"] in ("0.1.16", "0.1.16-arbol4"), "explicit native pin", value["nativeVersion"])
     Path(home.tool, "fixture-paths.json").write_text(json.dumps(value))
     home.command = [*home.command, "dev", "stand-in", home.tool, "--", "driver"]
     home.env["PATH"] = value["helperPath"] + ":" + home.env["PATH"]
