@@ -1099,11 +1099,11 @@ Source remains in Git at the reviewed revision; these cases are not reintroduced
 | `tests/radar/test_vigor.py::Records.test_a_report_is_read_as_delivered` | Low / removed | Long ordinary field projection from a fixed delivered report into dataclasses; substantive clamping, missing fields, invalid dates and resource interpretation have dedicated cases. |
 | `tests/test_builds.py::Builds.test_builds_help` | Low / removed | Exercises the static help branch and pins a usage prefix; it does not build, select or launch anything. |
 
-SYL-314: shared `run_suite` temporarily restored for the owner-requested Mimo qualification task; it still reports failures, and disabled other-Driver variants remain refusals.
+SYL-314: shared `run_suite` and the reviewed 38-case Mimo module return to comments after the explicit unpaid selection. The runner refuses while required cases are disabled; the completed implementation is retained for a future explicit testing task. Other-Driver refusal stubs remain intact.
 
 ## Mimo shared adapter — SYL-314 explicit testing
 
-Each case uses the shipped entry, production account/run controller and an isolated actual native process with a loopback synthetic provider. Mid-tier restoration is temporary.
+Each retained case uses the shipped entry, production account/run controller and an isolated actual native process with a loopback synthetic provider. All 38 are now mid-tier/commented; exact qualified source is `fbf37f084de07419da82d762c45b924b33a4825a`. This inventory is not a production release claim.
 
 | Case | Reviewed applicability |
 | --- | --- |

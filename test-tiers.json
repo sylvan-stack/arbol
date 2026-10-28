@@ -12,9 +12,10 @@
     "node_cases_commented": 0,
     "scenario_functions_commented": 72,
     "programs_commented": 35,
-    "entrypoints_guarded": 1,
+    "entrypoints_guarded": 2,
     "low_removed_previously": 12,
-    "mimo_registry_cases_active": 38
+    "mimo_registry_cases_active": 0,
+    "mimo_registry_cases_commented": 38
   },
   "tests": [
     {
@@ -25,13 +26,13 @@
       "class": "",
       "kind": "entrypoint",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "line_before": 49,
       "end_before": 100,
       "reason": "Restored shared runner for owner-requested Mimo shared testing; other Driver scenario refusal stubs remain intact.",
       "review": "SYL-314 explicit Mimo qualification",
       "line": 47,
-      "file_sha256": "ca6ba5bfc54d46d5ecee1a2c77f657ec3f92f2e1f8796088531071b45cc15e28"
+      "file_sha256": "022b9c5ccd281108692923193fe705b37df4a218f040fd1bb2292ca05335ae31"
     },
     {
       "repo": "arbol",
@@ -9961,10 +9962,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "MIM-A1 local default/relabel and explicit second-production-account refusal",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -9974,10 +9975,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "real pending attachment, replacement, five-minute scaled expiry and device-code refusal",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -9987,10 +9988,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "MIM-A2 malformed native-owned credential refuses without deletion",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10000,10 +10001,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "rejection/attention state and fresh-check repair",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10013,10 +10014,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "native-owned destructive refusal leaves active run untouched",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10026,10 +10027,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "killed pending attachment and durable attempt recovery",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10039,10 +10040,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "native provider secret redaction before common output",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10052,10 +10053,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "competing inherited provider configuration is stripped",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10065,10 +10066,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "native instructions plus additive caller context and unchanged source",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10078,10 +10079,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "fragmented native UTF-8, exact ID/labels and complete blocks",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10091,10 +10092,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "actual native shell command/result and paired public calls",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10104,10 +10105,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "asynchronous provider error under HTTP success cannot become native success",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10117,10 +10118,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "native usage and absence of fabricated monetary cost",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10130,10 +10131,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "native continuation/rebuild and exact completed-history projection",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10143,10 +10144,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "control cancellation during actual shell work and bounded balanced cleanup",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10156,10 +10157,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "idempotent public stop for unknown and retired runs",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10169,10 +10170,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "signal/EOF cleanup during actual shell work",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10182,10 +10183,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "concurrent native runs, failed sibling and blocked output retain independent results",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10195,10 +10196,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "actual empty tool set and ephemeral run retirement",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10208,10 +10209,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "large multibyte native shell result stays bounded",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10221,10 +10222,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "native permission handling through production hooks",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10234,10 +10235,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "native structured failure classification",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10247,10 +10248,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "first rate rejection stops native retry",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10260,10 +10261,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "first credential rejection stops native retry",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10273,10 +10274,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "unscaled request total/idle limits",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10286,10 +10287,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "observed run tokens never fabricate native allowance windows or polling",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10299,10 +10300,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "unqualified native binary/profile refusal",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10312,10 +10313,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "public CLI plus synthetic native development orchestration; paid gate remains closed",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10325,10 +10326,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "no-control native question is refused before execution",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10338,10 +10339,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "ordinary failed native shell continues with balanced result",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10351,10 +10352,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "native keyed question validation and exactly-once answers",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10364,10 +10365,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "unchanged owner instructions and actual native skill discovery",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10377,10 +10378,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "killed run ownership and retained-group recovery",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10390,10 +10391,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "MIM-A1 second-production refusal, isolated test record and changed-native-UID fencing",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10403,10 +10404,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "unsigned and invalid request refusals before native inference",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10416,10 +10417,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "authenticated native catalog and explicit allowance applicability",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10429,10 +10430,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "failure after partial output retains closed/unfinished calls and usage",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     },
     {
       "repo": "arbol",
@@ -10442,10 +10443,10 @@
       "class": "",
       "kind": "scenario",
       "tier": "mid",
-      "status": "active-for-testing-task",
+      "status": "commented",
       "reason": "unwritable run state has one pre-start failure",
       "review": "Individually reviewed Mimo applicability in owner-requested SYL-314 testing; no borrowed Driver pass",
-      "file_sha256": "623af6e58e7066f73acea504a99b3e38fcdf6eb4a1bdda0606841c046a817ea7"
+      "file_sha256": "dadfe2173c34fefd1c89934513e350de8db66839fe07d0c6707fbc47b77897ba"
     }
   ],
   "removed_low": [
@@ -10549,6 +10550,7 @@
   "explicit_testing_task": {
     "beat": "SYL-314",
     "scope": "All 38 Mimo shared applicability cases only; paid inference and installation gated.",
-    "status": "in progress"
+    "status": "completed unpaid selection; paid and installation gated",
+    "qualifiedRevision": "fbf37f084de07419da82d762c45b924b33a4825a"
   }
 }

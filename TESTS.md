@@ -41,4 +41,4 @@ For a method under `tests/backend`, use its `backend.test_…` module name. The 
 
 Broad build/qualification checks refuse while their implementation is commented. Preserve that refusal until the requested qualification has its necessary tests restored. A top-only run does not satisfy an old full-suite gate. Metadata verification, production validation, fixture helpers, Storybook examples and historical result records are not test passes and remain separate.
 
-SYL-314 explicit testing task (28 October 2026): the shared runner is temporarily restored for the reviewed Mimo adapter. Existing Claude/Codex/Pi scenario bodies remain commented. This restoration grants no release pass and will return to comments when testing ends.
+SYL-314 explicit testing task (28 October 2026): all 38 reviewed Mimo cases are implemented and preserved in comments after the unpaid qualification selection. The shared runner again refuses. Existing Claude/Codex/Pi scenario bodies remain commented. The immutable tested Mimo package and exact results are recorded in the Mimo artifact corpus; paid calls and installation remain gated.
