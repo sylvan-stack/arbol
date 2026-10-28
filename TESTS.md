@@ -40,3 +40,5 @@ For a method under `tests/backend`, use its `backend.test_…` module name. The 
 4. Update both inventories to reflect the selection. Run only the requested scope, record actual results, then return mid-tier code to comments when the task finishes unless the owner asked to retain it active. Promotion to top tier needs a concrete, individually reviewed reason.
 
 Broad build/qualification checks refuse while their implementation is commented. Preserve that refusal until the requested qualification has its necessary tests restored. A top-only run does not satisfy an old full-suite gate. Metadata verification, production validation, fixture helpers, Storybook examples and historical result records are not test passes and remain separate.
+
+SYL-314 explicit testing task (28 October 2026): all 38 reviewed Mimo cases are implemented and preserved in comments after the unpaid qualification selection. The shared runner again refuses. Existing Claude/Codex/Pi scenario bodies remain commented. The immutable tested Mimo package and exact results are recorded in the Mimo artifact corpus; paid calls and installation remain gated.

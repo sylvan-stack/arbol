@@ -8,7 +8,7 @@ Reviewed source revision: `fb3fba2677f3bbb45aea574d5383778aa9feba2b`. Static inv
 
 | Test or check | Tier / state | Justification |
 | --- | --- | --- |
-| [`run_suite`](../conformance/runner.py#L47) | Mid* / refuses | Broad qualification or diagnostic entry point. Its original implementation is commented and the callable refuses, so disabled checks cannot yield a passing release claim. |
+| [`run_suite`](../conformance/runner.py#L47) | Mid / active for SYL-314 testing | Restored for the explicitly authorized Mimo qualification; other Driver scenario refusal stubs remain. |
 
 ## conformance/scenarios/c1.py
 
@@ -1098,3 +1098,50 @@ Source remains in Git at the reviewed revision; these cases are not reintroduced
 | `tests/radar/test_cli.py::TheVerb.test_the_verb_and_its_options_are_parsed` | Low / removed | Copies valid parser dictionaries and Options defaults for ordinary flags. |
 | `tests/radar/test_vigor.py::Records.test_a_report_is_read_as_delivered` | Low / removed | Long ordinary field projection from a fixed delivered report into dataclasses; substantive clamping, missing fields, invalid dates and resource interpretation have dedicated cases. |
 | `tests/test_builds.py::Builds.test_builds_help` | Low / removed | Exercises the static help branch and pins a usage prefix; it does not build, select or launch anything. |
+
+SYL-314: shared `run_suite` and the reviewed 38-case Mimo module return to comments after the explicit unpaid selection. The runner refuses while required cases are disabled; the completed implementation is retained for a future explicit testing task. Other-Driver refusal stubs remain intact.
+
+## Mimo shared adapter — SYL-314 explicit testing
+
+Each retained case uses the shipped entry, production account/run controller and an isolated actual native process with a loopback synthetic provider. All 38 are now mid-tier/commented; exact qualified source is `fbf37f084de07419da82d762c45b924b33a4825a`. This inventory is not a production release claim.
+
+| Case | Reviewed applicability |
+| --- | --- |
+| C1 | MIM-A1 local default/relabel and explicit second-production-account refusal |
+| C2 | real pending attachment, replacement, five-minute scaled expiry and device-code refusal |
+| C3 | MIM-A2 malformed native-owned credential refuses without deletion |
+| C4 | rejection/attention state and fresh-check repair |
+| C5 | native-owned destructive refusal leaves active run untouched |
+| C6 | killed pending attachment and durable attempt recovery |
+| C7 | native provider secret redaction before common output |
+| C8 | competing inherited provider configuration is stripped |
+| C9 | native instructions plus additive caller context and unchanged source |
+| C10 | fragmented native UTF-8, exact ID/labels and complete blocks |
+| C11 | actual native shell command/result and paired public calls |
+| C12 | asynchronous provider error under HTTP success cannot become native success |
+| C13 | native usage and absence of fabricated monetary cost |
+| C14 | native continuation/rebuild and exact completed-history projection |
+| C15 | control cancellation during actual shell work and bounded balanced cleanup |
+| C16 | idempotent public stop for unknown and retired runs |
+| C17 | signal/EOF cleanup during actual shell work |
+| C18 | concurrent native runs, failed sibling and blocked output retain independent results |
+| C19 | actual empty tool set and ephemeral run retirement |
+| C20 | large multibyte native shell result stays bounded |
+| C25 | native permission handling through production hooks |
+| C26 | native structured failure classification |
+| C27 | first rate rejection stops native retry |
+| C28 | first credential rejection stops native retry |
+| C29 | unscaled request total/idle limits |
+| C30 | observed run tokens never fabricate native allowance windows or polling |
+| C31 | unqualified native binary/profile refusal |
+| C32 | public CLI plus synthetic native development orchestration; paid gate remains closed |
+| C33 | no-control native question is refused before execution |
+| C35 | ordinary failed native shell continues with balanced result |
+| C36 | native keyed question validation and exactly-once answers |
+| C37 | unchanged owner instructions and actual native skill discovery |
+| C38 | killed run ownership and retained-group recovery |
+| C39 | MIM-A1 second-production refusal, isolated test record and changed-native-UID fencing |
+| C40 | unsigned and invalid request refusals before native inference |
+| C41 | authenticated native catalog and explicit allowance applicability |
+| C42 | failure after partial output retains closed/unfinished calls and usage |
+| C43 | unwritable run state has one pre-start failure |
