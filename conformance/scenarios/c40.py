@@ -5,7 +5,7 @@ from __future__ import annotations
 from ..check import check, equal, object_
 from ..harness import Scenario, ScenarioHome
 from ..js import parse, text_of
-from .runs import run_refusals, stream
+from .runs import stream
 
 
 async def check_subscription_refusals(home: ScenarioHome, include_runs: bool = False) -> None:
@@ -32,11 +32,20 @@ async def check_subscription_refusals(home: ScenarioHome, include_runs: bool = F
     equal("The vendor tool is never started", await home.received(), [])
 
 
+# TEST-TIER-DISABLED-BEGIN conformance/scenarios/c40.py::run
+# async def run(home: ScenarioHome) -> None:
+#     await check_subscription_refusals(home, True)
+#     await run_refusals(home)
+# TEST-TIER-DISABLED-END conformance/scenarios/c40.py::run
 async def run(home: ScenarioHome) -> None:
-    await check_subscription_refusals(home, True)
-    await run_refusals(home)
+    raise RuntimeError('Tests are commented under the tier policy; see TESTS.md. Restore only in an explicitly requested testing task.')  # TEST-TIER-REFUSAL
 
 
 c40 = Scenario("C40", "Subscription refusals before starting the tool",
                "unsigned models, check, usage and runs; folders, duplicate ID, models and effort",
                ["DRV-1.11", "DRV-2.2"], run)
+
+# Archived complete imports; restore needed names in their original scope, not at this file tail.
+# TEST-TIER-IMPORTS-BEGIN conformance/scenarios/c40.py:8
+# from .runs import run_refusals, stream
+# TEST-TIER-IMPORTS-END conformance/scenarios/c40.py:8
