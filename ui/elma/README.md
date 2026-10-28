@@ -4,8 +4,10 @@ This is the first Arbol 2 conversation window, using Svelte 5 and a committed,
 SHA256-verified snapshot of maintained `arbol-design-system` source. Production
 Bridge/app adapters live in `src/`; fictional browser services live in
 `tests/ui/` at the repository root. The controlled composer, versioned Drafts, route/repository controls and
-receipt-owned send/stop/question/failure actions are implemented. Chat actions,
-latest-chat selection and queued external open notices remain SYL-256.
+receipt-owned send/stop/question/failure actions are implemented, together with
+chat rename/ongoing/archive, quick actions, bounded latest chats, serialized
+external opening, public sign-in refresh, attention/reconnect recovery and
+explicit stale-copy bring-over. Native Swift host delivery remains SYL-192.
 
 Install the exact dependency lock with `npm ci --ignore-scripts`, then use
 `npm run check`, `npm run build` and `npm test`. The browser checks use the pinned
@@ -54,7 +56,7 @@ replaces only the last saved failed turn in its original folder. Control replies
 do not invent recorded question answers or saved terminal outcomes. The Build
 reload barrier waits for Drafts and unconfirmed send receipts/reconciliation.
 
-The complete renderer suite has22 contract/browser scripts, including actual
+The complete renderer suite has30 contract/browser scripts, including actual
 private separately compiled Builds for pending-send reloads. These use explicit
 stand-in backends/accounts and never call a vendor or the owner’s installation.
 Mycel coverage and Source Refs are prepared; ingest/index/embedding/retrieval
@@ -83,4 +85,52 @@ arbol:tests/ui/send_reload_browser.mjs
 arbol:tests/ui/stop_browser.mjs
 arbol:tests/ui/question_browser.mjs
 arbol:tests/ui/failure_browser.mjs
+-->
+
+Chat actions use canonical publications and definitive receipts. Rename/mark
+retain exact parameters across reconnect; archive saves the current Draft, waits
+for pending send acceptance, requests a stop if needed, and waits for saved
+terminal data. Known archived UUIDs are removed from every observing window’s
+last/repository/recent conveniences, including after a later preference save.
+The same chat can be reread without invalidating actions waiting in that context.
+Workspace inventory updates independently of guarded default-view restoration.
+
+Latest chats retain at most100 canonical active summaries in memory, exclude
+the current chat, and order Root-local recently shown UUIDs before activity.
+The native app-only channel is gated by Draft readiness/saving and pending
+receipts before app.takeOpen. Returned routing targets survive failed reads and
+reloads until actual opening; failed selection keeps the existing subscription.
+Only UUID/folder routing conveniences are cached for this purpose.
+
+Sign-in controls refresh only public account/catalog data and show the exact
+Claude/Codex/Pi command without executing it or taking a credential. Attention
+keeps every stable ID, severity and literal unknown-kind message. Reconnect
+retains editable Draft text and the transcript, then replaces projections from
+fresh subscriptions and immediately saves a non-conflicting dirty Draft. A
+healthy attention snapshot also restarts database-ended subscriptions when the
+individual return event was missed.
+
+Stale copies use Bridge migration metadata and public catalogue display names.
+Bring over again saves the visible Draft and issues chat.reimport once, then
+opens the validated returned UUID. A failed result read retries opening only;
+a copied result preserves the continued copy. Lost/no_answer mutation receipts
+show the specified uncertainty and refresh the list without automatic replay.
+Actual Root migration, Swift/Willo integration, installed/vendor and Mac sleep
+journeys retain their own qualification; browser fixtures state their boundary.
+
+<!-- sources:
+arbol:ui/elma/src/mutations.svelte.ts
+arbol:ui/elma/src/chats.svelte.ts
+arbol:ui/elma/src/opening.svelte.ts
+arbol:ui/elma/src/attention.svelte.ts
+arbol:ui/elma/src/window.svelte.ts
+arbol:ui/elma/src/App.svelte
+arbol:tests/ui/mutations.mjs
+arbol:tests/ui/actions_browser.mjs
+arbol:tests/ui/quick_archive_browser.mjs
+arbol:tests/ui/latest_browser.mjs
+arbol:tests/ui/opening_browser.mjs
+arbol:tests/ui/accounts_browser.mjs
+arbol:tests/ui/recovery_browser.mjs
+arbol:tests/ui/reimport_browser.mjs
 -->

@@ -2,6 +2,10 @@ import { Bridge, Refusal, describe, type BridgeError, type Fields, type RootInfo
 import { AppChannel } from './app-channel';
 import { Drafts,type DraftEditor } from './drafts.svelte';
 import { Sending,type SendIntent,type SendOperation,type Accepted } from './sending.svelte';
+import {Mutations} from './mutations.svelte';
+import {Chats,chatTitle,chatDetail} from './chats.svelte';
+import {Opening} from './opening.svelte';
+import {Attention} from './attention.svelte';
 import type { Revision } from './wire-json';
 import { Routing } from './routes.svelte';
 import { LiveExchange,savedBlocks } from './live';
@@ -9,25 +13,35 @@ import {signInCommand} from '../design-system/src/sections/elma-response';
 import { readPreferences, savePreferences, type Preferences } from './preferences';
 import type { ElmaExchange, ElmaRoute } from '../design-system/src/sections/elma-types';
 import type { ResponseBlock,ToolView,ToolDetails,QuestionView,Answer } from '../design-system/src/sections/elma-response';
-export interface ChatInfo {chat:string;title:string|null;firstMessage?:string;createdAt?:string;exchangeCount:number;usage:{inputTokens:number;outputTokens:number}}
+export interface ChatInfo {chat:string;title:string|null;firstMessage?:string;createdAt?:string;migration?:{fromRoot:string;fromChat:string;stale:boolean};exchangeCount:number;usage:{inputTokens:number;outputTokens:number}}
 export interface Repository {name:string;folder:string;route:ElmaRoute}
+interface RenameEditor {root:string;chat:string;generation:number;value:string;busy:boolean;problem:string}
+interface ArchiveIntent {root:string;chat:string;generation:number;folder:string;phase:'confirm'|'preparing'|'stopping'|'marking'}
 interface PendingMessage {intent:SendIntent;editor:DraftEditor;generation:number;exchange:string}
-interface ChatSnapshot {kind:string;chat:ChatInfo;exchanges:ElmaExchange[];more:boolean;settings:{route?:ElmaRoute;workingFolder?:string};marks:{ongoing:boolean};draft:unknown}
+interface ChatSnapshot {kind:string;chat:ChatInfo;exchanges:ElmaExchange[];more:boolean;settings:{route?:ElmaRoute;workingFolder?:string};marks:{ongoing:boolean;archivedAt?:string};draft:unknown}
 export class ElmaWindow {
+ private accountsVisible=()=>{if(document.visibilityState==='visible'&&this.root.root)void this.routing.refresh(this.root.root);};
  private live=new Map<string,LiveExchange>();private revision=$state(0);snapshotRevision=$state(0);openTools=$state<Record<string,boolean>>({});readonly readingPositions=new Map<string,{top:number;following:boolean}>();restoring=$state(false);
  now=$state(Date.now());private clock=setInterval(()=>{this.now=Date.now();},1000);
  root=$state<RootInfo>({root:'',name:'…',status:'working',current:false});
  connection=$state('Connecting…');problem=$state('');info=$state<ChatInfo|null>(null);exchanges=$state<ElmaExchange[]>([]);
- selected=$state<string|null>(null);more=$state(false);pageBusy=$state(false);pageProblem=$state('');historyOpen=$state(false);settings=$state<ChatSnapshot['settings']>({});ongoing=$state(false);
+ selected=$state<string|null>(null);more=$state(false);pageBusy=$state(false);pageProblem=$state('');historyOpen=$state(false);settings=$state<ChatSnapshot['settings']>({});ongoing=$state(false);archived=$state(false);
  repositories=$state<Repository[]>([]);folder=$state('');defaultRoute=$state<ElmaRoute>({});private workspaceRoute:ElmaRoute={};routing:Routing;private settingsQueues=new Map<string,Promise<unknown>>();
  preferences=$state<Preferences>(readPreferences(''));bridge:Bridge;app=new AppChannel();drafts:Drafts;
+ rename=$state<RenameEditor|null>(null);actionNotice=$state('');actionProblem=$state('');mutations:Mutations;private titleObservation=0;private marksObservation=0;
+ quickOpen=$state(false);archive=$state<ArchiveIntent|null>(null);private stateWaiters=new Set<()=>void>();
+ latestOpen=$state(false);latestProblem=$state('');latestBusy=$state(false);chats:Chats;opening:Opening;attention:Attention;private chatProblem='';
+ reimportBusy=$state(false);private reimportContext='';rootNames=$state<{root:string;name:string}[]>([]);rootNamesProblem=$state('');private namesRead?:{root:string;promise:Promise<void>};
  composerOpen=$state(false);sendWait=$state('');stopping=$state<string[]>([]);sending:Sending;stopConfirmation=$state<PendingMessage|null>(null);private stopQueue?:PendingMessage&{finish:()=>void};private previousSelection=new Map<string,string|null>();private replacements=new Map<string,ElmaExchange>();private stopCalls=new Map<string,Promise<void>>();private answerSerial=0;private answerStates=$state<Record<string,{token:number;pending:boolean;problem:string;after:number}>>({});
  repositoryNotice=$state('');repositoryChange=$state<{root:string;chat:string;folder:string;generation:number}|null>(null);
  private pageTicket=0;private generation=0;private settingsObservation=0;private chatSub?:{close:()=>void;retry:()=>void};private bootstrapGeneration=0;private closed=false;private cancelOpening?:()=>void;
- constructor(){this.bridge=new Bridge({build:__ARBOL_BUILD__,onstate:s=>{this.connection=s;if(s==='Reconnecting…'||s==='Connecting…'||s.includes('Bridge version'))this.sending?.offline();},beforeReload:()=>this.drafts.beforeReload(),onhello:(root)=>{if(this.root.root&&this.root.root!==root.root){this.clear();this.folder='';this.stopping=[];this.stopCalls.clear();}this.drafts?.rootChanged(root.root);this.root=root;this.sending?.hello(root.root);this.preferences=readPreferences(root.root);void this.bootstrap();void this.loadAccounts();const rootId=root.root;setTimeout(()=>{if(this.root.root===rootId)for(const id of this.stopping)void this.stopExchange(id,true);},0);}});
+ constructor(){this.bridge=new Bridge({build:__ARBOL_BUILD__,onstate:s=>{this.connection=s;if(s==='Reconnecting…'||s==='Connecting…'||s.includes('Bridge version')){this.sending?.offline();this.mutations?.offline();}},beforeReload:async()=>{await this.drafts.beforeReload();this.opening.beforeReload();},onhello:(root)=>{if(this.root.root&&this.root.root!==root.root){this.clear();this.rootNames=[];this.rootNamesProblem='';this.reimportBusy=false;this.folder='';this.stopping=[];this.stopCalls.clear();}this.drafts?.rootChanged(root.root);this.root=root;this.sending?.hello(root.root);this.mutations?.hello(root.root);this.chats?.hello(root.root);this.opening?.hello(root.root);this.attention?.hello(root.root);this.preferences=readPreferences(root.root);void this.bootstrap();void this.loadAccounts();void this.loadRootNames();const rootId=root.root;setTimeout(()=>{if(this.root.root===rootId)for(const id of this.stopping)void this.stopExchange(id,true);},0);}});
+  this.mutations=new Mutations(this.bridge,done=>this.drafts.holdSend(done));
+  this.chats=new Chats(this.bridge);this.attention=new Attention(this.bridge);
   this.drafts=new Drafts(this.bridge,(root,editor)=>this.sending?.marked(root,editor,this.drafts.current===editor));this.sending=new Sending(this.bridge,(root,scope)=>this.drafts.owner(root,scope),done=>this.drafts.holdSend(done),{provisional:op=>this.provisional(op),accepted:(op,result)=>this.accepted(op,result),refused:(op,error)=>this.refused(op,error)});this.routing=new Routing(this.bridge,(chat,route)=>this.saveSettings(chat,{route}));
+  this.opening=new Opening(this.app,async done=>{const root=this.root.root,editor=this.drafts.current;if(!editor)throw new Error('Wait for the workspace and Draft to be read.');await editor.waitReady();await this.drafts.settleCurrent(done);if(root!==this.root.root)throw new Error('The Root changed before opening the request.');},async target=>{if(target.chat){const opened=await this.openChat(target.chat);if(opened){this.latestOpen=false;this.historyOpen=false;this.quickOpen=false;}return opened;}this.newChat(target.folder!);return true;},done=>this.drafts.holdSend(done));
+  document.addEventListener('visibilitychange',this.accountsVisible);window.addEventListener('focus',this.accountsVisible);
   this.bridge.subscribe('root',{},event=>{if(event.root)this.root=event.root as unknown as RootInfo;},e=>this.failure(e));
-  this.bridge.subscribe('attention',{},()=>{});
  }
  get exchange(){if(this.restoring)return undefined;return this.exchanges.find(e=>e.exchange===this.selected)??this.exchanges.at(-1);}
  get title(){return this.info?.title||Array.from((this.info?.firstMessage??'').split('\n')[0]).slice(0,80).join('')||'New Chat';}
@@ -39,7 +53,87 @@ export class ElmaWindow {
  get turn(){return this.info?this.info.exchangeCount-this.exchanges.filter(e=>e.number>(this.exchange?.number??Infinity)).length:0;}
  get working(){this.revision;return this.exchanges.some(e=>['open','accepting','running','stopping','ending','unsaved','gone'].includes(e.state));}
  savePreferences(){savePreferences(this.root.root,this.preferences);}
+ private forgetChat(chat:string){if(this.preferences.lastChat===chat)delete this.preferences.lastChat;for(const [repo,id]of Object.entries(this.preferences.repositoryChats))if(id===chat)delete this.preferences.repositoryChats[repo];this.preferences.recentChats=this.preferences.recentChats.filter(id=>id!==chat);this.savePreferences();}
+ private rememberChat(){if(!this.info?.createdAt)return;if(this.archived){this.forgetChat(this.info.chat);return;}const chat=this.info.chat,repo=this.repositories.find(repo=>repo.folder===this.folder);this.preferences.lastChat=chat;if(repo)this.preferences.repositoryChats[repo.name]=chat;this.preferences.recentChats=[chat,...this.preferences.recentChats.filter(id=>id!==chat)].slice(0,100);this.savePreferences();}
  private failure(error?:BridgeError){if(error)this.problem=describe(error);}
+ get metadataBusy(){return !!this.info&&this.mutations.forChat(this.info.chat).length>0;}
+ sourceRootName(root:string){return root===this.root.root?this.root.name:this.rootNames.find(row=>row.root===root)?.name??root;}
+ get staleMessage(){return this.info?.migration?.stale?'New messages in '+this.sourceRootName(this.info.migration.fromRoot):'';}
+ get importBlocked(){return this.reimportBusy||this.opening.busy||!!this.opening.pending||!!this.archive||this.metadataBusy;}
+ get latestRows(){return this.chats.ordered(this.info?.chat,this.preferences.recentChats).map(row=>({id:row.chat,label:chatTitle(row),detail:chatDetail(row,this.repositories,this.now)+(row.migration?.stale?' · New messages in '+this.sourceRootName(row.migration.fromRoot):''),...(row.migration?.stale?{action:{label:'Bring over again',disabled:this.importBlocked}}:{})}));}
+ openLatest(){this.latestProblem='';this.latestOpen=true;void this.loadRootNames();}
+ loadRootNames(){const root=this.root.root;if(this.namesRead?.root===root)return this.namesRead.promise;const promise=(async()=>{try{const value=await this.bridge.call<{roots:{root:RootInfo}[]}>('roots.list');if(root!==this.root.root||this.closed)return;if(!Array.isArray(value.roots))throw new Error('The Root names could not be read.');this.rootNames=value.roots.flatMap(row=>row.root&&typeof row.root.root==='string'&&typeof row.root.name==='string'?[{root:row.root.root,name:row.root.name}]:[]);this.rootNamesProblem='';}catch(error){if(root===this.root.root&&!this.closed)this.rootNamesProblem=error instanceof Refusal?describe(error.detail):'The source Root names could not be read.';}})();this.namesRead={root,promise};void promise.finally(()=>{if(this.namesRead?.promise===promise)this.namesRead=undefined;});return promise;}
+ async chooseLatest(chat:string){if(this.latestBusy||!this.chats.rows.some(row=>row.chat===chat&&!row.archived))return;const root=this.root.root,generation=this.generation;this.latestBusy=true;this.latestProblem='';try{await this.drafts.settleCurrent();if(this.closed||root!==this.root.root||generation!==this.generation)return;if(!await this.openChat(chat))throw new Error('This chat is not available.');this.latestOpen=false;this.problem='';}catch(error){if(root===this.root.root&&this.latestOpen)this.latestProblem=error instanceof Refusal?describe(error.detail):error instanceof Error?error.message:'The chat could not be opened.';}finally{this.latestBusy=false;}}
+ openQuick(){if(!this.info){this.actionNotice='Start a chat before using chat actions';return;}this.quickOpen=true;void this.loadRootNames();}
+ quickAction(id:string){this.quickOpen=false;if(id==='rename')this.startRename();else if(id==='archive')this.startArchive();else if(id==='copy')void this.copySession();else if(id==='reimport'&&this.info)void this.bringOver(this.info.chat);}
+ async bringOver(chat:string){
+  if(this.importBlocked)return;const root=this.root.root,generation=this.generation,migration=this.info?.chat===chat?this.info.migration:this.chats.rows.find(row=>row.chat===chat)?.migration;
+  if(!migration?.stale)return;this.reimportContext=this.root.root+':'+(this.info?.chat??this.folder);this.reimportBusy=true;this.actionNotice='';this.actionProblem='';this.latestProblem='';let submitted=false,finish!:()=>void;const done=new Promise<void>(resolve=>finish=resolve);this.drafts.holdSend(done);
+  try{
+   await this.drafts.settleCurrent(done);if(this.closed||root!==this.root.root||generation!==this.generation)return;
+   const current=this.info?.chat===chat?this.info.migration:this.chats.rows.find(row=>row.chat===chat)?.migration;if(!current?.stale||current.fromRoot!==migration.fromRoot||current.fromChat!==migration.fromChat)throw new Error('This copy changed. Check the chat list before bringing it over again.');
+   submitted=true;const value=await this.bridge.call<Fields>('chat.reimport',{chat});
+   if(!value||typeof value.chat!=='string'||!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value.chat)||value.previousChat!==chat||!['replaced','copied'].includes(String(value.action))||(value.action==='replaced')!==(value.chat===chat)||value.fromRoot!==migration.fromRoot||value.fromChat!==migration.fromChat)throw new Refusal({code:'no_answer',message:'The import receipt could not be verified.'});
+   if(root===this.root.root&&generation===this.generation){this.latestOpen=false;this.quickOpen=false;this.historyOpen=false;}
+   this.opening.retainResult(root,{chat:value.chat},generation===this.generation?'':'The import finished. Open the returned chat when ready.');finish();if(root!==this.root.root||generation!==this.generation)return;
+   await this.opening.start();if(root===this.root.root&&this.info?.chat===value.chat)this.actionNotice=value.action==='copied'?'Opened a new copy. The continued copy is kept.':'Chat updated from '+this.sourceRootName(migration.fromRoot);
+  }catch(error){if(root!==this.root.root||this.closed||generation!==this.generation)return;const uncertain=submitted&&error instanceof Refusal&&['disconnected','no_answer'].includes(error.detail.code);const message=uncertain?'The import may have finished. Check the chat list before trying again.':error instanceof Refusal?describe(error.detail):error instanceof Error?error.message:'The chat could not be brought over.';if(this.latestOpen)this.latestProblem=message;else this.actionProblem=message;if(uncertain)this.chats.retry();}
+  finally{finish();if(root===this.root.root){this.reimportBusy=false;this.reimportContext='';}}
+ }
+ async copySession(){const chat=this.info?.chat,root=this.root.root,generation=this.generation;if(!chat){this.actionNotice='Start a chat before copying its session ID';return;}try{await navigator.clipboard.writeText(chat);if(root===this.root.root&&generation===this.generation)this.actionNotice='Session ID copied';}catch{if(root===this.root.root&&generation===this.generation)this.actionProblem='The session ID could not be copied.';}}
+ startArchive(){if(!this.info){this.actionNotice='Start a chat before archiving';return;}if(this.archive||this.metadataBusy)return;this.actionNotice='';this.actionProblem='';this.archive={root:this.root.root,chat:this.info.chat,generation:this.generation,folder:this.settings.workingFolder??this.exchange?.workingFolder??this.folder,phase:'confirm'};}
+ cancelArchive(){if(this.archive?.phase==='marking')return;this.archive=null;this.notifyState();}
+ private notifyState(){for(const check of [...this.stateWaiters])check();}
+ private archiveCurrent(intent:ArchiveIntent){return !this.closed&&this.archive===intent&&intent.root===this.root.root&&intent.chat===this.info?.chat&&intent.generation===this.generation;}
+ private savedEnd(intent:ArchiveIntent,exchange:string){return new Promise<boolean>(resolve=>{const check=()=>{const row=this.exchanges.find(row=>row.exchange===exchange);if(!this.archiveCurrent(intent)||row&&['completed','failed','cancelled','interrupted'].includes(row.state)){this.stateWaiters.delete(check);resolve(this.archiveCurrent(intent));}};this.stateWaiters.add(check);check();});}
+ async confirmArchive(){
+  const intent=this.archive;if(!intent||intent.phase!=='confirm'||!this.archiveCurrent(intent))return;intent.phase='preparing';
+  let finish!:()=>void;const done=new Promise<void>(resolve=>finish=resolve);this.drafts.holdSend(done);
+  try{
+   await this.drafts.settleCurrent(done);if(!this.archiveCurrent(intent))return;
+   const editor=this.drafts.current;if(!editor?.ready||editor.dirty||editor.conflict||editor.recovery!==null)throw new Error('Save or resolve the Draft before archiving.');
+   const running=[...this.exchanges].reverse().find(row=>!['completed','failed','cancelled','interrupted'].includes(row.state));
+   if(running){intent.phase='stopping';await this.stopExchange(running.exchange);if(!this.archiveCurrent(intent))return;if(!this.stopping.includes(running.exchange)&&!['completed','failed','cancelled','interrupted'].includes(this.exchanges.find(row=>row.exchange===running.exchange)?.state??''))throw new Error(this.problem||'The response could not be stopped.');if(!await this.savedEnd(intent,running.exchange))return;}
+   if(!this.archiveCurrent(intent))return;if(this.working)throw new Error('Another response started. Confirm Archive again after it finishes.');
+   await editor.flush();if(!this.archiveCurrent(intent))return;if(editor.dirty||editor.conflict||editor.recovery!==null)throw new Error('Save or resolve the Draft before archiving.');
+   intent.phase='marking';await this.mutations.start('chat.mark',{chat:intent.chat,archived:true}).result;
+   if(intent.root!==this.root.root)return;
+   this.forgetChat(intent.chat);
+   if(this.archiveCurrent(intent)){this.archive=null;this.newChat(intent.folder);this.actionNotice='Chat archived';}
+  }catch(error){if(this.archiveCurrent(intent))this.actionProblem=error instanceof Refusal?describe(error.detail):error instanceof Error?error.message:'The chat could not be archived.';}
+  finally{if(this.archive===intent)this.archive=null;finish();this.notifyState();}
+ }
+ startRename(){
+  if(!this.info?.exchangeCount||!this.info.createdAt){this.actionNotice='Start a chat before renaming';return;}
+  if(this.metadataBusy||this.archive)return;
+  this.rename={root:this.root.root,chat:this.info.chat,generation:this.generation,value:this.info.title??'',busy:false,problem:''};
+  this.actionNotice='';
+ }
+ cancelRename(){if(!this.rename?.busy)this.rename=null;}
+ async saveRename(){
+  const edit=this.rename;if(!edit||edit.busy||edit.root!==this.root.root||edit.chat!==this.info?.chat||edit.generation!==this.generation)return;
+  const title=edit.value.trim()||null;
+  if(title!==null&&(Array.from(title).length>240||title.includes('\0'))){edit.problem='Use at most 240 characters, without NUL.';return;}
+  edit.busy=true;edit.problem='';const observed=this.titleObservation;
+  try{
+   const result=await this.mutations.start('chat.rename',{chat:edit.chat,title}).result;
+   if(edit.root!==this.root.root||edit.chat!==this.info?.chat||edit.generation!==this.generation)return;
+   if(observed===this.titleObservation)this.info.title=result.title as string|null;
+   if(this.rename===edit)this.rename=null;
+  }catch(error){if(this.rename===edit)edit.problem=error instanceof Refusal?describe(error.detail):error instanceof Error?error.message:'The title could not be saved.';}
+  finally{edit.busy=false;}
+ }
+ async toggleOngoing(){
+  const chat=this.info?.chat,root=this.root.root,generation=this.generation;if(!chat||this.metadataBusy||this.archive||this.composerBusy)return;
+  const observed=this.marksObservation;this.actionNotice='';this.actionProblem='';
+  try{
+   const result=await this.mutations.start('chat.mark',{chat,ongoing:!this.ongoing}).result;
+   if(root!==this.root.root||chat!==this.info?.chat||generation!==this.generation)return;
+   if(observed===this.marksObservation)this.ongoing=result.ongoing===true;
+   this.actionNotice=this.ongoing?'Marked ongoing':'Cleared ongoing';
+  }catch(error){if(root===this.root.root&&chat===this.info?.chat&&generation===this.generation)this.actionProblem=error instanceof Refusal?describe(error.detail):error instanceof Error?error.message:'The ongoing mark could not be saved.';}
+ }
+
  private async loadAccounts(){await this.routing.refresh(this.root.root);}
  private selectRoute(){if(this.root.root&&(this.info||this.folder))this.routing.select(this.root.root+':'+(this.info?.chat??this.folder),this.info?.chat,this.info?(this.settings.route??this.exchange?.route):undefined,[this.repositories.find(r=>r.folder===this.folder)?.route??{},this.workspaceRoute]);}
  private async saveSettings(chat:string,change:{route?:ElmaRoute;workingFolder?:string},valid?:()=>boolean){
@@ -50,45 +144,50 @@ export class ElmaWindow {
   finally{if(this.settingsQueues.get(key)===operation)this.settingsQueues.delete(key);}
  }
  private async bootstrap(){
-  const generation=++this.bootstrapGeneration;
+  const generation=++this.bootstrapGeneration,context=this.generation;
   try{
-   const request=await this.app.call('app.takeOpen');const workspace=await this.bridge.call<{repositories:Repository[];route:ElmaRoute}>('workspace.get');
+   const workspace=await this.bridge.call<{repositories:Repository[];route:ElmaRoute}>('workspace.get');
    if(this.closed||generation!==this.bootstrapGeneration)return;
    this.workspaceRoute=workspace.route;this.repositories=[...workspace.repositories];const recent=this.preferences.recentRepositories;
    this.repositories=[...this.repositories.slice(0,1),...this.repositories.slice(1).sort((a,b)=>{const ai=recent.indexOf(a.name),bi=recent.indexOf(b.name);return(ai<0?Infinity:ai)-(bi<0?Infinity:bi);})];
-   this.folder=this.folder||this.repositories[0]?.folder||'';this.defaultRoute=this.repositories.find(r=>r.folder===this.folder)?.route??workspace.route;
-   // A live view is reread by its retained subscription on hello, not replaced by convenience state.
-   if(this.info&&!request.chat){this.selectRoute();return;}
-   const first=this.repositories[0];const candidates=[request.chat,this.preferences.lastChat,first&&this.preferences.repositoryChats[first.name]].filter((v):v is string=>typeof v==='string');
-   let opened=false;for(const chat of [...new Set(candidates)]){if(generation!==this.bootstrapGeneration)return;if(await this.openChat(chat)){opened=true;break;}}if(generation!==this.bootstrapGeneration)return;
-   if(!opened){this.clear();if(typeof request.folder==='string')this.folder=request.folder;}
+   this.folder=this.folder||this.repositories[0]?.folder||'';this.defaultRoute=this.repositories.find(r=>r.folder===this.folder)?.route??workspace.route;this.rememberChat();
+   this.selectDraft();this.selectRoute();
+   const requested=await this.opening.start();if(this.closed||generation!==this.bootstrapGeneration||context!==this.generation)return;
+   if(requested||this.info||this.opening.busy||this.opening.pending||this.opening.problem)return;
+   const first=this.repositories[0];const candidates=[this.preferences.lastChat,first&&this.preferences.repositoryChats[first.name]].filter((v):v is string=>typeof v==='string');
+   let opened=false;for(const chat of [...new Set(candidates)]){if(generation!==this.bootstrapGeneration)return;if(await this.openChat(chat)){opened=true;break;}if(this.opening.busy||this.opening.pending||this.opening.problem)return;}if(generation!==this.bootstrapGeneration||this.opening.busy||this.opening.pending||this.opening.problem)return;
+   if(!opened)this.clear();
    this.selectDraft();this.selectRoute();this.problem='';
-  }catch(e){this.problem=e instanceof Refusal?describe(e.detail):'The chat could not be read.';}
+  }catch(e){if(generation===this.bootstrapGeneration)this.problem=e instanceof Refusal?describe(e.detail):'The chat could not be read.';}
  }
  async openChat(chat:string,canonicalDraft=false):Promise<boolean>{
-  this.cancelOpening?.();const generation=++this.generation;this.chatSub?.close();
+  this.cancelOpening?.();const previous=this.chatSub,priorGeneration=this.generation,same=!!previous&&this.info?.chat===chat,generation=same?this.generation:++this.generation;
+  if(!same){this.quickOpen=false;this.archive=null;this.notifyState();this.rename=null;this.actionNotice='';this.actionProblem='';}
   return new Promise<boolean>((resolve,reject)=>{
-   let settled=false;this.cancelOpening=()=>{if(!settled){settled=true;resolve(false);}};
-   this.chatSub=this.bridge.subscribe('chat',{chat},event=>{
+   let settled=false,candidate:{close:()=>void;retry:()=>void};
+   const fail=(error?:BridgeError)=>{if(settled)return;settled=true;if(!same){candidate.close();if(generation===this.generation){this.generation=priorGeneration;this.chatSub=previous;previous?.retry();}}if(error)reject(new Refusal(error));else resolve(false);};
+   this.cancelOpening=()=>fail();
+   candidate=this.bridge.subscribe('chat',{chat},event=>{
     if(this.closed||generation!==this.generation)return;
     if(event.kind==='snapshot'){
-     let snapshot=event as unknown as ChatSnapshot;const pending=this.sending.forChat(chat);if(pending?.outcome==='pending'&&snapshot.chat.createdAt&&!snapshot.exchanges.some(row=>row.exchange===pending.intent.exchange)){const row=this.provisionalRow(pending,Math.max(pending.intent.number,snapshot.chat.exchangeCount+1));snapshot={...snapshot,chat:{...snapshot.chat,exchangeCount:row.number},exchanges:[...snapshot.exchanges,row]};}this.pageTicket++;this.pageBusy=false;this.pageProblem='';
-     if(!snapshot.chat||!snapshot.chat.createdAt&&snapshot.chat.exchangeCount===0){if(!settled){settled=true;resolve(false);}return;}
+     let snapshot=event as unknown as ChatSnapshot;const pending=this.sending.forChat(chat);if(pending?.outcome==='pending'&&snapshot.chat.createdAt&&!snapshot.exchanges.some(row=>row.exchange===pending.intent.exchange)){const row=this.provisionalRow(pending,Math.max(pending.intent.number,snapshot.chat.exchangeCount+1));snapshot={...snapshot,chat:{...snapshot.chat,exchangeCount:row.number},exchanges:[...snapshot.exchanges,row]};}if(!snapshot.chat||!snapshot.chat.createdAt&&snapshot.chat.exchangeCount===0){fail();return;}
+     if(this.problem===this.chatProblem)this.problem='';this.chatProblem='';if(!settled&&!same)previous?.close();this.pageTicket++;this.pageBusy=false;this.pageProblem='';
      const desired=this.info?.chat===snapshot.chat.chat?this.selected:null;for(const [exchange,live]of this.live)for(const block of live.blocks)if(block.kind==='tool'&&block.tool.position!==undefined&&this.openTools[block.tool.id])this.openTools[exchange+':'+block.tool.position]=true;
      this.restoring=false;this.live.clear();this.revision++;this.snapshotRevision++;
-     this.info=snapshot.chat;this.exchanges=snapshot.exchanges;this.more=snapshot.more;this.settings=snapshot.settings;this.settingsObservation++;this.ongoing=snapshot.marks.ongoing;this.selected=this.exchanges.some(e=>e.exchange===this.selected)?this.selected:this.exchanges.at(-1)?.exchange??null;
+     this.titleObservation++;this.marksObservation++;this.info=snapshot.chat;this.exchanges=snapshot.exchanges;this.more=snapshot.more;this.settings=snapshot.settings;this.settingsObservation++;this.ongoing=snapshot.marks.ongoing;this.archived=typeof snapshot.marks.archivedAt==='string';this.selected=this.exchanges.some(e=>e.exchange===this.selected)?this.selected:this.exchanges.at(-1)?.exchange??null;
      this.folder=this.settings.workingFolder??this.exchange?.workingFolder??this.folder;this.selectDraft(canonicalDraft);this.selectRoute();this.afterChatState();
-     this.preferences.lastChat=chat;this.preferences.repositoryChats[this.repository]=chat;this.preferences.recentChats=[chat,...this.preferences.recentChats.filter(v=>v!==chat)].slice(0,100);this.savePreferences();
+     this.rememberChat();
      if(desired&&!this.exchanges.some(e=>e.exchange===desired)&&this.more){this.restoring=true;void this.restoreSelection(desired,generation,this.snapshotRevision);}
      if(!settled){settled=true;resolve(true);}
     }else if(event.kind==='exchange'){const status=event.exchange as Fields;const row=this.exchanges.find(e=>e.exchange===status.exchange);if(row){this.projection(row).status(status);this.revision++;}}
     else if(event.kind==='lines'){const row=this.exchanges.find(e=>e.exchange===event.exchange);if(row&&Array.isArray(event.lines)){this.projection(row).apply(event.lines);this.settleAnswerReceipts(row);this.revision++;}}
     else if(event.kind==='saved'){const row=event.exchange as unknown as ElmaExchange;const old=this.exchanges.find(e=>e.exchange===row.exchange);if(old){this.projection(old).reconcile(row);this.exchanges=this.exchanges.map(e=>e.exchange===row.exchange?row:e);this.revision++;this.afterChatState();}}
     else if(event.kind==='note'){const note=event.note as Fields;const row=this.exchanges.find(e=>e.exchange===note.exchange);if(row){row.note=note as unknown as ElmaExchange['note'];this.revision++;}}
-    else if(event.kind==='title'&&this.info)this.info.title=event.title as string|null;
+    else if(event.kind==='title'&&this.info){this.info.title=event.title as string|null;this.titleObservation++;}
     else if(event.kind==='settings'){this.settings=event.settings as ChatSnapshot['settings'];this.settingsObservation++;this.selectRoute();}
-    else if(event.kind==='marks')this.ongoing=!!(event.marks as {ongoing:boolean}).ongoing;
-   },error=>{this.failure(error);if(!settled){settled=true;reject(new Refusal(error??{code:'ended',message:'The chat subscription ended.'}));}});
+    else if(event.kind==='marks'){const marks=event.marks as ChatSnapshot['marks'];this.ongoing=!!marks.ongoing;this.archived=typeof marks.archivedAt==='string';this.marksObservation++;if(this.info)this.rememberChat();}
+   },error=>{if(generation!==this.generation)return;this.chatProblem=error?describe(error):'The chat subscription ended.';this.problem=this.chatProblem;fail(error??{code:'ended',message:'The chat subscription ended.'});});
+   this.chatSub=candidate;
   });
  }
  private projection(row:ElmaExchange){let live=this.live.get(row.exchange);if(!live){live=new LiveExchange(row);this.live.set(row.exchange,live);}return live;}
@@ -115,7 +214,7 @@ export class ElmaWindow {
   try{await this.bridge.call('exchange.answer',{exchange:row.exchange,askId:question.askId,answer});}
   catch(e){if(this.answerStates[key]?.token===token)this.answerStates[key]={...this.answerStates[key],pending:false,problem:e instanceof Refusal?describe(e.detail):'The answer could not be sent.'};}
  }
- get composerBusy(){return !!this.drafts.current?.pendingSend||!!(this.info&&this.sending.forChat(this.info.chat));}
+ get composerBusy(){return this.reimportBusy&&this.reimportContext===this.root.root+':'+(this.info?.chat??this.folder)||!!this.archive&&this.archive.phase!=='confirm'||!!this.drafts.current?.pendingSend||!!(this.info&&this.sending.forChat(this.info.chat));}
  get composerStatus(){return(this.info?this.sending.forChat(this.info.chat)?.status:undefined)||this.sendWait||this.drafts.current?.pastes.status||this.drafts.current?.status||'';}
  async recoverFailure(continueFrom=false){
   const row=this.exchange,editor=this.drafts.current,chat=this.info?.chat,root=this.root.root,generation=this.generation;
@@ -173,7 +272,7 @@ export class ElmaWindow {
   let finish!:()=>void;const done=new Promise<void>(resolve=>finish=resolve);this.stopQueue={...pending,finish};this.drafts.holdSend(done);this.sendWait='Waiting for the current response to be saved…';this.composerOpen=false;this.afterChatState();if(this.stopQueue)await this.stopExchange(pending.exchange);
  }
  private cancelQueued(){const pending=this.stopConfirmation;this.stopConfirmation=null;if(pending){pending.editor.pendingSend=false;pending.editor.sendProblem='The queued message is kept in its Draft.';}if(this.stopQueue){this.stopQueue.editor.pendingSend=false;this.stopQueue.editor.sendProblem='The queued message is kept in its Draft.';this.stopQueue.finish();this.stopQueue=undefined;}this.sendWait='';}
- private afterChatState(){this.stopping=this.stopping.filter(id=>!this.exchanges.some(row=>row.exchange===id&&['completed','failed','cancelled','interrupted'].includes(row.state)));const queued=this.stopQueue;if(!queued)return;const row=this.exchanges.find(row=>row.exchange===queued.exchange);if(!row||!['completed','failed','cancelled','interrupted'].includes(row.state))return;this.stopQueue=undefined;this.sendWait='';queued.editor.pendingSend=false;try{this.sending.start(queued.intent);}catch(e){queued.editor.sendProblem=e instanceof Error?e.message:'Not sent';this.composerOpen=true;}queued.finish();}
+ private afterChatState(){this.notifyState();this.stopping=this.stopping.filter(id=>!this.exchanges.some(row=>row.exchange===id&&['completed','failed','cancelled','interrupted'].includes(row.state)));const queued=this.stopQueue;if(!queued)return;const row=this.exchanges.find(row=>row.exchange===queued.exchange);if(!row||!['completed','failed','cancelled','interrupted'].includes(row.state))return;this.stopQueue=undefined;this.sendWait='';queued.editor.pendingSend=false;try{this.sending.start(queued.intent);}catch(e){queued.editor.sendProblem=e instanceof Error?e.message:'Not sent';this.composerOpen=true;}queued.finish();}
  stopCurrent(){const row=[...this.exchanges].reverse().find(value=>!['completed','failed','cancelled','interrupted'].includes(value.state));if(row)void this.stopExchange(row.exchange);}
  async stopExchange(exchange:string,retry=false):Promise<void>{
   const root=this.root.root,previous=this.stopCalls.get(exchange);if(previous){await previous;if(retry&&root===this.root.root&&this.stopping.includes(exchange)){if(this.stopCalls.get(exchange)===previous)this.stopCalls.delete(exchange);await this.stopExchange(exchange,true);}return;}
@@ -216,8 +315,8 @@ export class ElmaWindow {
   }catch(e){if(ticket===this.pageTicket&&e instanceof Refusal)this.pageProblem=describe(e.detail);}
   finally{if(ticket===this.pageTicket)this.pageBusy=false;}
  }
- private clear(){this.answerStates={};this.cancelQueued();this.repositoryChange=null;this.repositoryNotice='';this.restoring=false;this.live.clear();this.revision++;this.pageTicket++;this.pageBusy=false;this.pageProblem='';this.historyOpen=false;this.cancelOpening?.();this.chatSub?.close();this.chatSub=undefined;this.generation++;this.info=null;this.exchanges=[];this.selected=null;this.settings={};this.ongoing=false;}
+ private clear(){this.latestProblem='';this.latestOpen=false;this.quickOpen=false;this.archive=null;this.notifyState();this.rename=null;this.actionNotice='';this.actionProblem='';this.answerStates={};this.cancelQueued();this.repositoryChange=null;this.repositoryNotice='';this.restoring=false;this.live.clear();this.revision++;this.pageTicket++;this.pageBusy=false;this.pageProblem='';this.historyOpen=false;this.cancelOpening?.();this.chatSub?.close();this.chatSub=undefined;this.generation++;this.info=null;this.exchanges=[];this.selected=null;this.settings={};this.ongoing=false;this.archived=false;}
  private selectDraft(canonical=false){if(this.root.root&&(this.info||this.folder)){const pending=this.info?this.sending.forChat(this.info.chat):undefined;this.drafts.select(this.root.root,pending&&!canonical?pending.intent.scope:this.info?{chat:this.info.chat}:{folder:this.folder});this.sending.select(this.root.root,this.drafts.current);}}
 
- close(){clearInterval(this.clock);this.cancelOpening?.();this.closed=true;this.bootstrapGeneration++;this.chatSub?.close();this.cancelQueued();this.sending.close();this.drafts.close();this.routing.close();this.bridge.close();this.app.close();}
+ close(){document.removeEventListener('visibilitychange',this.accountsVisible);window.removeEventListener('focus',this.accountsVisible);clearInterval(this.clock);this.cancelOpening?.();this.closed=true;this.notifyState();this.bootstrapGeneration++;this.chatSub?.close();this.cancelQueued();this.sending.close();this.opening.close();this.attention.close();this.mutations.close();this.chats.close();this.drafts.close();this.routing.close();this.bridge.close();this.app.close();}
 }

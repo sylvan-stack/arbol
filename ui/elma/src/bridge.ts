@@ -88,7 +88,7 @@ export class Bridge {
   if(m.type!=='event'||!Number.isSafeInteger(m.seq)||!m.event||typeof m.event!=='object')return;
   if(m.seq!==sub.seq+1){this.start(sub);return;}sub.seq=m.seq as number;
   const event=m.event as Fields;sub.receive(event);
-  if(sub.topic==='attention'&&event.kind==='closed'&&event.id==='database_unreachable')for(const failed of this.topics)if(!failed.active&&failed.failure==='database_unavailable')this.start(failed);
+  if(sub.topic==='attention'&&(event.kind==='closed'&&event.id==='database_unreachable'||event.kind==='snapshot'&&Array.isArray(event.items)&&!event.items.some(item=>item&&typeof item==='object'&&(item as Fields).id==='database_unreachable')))for(const failed of this.topics)if(!failed.active&&failed.failure==='database_unavailable')this.start(failed);
  }
  private async reloadFor(build:string){
   if(build===this.options.build||this.reloads.has(build)||this.reloading)return;

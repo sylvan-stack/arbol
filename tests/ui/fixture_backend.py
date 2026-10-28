@@ -11,6 +11,7 @@ import os
 import signal
 import sys
 import tempfile
+from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -136,17 +137,31 @@ class Fixture:
         self.tasks.add(task)
         self.windows[writer] = {}
         try:
+            if self.scenario.get("helloDelay"):
+                await asyncio.sleep(self.scenario["helloDelay"])
             await self.send(
-                writer, {"type": "hello", "bridge": 1, "root": ROOT, "build": self.scenario.get("build", "development")}
+                writer, {"type": "hello", "bridge": 1, "root": self.scenario.get("root", ROOT), "build": self.scenario.get("build", "development")}
             )
             while line := await reader.readline():
                 message = json.loads(line)
                 if message["type"] == "subscribe":
+                    if self.record and self.scenario.get("recordSubscriptions"):
+                        with os.fdopen(os.open(self.record, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "w") as out:
+                            out.write(json.dumps({"method": "fixture.subscribe", "topic": message["topic"], "id": message["id"], "params": message.get("params", {})}) + "\n")
+                    topic_key = message["topic"] + ":" + str(message.get("params", {}).get("chat", ""))
+                    subscription_delay = self.scenario.get("subscriptionDelays", {}).get(topic_key, self.scenario.get("subscriptionDelays", {}).get(message["topic"], 0))
+                    subscription_errors = self.scenario.get("subscriptionErrors", {}).get(topic_key, [])
+                    subscription_error = subscription_errors.pop(0) if subscription_errors else None
+                    if subscription_delay:
+                        await asyncio.sleep(subscription_delay)
+                    if subscription_error:
+                        await self.send(writer, {"type": "ended", "id": message["id"], "error": subscription_error})
+                        continue
                     sub = {"topic": message["topic"], "params": message.get("params", {}), "seq": 1}
                     self.windows[writer][message["id"]] = sub
                     event = self.scenario.get("topics", {}).get(
                         message["topic"],
-                        {"kind": "snapshot", "root": ROOT}
+                        {"kind": "snapshot", "root": self.scenario.get("root", ROOT)}
                         if message["topic"] == "root"
                         else {"kind": "snapshot", "items": []},
                     )
@@ -172,6 +187,8 @@ class Fixture:
                         )
                     elif message["topic"] == "draft":
                         event = {"kind": "snapshot", "draft": self.drafts.get(self.draft_key(sub["params"]))}
+                    elif message["topic"] == "chats" and "chats" not in self.scenario.get("topics", {}):
+                        event = {"kind": "snapshot", "chats": []}
                     await self.send(writer, {"type": "event", "id": message["id"], "seq": 1, "event": event})
                     if message["topic"] == "chat":
                         for replay in self.scenario.get("replay", {}).get(sub["params"].get("chat"), []):
@@ -192,7 +209,7 @@ class Fixture:
                                         "limit": message.get("params", {}).get("limit"),
                                         "exchange": message.get("params", {}).get("exchange"),
                                         "position": message.get("params", {}).get("position"),
-                                        **({"params": message.get("params", {})} if method.startswith(("draft.", "accounts.")) or method in ("chat.settings", "chat.send", "exchange.stop", "exchange.sendAgain", "exchange.answer") else {}),
+                                        **({"params": message.get("params", {})} if method.startswith(("draft.", "accounts.")) or method in ("chat.settings", "chat.send", "exchange.stop", "exchange.sendAgain", "exchange.answer", "chat.rename", "chat.mark", "chat.reimport") else {}),
                                         **({"characters": len(message["params"]["text"])} if method == "paste.save" else {}),
                                     }
                                 )
@@ -200,6 +217,8 @@ class Fixture:
                             )
                     failures = self.scenario.get("callErrors", {}).get(method, [])
                     failure = failures.pop(0) if failures else None
+                    reply_delays = self.scenario.get("replyDelays", {}).get(method, 0)
+                    reply_delay = reply_delays.pop(0) if isinstance(reply_delays, list) and reply_delays else reply_delays if not isinstance(reply_delays, list) else 0
                     delay = self.scenario.get("delays", {}).get(method, 0)
                     if delay:
                         await asyncio.sleep(delay)
@@ -217,6 +236,8 @@ class Fixture:
                         }
                     elif method == "accounts.list" and method not in self.scenario.get("calls", {}):
                         value = {"drivers": []}
+                    elif method == "roots.list" and method not in self.scenario.get("calls", {}):
+                        value = {"roots": [{"root": self.scenario.get("root", ROOT)}]}
                     elif method == "accounts.models" and "catalogs" in self.scenario:
                         params = message["params"]
                         value = self.scenario["catalogs"].get(params["driver"] + ":" + params["subscription"], {"models": []})
@@ -238,8 +259,54 @@ class Fixture:
                         value = self.scenario["exchangePages"].get(
                             str(message.get("params", {}).get("beforeNumber")), {"exchanges": [], "more": False}
                         )
+                    elif method in ("chat.rename", "chat.mark"):
+                        params = message["params"]
+                        snapshot = self.scenario.get("chats", {}).get(params["chat"])
+                        if snapshot is None:
+                            await self.send(writer, {"type": "reply", "id": message["id"], "error": {"code": "not_found", "message": "No such chat"}})
+                            continue
+                        if method == "chat.rename":
+                            snapshot["chat"]["title"] = str(params["title"]).strip() or None if params["title"] is not None else None
+                            value = {"title": snapshot["chat"]["title"]}
+                            event = {"kind": "title", "title": value["title"]}
+                        else:
+                            marks = snapshot["marks"]
+                            if "ongoing" in params:
+                                marks["ongoing"] = params["ongoing"]
+                            if "archived" in params:
+                                if params["archived"]:
+                                    marks["archivedAt"] = datetime.now(UTC).isoformat()
+                                else:
+                                    marks.pop("archivedAt", None)
+                            value = dict(marks)
+                            event = {"kind": "marks", "marks": dict(marks)}
+                        for peer, subscriptions in tuple(self.windows.items()):
+                            for id, sub in tuple(subscriptions.items()):
+                                if sub["topic"] == "chat" and sub["params"].get("chat") == params["chat"]:
+                                    sub["seq"] += 1
+                                    await self.send(peer, {"type": "event", "id": id, "seq": sub["seq"], "event": event})
+                    elif method == "chat.reimport":
+                        imported = self.scenario["reimports"][message["params"]["chat"]]
+                        value = dict(imported["result"])
+                        changed = deepcopy(imported["snapshot"])
+                        self.scenario["chats"][value["chat"]] = changed
+                        await self.chat_changed(value["chat"])
+                        summary = {"chat": value["chat"], "title": changed["chat"]["title"], "firstMessage": changed["chat"].get("firstMessage", ""),
+                                   "activityAt": "2026-10-27T23:00:00Z", "last": {"exchange": changed["exchanges"][-1]["exchange"], "number": 1, "state": changed["exchanges"][-1]["state"]},
+                                   "hasDraft": False, "ongoing": changed["marks"]["ongoing"], "migration": changed["chat"].get("migration"), "route": changed["settings"].get("route"), "workingFolder": changed["settings"].get("workingFolder")}
+                        topics = self.scenario.setdefault("topics", {})
+                        listing = topics.setdefault("chats", {"kind": "snapshot", "chats": []})
+                        listing["chats"] = [row for row in listing["chats"] if row["chat"] != value["chat"]] + [summary]
+                        for peer, subscriptions in tuple(self.windows.items()):
+                            for id, sub in tuple(subscriptions.items()):
+                                if sub["topic"] == "chats":
+                                    sub["seq"] += 1
+                                    await self.send(peer, {"type": "event", "id": id, "seq": sub["seq"], "event": {"kind": "changed", "chats": [summary]}})
+                        if self.scenario.get("dropReimportReplies", 0):
+                            self.scenario["dropReimportReplies"] -= 1
+                            return
                     elif method == "root.get":
-                        value = {"root": ROOT, "layoutComplete": True}
+                        value = {"root": self.scenario.get("root", ROOT), "layoutComplete": True}
                     elif method == "chat.send":
                         value = await self.start_message(message["params"])
                         if "error" in value:
@@ -286,6 +353,11 @@ class Fixture:
                         await self.draft_changed({k: params[k] for k in ("chat", "folder") if k in params})
                     else:
                         value = self.scenario.get("calls", {}).get(method, {})
+                    if method in ("chat.rename", "chat.mark") and self.scenario.get("dropMetadataReplies", 0):
+                        self.scenario["dropMetadataReplies"] -= 1
+                        return
+                    if reply_delay:
+                        await asyncio.sleep(reply_delay)
                     await self.send(writer, {"type": "reply", "id": message["id"], "result": value})
         except (OSError, asyncio.CancelledError):
             pass
@@ -300,16 +372,26 @@ class Fixture:
         if value["kind"] == "disconnect":
             for writer in tuple(self.windows):
                 writer.close()
+        elif value["kind"] == "end":
+            for writer, subs in tuple(self.windows.items()):
+                for id, sub in tuple(subs.items()):
+                    if sub["topic"] == value["topic"]:
+                        await self.send(writer, {"type": "ended", "id": id, "error": value["error"]})
+                        subs.pop(id, None)
         elif value["kind"] == "scenario":
             self.scenario.update(value["value"])
         elif value["kind"] == "publish":
+            if value["topic"] == "chat" and value.get("params", {}).get("chat"):
+                snapshot = self.scenario.get("chats", {}).get(value["params"]["chat"])
+                if snapshot and value["event"].get("kind") == "title":
+                    snapshot["chat"]["title"] = value["event"]["title"]
             if value["topic"] == "chat" and value["event"].get("kind") == "saved":
                 saved = value["event"]["exchange"]
                 for snapshot in self.scenario.get("chats", {}).values():
                     snapshot["exchanges"] = [saved if row["exchange"] == saved["exchange"] else row for row in snapshot["exchanges"]]
             for writer, subs in tuple(self.windows.items()):
                 for id, s in tuple(subs.items()):
-                    if s["topic"] == value["topic"]:
+                    if s["topic"] == value["topic"] and all(s["params"].get(key) == expected for key, expected in value.get("params", {}).items()):
                         s["seq"] += value.get("advance", 1)
                         await self.send(writer, {"type": "event", "id": id, "seq": s["seq"], "event": value["event"]})
         elif value["kind"] == "draft":

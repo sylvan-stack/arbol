@@ -20,15 +20,18 @@ export class DraftEditor {
  private timer?:ReturnType<typeof setTimeout>;private retry?:ReturnType<typeof setTimeout>;
  private pending?:Promise<void>;private captured?:Saving;private observation=0;private version=0;private closed=false;
  private subscription:{close:()=>void;retry:()=>void};
+ private readyWaiters=new Set<{resolve:()=>void;reject:(error:Error)=>void}>();
  constructor(private bridge:Bridge,readonly scope:DraftScope,private storageKey:string,onCanonical?:(editor:DraftEditor)=>void){
   this.pastes=new Pastes(bridge,this);
   try{const raw=sessionStorage.getItem(storageKey);if(raw){const value=parseWire(raw) as {text?:unknown;baseRevision?:unknown};if(typeof value?.text==='string'&&(value.baseRevision===null||validRevision(value.baseRevision)))this.recovered={text:value.text,baseRevision:value.baseRevision};else sessionStorage.removeItem(storageKey);}}
   catch{this.storageProblem='Unsaved-text recovery is unavailable in this window.';}
   this.subscription=bridge.subscribe('draft',scope,event=>{
    if(!['snapshot','draft'].includes(String(event.kind)))return;
-   try{this.observe(decode(event.draft));onCanonical?.(this);}catch(e){this.problem=e instanceof Error?e.message:'The Draft could not be read.';}
-  },error=>{this.problem='Draft not loaded: '+(error?.message??'The subscription ended.');});
+   try{this.observe(decode(event.draft));onCanonical?.(this);if(this.ready){for(const waiter of this.readyWaiters)waiter.resolve();this.readyWaiters.clear();if(event.kind==='snapshot'){if(!this.dirty)this.problem='';else if(!this.conflict&&this.recovery===null)void this.flush();}}}catch(e){this.problem=e instanceof Error?e.message:'The Draft could not be read.';this.rejectReady();}
+  },error=>{this.problem='Draft not loaded: '+(error?.message??'The subscription ended.');this.rejectReady();});
  }
+ private rejectReady(){for(const waiter of this.readyWaiters)waiter.reject(new Error(this.problem||'The Draft was closed.'));this.readyWaiters.clear();}
+ waitReady(){if(this.ready)return Promise.resolve();if(this.problem||this.closed)return Promise.reject(new Error(this.problem||'The Draft was closed.'));return new Promise<void>((resolve,reject)=>this.readyWaiters.add({resolve,reject}));}
  get revision(){return this.canonical?.revision??null;}
  get status(){return !this.ready?'Loading Draft…':this.saving?'Saving Draft…':this.problem?'Draft not saved':this.dirty?'Draft not saved yet':'';}
  private cancel(){clearTimeout(this.timer);clearTimeout(this.retry);}
@@ -107,7 +110,7 @@ export class DraftEditor {
   try{if(this.recovered&&(!this.ready||this.recovery!==null))sessionStorage.setItem(this.storageKey,stringifyWire(this.recovered));else if(this.dirty)sessionStorage.setItem(this.storageKey,stringifyWire({text:this.text,baseRevision:this.editBase}));else sessionStorage.removeItem(this.storageKey);this.storageProblem='';}
   catch{this.storageProblem='Unsaved text is held in this page, but could not be kept for a reload.';}
  }
- close(){this.persist();this.closed=true;this.cancel();this.pastes.close();this.subscription.close();}
+ close(){this.persist();this.closed=true;this.rejectReady();this.cancel();this.pastes.close();this.subscription.close();}
 }
 
 export class Drafts {
@@ -124,12 +127,22 @@ export class Drafts {
  }
  private prune(){for(const [key,editor]of this.editors)if(editor!==this.current&&editor.ready&&!editor.pendingSend&&!editor.dirty&&!editor.saving&&editor.recovery===null){editor.close();this.editors.delete(key);}}
  holdSend(completion:Promise<unknown>){this.sends.add(completion);const remove=()=>this.sends.delete(completion);void completion.then(remove,remove);}
- async beforeReload(){
-  while(this.sends.size)await Promise.all([...this.sends].map(p=>p.catch(()=>undefined)));
+ private async waitPending(except?:Promise<unknown>){
+  while([...this.sends].some(p=>p!==except))await Promise.all([...this.sends].filter(p=>p!==except).map(p=>p.catch(()=>undefined)));
+ }
+ async settleCurrent(except?:Promise<unknown>){
+  await this.waitPending(except);const editor=this.current;
+  if(!editor)throw new Error('Wait for the current Draft to be read.');await editor.waitReady();
+  do{await editor.flush();}while(editor.dirty&&!editor.problem&&!editor.conflict&&editor.ready);
+  if(editor!==this.current||editor.dirty||editor.conflict||editor.recovery!==null)throw new Error('Unsaved Draft text needs attention before continuing.');
+ }
+ async settle(){
+  await this.waitPending();
   for(const editor of this.editors.values()){
    do{await editor.flush();}while(editor.dirty&&!editor.problem&&!editor.conflict&&editor.ready);
    if(editor.dirty||editor.conflict||editor.recovery!==null)throw new Error('Unsaved Draft text needs attention before reloading.');
   }
  }
+ async beforeReload(){await this.settle();}
  close(){for(const editor of this.editors.values())editor.close();this.editors.clear();}
 }
