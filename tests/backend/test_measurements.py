@@ -116,6 +116,61 @@ class Storage(WindowFixture):
         self.assertGreater(report["freeBytes"], 0)
         self.assertNotIn("fictional-private-diagnostic", json.dumps(report))
 
+    async def test_limited_role_measures_an_attested_local_server_without_more_privileges(self) -> None:
+        """measurement.limited-role-attested-disk; measurement.no-new-privileges"""
+        await self.db.execute("CREATE ROLE disk_limited LOGIN")
+        selected = replace(self.backend.identity, database=self.cluster.address.replace("bkd@", "disk_limited@"))
+        database = Database(selected)
+        health = Health(database, Attention())
+        measure = Measurements(health, self.backend.roots, Registry())
+        expected = selected.home / "Library/Application Support/Arbol/database/data"
+        confirm = LocalDisk.confirm
+        def private_candidate(candidate: Path, pid: int, started: float) -> Path:
+            self.assertEqual(candidate, expected)
+            return confirm(self.cluster.data, pid, started)
+        try:
+            with mock.patch.object(measure.disk, "confirm", side_effect=private_candidate) as observed:
+                report = await measure.measure({})
+            self.assertTrue(report["server"]["ok"])
+            self.assertGreater(report["freeBytes"], 0)
+            self.assertGreater(report["dataFolderBytes"], 0)
+            self.assertNotIn("diskProblem", report)
+            observed.assert_called_once()
+            self.assertEqual(await self.db.execute("SELECT pg_has_role('disk_limited','pg_read_all_settings','MEMBER')"), [(False,)])
+            self.assertEqual(await self.db.execute("SELECT count(*) FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.member WHERE r.rolname='disk_limited'"), [(0,)])
+            self.assertFalse(database.away)
+        finally:
+            await measure.close()
+            await database.close()
+
+    async def test_attestation_refuses_another_process_start_directory_or_unsafe_metadata(self) -> None:
+        """measurement.disk-attestation-identity; measurement.disk-attestation-metadata"""
+        async with self.backend.database.session() as session:
+            pid, started = (await session.execute("SELECT pg_backend_pid(), EXTRACT(EPOCH FROM pg_postmaster_start_time())::double precision"))[0]
+            self.assertEqual(LocalDisk.confirm(self.cluster.data, pid, started), self.cluster.data.resolve())
+            for bad_pid, bad_start in [(os.getpid(), started), (pid, started+5), (True, started), (pid, float("nan"))]:
+                with self.subTest(pid=bad_pid, start=bad_start), self.assertRaises(ValueError):
+                    LocalDisk.confirm(self.cluster.data, bad_pid, bad_start)
+            candidate = self.frame.base / "other-data"
+            candidate.mkdir(mode=0o700)
+            path = candidate / "postmaster.pid"
+            raw = (self.cluster.data / "postmaster.pid").read_bytes()
+            path.write_bytes(raw)
+            path.chmod(0o600)
+            with self.assertRaises(ValueError):
+                LocalDisk.confirm(candidate, pid, started)
+            path.unlink()
+            path.symlink_to(self.cluster.data / "postmaster.pid")
+            with self.assertRaises(OSError):
+                LocalDisk.confirm(candidate, pid, started)
+            path.unlink()
+            os.link(self.cluster.data / "postmaster.pid", path)
+            try:
+                with self.assertRaises(ValueError):
+                    LocalDisk.confirm(candidate, pid, started)
+            finally:
+                path.unlink()
+
     async def test_actual_away_report_has_no_invented_sizes_and_keeps_attention(self) -> None:
         """measurement.database-away; measurement.no-zero-facts"""
         await offline(self.cluster)
