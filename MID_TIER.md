@@ -20,7 +20,7 @@ Definitions, scenarios, programs and entry points are separate inventory units; 
 
 | Selection and description | Tier justification and review status | Source observations |
 | --- | --- | --- |
-| [`run_suite`](tests/mid/archived/conformance/runner.py#L56) — Runs the selected contract scenarios with shared setup, cleanup and per-scenario reporting. | Shared scenario runner covering Driver integration; execute only as a separately requested testing task. Review: **SYL-314 explicit Mimo qualification; complete restored runner matches qualified Build 4 and its obsolete overriding refusal is removed**. | Read the linked body and its shared helpers; no semantic approval inferred. |
+| [`run_suite`](tests/mid/archived/conformance/runner.py#L53) — Runs the selected contract scenarios with shared setup, cleanup and per-scenario reporting. | Shared scenario runner covering Driver integration; execute only as a separately requested testing task. Review: **SYL-314 explicit Mimo qualification; complete restored runner matches qualified Build 4 and its obsolete overriding refusal is removed**. | Read the linked body and its shared helpers; no semantic approval inferred. |
 
 ### conformance/scenarios/c1.py
 

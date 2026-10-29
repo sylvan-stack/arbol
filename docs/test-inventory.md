@@ -16,7 +16,7 @@ Folder separation from `8e991665e2cfce92c9f8757eacf015464d09ee46` on 29 October 
 
 | Selection | State | Justification |
 | --- | --- | --- |
-| [`run_suite`](../tests/mid/archived/conformance/runner.py#L56) | available; explicit task only | Shared scenario runner covering Driver integration; execute only as a separately requested testing task. |
+| [`run_suite`](../tests/mid/archived/conformance/runner.py#L53) | available; explicit task only | Shared scenario runner covering Driver integration; execute only as a separately requested testing task. |
 | [`run`](../tests/mid/archived/conformance/scenarios/c1.py#L13) | available; explicit task only | Contract scenario with a multi-step fixture and compatibility assertions. Reserved for explicit qualification; this reset does not establish a reason to keep the whole scenario active. |
 | [`run`](../tests/mid/archived/conformance/scenarios/c14.py#L136) | available; explicit task only | Contract scenario with a multi-step fixture and compatibility assertions. Reserved for explicit qualification; this reset does not establish a reason to keep the whole scenario active. |
 | [`run`](../tests/mid/archived/conformance/scenarios/c31.py#L13) | available; explicit task only | Contract scenario with a multi-step fixture and compatibility assertions. Reserved for explicit qualification; this reset does not establish a reason to keep the whole scenario active. |
