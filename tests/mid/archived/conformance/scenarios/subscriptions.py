@@ -778,41 +778,6 @@ async def run_c2(home: ScenarioHome) -> None:
 # --- C3 --------------------------------------------------------------------------------------------------
 
 
-async def run_c3(home: ScenarioHome) -> None:
-    family = find(await families(home), lambda value: value["auth"] == "key")
-    if family is UNDEFINED:
-        before = len(await home.received())
-        refused = await home.json(["subscriptions", "create", "--family", "openai", "--label", "Unsupported key", "--id",
-                                   "key-not-offered"])
-        equal("Unavailable key family exit", refused.process["status"], 1)
-        equal("Unavailable key family refusal",
-              object_("Unavailable key family error", refused.result["error"])["code"], "invalid_input")
-        equal("Unavailable key family starts no vendor", len(await home.received()), before)
-        return
-    identifier = text("Family id", family["id"])
-    pending = home.start(["subscriptions", "sign-in", identifier])
-    service: str | None = None
-    try:
-        step = await pending.step("store_secret")
-        entry = object_("Keychain item", step["keychain"])
-        service = text("Service", entry["service"])
-        check("Test service is isolated", test(r"\.[a-f0-9]{12}\Z", service), "hashed test-directory service", service)
-        equal("Item account", entry["account"], identifier)
-        await store(service, identifier, "fixture-key“ ”—")
-        failed = await pending.step("failed")
-        error = object_("Error", failed["error"])
-        equal("Validation error", error["code"], "invalid_input")
-        message = error["message"]
-        check("Offending characters named", isinstance(message, str) and "U+201C" in message and "U+00A0" in message
-              and "U+2014" not in message, "up to three invalid code points", error)
-        equal("Failed sign-in exit", (await pending.done)["status"], 1)
-        equal("Rejected key removed",
-              (await keychain(["find-generic-password", "-s", service, "-a", identifier, "-w"]))["status"], 44)
-        equal("Failed state", (await subscription(home, identifier))["state"], "signed_out")
-    finally:
-        await pending.dispose()
-        if service:
-            await keychain(["delete-generic-password", "-s", service, "-a", identifier])
 
 
 # --- C4 --------------------------------------------------------------------------------------------------
@@ -1024,44 +989,13 @@ async def run_c7(home: ScenarioHome) -> None:
 # --- C8 --------------------------------------------------------------------------------------------------
 
 
-async def check_subscription_environments(home: ScenarioHome, include_run: bool = False) -> None:
-    await home.part("success")
-    home.env["ARBOL_TEST_TIME_SCALE"] = "10"
-    home.env.update({"ANTHROPIC_API_KEY": KEY, "CLAUDECODE": "1", "CLAUDE_SESSION_ID": KEY, "OPENAI_API_KEY": KEY,
-                     "OPENAI_BASE_URL": "http://127.0.0.1:9", "CODEX_HOME": "/wrong-home", "CODEX_API_KEY": KEY})
-    identifier = await vendor_family(home)
-    await sign_in(home, identifier)
-    for command in ("check", "usage", "models"):
-        equal("Subscription operation exit", (await home.call(["subscriptions", command, identifier]))["status"], 0)
-    if include_run:
-        stream(await home.call(["run", "--subscription", identifier, "answer"]))
-    for received in [entry for entry in await home.received() if entry["stage"] != "input"]:
-        equal("No inherited selectors", received["checks"]["injectedVariablesAbsent"], True)
-        arguments = received["arguments"]
-        if arguments[0] != "--version" and not includes(arguments, "--input-format"):
-            equal("Both homes private", received["checks"]["privateHome"], True)
 
 
-async def run_c8(home: ScenarioHome) -> None:
-    await check_subscription_environments(home, True)
 
 
 # --- C39 -------------------------------------------------------------------------------------------------
 
 
-async def run_c39(home: ScenarioHome) -> None:
-    await home.part("success")
-    home.env["ARBOL_TEST_TIME_SCALE"] = "10"
-    family = await vendor_family(home)
-    created = await home.json(["subscriptions", "create", "--family", family, "--label", "Second", "--id", "second"])
-    equal("Creation exit", created.process["status"], 0)
-    await sign_in(home, family)
-    await sign_in(home, "second")
-    homes = set_size(entry["checks"]["home"] for entry in await home.received() if entry["arguments"][0] != "--version")
-    equal("Distinct vendor homes", homes, 2)
-    await home.call(["subscriptions", "sign-out", family])
-    equal("First is out", (await subscription(home, family))["state"], "signed_out")
-    equal("Second still works", (await home.json(["subscriptions", "check", "second"])).result["state"], "signed_in")
 
 
 # --- C41 -------------------------------------------------------------------------------------------------
@@ -1078,187 +1012,15 @@ def check_resources(site: str, windows: Any) -> None:
               "tokens, credits, calls or absent", resource)
 
 
-def operations(records: list[JSObject]) -> JSArray:
-    """The operations the stand-in was asked for, setup requests left out."""
-    return JSArray(entry["checks"]["operation"] for entry in records
-                   if entry["stage"] == "request" and entry["checks"]["operation"] != "setup")
 
 
-async def check_chatgpt_usage(home: ScenarioHome) -> None:
-    await home.part("success")
-    home.env["ARBOL_TEST_TIME_SCALE"] = "10"
-    identifier = "chatgpt"
-    equal("Unsigned usage", (await home.json(["subscriptions", "usage", identifier])).result["outcome"], "needs_sign_in")
-    await sign_in(home, identifier)
-    account = object_("Vendor account", (await subscription(home, identifier))["account"])
-    equal("Vendor email", account["email"], "fixture@example.invalid")
-    equal("Vendor plan", account["plan"], "fixture")
-    before = len(await home.received())
-    await home.call(["subscriptions", "list"])
-    equal("List does not poll", len(await home.received()), before)
-    catalog = await home.json(["subscriptions", "models", identifier])
-    equal("Catalog exit", catalog.process["status"], 0)
-    equal("Catalog source", catalog.result["source"], "tool")
-    equal("Only catalog pages requested", operations((await home.received())[before:]), ["models", "models"])
-    models = [object_("Model", value) for value in array(catalog.result["models"], "map", "catalog.result.models")]
-    equal("Every model page read", [value["id"] for value in models], ["gpt-6.1-sol", "gpt-6-astra"])
-    equal("Vendor model label", get(item(models, 0), "label"), "GPT-6.1-Sol")
-    equal("Vendor effort words", get(item(models, 0), "efforts"), ["low", "medium", "high", "xhigh", "max", "ultra"])
-    equal("Default effort", get(item(models, 0), "defaultEffort"), "low")
-    equal("Service tiers", get(item(models, 0), "serviceTiers"), ["priority"])
-    equal("Default model", get(item(models, 0), "isDefault"), True)
-    before_usage = len(await home.received())
-    usage = await home.json(["subscriptions", "usage", identifier])
-    equal("Usage exit", usage.process["status"], 0)
-    equal("Usage outcome", usage.result["outcome"], "ok")
-    equal("Usage plan", usage.result["plan"], "fixture")
-    equal("Only requested usage", operations((await home.received())[before_usage:]), ["usage"])
-    windows = [object_("Window", value) for value in array(usage.result["windows"], "map", "usage.result.windows")]
-    check_resources("usage.result.windows", usage.result["windows"])
-    equal("Window kind follows duration", [value["kind"] for value in windows], ["weekly", "session"])
-    equal("Window labels", [value["label"] for value in windows], ["Weekly window", "5-hour window"])
-    equal("Used percentage", get(item(windows, 0), "usedPercent"), 25)
-    equal("Weekly length", get(item(windows, 0), "windowMinutes"), 10080)
-    equal("Vendor reset in UTC", get(item(windows, 0), "resetsAt"), iso(1791640848 * 1000))
-    equal("Unknown reset absent", get(item(windows, 1), "resetsAt"), UNDEFINED)
-    equal("Exhausted window", get(item(windows, 1), "limitReached"), True)
-    equal("Vendor details URL", usage.result["detailsUrl"], "https://chatgpt.com/codex/settings/usage")
-    equal("Good usage cached", (await subscription(home, identifier))["lastUsage"], usage.result)
-    await home.part("unavailable")
-    unavailable = await home.json(["subscriptions", "usage", identifier])
-    equal("Unavailable usage", unavailable.result["outcome"], "unavailable")
-    equal("Unavailable windows empty", unavailable.result["windows"], [])
-    text("Unavailable reason", unavailable.result["message"])
-    equal("Last good report preserved", (await subscription(home, identifier))["lastUsage"], usage.result)
-    fallback = await home.json(["subscriptions", "models", identifier])
-    equal("Fallback source", fallback.result["source"], "builtin")
-    fallback_models = fallback.result["models"]
-    check("Fallback remains in ChatGPT family", isinstance(fallback_models, list) and len(fallback_models) > 0
-          and all(text("Model", object_("Model entry", value)["id"]).startswith("gpt-") for value in fallback_models),
-          "ChatGPT models", fallback_models)
-    await home.part("unknown-windows")
-    unknown = await home.json(["subscriptions", "usage", identifier])
-    equal("Unknown-window usage", unknown.result["outcome"], "ok")
-    other = [object_("Window", value) for value in array(unknown.result["windows"], "map", "unknown.result.windows")]
-    check_resources("unknown.result.windows", unknown.result["windows"])
-    equal("Unknown length is absent", get(item(other, 0), "windowMinutes"), UNDEFINED)
-    equal("Unknown length kind", get(item(other, 0), "kind"), "other")
-    equal("Unknown reset is absent", get(item(other, 0), "resetsAt"), UNDEFINED)
-    equal("Other duration kind", get(item(other, 1), "kind"), "other")
-    equal("Other duration", get(item(other, 1), "windowMinutes"), 1440)
-    await home.part("rejected")
-    equal("Rejected usage", (await home.json(["subscriptions", "usage", identifier])).result["outcome"], "needs_sign_in")
-    rejected = await subscription(home, identifier)
-    equal("Rejected login needs attention", rejected["state"], "needs_attention")
-    equal("Rejected credential code", object_("Problem", rejected["problem"])["code"], "credential_rejected")
-    await home.part("success")
-    equal("Recovery check", (await home.json(["subscriptions", "check", identifier])).result["state"], "signed_in")
-    out = await home.json(["subscriptions", "sign-out", identifier])
-    equal("Sign-out exit", out.process["status"], 0)
-    equal("Account gone", out.result["account"], UNDEFINED)
-    equal("Cached usage gone", out.result["lastUsage"], UNDEFINED)
 
 
-async def run_c41(home: ScenarioHome) -> None:
-    offered = await families(home)
-    if any(value["id"] == "chatgpt" for value in offered):
-        await check_chatgpt_usage(home)
-        return
-    if [value["id"] for value in offered] == ["anthropic"]:
-        await home.part("success")
-        equal("Unsigned usage", (await home.json(["subscriptions", "usage", "anthropic"])).result["outcome"],
-              "needs_sign_in")
-        await sign_in(home, "anthropic")
-        account = object_("Vendor account", (await subscription(home, "anthropic"))["account"])
-        equal("Vendor plan", account["plan"], "fixture")
-        before = len(await home.received())
-        await home.call(["subscriptions", "list"])
-        equal("List does not poll", len(await home.received()), before)
-        unsupported = await home.json(["subscriptions", "usage", "anthropic"])
-        equal("Usage unsupported before run", unsupported.result["outcome"], "unsupported")
-        check_resources("unsupported.result.windows", unsupported.result["windows"])
-        equal("Tool catalog source", (await home.json(["subscriptions", "models", "anthropic"])).result["source"],
-              "tool")
-        await home.part("unavailable")
-        fallback = await home.json(["subscriptions", "models", "anthropic"])
-        equal("Unavailable catalog marked builtin", fallback.result["source"], "builtin")
-        check("Fallback is nonempty", isinstance(fallback.result["models"], list) and bool(fallback.result["models"]),
-              "Anthropic models", fallback.result)
-        for model in array(fallback.result["models"], "map", "models"):
-            check("No retired model", not text("Model id", object_("Model", model)["id"]).startswith("glm"),
-                  "Anthropic model", model)
-        await home.part("success")
-        out = await home.json(["subscriptions", "sign-out", "anthropic"])
-        equal("Account gone", out.result["account"], UNDEFINED)
-        equal("Cached usage gone", out.result["lastUsage"], UNDEFINED)
-        before = len(await home.received())
-        for command in ("check", "usage", "models", "sign-in"):
-            stale = await home.json(["subscriptions", command, "zai"])
-            equal("Retired route refused", stale.result["error"]["code"], "invalid_input")
-        equal("Retired requests never reach native tool", len(await home.received()), before)
-        return
-    await home.part("success")
-    home.env["ARBOL_TEST_TIME_SCALE"] = "10"
-    gateway = await gateway_fixture(home)
-    try:
-        equal("Unsigned usage", (await home.json(["subscriptions", "usage", "zai"])).result["outcome"], "needs_sign_in")
-        await sign_in(home, "zai")
-        gateway.paths.clear()
-        await home.call(["subscriptions", "list"])
-        equal("List does not poll", gateway.paths, [])
-        catalog = await home.json(["subscriptions", "models", "zai"])
-        equal("Vendor source", catalog.result["source"], "vendor")
-        equal("Only models request", gateway.paths, ["/api/paas/v4/models"])
-        gateway.paths.clear()
-        usage = await home.json(["subscriptions", "usage", "zai"])
-        equal("Usage outcome", usage.result["outcome"], "ok")
-        equal("Only requested usage", gateway.paths, ["/api/monitor/usage/quota/limit"])
-        windows = usage.result["windows"]
-        check_resources("usage.result.windows", windows)
-        equal("Computed percentage", get(prop(windows, 0), "usedPercent"), 25)
-        equal("Unknown reset absent", get(prop(windows, 1), "resetsAt"), UNDEFINED)
-        equal("Unknown length absent", get(prop(windows, 2), "windowMinutes"), UNDEFINED)
-        equal("Good usage cached", (await subscription(home, "zai"))["lastUsage"], usage.result)
-        gateway.mode = "unavailable"
-        unavailable = await home.json(["subscriptions", "usage", "zai"])
-        equal("Unavailable usage", unavailable.result["outcome"], "unavailable")
-        check("Error redacted", KEY not in unavailable.process["stdout"], "no key", "output checked")
-        equal("Last good report preserved", (await subscription(home, "zai"))["lastUsage"], usage.result)
-        fallback = await home.json(["subscriptions", "models", "zai"])
-        equal("Fallback source", fallback.result["source"], "builtin")
-        equal("Own family only", fallback.result["models"], [record(id="fixture-fallback", label="fixture-fallback")])
-        await sign_in(home, "anthropic")
-        account = object_("Vendor account", (await subscription(home, "anthropic"))["account"])
-        equal("Vendor plan", account["plan"], "fixture")
-        equal("Anthropic usage unsupported before run",
-              (await home.json(["subscriptions", "usage", "anthropic"])).result["outcome"], "unsupported")
-        equal("Tool catalog source", (await home.json(["subscriptions", "models", "anthropic"])).result["source"], "tool")
-        await home.part("unavailable")
-        await home.settings(gateway.settings)
-        tool_fallback = await home.json(["subscriptions", "models", "anthropic"])
-        equal("Tool fallback marked builtin", tool_fallback.result["source"], "builtin")
-        tool_models = tool_fallback.result["models"]
-        check("Tool fallback is its own family", isinstance(tool_models, list) and all(
-            not text("Model", object_("Model entry", value)["id"]).startswith("fixture-") for value in tool_models),
-            "Anthropic names", tool_models)
-        await home.part("success")
-        await home.settings(gateway.settings)
-        out = await home.json(["subscriptions", "sign-out", "anthropic"])
-        equal("Account gone", out.result["account"], UNDEFINED)
-        equal("Cached usage gone", out.result["lastUsage"], UNDEFINED)
-        gateway.mode = "rejected"
-        equal("Rejected usage", (await home.json(["subscriptions", "usage", "zai"])).result["outcome"], "needs_sign_in")
-        equal("Rejected key needs attention", (await subscription(home, "zai"))["state"], "needs_attention")
-    finally:
-        await gateway.dispose()
 
 
 c2 = Scenario("C2", "Sign-in steps, replacement and expiry",
               "vendor login, code, command key and Keychain step; replacement and five-minute expiry",
               ["DRV-1.5", "DRV-1.6", "DRV-1.25", "DRV-6.9"], run_c2)
-c3 = Scenario("C3", "Refusing a malformed Keychain key",
-              "store_secret, invalid Unicode, deletion and isolated Keychain service; typed refusal where no key family "
-              "is offered", ["DRV-1.4", "DRV-1.26"], run_c3)
 c4 = Scenario("C4", "Rejected credentials and recovery",
               "check and run rejection, all families, and attention-state recovery",
               ["DRV-1.7", "DRV-4.7", "DRV-1.11 (attention check)"], run_c4)
@@ -1270,14 +1032,5 @@ c6 = Scenario("C6", "Cancelling and killing a pending sign-in",
 c7 = Scenario("C7", "Credentials stay out of Driver data and output",
               "subscription operations, streamed text/thinking, tools, errors, stderr, text output and tool-owned login",
               ["DRV-0.3", "DRV-1.3", "DRV-1.8"], run_c7)
-c8 = Scenario("C8", "Clean environments for every tool child", "sign-in, status, catalog and inference children",
-              ["DRV-0.5"], run_c8)
-c39 = Scenario("C39", "Two accounts of one family stay independent",
-               "independent login, homes and sign-out; conversation separation covered by C14",
-               ["DRV-1.2 (subscriptions)"], run_c39)
-c41 = Scenario("C41", "Usage, model catalogs and vendor account details",
-               "available usage outcomes, cached reports, unknown fields, what each window counts, family fallback and "
-               "account clearing; run-derived usage covered by C30",
-               ["DRV-1.16", "DRV-1.17", "DRV-1.18", "DRV-1.19", "DRV-1.20", "DRV-1.21", "DRV-1.22", "DRV-1.27"], run_c41)
 
 # Archived complete imports; restore needed names in their original scope, not at this file tail.

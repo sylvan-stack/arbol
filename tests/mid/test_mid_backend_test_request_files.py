@@ -23,24 +23,6 @@ from backend.test_request_files import (
 
 
 class Files(_support.Files):
-# TEST-TIER-BEGIN tests/backend/test_request_files.py::Files.test_atomic_complete_private_file_and_only_same_payload_adoption
-    def test_atomic_complete_private_file_and_only_same_payload_adoption(self) -> None:
-        """sending.private-request"""
-        request = self.files.write(self.exchange, self.request)
-        path = Path(request.path)
-        self.assertEqual(json.loads(path.read_bytes()), self.request)
-        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
-        self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
-        self.assertEqual([p.name for p in path.parent.iterdir()], [self.exchange + ".json"])
-        adopted = self.files.write(self.exchange, dict(self.request))
-        self.assertEqual(adopted.inode, request.inode)
-        with self.assertRaises(Error):
-            self.files.write(self.exchange, {**self.request, "message": "different"})
-        self.assertEqual(json.loads(path.read_bytes()), self.request)
-        request.remove()
-        adopted.remove()
-        self.assertFalse(path.exists())
-# TEST-TIER-END tests/backend/test_request_files.py::Files.test_atomic_complete_private_file_and_only_same_payload_adoption
 
 # TEST-TIER-BEGIN tests/backend/test_request_files.py::Files.test_no_follow_directory_file_fifo_hardlink_or_insecure_mode
     def test_no_follow_directory_file_fifo_hardlink_or_insecure_mode(self) -> None:
@@ -82,19 +64,6 @@ class Files(_support.Files):
         self.assertEqual(list(directory.iterdir()), [])
 # TEST-TIER-END tests/backend/test_request_files.py::Files.test_no_follow_directory_file_fifo_hardlink_or_insecure_mode
 
-# TEST-TIER-BEGIN tests/backend/test_request_files.py::Files.test_cleanup_never_unlinks_a_replaced_request
-    def test_cleanup_never_unlinks_a_replaced_request(self) -> None:
-        """sending.request-inode"""
-        request = self.files.write(self.exchange, self.request)
-        path = Path(request.path)
-        prior = path.with_suffix(".retained")
-        path.rename(prior)
-        path.write_text("replacement")
-        path.chmod(0o600)
-        request.remove()
-        self.assertEqual(path.read_text(), "replacement")
-        self.assertEqual(json.loads(prior.read_bytes()), self.request)
-# TEST-TIER-END tests/backend/test_request_files.py::Files.test_cleanup_never_unlinks_a_replaced_request
 
 # TEST-TIER-BEGIN tests/backend/test_request_files.py::Files.test_startup_removes_only_owned_private_matching_hour_old_files
     def test_startup_removes_only_owned_private_matching_hour_old_files(self) -> None:
@@ -127,15 +96,3 @@ class Files(_support.Files):
         self.assertFalse(old_temp.exists())
         self.assertTrue(all(p.exists() for p in keep))
 # TEST-TIER-END tests/backend/test_request_files.py::Files.test_startup_removes_only_owned_private_matching_hour_old_files
-
-# TEST-TIER-BEGIN tests/backend/test_request_files.py::Files.test_failed_partial_write_and_invalid_identifier_leave_no_file
-    def test_failed_partial_write_and_invalid_identifier_leave_no_file(self) -> None:
-        """sending.request-write-failure"""
-        with self.assertRaises(Error):
-            self.files.write("../escape", self.request)
-        self.assertFalse((self.frame.root / "requests").exists())
-        with mock.patch("arbol_backend.requests.os.write", side_effect=OSError("private failure")):
-            with self.assertRaises(Error):
-                self.files.write(self.exchange, self.request)
-        self.assertEqual(list((self.frame.root / "requests").iterdir()), [])
-# TEST-TIER-END tests/backend/test_request_files.py::Files.test_failed_partial_write_and_invalid_identifier_leave_no_file

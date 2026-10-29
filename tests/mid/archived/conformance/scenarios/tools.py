@@ -155,197 +155,22 @@ def utf16_order(name: str) -> bytes:
 # --- Codex paths -------------------------------------------------------------------------------------------
 
 
-async def codex_permissions(home: ScenarioHome) -> None:
-    identifier = await signed(home)
-    records = stream(await home.call(run_args(home, identifier)))
-    equal("Unexpected request notices",
-          count(records, lambda event: event["type"] == "notice" and event["code"] == "unexpected_request"), 7)
-    equal("No caller questions",
-          count(records, lambda event: event["type"] == "ask_opened" or event["type"] == "ask_closed"), 0)
-    responses = [record for record in await home.received() if record["stage"] == "response"]
-    equal("Every vendor request answered", len(responses), 7)
-    for index in range(len(responses)):
-        response = object_("Codex response", responses[index]["request"])
-        equal("Response identifier", response["id"], f"fixture-request-{index}")
-        if index < 2:
-            equal("Approval accepted", response["result"], {"decision": "accept"})
-        else:
-            equal("Unsupported request rejected", object_("Request error", response["error"])["code"], -32601)
-            check("Rejection explains why", isinstance(object_("Request error", response["error"])["message"], str),
-                  "message", response)
-    await home.part("malformed")
-    malformed = stream(await home.call(run_args(home, identifier)), "failed")
-    equal("Malformed vendor protocol fails its run", prop(at(malformed, -1)["error"], "code"), "tool_failed")
-    await home.part("no-requests")
-    stream(await home.call(run_args(home, identifier)))
-    equal("No responses in next run",
-          count(await home.received(), lambda record: record["stage"] == "response" and record["part"] == "no-requests"),
-          0)
 
 
-async def codex_completed_tools(home: ScenarioHome) -> None:
-    identifier = await signed(home)
-    for part in ("plain", "collaboration", "nested"):
-        await home.part(part)
-        records = stream(await home.call(run_args(home, identifier)))
-        equal("Refused call reason", prop(ended(records, "refused"), "error"), "Codex refused this command.")
-        equal("Refused call failed", prop(ended(records, "refused"), "ok"), False)
-        equal("Shell input", prop(begun(records, "refused"), "input"), {"command": "rejected-command", "cwd": home.home})
-        equal("Main answer", [event["text"] for event in records
-                              if event["type"] == "text" and not truthy(event["parentCallId"])],
-              ["main-before", "main-answer"])
-        parent = "agent-spawn" if part == "collaboration" else "agent"
-        child_events = [event for event in records
-                        if event["callId"] == "subcall" or event["text"] == "sub-agent-only"
-                        or event["text"] == "child-thinking" or event["type"] == "usage"]
-        check("Child event coverage", len(child_events) >= 7,
-              "tool start/result/delta, text/delta, reasoning/delta and usage", child_events)
-        for event in child_events:
-            equal("Sub-agent parent", event["parentCallId"], parent)
-        child_notices = [event for event in records if event["type"] == "notice"
-                         and (event["code"] == "unexpected_request" or event["message"] == "Fixture child warning.")]
-        equal("Child request and warning both carried", len(child_notices), 2)
-        for event in child_notices:
-            equal("Child notice parent", event["parentCallId"], parent)
-        equal("Child elicitation rejected",
-              len([record for record in await home.received() if record["part"] == part and record["stage"] == "response"
-                   and object_("Response", record["request"])["id"] == "fixture-child-request"]), 1)
-        equal("Child tool result", prop(ended(records, "subcall"), "result"), {"output": "child-output", "exitCode": 0})
-        if part == "nested":
-            equal("Nested spawn parent", prop(begun(records, "nested-agent"), "parentCallId"), "agent")
-            for event in [event for event in records
-                          if event["callId"] == "nested-call" or event["text"] == "nested-only"]:
-                equal("Nested child parent", event["parentCallId"], "nested-agent")
-        for event in [event for event in records if event["type"] == "tool_started"]:
-            equal("Call paired once", paired(records, event), 1)
-        equal("Patch input", prop(begun(records, "patch"), "input"),
-              [{"path": join(home.home, "fixture-patch.txt"), "kind": {"type": "add"}, "content": "fixture patch\n"}])
-        equal("Patch succeeds", prop(ended(records, "patch"), "ok"), True)
-        equal("Web tool name", prop(begun(records, "search"), "name"), "webSearch")
-        equal("Web shape retained", object_("Web result", prop(ended(records, "search"), "result"))["action"],
-              {"type": "search", "query": "fixture query", "queries": None})
-        equal("MCP tool name", prop(begun(records, "mcp"), "name"), "mcpToolCall")
-        equal("MCP arguments retained", object_("MCP input", prop(begun(records, "mcp"), "input"))["arguments"],
-              {"value": "fixture-value"})
-        equal("MCP result retained", prop(ended(records, "mcp"), "result"),
-              {"content": [{"type": "text", "text": "fixture-value"}], "structuredContent": {"value": "fixture-value"}})
-        equal("MCP failure reason", prop(ended(records, "mcp-failed"), "error"), "Fixture MCP refusal.")
-        equal("MCP failure", prop(ended(records, "mcp-failed"), "ok"), False)
-        equal("Background result", prop(ended(records, "background"), "result"),
-              {"output": "background-output\n", "exitCode": 0})
-        check("Final after late child", index_of(records, ended(records, "subcall")) < len(records) - 1,
-              "child completes before finished", records)
-        check("Final after background", index_of(records, ended(records, "background")) < len(records) - 1,
-              "background completes before finished", records)
-        received = [record for record in await home.received() if record["part"] == part]
-        main_end = find(received, lambda record: record["stage"] == "main-ended")
-        equal("Main ends with child active", prop(prop(main_end, "checks"), "childWasActive"), True)
-        equal("Main ends with command active", prop(prop(main_end, "checks"), "backgroundWasAlive"), True)
-        equal("Child completed", count(received, lambda record: record["stage"] == "child-ended"), 1)
-        equal("Background completed", count(received, lambda record: record["stage"] == "background-ended"), 1)
-        thread_request = find(received, lambda record: record["stage"] == "request"
-                              and object_("Request", record["request"])["method"] == "thread/start")
-        thread = object_("Thread params", object_("Thread request", prop(thread_request, "request"))["params"])
-        equal("Trusted sandbox", thread["sandbox"], "danger-full-access")
-        equal("No approval", thread["approvalPolicy"], "never")
-        equal("Single app-server argument",
-              prop(find(received, lambda record: record["stage"] == "input"), "arguments"), ["app-server"])
-        turn_request = find(received, lambda record: record["stage"] == "input")
-        turn = object_("Turn params", object_("Turn request", prop(turn_request, "request"))["params"])
-        equal("Turn trusted sandbox", turn["sandboxPolicy"], {"type": "dangerFullAccess"})
-        equal("Turn no approval", turn["approvalPolicy"], "never")
-        config = read_file(join(to_string(prop(prop(main_end, "checks"), "home")), "config.toml"))
-        features = re.search(r"\[features\]" + SPACE_CLASS + r"*([^\[]*)", config)
-        if features is None:
-            raise ScenarioError("Cannot read properties of null (reading '1')")
-        equal("Only memory feature disabled", trim(features.group(1)), "memories = false")
-        check("Live web search", 'web_search = "live"' in config, "live web", config)
-    await home.part("plain")
-    output = await home.call([*run_args(home, identifier), "--output", "text"])
-    equal("Text output completed", output["status"], 0)
-    equal("Child text excluded", output["stdout"], "main-beforemain-answer")
-    await home.part("early-exit")
-    failed = stream(await home.call(run_args(home, identifier)), "failed")
-    equal("Premature exit refused", prop(at(failed, -1)["error"], "code"), "tool_failed")
-    await home.part("unexpected-tool")
-    without = stream(await home.call(["run", "--subscription", identifier, "answer"]))
-    equal("Unexpected tool in no-tool run reported",
-          count(without, lambda event: event["type"] == "tool_started" and event["name"] == "shell"), 1)
-    equal("Unexpected tool leaves run completed", at(without, -1)["outcome"], "completed")
 
 
 # --- C25 ---------------------------------------------------------------------------------------------------
 
 
-async def run_c25(home: ScenarioHome) -> None:
-    if await is_codex(home):
-        await codex_permissions(home)
-        return
-    identifier = await signed(home)
-    records = stream(await home.call(run_args(home, identifier)))
-    equal("Permission notices",
-          count(records, lambda event: event["type"] == "notice" and event["code"] == "permission_answered"), 2)
-    equal("No ask", count(records, lambda event: event["type"] == "ask_opened"), 0)
-    responses = [record for record in await home.received() if record["stage"] == "response"]
-
-    def answer(n: int) -> JSObject:
-        return object_("Response", object_("Envelope", prop(prop(item(responses, n), "checks"), "input"))["response"])
-
-    equal("Permission allowed", object_("Allow", answer(0)["response"]),
-          {"behavior": "allow", "updatedInput": {"file_path": "fixture", "content": "value"}})
-    equal("Permission declined", object_("Deny", answer(1)["response"])["behavior"], "deny")
-    check("Deny has reason", isinstance(object_("Deny", answer(1)["response"])["message"], str), "message", answer(1))
-    await home.part("missing-id")
-    failed = stream(await home.call(run_args(home, identifier)), "failed")
-    equal("Malformed protocol fails", prop(at(failed, -1)["error"], "code"), "tool_unsupported")
-    await home.part("plain")
-    stream(await home.call(run_args(home, identifier)))
 
 
-c25 = Scenario("C25", "Unexpected permission requests",
-               "automatic allow, malformed deny, missing identifier fails only its own run", ["DRV-3.22", "DRV-0.7"],
-               run_c25)
 
 
 # --- C35 ---------------------------------------------------------------------------------------------------
 
 
-async def run_c35(home: ScenarioHome) -> None:
-    if await is_codex(home):
-        await codex_completed_tools(home)
-        return
-    identifier = await signed(home)
-    records = stream(await home.call(run_args(home, identifier)))
-    equal("Refused call reason", prop(ended(records, "refused"), "error"), "Claude refused this command.")
-    equal("Refused call failed", prop(ended(records, "refused"), "ok"), False)
-    equal("Shell input", prop(begun(records, "refused"), "input"), {"command": "rejected-command", "cwd": home.home})
-    equal("Main answer",
-          [event["text"] for event in records if event["type"] == "text" and not truthy(event["parentCallId"])],
-          ["main-before", "main-after-agent", "main-after-command"])
-    for event in [event for event in records if event["callId"] == "subcall" or event["text"] == "sub-agent-only"]:
-        equal("Sub-agent parent", event["parentCallId"], "agent")
-    for event in [event for event in records if event["type"] == "tool_started"]:
-        equal("Call paired", paired(records, event), 1)
-    input_ = find(await home.received(), lambda record: record["stage"] == "input")
-    for option in ("--tools", "--allowedTools", "--disallowedTools", "--setting-sources", "--strict-mcp-config"):
-        equal("No restrictive " + option, option in prop(input_, "arguments"), False)
-    arguments = prop(input_, "arguments")
-    equal("Trusted mode", item(arguments, index_of(arguments, "--permission-mode") + 1), "bypassPermissions")
-    equal("Memory disabled", prop(prop(input_, "checks"), "memoryOff"), True)
-    equal("Background completed",
-          count(await home.received(), lambda record: record["stage"] == "background-ended"), 1)
-    output = await home.call([*run_args(home, identifier), "--output", "text"])
-    equal("Text output completed", output["status"], 0)
-    equal("Sub-agent excluded", output["stdout"], "main-beforemain-after-agentmain-after-command")
-    await home.part("early-exit")
-    failed = stream(await home.call(run_args(home, identifier)), "failed")
-    equal("Premature exit refused", prop(at(failed, -1)["error"], "code"), "tool_failed")
 
 
-c35 = Scenario("C35", "Tools and completed background work",
-               "all tools, refusal reason, shell shape, sub-agent attribution, three result parts and text output; "
-               "idle-limit integration covered by C29",
-               ["DRV-3.19", "DRV-3.20", "DRV-3.21", "DRV-3.23", "DRV-3.24", "DRV-3.25", "DRV-3.32"], run_c35)
 
 
 # --- C36 ---------------------------------------------------------------------------------------------------
@@ -564,17 +389,12 @@ async def codex_owner_scenario(home: ScenarioHome, configured: bool) -> None:
         equal("Owner trees unchanged after no-tool run", trees(), before)
 
 
-async def run_c9(home: ScenarioHome) -> None:
-    await owner_scenario(home, False)
 
 
 async def run_c37(home: ScenarioHome) -> None:
     await owner_scenario(home, True)
 
 
-c9 = Scenario("C9", "Owner setup stays unchanged",
-              "sentinel settings, instructions, skills and MCP list; only skills and MCP paths supplied to the tool",
-              ["DRV-0.4"], run_c9)
 c37 = Scenario("C37", "Owner skills and MCP servers",
                "owner skill link, MCP configuration argument and private home, including no-tool MCP omission",
                ["DRV-3.31", "DRV-0.4"], run_c37)

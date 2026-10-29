@@ -4,11 +4,11 @@ Both tiers have uncommented source. Only the top-tier cases below may be selecte
 
 [Mid-tier descriptions and justifications](MID_TIER.md) · [Complete inventory and tier justifications](docs/test-inventory.md) · [Machine-readable inventory](test-tiers.json)
 
-Reviewed revision: `fb3fba2677f3bbb45aea574d5383778aa9feba2b` (28 October 2026), plus the preceding local pruning changes. No tests were run for this reset.
+Reviewed revision: `f66335c7e203794dc84e40fe3106e85f8cae2dd6` under SYL-327 (29 October 2026). No tests were run.
 
 ## Selection and limits
 
-3 top-tier inventory entries and 656 mid-tier entries are available. Definitions, scenarios, programs and entry points overlap; this is not a runtime suite count. Mid-tier source remains uncommented at the owner's request. Provisional classifications are execution decisions, not semantic approval. Low-tier removals remain removed.
+3 top-tier inventory entries and 151 mid-tier entries are available after the higher-bar review. 505 low-tier entries were removed under SYL-327. Definitions, scenarios, programs and entry points overlap; this is not a runtime suite count. Top-tier bodies are unchanged. Retained mid-tier sources remain uncommented.
 
 ## Active top tier
 
@@ -39,3 +39,5 @@ PYTHONPATH=src:tests:tests/top python -m unittest test_top_backend_test_chat_wir
 For a Python method, use the same fixture setup as the top tier, put the mid folder on PYTHONPATH, and select `test_mid_<module>.Class.test_method`. Mycel's fixture-aware runner accepts `--tests tests/mid --select test_mid_<module>.Class.test_method`; store cases require explicit disposable-store settings. Archived scenarios and programs retain their original compatibility entry paths.
 
 Restoration under SYL-326 used static checks only. No tests, Builds, provider calls, Origin migrations or corpus ingest were performed. Original prerequisites and environment limits still apply.
+
+The shared conformance runner requires explicit `--only` selections. Removed scenario IDs are unavailable; native-only retained IDs refuse generic-driver execution. Historical qualification commands that require deleted scenarios remain unsatisfied. The UI runner contains only retained programs and reports a reduced selection. MiMo’s vendored copy retains twelve commented scenarios, accounted separately in its inventory.
