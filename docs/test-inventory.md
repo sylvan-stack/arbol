@@ -661,7 +661,7 @@ Folder separation from `8e991665e2cfce92c9f8757eacf015464d09ee46` on 29 October 
 | [`C29`](../tests/mid/archived/conformance/scenarios/mimo.py#L917) | available; explicit task only | unscaled request total/idle limits |
 | [`C30`](../tests/mid/archived/conformance/scenarios/mimo.py#L917) | available; explicit task only | observed run tokens never fabricate native allowance windows or polling |
 | [`C31`](../tests/mid/archived/conformance/scenarios/mimo.py#L917) | available; explicit task only | unqualified native binary/profile refusal |
-| [`C32`](../tests/mid/archived/conformance/scenarios/mimo.py#L917) | available; explicit task only | public CLI plus synthetic native development orchestration; paid gate remains closed |
+| [`C32`](../tests/mid/archived/conformance/scenarios/mimo.py#L917) | available; explicit task only | enabled release CLI plus synthetic native development orchestration without real-provider calls |
 | [`C33`](../tests/mid/archived/conformance/scenarios/mimo.py#L917) | available; explicit task only | no-control native question is refused before execution |
 | [`C35`](../tests/mid/archived/conformance/scenarios/mimo.py#L917) | available; explicit task only | ordinary failed native shell continues with balanced result |
 | [`C36`](../tests/mid/archived/conformance/scenarios/mimo.py#L917) | available; explicit task only | native keyed question validation and exactly-once answers |
