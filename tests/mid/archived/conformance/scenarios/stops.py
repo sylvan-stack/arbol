@@ -312,3 +312,20 @@ c38 = Scenario("C38", "Recover a killed Driver and protect durable state",
                ["DRV-6.1", "DRV-6.3", "DRV-6.10", "DRV-0.9", "DRV-1.10"], run_c38)
 
 # Archived complete imports; restore needed names in their original scope, not at this file tail.
+
+# LOW TIER — DO NOT ENABLE OR RECREATE
+# Historical examples only. Read before adding related tests; never execute.
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/stops.py::run_c16
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c16.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/stops.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c16(home: ScenarioHome) -> None:
+#     identifier = await signed(home)
+#     stream(await home.call(["run", "--subscription", identifier, "--run-id", "ended", "answer"]))
+#     for run in ("ended", "unknown"):
+#         reply = await home.call(["runs", "stop", run])
+#         equal("Successful stop", reply["status"], 0)
+#         equal("No output", reply["stdout"], "")
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END

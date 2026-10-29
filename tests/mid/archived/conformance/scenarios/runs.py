@@ -329,3 +329,203 @@ c33 = Scenario("C33", "Run input and active records",
 
 
 # Archived complete imports; restore needed names in their original scope, not at this file tail.
+
+# LOW TIER — DO NOT ENABLE OR RECREATE
+# Historical examples only. Read before adding related tests; never execute.
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/runs.py::run_c10
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c10.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/runs.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c10(home: ScenarioHome) -> None:
+#     identifier = await signed(home)
+#     records = stream(await start(home, identifier, "answer", ["--label", "exchange=41"]))
+#     equal("First event", records[0]["type"], "started")
+#     equal("Fresh conversation", records[0]["continuity"], "fresh")
+#     check("Actual model", isinstance(records[0]["model"], str), "model from tool", records[0])
+#     for event in records:
+#         equal("Echoed labels", event["labels"], {"exchange": "41"})
+#     equal("Whole answer despite partial delta", JSArray(event["text"] for event in of_type(records, "text")), ["answer"])
+#     info = await home.json(["info"])
+#     equal("Build identity", records[0]["driverBuild"], info.result["build"])
+#     options = await run_models(home, identifier)
+#     await home.settings({"defaultSubscription": identifier,
+#                          "subscriptions": {identifier: {"defaultModel": options.model,
+#                                                         "defaultEffort": options.effort}}})
+#     defaults = stream(await home.call(["run", "answer"]))
+#     equal("Default subscription", defaults[0]["subscriptionId"], identifier)
+#     equal("Default effort", defaults[0]["effort"], "low")
+#     received = at(await calls(home), -1)
+#     arguments = prop(received, "arguments")
+#     equal("Default model passed",
+#           item(arguments, index_of(arguments, "--model") + 1) if includes(arguments, "--input-format")
+#           else object_("Thread params", object_("Thread request", received["request"])["params"])["model"],
+#           options.model)
+#     path = join(home.home, "request.json")
+#     write_file(path, text_of(stringify({"subscriptionId": identifier, "tools": "none", "history": [],
+#                                         "input": {"role": "user", "text": "file message"},
+#                                         "model": options.alternate, "effort": "high",
+#                                         "systemPrompt": "Keep this exact.\nSecond line.",
+#                                         "labels": {"source": "file"}})))
+#     stream(await home.call(["run", "--request", path, "--model", options.model, "--effort", options.effort,
+#                             "override"]))
+#     input_ = at([record for record in await home.received() if record["stage"] == "input"], -1)
+#     request = object_("Input", prop(input_, "checks")["input"])
+#     if request["method"] == "turn/start":
+#         content = object_("Turn params", request["params"])["input"]
+#         check("Text input array", isinstance(content, list), "Codex text input", request)
+#         equal("Option replaces message",
+#               JSArray(JSObject(type=object_("Text input", value)["type"], text=object_("Text input", value)["text"])
+#                       for value in content), [{"type": "text", "text": "override"}])
+#     else:
+#         equal("Option replaces message", object_("Message", request["message"])["content"],
+#               [{"type": "text", "text": "override"}])
+#     before = read_file(path)
+#     stream(await home.call(["run", "--request", path]))
+#     equal("Request unchanged", read_file(path), before)
+#     settings = join(home.home, ".arbol", "arbol-" + text_of(info.result["driver"]) + "-driver.json")
+#     write_file(settings, "{")
+#     refused = stream(await start(home, identifier), "failed")
+#     equal("Unreadable settings only final", len(refused), 1)
+#     equal("Settings refusal", prop(refused[0]["error"], "code"), "invalid_input")
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/runs.py::run_c11
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c11.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/runs.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c11(home: ScenarioHome) -> None:
+#     identifier = await signed(home)
+#     records = stream(await start(home, identifier, "answer", ["--tools", "all", "--cwd", home.home]))
+#     begun = find_index(records, lambda event, _: event["type"] == "tool_started")
+#     ended = find_index(records, lambda event, _: event["type"] == "tool_finished")
+#     check("Text before call", find_index(records, lambda event, _: event["type"] == "text") < begun,
+#           "text before tool_started", records)
+#     check("Text after call",
+#           find_index(records, lambda event, index: index > ended and event["type"] == "text") > ended,
+#           "text after call", records)
+#     equal("Normalized command", prop(item(records, begun), "name"), "shell")
+#     input_ = object_("Command input", prop(item(records, begun), "input"))
+#     equal("Command input", input_["command"], "printf fixture-output")
+#     if "cwd" in input_:
+#         equal("Command directory", input_["cwd"], home.home)
+#     equal("One matching finish",
+#           len([event for event in records if event["type"] == "tool_finished"
+#                and strict(event["callId"], prop(item(records, begun), "callId"))]), 1)
+#     result = object_("Shell result", prop(item(records, ended), "result"))
+#     equal("Shell output", result["output"], "fixture-output")
+#     if "exitCode" in result:
+#         equal("Shell exit code", result["exitCode"], 0)
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/runs.py::run_c12
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c12.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/runs.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c12(home: ScenarioHome) -> None:
+#     records = stream(await start(home, await signed(home)), "failed")
+#     equal("Failure code", prop(at(records, -1)["error"], "code"), "vendor_error")
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/runs.py::run_c13
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c13.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/runs.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c13(home: ScenarioHome) -> None:
+#     records = stream(await start(home, await signed(home)))
+#     usage = JSArray(event["usage"] for event in of_type(records, "usage"))
+#     equal("Input totals", JSArray(prop(entry, "inputTokens") for entry in usage), [3, 7, 7])
+#     equal("Output totals", JSArray(prop(entry, "outputTokens") for entry in usage), [2, 5, 5])
+#     for entry in usage:
+#         for field in ("cachedInputTokens", "reasoningTokens", "costUsd"):
+#             equal("Unreported " + field, has(entry, field), False)
+#     equal("Final usage", at(records, -1)["usage"], at(usage, -1))
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/runs.py::run_c19
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c19.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/runs.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c19(home: ScenarioHome) -> None:
+#     records = stream(await start(home, await signed(home)))
+#     equal("One whole text", len(of_type(records, "text")), 1)
+#     equal("No calls", len(of_type(records, "tool_started")), 0)
+#     received = at(await calls(home), -1)
+#     arguments = prop(received, "arguments")
+#     if includes(arguments, "--input-format"):
+#         check("Tools off", includes(arguments, "--tools") and item(arguments, index_of(arguments, "--tools") + 1) == "",
+#               "empty tool list", received)
+#         check("No persistence", includes(arguments, "--no-session-persistence"), "--no-session-persistence", received)
+#     else:
+#         params = object_("Thread params", object_("Thread request", received["request"])["params"])
+#         equal("Read-only sandbox", params["sandbox"], "read-only")
+#         equal("No permission escalation", params["approvalPolicy"], "never")
+#         equal("No persistence", params["ephemeral"], True)
+#         turn = at([record for record in await home.received() if record["stage"] == "input"], -1)
+#         equal("Network off", object_("Turn sandbox", object_("Turn params", object_(
+#             "Turn request", prop(turn, "request"))["params"])["sandboxPolicy"])["networkAccess"], False)
+#     equal("Work folder removed", not exists(received["workingDirectory"]), True)
+#     info = await home.json(["info"])
+#     equal("No temporary run folders", sorted_entries(join(text_of(info.result["stateDirectory"]), "tmp")), [])
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/runs.py::run_c20
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c20.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/runs.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c20(home: ScenarioHome) -> None:
+#     identifier = await signed(home)
+#     for part in ("text", "structure"):
+#         await home.part(part)
+#         records = stream(await start(home, identifier, "answer", ["--tools", "all", "--cwd", home.home]))
+#         result = find(records, lambda event: event["type"] == "tool_finished")
+#         equal("Cut flag", prop(result, "truncated"), True)
+#         value = result["result"]
+#         check("Result length", byte_length(value if isinstance(value, str) else stringify(value)) <= 200 * 1024,
+#               "at most 200 KiB", result)
+#         check("Whole UTF-8 characters", "�" not in text_of(stringify(result["result"])), "valid UTF-8",
+#               result["result"])
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/runs.py::run_c42
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c42.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/runs.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c42(home: ScenarioHome) -> None:
+#     identifier = await signed(home)
+#     records = stream(await start(home, identifier), "failed")
+#     final = at(records, -1)
+#     equal("Output retained", JSArray(event["text"] for event in of_type(records, "text")), ["answer"])
+#     equal("Produced output", final["producedOutput"], True)
+#     equal("Unfinished call named", final["unfinishedCalls"], ["fixture-call"])
+#     equal("Usage retained", prop(final["usage"], "inputTokens"), 3)
+#     equal("Call closed once", len(of_type(records, "tool_finished")), 1)
+#     equal("No retry", len(await calls(home)), 1)
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/runs.py::run_c43
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c43.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/runs.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c43(home: ScenarioHome) -> None:
+#     path = join(home.home, "blocked-state")
+#     write_file(path, "file")
+#     records = stream(await home.call(["run", "--state-dir", path, "answer"]), "failed")
+#     equal("Only final event", len(records), 1)
+#     equal("Internal failure", prop(records[0]["error"], "code"), "internal")
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END

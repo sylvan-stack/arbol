@@ -743,3 +743,565 @@ async def run(home: ScenarioHome) -> None:
     await handler(home)
 
 # Archived complete imports; restore needed names in their original scope, not at this file tail.
+
+# LOW TIER — DO NOT ENABLE OR RECREATE
+# Historical examples only. Read before adding related tests; never execute.
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/pi.py::run_c1
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c1.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/pi.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c1(home: ScenarioHome) -> None:
+#     from .c1 import run as local_records
+#     await local_records(home)
+#     equal("Local commands do not resolve credentials", len([
+#         r for r in await home.received() if r.get("stage") in ("credential-export", "authentication", "input")
+#     ]), 0)
+#     return
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/pi.py::run_c2
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c2.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/pi.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c2(home: ScenarioHome) -> None:
+#     for family in ("zai", "deepseek"):
+#         await signed(home, family)
+#         result = await home.json(["subscriptions", "get", family])
+#         equal("Native key family", result.result["auth"], "key")
+#         equal("Usable attachment", result.result["state"], "signed_in")
+#         again = await home.json(["subscriptions", "sign-in", family, "--by-code"])
+#         equal("No device code for a native-owned key", again.result["error"]["code"], "unsupported")
+#     await options(home, "pending", authDelayMs=5000)
+#     pending = home.start(["subscriptions", "sign-in", "zai"])
+#     try:
+#         async def authenticating() -> bool:
+#             return any(r.get("stage") == "authentication" and r["part"] == "pending" for r in await home.received())
+#         await wait_for("First attachment is pending", authenticating)
+#         await options(home, "replacement")
+#         await signed(home)
+#         reply = await pending.done
+#         equal("Replaced attempt refuses", json.loads(reply["stdout"])["error"]["code"], "in_use")
+#     finally:
+#         await pending.dispose()
+#     home.env["ARBOL_TEST_TIME_SCALE"] = "1000"
+#     await options(home, "expiry", authDelayMs=400)
+#     expired = await home.json(["subscriptions", "sign-in", "zai"])
+#     equal("Expired attachment refuses", expired.result["error"]["code"], "tool_failed")
+#     equal("Expired attachment is signed out", (await home.json(["subscriptions", "get", "zai"])).result["state"],
+#           "signed_out")
+#     return
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/pi.py::run_c3
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c3.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/pi.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c3(home: ScenarioHome) -> None:
+#     path = Path(home.tool, "credentials.json")
+#     keys = json.loads(path.read_text())
+#     keys["zai-coding-plan"][0]["value"]["key"] = "invalid-é"
+#     path.write_text(json.dumps(keys))
+#     credential_before = path.read_text()
+#     result = await home.json(["subscriptions", "sign-in", "zai"])
+#     equal("Malformed native key refused", result.result["error"]["code"], "not_signed_in")
+#     equal("Native credential is not deleted", path.read_text(), credential_before)
+#     equal("Malformed key never reaches provider", len([
+#         r for r in await home.received() if r.get("stage") == "authentication"
+#     ]), 0)
+#     return
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/pi.py::run_c10
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c10.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/pi.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c10(home: ScenarioHome) -> None:
+#     await signed(home)
+#     records = await request(home)
+#     equal("Started precedes content", records[0]["type"], "started")
+#     equal("Default subscription", records[0]["subscriptionId"], "zai")
+#     equal("Default model", records[0]["model"], "glm-5.3-flash")
+#     equal("Single final block", [r["text"] for r in records if r["type"] == "text"], ["Answer"])
+#     equal("One native request", len(await native_inputs(home)), 1)
+#     check("Only the captured native key reaches Pi", (await native_inputs(home))[0]["checks"]["credentialMatched"],
+#           True, await native_inputs(home))
+#     await signed(home, "deepseek")
+#     catalog = (await home.json(["subscriptions", "models", "deepseek"])).result
+#     selected = next(m for m in catalog["models"] if len(m["efforts"]) > 1)
+#     effort = selected["efforts"][0]
+#     await home.settings({"defaultSubscription": "deepseek", "subscriptions": {
+#         "deepseek": {"defaultModel": selected["id"], "defaultEffort": effort}}})
+#     records = await request(home)
+#     equal("Configured subscription", records[0]["subscriptionId"], "deepseek")
+#     equal("Configured model", records[0]["model"], selected["id"])
+#     equal("Configured effort", records[0]["effort"], effort)
+#     records = await request(home, subscriptionId="zai", model="glm-5.3-flash", effort="low")
+#     equal("Request overrides default", records[0]["subscriptionId"], "zai")
+#     equal("Explicit effort", records[0]["effort"], "low")
+#     await options(home, "authoritative", delta="wrong provisional text", text="wrong original final",
+#                   finalRewrite="Rewritten\u2028line\u2029paragraph")
+#     records = await request(home)
+#     equal("Native final hook is authoritative", [r["text"] for r in records if r["type"] == "text"],
+#           ["Rewritten\u2028line\u2029paragraph"])
+#     settings = Path(home.home, ".arbol/arbol-pi-driver.json")
+#     settings.unlink()
+#     settings.mkdir()
+#     records = await request(home, outcome="failed")
+#     equal("Unreadable settings refuse", records[-1]["error"]["code"], "invalid_input")
+#     return
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/pi.py::run_c12
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c12.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/pi.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c12(home: ScenarioHome) -> None:
+#     await signed(home)
+#     await options(home, "terminal-error", failure="invalid")
+#     records = await request(home, outcome="failed")
+#     equal("Native error cannot become success", records[-1]["error"]["code"], "invalid_input")
+#     return
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/pi.py::run_c4
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c4.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/pi.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c4(home: ScenarioHome) -> None:
+#     for family in ("zai", "deepseek"):
+#         await options(home, "attach")
+#         await signed(home, family)
+#         await options(home, "rejected-check", authStatus=401)
+#         result = await home.json(["subscriptions", "check", family])
+#         equal("Rejected check", result.result["error"]["code"], "credential_rejected")
+#         account = (await home.json(["subscriptions", "get", family])).result
+#         equal("Rejected check marks account unusable", account["state"], "needs_attention")
+#         check("Repair remedy", bool(account["problem"].get("remedy")), True, account)
+#         await options(home, "repair")
+#         await signed(home, family)
+#         await options(home, "rejected-run", failure="auth")
+#         records = await request(home, subscriptionId=family, outcome="failed")
+#         equal("Rejected run", records[-1]["error"]["code"], "credential_rejected")
+#         equal("Run marks account unusable", (await home.json(["subscriptions", "get", family])).result["state"],
+#               "needs_attention")
+#     return
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/pi.py::run_c8
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c8.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/pi.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c8(home: ScenarioHome) -> None:
+#     home.env.update({key: "inherited-credential-sentinel" for key in (
+#         "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CLAUDECODE", "CLAUDE_CONFIG_DIR", "CODEX_HOME",
+#         "DEEPSEEK_API_KEY", "ZAI_API_KEY", "NODE_OPTIONS", "PI_CODING_AGENT_DIR",
+#     )})
+#     await signed(home)
+#     await request(home)
+#     for record in await native_inputs(home):
+#         names = record["environment"]
+#         check("Provider credentials are absent from native environment",
+#               not any(name.startswith(("ANTHROPIC_", "OPENAI_", "CLAUDE", "CODEX_", "DEEPSEEK_", "ZAI_"))
+#                       or name == "NODE_OPTIONS" for name in names), True, names)
+#     return
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/pi.py::run_c11
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c11.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/pi.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c11(home: ScenarioHome) -> None:
+#     await signed(home)
+#     await options(home, "shell", tool="shell", command="printf EARLY; (sleep .1; printf LATE) &")
+#     history = [{"type": "message", "role": "user", "text": "earlier"},
+#                {"type": "tool_call", "name": "shell", "input": {"command": "false", "cwd": home.home},
+#                 "result": {"output": "prior failure", "exitCode": 7}, "ok": False, "truncated": True}]
+#     records = await request(home, tools="all", workingDirectory=home.home, history=history)
+#     kinds = [r["type"] for r in records]
+#     check("Final prose precedes execution", kinds.index("text") < kinds.index("tool_started"), True, kinds)
+#     calls = [r for r in records if r["type"] == "tool_started"]
+#     equal("Native Bash is public shell", calls[0]["name"], "shell")
+#     equal("Plain command", calls[0]["input"]["command"], "printf EARLY; (sleep .1; printf LATE) &")
+#     ends = [r for r in records if r["type"] == "tool_finished"]
+#     equal("One terminal call", len(ends), 1)
+#     equal("Late output retained", ends[0]["result"], {"output": "EARLYLATE", "exitCode": 0})
+#     messages = (await native_inputs(home))[0]["checks"]["messages"]
+#     imported = next(m for m in messages if m["role"] == "toolResult")
+#     equal("Historical shell becomes native Bash", imported["toolName"], "bash")
+#     equal("Historical error is preserved", imported["isError"], True)
+#     check("Historical exit code reaches context", "exit code: 7" in imported["content"][0]["text"], True, imported)
+#     return
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/pi.py::run_c13
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c13.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/pi.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c13(home: ScenarioHome) -> None:
+#     await signed(home)
+#     await options(home, "totals", tool="result")
+#     records = await request(home, tools="all", workingDirectory=home.home)
+#     usages = [r["usage"] for r in records if r["type"] == "usage"]
+#     equal("Response usage is cumulative", [u["inputTokens"] for u in usages], [17, 34])
+#     equal("Final input includes both responses", records[-1]["usage"]["inputTokens"], 34)
+#     equal("Cached input is a subset", records[-1]["usage"]["cachedInputTokens"], 6)
+#     check("Estimated cost is not billed cost", "cost" not in records[-1]["usage"], True, records[-1])
+#     await options(home, "unknown-child-scope", tool="child")
+#     records = await request(home, tools="all", workingDirectory=home.home)
+#     equal("Unknown aggregate input is omitted", "inputTokens" in records[-1]["usage"], False)
+#     check("Unknown aggregate usage is explained", any(r.get("code") == "usage_incomplete" for r in records),
+#           True, records[-1])
+#     return
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/pi.py::run_c16
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c16.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/pi.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c16(home: ScenarioHome) -> None:
+#     await signed(home)
+#     await request(home, runId="ended")
+#     for run_id in ("ended", "unknown"):
+#         reply = await home.call(["runs", "stop", run_id])
+#         equal("Idempotent stop exit", reply["status"], 0)
+#         equal("Idempotent stop output", reply["stdout"], "")
+#     return
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/pi.py::run_c19
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c19.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/pi.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c19(home: ScenarioHome) -> None:
+#     await signed(home)
+#     records = await request(home, tools="none")
+#     equal("Tools-off single text", len([r for r in records if r["type"] == "text"]), 1)
+#     equal("Effective tool set is empty", (await native_inputs(home))[0]["checks"]["tools"], [])
+#     state = Path((await home.json(["info"])).result["stateDirectory"])
+#     equal("No private run folder remains", sorted(p.name for p in (state / "tmp").iterdir()), [])
+#     check("No persistent ephemeral history", not list(Path(home.home, ".pi/agent/sessions").rglob("*.jsonl")),
+#           True, "ephemeral history")
+#     return
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/pi.py::run_c20
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c20.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/pi.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c20(home: ScenarioHome) -> None:
+#     await signed(home)
+#     for part, value in (("text", {"resultBytes": 300 * 1024}), ("unicode", {"result": "é" * 200 * 1024}),
+#                         ("structure", {"structured": True, "resultBytes": 300 * 1024})):
+#         await options(home, part, tool="result", **value)
+#         records = await request(home, tools="all", workingDirectory=home.home)
+#         end = next(r for r in records if r["type"] == "tool_finished")
+#         equal("Large result flagged", end["truncated"], True)
+#         length = len(json.dumps(end["result"], ensure_ascii=False, separators=(",", ":")).encode())
+#         check("Public result bounded", length <= 200 * 1024, "<= 200 KiB", length)
+#     await options(home, "rewritten", tool="result", toolRewrite=True, result="Authoritative tool result")
+#     records = await request(home, tools="all", workingDirectory=home.home)
+#     end = next(r for r in records if r["type"] == "tool_finished")
+#     equal("Final tool snapshot replaces provisional output", end["result"],
+#           {"content": [{"type": "text", "text": "Authoritative tool result"}]})
+#     return
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/pi.py::run_c25
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c25.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/pi.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c25(home: ScenarioHome) -> None:
+#     await signed(home)
+#     for approval in (True, False):
+#         await options(home, "approve" if approval else "cancel", tool="permission", approval=approval)
+#         records = await request(home, tools="all", workingDirectory=home.home)
+#         equal("Permission is not a user question", len([r for r in records if r["type"] == "ask_opened"]), 0)
+#         answers = [r for r in await home.received() if r.get("stage") == "answers"][-1]
+#         equal("Adapter receives the expected answer", answers["checks"]["values"], ["A"] if approval else [None])
+#         if not approval:
+#             check("Unapprovable permission produces notice", any(r["type"] == "notice" for r in records),
+#                   True, records)
+#     return
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/pi.py::run_c30_c41
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c30 c41.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/pi.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c30_c41(home: ScenarioHome) -> None:
+#     unsigned = await home.json(["subscriptions", "usage", "deepseek"])
+#     equal("Unsigned usage", unsigned.result["outcome"], "needs_sign_in")
+#     for family in ("zai", "deepseek"):
+#         await signed(home, family)
+#         before = len(await native_inputs(home))
+#         usage = await home.json(["subscriptions", "usage", family])
+#         equal("Unsupported account allowance is explicit", usage.result["outcome"], "unsupported")
+#         equal("No invented allowance windows", usage.result["windows"], [])
+#         catalog = await home.json(["subscriptions", "models", family])
+#         equal("Catalog comes from the native tool", catalog.result["source"], "tool")
+#         check("Nonempty native catalog", bool(catalog.result["models"]), True, catalog.result)
+#         equal("Usage/catalog do not infer", len(await native_inputs(home)), before)
+#         await request(home, subscriptionId=family)
+#         equal("Token counts do not invent account allowance",
+#               (await home.json(["subscriptions", "usage", family])).result["outcome"], "unsupported")
+#     return
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/pi.py::run_c31
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c31.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/pi.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c31(home: ScenarioHome) -> None:
+#     await signed(home)
+#     await home.part("missing", missing=True)
+#     records = await request(home, outcome="failed")
+#     equal("Missing executable", records[-1]["error"]["code"], "tool_missing")
+#     await options(home, "old", toolVersion="0.0.1")
+#     info = await home.json(["info"])
+#     equal("Old native version reported", info.result["tool"]["version"], "0.0.1")
+#     equal("Old native version unsupported", info.result["tool"]["supported"], False)
+#     records = await request(home, outcome="failed")
+#     equal("Old native version refused", records[-1]["error"]["code"], "tool_unsupported")
+#     equal("No inference for incompatible native profile", len(await native_inputs(home)), 0)
+#     return
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/pi.py::run_c40
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c40.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/pi.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c40(home: ScenarioHome) -> None:
+#     before = len(await native_inputs(home))
+#     records = await request(home, outcome="failed")
+#     equal("Unsigned run refuses", records[-1]["error"]["code"], "not_signed_in")
+#     catalog = await home.json(["subscriptions", "models", "zai"])
+#     equal("Unsigned catalog refuses", catalog.result["error"]["code"], "not_signed_in")
+#     await signed(home)
+#     for fields in ({"workingDirectory": home.home + "/missing"}, {"model": "unknown-fuzzy"},
+#                    {"effort": "unrecognised"}, {"serviceTier": "priority"},
+#                    {"model": "glm-4.7", "input": {"role": "user", "text": "image",
+#                                                  "images": [{"mediaType": "image/png", "data": "YQ=="}]}}):
+#         records = await request(home, outcome="failed", runId="refused-id", **fields)
+#         equal("Invalid request refuses", records[-1]["error"]["code"],
+#               "unsupported" if "serviceTier" in fields else "invalid_input")
+#         equal("Refused request keeps its identity", records[-1]["runId"], "refused-id")
+#         equal("No prompt-derived output", records[-1]["producedOutput"], False)
+#     equal("No refused request was submitted", len(await native_inputs(home)), before)
+#     await options(home, "held-id", failure="silent")
+#     active = active_run(home, runId="duplicate")
+#     try:
+#         await input_(home, "held-id")
+#         records = await request(home, runId="duplicate", outcome="failed")
+#         equal("Duplicate run refuses", records[-1]["error"]["code"], "in_use")
+#         equal("Duplicate run preserves requested identity", records[-1]["runId"], "duplicate")
+#         active.send({"type": "stop"})
+#         stream(await active.done, "cancelled")
+#     finally:
+#         await active.dispose()
+#     await options(home, "bad-check", authStatus=401)
+#     await home.json(["subscriptions", "check", "zai"])
+#     await options(home, "repair-check")
+#     repaired = await home.json(["subscriptions", "check", "zai"])
+#     equal("Check repairs attention state", repaired.result["state"], "signed_in")
+#     return
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/pi.py::run_c43
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c43.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/pi.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c43(home: ScenarioHome) -> None:
+#     await signed(home)
+#     state = Path((await home.json(["info"])).result["stateDirectory"])
+#     (state / "runs").rmdir()
+#     (state / "runs").write_text("unwritable directory fixture")
+#     records = await request(home, outcome="failed")
+#     equal("State refusal is internal", records[-1]["error"]["code"], "internal")
+#     equal("One final event before any start", len(records), 1)
+#     return
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/pi.py::run_c35
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c35.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/pi.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c35(home: ScenarioHome) -> None:
+#     await signed(home)
+#     for part in ("failed", "child"):
+#         await options(home, part, tool=part)
+#         records = await request(home, tools="all", workingDirectory=home.home, limits={"idleSeconds": .1})
+#         calls = [r for r in records if r["type"] == "tool_started"]
+#         for call in calls:
+#             equal("Each tool finishes exactly once", len([r for r in records if r["type"] == "tool_finished"
+#                                                           and r["callId"] == call["callId"]]), 1)
+#         if part == "failed":
+#             end = next(r for r in records if r["type"] == "tool_finished")
+#             equal("Ordinary tool failure is reported", end["ok"], False)
+#         else:
+#             child = next(r for r in records if r["type"] == "text" and r.get("parentCallId"))
+#             equal("Child attribution", child["parentCallId"], calls[0]["callId"])
+#             equal("Root answer excludes child", [r["text"] for r in records
+#                                                  if r["type"] == "text" and not r.get("parentCallId")],
+#                   ["Before", "After"])
+#     return
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/pi.py::run_c42
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c42.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/pi.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c42(home: ScenarioHome) -> None:
+#     await signed(home)
+#     await options(home, "partial-failure", tool="hang", failDuringTool=True)
+#     records = await request(home, tools="all", workingDirectory=home.home, outcome="failed")
+#     equal("Text emitted before failure", [r["text"] for r in records if r["type"] == "text"], ["Before"])
+#     equal("Prior usage retained", records[-1]["usage"]["inputTokens"], 17)
+#     equal("Output flag retained", records[-1]["producedOutput"], True)
+#     calls = [r for r in records if r["type"] == "tool_started"]
+#     equal("Unfinished call retained", records[-1]["unfinishedCalls"], [calls[0]["callId"]])
+#     equal("No prompt replay", len(await native_inputs(home)), 1)
+#     return
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/pi.py::run_c32
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c32.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/pi.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c32(home: ScenarioHome) -> None:
+#     from .info import inspect_info
+#     identity: dict[str, Any] | None = None
+#     for override in (None, str(Path(home.home, "explicit-state"))):
+#         identity_result = await home.json(["info", *(["--state-dir", override] if override else [])])
+#         info, tool, name = inspect_info(identity_result.result)
+#         equal("Driver identity", name, "pi")
+#         equal("Contract version", info["contract"], 2)
+#         equal("State format", info["dataFormat"], 1)
+#         equal("State directory", info["stateDirectory"],
+#               override or str(Path(home.home, "Library/Application Support/Arbol/drivers/pi")))
+#         equal("Settings file", info["settingsFile"], str(Path(home.home, ".arbol/arbol-pi-driver.json")))
+#         check("Semantic package version", bool(re.fullmatch(r"\d+\.\d+\.\d+", info["version"])), True, info)
+#         check("Build identity format", bool(re.fullmatch(r"0|[1-9a-f][0-9a-f]*", info["build"])), True, info)
+#         equal("Qualified native version", tool["version"], "1.1.0")
+#         equal("Native tool supported", tool["supported"], True)
+#         current = {key: info[key] for key in ("driver", "version", "build", "contract")}
+#         if identity is not None:
+#             equal("Identity is independent of state override", current, identity)
+#         identity = current
+#     await signed(home)
+#     info = (await home.json(["info"])).result
+#     system = Path(home.tool, "system.txt")
+#     system.write_text("CLI_APPEND_SENTINEL")
+#     extra = Path(home.home, "extra")
+#     extra.mkdir()
+#     path = request_file(home)
+#     reply = await home.call([
+#         "run", "--request", str(path), "--subscription", "zai", "--model", "glm-5.3-flash", "--effort", "low",
+#         "--system-prompt-file", str(system), "--cwd", home.home, "--add-dir", str(extra), "--tools", "all",
+#         "--chat-session", "cli", "--run-id", "cli-run", "--output", "events", "--label", "one=1", "--label", "two=2",
+#         "--state-dir", info["stateDirectory"], "override",
+#     ])
+#     records = list(stream(reply))
+#     equal("Build identity is consistent", records[0]["driverBuild"], info["build"])
+#     equal("Exact request identity", records[0]["runId"], "cli-run")
+#     equal("Labels survive", records[0]["labels"], {"one": "1", "two": "2"})
+#     seen = (await native_inputs(home))[-1]
+#     for text in ("CLI_APPEND_SENTINEL", str(extra), "override"):
+#         check("CLI field reaches native context", text in json.dumps(seen["checks"]), True, text)
+#     stdin = home.start(["run", "--request", "-", "--control"])
+#     try:
+#         stdin.send({"input": {"role": "user", "text": "stdin"}, "tools": "none"})
+#         stdin.send({"type": "unknown"})
+#         stream(await stdin.done)
+#         equal("Buffered request does not swallow control", len([r for r in stdin.lines
+#                                                                 if r.get("type") == "control_refused"]), 1)
+#     finally:
+#         await stdin.dispose()
+#     text_reply = await home.call(["run", "--output=text", "plain"])
+#     equal("Text exit status", text_reply["status"], 0)
+#     equal("Text output", text_reply["stdout"], "Answer")
+#     for bad in (["unknown"], ["info", "--unknown"], ["info", "--state-dir"], ["run", "--unknown"],
+#                 ["subscriptions", "sign-in", "zai", "--key-file", str(path)],
+#                 ["subscriptions", "sign-in", "zai", "--secret=NEVER_ECHO_THIS"],
+#                 ["subscriptions", "export", "zai"]):
+#         result = await home.call(bad)
+#         equal("Invalid command exit", result["status"], 1)
+#         equal("Typed invalid command", json.loads(result["stdout"])["error"]["code"], "invalid_input")
+#         check("Rejected secret option is not echoed", "NEVER_ECHO_THIS" not in result["stdout"], True, result)
+#     for operation in ("build-check", "live-check"):
+#         refused = await home.json(["dev", operation])
+#         equal("Missing test binding refuses", refused.result["error"]["code"], "not_found")
+#     for family in ("zai", "deepseek"):
+#         await home.json(["subscriptions", "create", "--family", family, "--id", "test-" + family, "--label", "Test"])
+#         if family == "zai":
+#             refused = await home.json(["dev", "build-check"])
+#             equal("Unsigned test binding refuses", refused.result["error"]["code"], "not_signed_in")
+#         await signed(home, "test-" + family)
+#     await options(home, "development", devChecks=True)
+#     before = len(await native_inputs(home))
+#     build = await home.json(["dev", "build-check"])
+#     equal("Build check passes", build.process["status"], 0)
+#     equal("One build inference", build.result["inferenceRequests"], 1)
+#     equal("Exactly one provider call", len(await native_inputs(home)), before + 1)
+#     equal("Build check disables tools", (await native_inputs(home))[-1]["checks"]["tools"], [])
+#     previous_timeout = home.timeout_ms
+#     try:
+#         # This one command performs twelve actual native startup/cleanup cycles.
+#         home.timeout_ms = max(previous_timeout, 60000)
+#         live = await home.json(["dev", "live-check"])
+#     finally:
+#         home.timeout_ms = previous_timeout
+#     equal("Live orchestration passes synthetic native providers", live.process["status"], 0)
+#     equal("Both families each receive six qualification turns", live.result["inferenceRequests"], 12)
+#     state = Path(info["stateDirectory"])
+#     account_file = state / "subscriptions/test-zai/record.json"
+#     account = json.loads(account_file.read_text())
+#     account["lastUsage"] = {"outcome": "ok", "windows": [{"usedPercent": 100}]}
+#     account_file.write_text(json.dumps(account))
+#     before = len(await native_inputs(home))
+#     for operation in ("build-check", "live-check"):
+#         refused = await home.json(["dev", operation])
+#         equal("Known exhausted quota refuses", refused.result["error"]["code"], "rate_limited")
+#     equal("No inference under exhausted quota", len(await native_inputs(home)), before)
+#     probe = await home.json(["dev", "probe"])
+#     equal("Probe has no inference", probe.result["inferenceRequests"], 0)
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END

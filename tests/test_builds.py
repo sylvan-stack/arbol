@@ -445,3 +445,23 @@ class Install(unittest.TestCase):
 
 
 # Archived complete imports; restore needed names in their original scope, not at this file tail.
+
+# LOW TIER — DO NOT ENABLE OR RECREATE
+# Historical examples only. Read before adding related tests; never execute.
+# LOW-TIER-BEGIN: tests/test_builds.py::Builds.test_builds_help
+# Reason: Exercises the static help branch and pins a usage prefix; it does not build, select or launch anything.
+# Source: arbol@6a02bf2bf3a7a699e2f8f8d27b799849c3a79179:tests/test_builds.py
+# Retained evidence at review: Actual build/launcher invocation and invalid-command tests remain.
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     def test_builds_help(self) -> None:
+#         """builds.help prints the usage only when --help is the whole command line."""
+#         f = Fixture(self)
+#         shown = run_tool(f, "--help")
+#         self.assertEqual([shown.returncode, list(document(shown))], [0, ["usage"]])
+#         self.assertTrue(document(shown)["usage"].startswith("arbol-builds build <component>"))
+#         for args in (["--help", "list"], ["list", "--help"]):
+#             refused = run_tool(f, *args)
+#             self.assertEqual([refused.returncode, document(refused)["error"]["code"]], [1, "builds_failed"], args)
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END

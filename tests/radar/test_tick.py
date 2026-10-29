@@ -75,3 +75,61 @@ class TheBackend(RecordFixture):
 
 
 # Archived complete imports; restore needed names in their original scope, not at this file tail.
+
+# LOW TIER — DO NOT ENABLE OR RECREATE
+# Historical examples only. Read before adding related tests; never execute.
+# LOW-TIER-BEGIN: tests/radar/test_tick.py::Advisory.test_a_build_of_arbol_carries_the_radar_and_its_checks
+# Reason: Matches source quote style and packaging call spelling; the earlier behavior-preserving quote change failed it.
+# Source: arbol@4c5489dac9c73d28a2fdf232403fdcfd3a2dbbd5:tests/radar/test_tick.py
+# Retained evidence at review: Package manifests, package construction and remaining actual Radar behavior checks remain; no packaging success is inferred here.
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     def test_a_build_of_arbol_carries_the_radar_and_its_checks(self) -> None:
+#         """radar.packaged"""
+#         script = ROOT / "scripts/package_backend.py"
+#         if script.is_file():  # a checkout: the packaging copies both folders into the Build as it copies the backend
+#             text = script.read_text(encoding="utf-8")
+#             for folder in ("src/arbol_radar", "tests/radar"):
+#                 self.assertIn(f'root / "{folder}", folder / "{folder}"', text)
+#         else:  # a packaged Build: its manifest lists every payload file, the radar's and its checks' among them
+#             manifest = json.loads((ROOT / "package-manifest.json").read_text(encoding="utf-8"))
+#             files = set(manifest["files"])
+#             self.assertIn("src/arbol_radar/tick.py", files)
+#             self.assertIn("tests/radar/test_tick.py", files)
+#             self.assertIn("tests/radar/layout.sql", files)
+#         check = (ROOT / "scripts/check_backend.py").read_text(encoding="utf-8")
+#         self.assertIn('"-p", "test*.py"', check)  # the Build's unit check runs every packaged test, the radar's too
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/radar/test_tick.py::Advisory.test_the_package_writes_nothing_but_its_own_tables_and_runs_nothing_but_the_two_commands
+# Reason: Source substrings and a SQL regex do not observe writes/calls; includes an unrelated current-date assertion. Its import constraints overlap the retained explicit dependency audit.
+# Source: arbol@4c5489dac9c73d28a2fdf232403fdcfd3a2dbbd5:tests/radar/test_tick.py
+# Retained evidence at review: test_vigor.Advisory import boundary plus actual Tick/driver/records tests remain; no new runtime absence claim is made.
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     def test_the_package_writes_nothing_but_its_own_tables_and_runs_nothing_but_the_two_commands(self) -> None:
+#         """radar.advisory-writes"""
+#         for path in sorted((ROOT / "src/arbol_radar").glob("*.py")):
+#             text = path.read_text(encoding="utf-8")
+#             for writer in self.WRITERS:
+#                 self.assertNotIn(writer, text, f"{path.name} uses {writer}")
+#             tree = ast.parse(text, str(path))
+#             for node in ast.walk(tree):
+#                 if isinstance(node, ast.ImportFrom):
+#                     self.assertNotIn(node.module, self.BACKEND_WRITERS, f"{path.name} imports {node.module}")
+#             for statement in re.findall(r'"(INSERT INTO|UPDATE|DELETE FROM|CREATE|ALTER|DROP)\s+(\w+)', text):
+#                 if statement[0] == "UPDATE":  # the owner's approval of a profile, in its row (SGM-1.11), alone
+#                     self.assertEqual((path.name, statement[1]), ("records.py", "vigor_profiles"))
+#                     continue
+#                 self.assertEqual(statement[0], "INSERT INTO", f"{path.name}: {statement}")
+#                 self.assertIn(statement[1], ("vigor_profiles", "vigor_reports", "vigor_results"))
+#         self.assertEqual((LIST, USAGE), (["subscriptions", "list"], ["subscriptions", "usage"]))
+#         for name in ("drivers.py", "cli.py", "tick.py"):
+#             text = (ROOT / "src/arbol_radar" / name).read_text(encoding="utf-8")
+#             for literal in re.findall(r'\["([a-z]+)", "([a-z]+)"', text):
+#                 self.assertEqual(literal[0], "subscriptions")
+#                 self.assertIn(literal[1], ("list", "usage"))
+#         self.assertLess(datetime(2026, 10, 27, tzinfo=UTC), datetime.now(UTC))
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END

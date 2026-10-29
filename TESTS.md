@@ -1,6 +1,6 @@
 # Tests: arbol
 
-Both tiers have uncommented source. Only the top-tier cases below may be selected during implementation. They may be selected when useful during implementation; running tests after every change is not required. Writing or running mid-tier tests requires a separate testing task explicitly requested by the owner. Do not write or restore low-tier tests.
+All test work, including top-tier cases, requires a separate task explicitly requested by the owner. Implement and polish code first; only the owner decides when it is ready for tests. Do not write, edit, maintain or run tests during implementation. Keep existing source in its documented state and low-tier examples commented at file ends.
 
 [Mid-tier descriptions and justifications](MID_TIER.md) · [Complete inventory and tier justifications](docs/test-inventory.md) · [Machine-readable inventory](test-tiers.json)
 
@@ -22,7 +22,7 @@ Reviewed revision: `f66335c7e203794dc84e40fe3106e85f8cae2dd6` under SYL-327 (29 
 
 Case bodies are separated into [`tests/top/`](tests/top/) and [`tests/mid/`](tests/mid/). The former mixed test modules retain shared fixture classes, helper functions and imports at their established paths, with no inventoried test methods. This preserves existing subprocess paths, patch targets and fixture imports without copying helpers into both tiers. Compatibility entries preserve original package and resource paths while loading the mid-tier implementation. Product-side test APIs load it only when invoked and refuse if the test source is absent.
 
-## Running a selected top-tier case
+## Running a selected top-tier case in an owner-requested testing task
 
 Select an exact method when it resolves a concrete uncertainty; no run is required after an edit. The new module names begin with test_top_ so they cannot shadow the shared fixture modules. Do not run whole folders or discovery as a substitute. Original prerequisites, skips and environment limitations still apply. A focused result is not full qualification.
 
@@ -45,3 +45,19 @@ The shared conformance runner requires explicit `--only` selections. Removed sce
 ## Builds
 
 Since SYL-329 (29 October 2026) a Build runs the top tier only. The backend Build's `unit` check runs every case under `tests/top/`, with its own interpreter and private PostgreSQL. The mid tier runs only when the owner asks for a mid-tier run.
+
+## Owner-controlled testing and archived examples — SYL-330
+
+All test work is separate from implementation, including top-tier regressions,
+fixtures, snapshots, classification, archival maintenance and runner changes.
+Only the owner decides readiness and requests the testing task; do not create
+one autonomously or widen implementation into testing. A test-running Build
+also belongs to a separately requested testing/Build task; its gate stays intact.
+A test review, writing or archival task does not itself authorize execution.
+
+Read the retained cases and the `LOW TIER — DO NOT ENABLE OR RECREATE` footers
+before adding related tests. They preserve rejected historical source, reasons
+and revisions, so obvious or redundant checks are not generated again. All
+archived lines are comments, including imports and registrations. They add no
+runnable coverage. Re-admission needs distinct new evidence and owner-requested
+test work; a testing request alone does not make low-tier cases useful.

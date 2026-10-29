@@ -132,3 +132,163 @@ class Windows(_support.Windows):
         self.assertEqual(await self.db.execute(schema_sql), before_schema)
         self.assertEqual(await self.db.execute("SELECT indexdef FROM pg_indexes WHERE schemaname='public' ORDER BY indexname"), before_indexes)
 # TEST-TIER-END tests/backend/test_chat_wire.py::Windows.test_backend_needs_no_schema_or_history_write_permission
+
+# LOW TIER — DO NOT ENABLE OR RECREATE
+# Historical examples only. Read before adding related tests; never execute.
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_chat_wire.py::Windows.test_default_and_explicit_pages_use_the_same_exact_millisecond_cursor
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: chats.page-cursor
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_chat_wire.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     async def test_default_and_explicit_pages_use_the_same_exact_millisecond_cursor(self) -> None:
+#         """chats.page-cursor"""
+#         reader, writer = await self.open()
+#         first = (await self.call(reader, writer, "chats.page"))["result"]["chats"]
+#         self.assertEqual(len(first), 100)
+#         self.assertEqual([row["chat"] for row in first], [chat(n) for n in range(201, 101, -1)])
+#         self.assertTrue(all(row["activityAt"] == "2026-10-27T00:00:00.000Z" for row in first))
+#         cursor = {key: first[-1][key] for key in ("activityAt", "chat")}
+#         rest = (await self.call(reader, writer, "chats.page", {"before": cursor, "limit": 200}))["result"]["chats"]
+#         self.assertEqual([row["chat"] for row in rest], [chat(n) for n in range(101, 0, -1)])
+#         self.assertEqual(len({row["chat"] for row in first + rest}), 201)
+#         snapshot = await self.subscribe(reader, writer, "list", "chats")
+#         self.assertEqual(snapshot["chats"], first)
+#         for params in ({"limit": True}, {"limit": 201}, {"before": {"chat": "../../x", "activityAt": "bad"}},
+#                        {"before": {"chat": chat(1), "activityAt": "2026-10-27T00:00:00.000001Z"}}):
+#             self.assertEqual((await self.call(reader, writer, "chats.page", params))["error"]["code"], "invalid_input")
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_chat_wire.py::Windows.test_title_changes_reach_two_windows_and_preserve_other_chat_tables
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: chats.title-windows
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_chat_wire.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     async def test_title_changes_reach_two_windows_and_preserve_other_chat_tables(self) -> None:
+#         """chats.title-windows"""
+#         first, first_writer = await self.open()
+#         second, second_writer = await self.open()
+#         await self.subscribe(first, first_writer, "a", "chat", {"chat": chat(1)})
+#         await self.subscribe(second, second_writer, "a", "chat", {"chat": chat(1)})
+#         result = await self.call(first, first_writer, "chat.rename", {"chat": chat(1), "title": "  Build script  "})
+#         self.assertEqual(result["result"], {"title": "Build script"})
+#         for reader in (first, second):
+#             self.assertEqual((await self.event(reader, "a", "title"))["title"], "Build script")
+#         self.assertEqual(await self.db.execute("SELECT title FROM chats WHERE id=%s", [chat(1)]), [("Build script",)])
+#         for title in ("🦫" * 240, "  \t ", None):
+#             result = await self.call(first, first_writer, "chat.rename", {"chat": chat(1), "title": title})
+#             self.assertEqual(result["result"]["title"], title if title and title.strip() else None)
+#         for params in ({"chat": chat(1), "title": "x" * 241}, {"chat": "../../x", "title": "x"},
+#                        {"chat": chat(1), "title": "\0"}, {"chat": chat(1)}):
+#             self.assertEqual((await self.call(first, first_writer, "chat.rename", params))["error"]["code"], "invalid_input")
+#         self.assertEqual((await self.call(first, first_writer, "chat.rename", {"chat": chat(999), "title": "x"}))["error"]["code"],
+#                          "not_found")
+#         self.assertEqual(await self.db.execute("SELECT count(*) FROM exchanges"), [(0,)])
+#         self.assertEqual(await self.db.execute("SELECT count(*) FROM drafts"), [(0,)])
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_chat_wire.py::Windows.test_external_older_title_and_archive_are_observed_within_a_second
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: chats.external-observation; chats.archive-list
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_chat_wire.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     async def test_external_older_title_and_archive_are_observed_within_a_second(self) -> None:
+#         """chats.external-observation; chats.archive-list"""
+#         reader, writer = await self.open()
+#         await self.subscribe(reader, writer, "list", "chats")
+#         await self.subscribe(reader, writer, "old", "chat", {"chat": chat(1)})
+#         started = time.monotonic()
+#         await self.db.execute("UPDATE chats SET title='external' WHERE id=%s", [chat(1)])
+#         changed = await self.event(reader, "list", "changed")
+#         self.assertLess(time.monotonic() - started, 1)
+#         self.assertEqual(changed["chats"][0]["chat"], chat(1))
+#         self.assertEqual(changed["chats"][0]["title"], "external")
+#         self.assertEqual((await self.event(reader, "old", "title"))["title"], "external")
+#         started = time.monotonic()
+#         result = await self.call(reader, writer, "chat.mark", {"chat": chat(201), "archived": True})
+#         self.assertIn("archivedAt", result["result"])
+#         changed = await self.event(reader, "list", "changed")
+#         self.assertLess(time.monotonic() - started, 1)
+#         self.assertEqual(changed["chats"][0]["chat"], chat(201))
+#         self.assertTrue(changed["chats"][0]["archived"])
+#         rows = (await self.call(reader, writer, "chats.page", {"limit": 200}))["result"]["chats"]
+#         self.assertEqual(len(rows), 200)
+#         self.assertNotIn(chat(201), [row["chat"] for row in rows])
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_chat_wire.py::Windows.test_layout_attention_and_contract_reads_without_own_tables
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: chats.layout-wire
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_chat_wire.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     async def test_layout_attention_and_contract_reads_without_own_tables(self) -> None:
+#         """chats.layout-wire"""
+#         reader, writer = await self.open()
+#         await self.db.execute("DROP TABLE drafts")
+#         result = await self.call(reader, writer, "root.get")
+#         self.assertFalse(result["result"]["layoutComplete"])
+#         attention = await self.subscribe(reader, writer, "attention", "attention")
+#         self.assertEqual([item["kind"] for item in attention["items"]], ["layout_incomplete"])
+#         snapshot = await self.subscribe(reader, writer, "a", "chat", {"chat": chat(1)})
+#         self.assertIsNone(snapshot["draft"])
+#         result = await self.call(reader, writer, "chat.mark", {"chat": chat(1), "ongoing": True})
+#         self.assertEqual(result["error"]["code"], "layout_incomplete")
+#         self.assertIn("result", await self.call(reader, writer, "chat.rename", {"chat": chat(1), "title": "still readable"}))
+#         await self.db.execute((ROOT / "tests/backend/own-layout.sql").read_text())
+#         result = await self.call(reader, writer, "root.get")
+#         self.assertTrue(result["result"]["layoutComplete"])
+#         self.assertEqual((await self.event(reader, "attention", "closed"))["id"], "layout_incomplete")
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_chat_wire.py::Windows.test_wire_paste_keeps_exact_utf8_and_no_other_request_fields
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: chats.paste-wire
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_chat_wire.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     async def test_wire_paste_keeps_exact_utf8_and_no_other_request_fields(self) -> None:
+#         """chats.paste-wire"""
+#         reader, writer = await self.open()
+#         value = "é\0🦫\n" * 2500
+#         result = await self.call(reader, writer, "paste.save", {"text": value, "folder": "/ignored", "key": "private-secret"})
+#         path = Path(result["result"]["path"])
+#         self.assertEqual(path.parent, self.frame.root / "pastes")
+#         self.assertEqual(path.read_bytes(), value.encode("utf-8"))
+#         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+#         self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+#         result = await self.call(reader, writer, "paste.save", {"text": "x" * 9999})
+#         self.assertEqual(result["error"]["code"], "invalid_input")
+#         self.assertEqual(len(list(path.parent.iterdir())), 1)
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_chat_wire.py::Windows.test_one_stalled_chat_does_not_hold_another_chat_or_call
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: chats.observer-isolation
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_chat_wire.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     async def test_one_stalled_chat_does_not_hold_another_chat_or_call(self) -> None:
+#         """chats.observer-isolation"""
+#         reader, writer = await self.open()
+#         entered, release = asyncio.Event(), asyncio.Event()
+#         original = self.backend.chats.chat_view.loader
+#         async def delayed(params: Params) -> Params:
+#             if params["chat"] == chat(1):
+#                 entered.set()
+#                 await release.wait()
+#             return await original(params)
+#         self.backend.chats.chat_view.loader = delayed
+#         await self.send(writer, {"type": "subscribe", "id": "slow", "topic": "chat", "params": {"chat": chat(1)}})
+#         await entered.wait()
+#         started = time.monotonic()
+#         await self.subscribe(reader, writer, "fast", "chat", {"chat": chat(2)})
+#         self.assertEqual((await self.call(reader, writer, "subscriptions.check"))["type"], "reply")
+#         self.assertLess(time.monotonic() - started, 0.75)
+#         ended = await self.until(reader, lambda value: value["type"] == "ended" and value["id"] == "slow")
+#         self.assertEqual(ended["error"]["code"], "timeout")
+#         self.assertTrue(any(sub.id == "fast" for sub in self.backend.chats.chat_view.topic.listeners))
+#         release.set()
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END

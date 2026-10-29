@@ -1034,3 +1034,179 @@ c7 = Scenario("C7", "Credentials stay out of Driver data and output",
               ["DRV-0.3", "DRV-1.3", "DRV-1.8"], run_c7)
 
 # Archived complete imports; restore needed names in their original scope, not at this file tail.
+
+# LOW TIER — DO NOT ENABLE OR RECREATE
+# Historical examples only. Read before adding related tests; never execute.
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/subscriptions.py::run_c3
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c3.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/subscriptions.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c3(home: ScenarioHome) -> None:
+#     family = find(await families(home), lambda value: value["auth"] == "key")
+#     if family is UNDEFINED:
+#         before = len(await home.received())
+#         refused = await home.json(["subscriptions", "create", "--family", "openai", "--label", "Unsupported key", "--id",
+#                                    "key-not-offered"])
+#         equal("Unavailable key family exit", refused.process["status"], 1)
+#         equal("Unavailable key family refusal",
+#               object_("Unavailable key family error", refused.result["error"])["code"], "invalid_input")
+#         equal("Unavailable key family starts no vendor", len(await home.received()), before)
+#         return
+#     identifier = text("Family id", family["id"])
+#     pending = home.start(["subscriptions", "sign-in", identifier])
+#     service: str | None = None
+#     try:
+#         step = await pending.step("store_secret")
+#         entry = object_("Keychain item", step["keychain"])
+#         service = text("Service", entry["service"])
+#         check("Test service is isolated", test(r"\.[a-f0-9]{12}\Z", service), "hashed test-directory service", service)
+#         equal("Item account", entry["account"], identifier)
+#         await store(service, identifier, "fixture-key“ ”—")
+#         failed = await pending.step("failed")
+#         error = object_("Error", failed["error"])
+#         equal("Validation error", error["code"], "invalid_input")
+#         message = error["message"]
+#         check("Offending characters named", isinstance(message, str) and "U+201C" in message and "U+00A0" in message
+#               and "U+2014" not in message, "up to three invalid code points", error)
+#         equal("Failed sign-in exit", (await pending.done)["status"], 1)
+#         equal("Rejected key removed",
+#               (await keychain(["find-generic-password", "-s", service, "-a", identifier, "-w"]))["status"], 44)
+#         equal("Failed state", (await subscription(home, identifier))["state"], "signed_out")
+#     finally:
+#         await pending.dispose()
+#         if service:
+#             await keychain(["delete-generic-password", "-s", service, "-a", identifier])
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/subscriptions.py::run_c8
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c8.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/subscriptions.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c8(home: ScenarioHome) -> None:
+#     await check_subscription_environments(home, True)
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/subscriptions.py::run_c39
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c39.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/subscriptions.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c39(home: ScenarioHome) -> None:
+#     await home.part("success")
+#     home.env["ARBOL_TEST_TIME_SCALE"] = "10"
+#     family = await vendor_family(home)
+#     created = await home.json(["subscriptions", "create", "--family", family, "--label", "Second", "--id", "second"])
+#     equal("Creation exit", created.process["status"], 0)
+#     await sign_in(home, family)
+#     await sign_in(home, "second")
+#     homes = set_size(entry["checks"]["home"] for entry in await home.received() if entry["arguments"][0] != "--version")
+#     equal("Distinct vendor homes", homes, 2)
+#     await home.call(["subscriptions", "sign-out", family])
+#     equal("First is out", (await subscription(home, family))["state"], "signed_out")
+#     equal("Second still works", (await home.json(["subscriptions", "check", "second"])).result["state"], "signed_in")
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/subscriptions.py::run_c41
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c41.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/subscriptions.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c41(home: ScenarioHome) -> None:
+#     offered = await families(home)
+#     if any(value["id"] == "chatgpt" for value in offered):
+#         await check_chatgpt_usage(home)
+#         return
+#     if [value["id"] for value in offered] == ["anthropic"]:
+#         await home.part("success")
+#         equal("Unsigned usage", (await home.json(["subscriptions", "usage", "anthropic"])).result["outcome"],
+#               "needs_sign_in")
+#         await sign_in(home, "anthropic")
+#         account = object_("Vendor account", (await subscription(home, "anthropic"))["account"])
+#         equal("Vendor plan", account["plan"], "fixture")
+#         before = len(await home.received())
+#         await home.call(["subscriptions", "list"])
+#         equal("List does not poll", len(await home.received()), before)
+#         unsupported = await home.json(["subscriptions", "usage", "anthropic"])
+#         equal("Usage unsupported before run", unsupported.result["outcome"], "unsupported")
+#         check_resources("unsupported.result.windows", unsupported.result["windows"])
+#         equal("Tool catalog source", (await home.json(["subscriptions", "models", "anthropic"])).result["source"],
+#               "tool")
+#         await home.part("unavailable")
+#         fallback = await home.json(["subscriptions", "models", "anthropic"])
+#         equal("Unavailable catalog marked builtin", fallback.result["source"], "builtin")
+#         check("Fallback is nonempty", isinstance(fallback.result["models"], list) and bool(fallback.result["models"]),
+#               "Anthropic models", fallback.result)
+#         for model in array(fallback.result["models"], "map", "models"):
+#             check("No retired model", not text("Model id", object_("Model", model)["id"]).startswith("glm"),
+#                   "Anthropic model", model)
+#         await home.part("success")
+#         out = await home.json(["subscriptions", "sign-out", "anthropic"])
+#         equal("Account gone", out.result["account"], UNDEFINED)
+#         equal("Cached usage gone", out.result["lastUsage"], UNDEFINED)
+#         before = len(await home.received())
+#         for command in ("check", "usage", "models", "sign-in"):
+#             stale = await home.json(["subscriptions", command, "zai"])
+#             equal("Retired route refused", stale.result["error"]["code"], "invalid_input")
+#         equal("Retired requests never reach native tool", len(await home.received()), before)
+#         return
+#     await home.part("success")
+#     home.env["ARBOL_TEST_TIME_SCALE"] = "10"
+#     gateway = await gateway_fixture(home)
+#     try:
+#         equal("Unsigned usage", (await home.json(["subscriptions", "usage", "zai"])).result["outcome"], "needs_sign_in")
+#         await sign_in(home, "zai")
+#         gateway.paths.clear()
+#         await home.call(["subscriptions", "list"])
+#         equal("List does not poll", gateway.paths, [])
+#         catalog = await home.json(["subscriptions", "models", "zai"])
+#         equal("Vendor source", catalog.result["source"], "vendor")
+#         equal("Only models request", gateway.paths, ["/api/paas/v4/models"])
+#         gateway.paths.clear()
+#         usage = await home.json(["subscriptions", "usage", "zai"])
+#         equal("Usage outcome", usage.result["outcome"], "ok")
+#         equal("Only requested usage", gateway.paths, ["/api/monitor/usage/quota/limit"])
+#         windows = usage.result["windows"]
+#         check_resources("usage.result.windows", windows)
+#         equal("Computed percentage", get(prop(windows, 0), "usedPercent"), 25)
+#         equal("Unknown reset absent", get(prop(windows, 1), "resetsAt"), UNDEFINED)
+#         equal("Unknown length absent", get(prop(windows, 2), "windowMinutes"), UNDEFINED)
+#         equal("Good usage cached", (await subscription(home, "zai"))["lastUsage"], usage.result)
+#         gateway.mode = "unavailable"
+#         unavailable = await home.json(["subscriptions", "usage", "zai"])
+#         equal("Unavailable usage", unavailable.result["outcome"], "unavailable")
+#         check("Error redacted", KEY not in unavailable.process["stdout"], "no key", "output checked")
+#         equal("Last good report preserved", (await subscription(home, "zai"))["lastUsage"], usage.result)
+#         fallback = await home.json(["subscriptions", "models", "zai"])
+#         equal("Fallback source", fallback.result["source"], "builtin")
+#         equal("Own family only", fallback.result["models"], [record(id="fixture-fallback", label="fixture-fallback")])
+#         await sign_in(home, "anthropic")
+#         account = object_("Vendor account", (await subscription(home, "anthropic"))["account"])
+#         equal("Vendor plan", account["plan"], "fixture")
+#         equal("Anthropic usage unsupported before run",
+#               (await home.json(["subscriptions", "usage", "anthropic"])).result["outcome"], "unsupported")
+#         equal("Tool catalog source", (await home.json(["subscriptions", "models", "anthropic"])).result["source"], "tool")
+#         await home.part("unavailable")
+#         await home.settings(gateway.settings)
+#         tool_fallback = await home.json(["subscriptions", "models", "anthropic"])
+#         equal("Tool fallback marked builtin", tool_fallback.result["source"], "builtin")
+#         tool_models = tool_fallback.result["models"]
+#         check("Tool fallback is its own family", isinstance(tool_models, list) and all(
+#             not text("Model", object_("Model entry", value)["id"]).startswith("fixture-") for value in tool_models),
+#             "Anthropic names", tool_models)
+#         await home.part("success")
+#         await home.settings(gateway.settings)
+#         out = await home.json(["subscriptions", "sign-out", "anthropic"])
+#         equal("Account gone", out.result["account"], UNDEFINED)
+#         equal("Cached usage gone", out.result["lastUsage"], UNDEFINED)
+#         gateway.mode = "rejected"
+#         equal("Rejected usage", (await home.json(["subscriptions", "usage", "zai"])).result["outcome"], "needs_sign_in")
+#         equal("Rejected key needs attention", (await subscription(home, "zai"))["state"], "needs_attention")
+#     finally:
+#         await gateway.dispose()
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
