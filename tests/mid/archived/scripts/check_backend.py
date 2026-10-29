@@ -14,8 +14,9 @@ from backend_package import verify  # noqa: E402
 def main() -> int:
     try:
         verify(ROOT)
+        # A Build runs the top tier only (SYL-329); the mid tier runs only when the owner asks.
         child = subprocess.run(
-            [str(ROOT / "runtime/python/bin/python3.14"), "-I", "-B", "-m", "unittest", "discover", "-s", str(ROOT / "tests"), "-p", "test*.py", "-v"],
+            [str(ROOT / "runtime/python/bin/python3.14"), "-I", "-B", "-m", "unittest", "discover", "-s", str(ROOT / "tests/top"), "-t", str(ROOT / "tests"), "-p", "test*.py", "-v"],
             cwd=ROOT,
             check=False,
         )
