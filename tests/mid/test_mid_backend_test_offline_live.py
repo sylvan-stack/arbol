@@ -102,3 +102,33 @@ class Offline(_support.Offline):
         self.assertGreater(updated["revision"], draft["revision"])
         self.assertEqual((await self.call(r, w, "draft.get", {"chat": chat(1)}))["result"]["text"], "owner keeps this in composer")
 # TEST-TIER-END tests/backend/test_offline_live.py::Offline.test_new_unconfirmed_folder_never_supplies_answer_and_failed_draft_save_keeps_sql_text
+
+# LOW TIER — DO NOT ENABLE OR RECREATE
+# Historical examples only. Read before adding related tests; never execute.
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_offline_live.py::Offline.test_offline_partial_append_and_file_replacement_replay_use_last_captured_snapshot
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: recovery.offline-partial; recovery.offline-replay-generation
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_offline_live.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     async def test_offline_partial_append_and_file_replacement_replay_use_last_captured_snapshot(self) -> None:
+#         """recovery.offline-partial; recovery.offline-replay-generation"""
+#         trunk, r, w = await self.opened()
+#         await offline(self.cluster)
+#         await self.backend.health.probe()
+#         raw = json.dumps({"n": 2, "event": {"runId": trunk.exchange+".1", "type": "text_delta", "text": "partial"}}).encode()
+#         trunk.append(raw)
+#         with self.assertRaises(TimeoutError):
+#             async with asyncio.timeout(0.2):
+#                 await self.event(r, "chat", "lines")
+#         trunk.append(b"\n")
+#         self.assertEqual((await self.event(r, "chat", "lines"))["lines"], [json.loads(raw)])
+#         replacement = {"n": 1, "event": {"runId": trunk.exchange+".1", "type": "text", "text": "replacement"}}
+#         path = trunk.folder / "events.jsonl"
+#         path.write_text(json.dumps(replacement)+"\n")
+#         snapshot = await self.event(r, "chat", "snapshot")
+#         self.assertEqual(snapshot["exchanges"][0]["state"], "open")
+#         self.assertEqual((await self.event(r, "chat", "lines"))["lines"], [replacement])
+#         active = (await self.call(r, w, "subscriptions.check"))["result"]["subscriptions"]
+#         self.assertIn("chat", [item["id"] for item in active])
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END

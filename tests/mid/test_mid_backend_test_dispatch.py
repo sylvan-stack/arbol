@@ -147,3 +147,299 @@ class Sending(_support.Sending):
         r, w = await self.open()
         self.assertIsNone((await self.call(r, w, "draft.get", {"chat": chat(1)}))["result"])
 # TEST-TIER-END tests/backend/test_dispatch.py::Sending.test_acceptance_survives_database_cleanup_failure_and_later_read_recovers
+
+# LOW TIER — DO NOT ENABLE OR RECREATE
+# Historical examples only. Read before adding related tests; never execute.
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_dispatch.py::Sending.test_acceptance_private_request_mark_before_start_duplicate_and_archived_preserved
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: sending.accepted; sending.mark-before-start; sending.repeat
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_dispatch.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     async def test_acceptance_private_request_mark_before_start_duplicate_and_archived_preserved(self) -> None:
+#         """sending.accepted; sending.mark-before-start; sending.repeat"""
+#         params = await self.with_draft(self.payload())
+#         await self.backend.chats.mark({"chat": chat(1), "archived": True})
+#         self.backend.dispatch.settings = replace(self.backend.settings, small_call_route={"driver": "claude",
+#             "subscription": "private", "model": "small"})
+#         r, w = await self.open()
+#         first = await self.call(r, w, "chat.send", params)
+#         self.assertEqual(first["result"]["duplicate"], False)
+#         record = starts(self.frame)[0]
+#         self.assertEqual(record["mode"], 0o600)
+#         self.assertEqual(record["directoryMode"], 0o700)
+#         self.assertEqual(record["pid"], record["pgid"])
+#         self.assertEqual(record["home"], str(self.frame.home))
+#         self.assertEqual(record["pgOverrides"], [])
+#         self.assertEqual(record["args"][:2], ["--root", self.backend.identity.root])
+#         self.assertIn("smallCallRoute", record["request"])
+#         self.assertEqual(record["draft"][0][2], params["exchange"])
+#         self.assertFalse((self.frame.root / "requests" / (params["exchange"] + ".json")).exists())
+#         self.assertIsNone(await self.backend.drafts.current({"chat": chat(1)}))
+#         marks = await self.db.execute("SELECT ongoing,archived_at IS NOT NULL FROM chat_marks WHERE chat_id=%s", [chat(1)])
+#         self.assertEqual(marks, [(True, True)])
+#         repeated = await self.call(r, w, "chat.send", params)
+#         self.assertTrue(repeated["result"]["duplicate"])
+#         self.assertEqual(await self.db.execute("SELECT count(*) FROM exchanges"), [(1,)])
+#         self.assertEqual(await self.db.execute("SELECT count(*) FROM messages"), [(1,)])
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_dispatch.py::Sending.test_definite_refusal_source_message_and_mark_clear
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: sending.refusal; sending.safe-errors
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_dispatch.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     async def test_definite_refusal_source_message_and_mark_clear(self) -> None:
+#         """sending.refusal; sending.safe-errors"""
+#         r, w = await self.open()
+#         for n, (code, source, explanation) in enumerate([
+#             ("chat_busy", "trunk", "The chat has an Exchange in progress: " + chat(700)),
+#             ("unknown_trunk", "root-manager", "No compatible Trunk."),
+#             ("future_refusal", "trunk", "A future refusal is still a refusal."),
+#             ("database_unavailable", "trunk", "Authorization Bearer fictional-private-value"),
+#         ]):
+#             install(self.frame, self.cluster.address, [{"reply": {"error": {"code": code, "message": explanation}}}])
+#             params = await self.with_draft(self.payload(exchange=800+n, id=n+1))
+#             reply = await self.call(r, w, "chat.send", params)
+#             self.assertEqual((reply["error"]["code"], reply["error"]["source"]), (code, source))
+#             if code == "database_unavailable":
+#                 self.assertNotIn("fictional-private-value", json.dumps(reply))
+#             else:
+#                 self.assertEqual(reply["error"]["message"], explanation)
+#             current = await self.backend.drafts.current({"chat": params["chat"]})
+#             assert current
+#             self.assertEqual(current["text"], params["message"])
+#             self.assertNotIn("sentAs", current)
+#         self.assertEqual(await self.db.execute("SELECT count(*) FROM exchanges"), [(0,)])
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_dispatch.py::Sending.test_production_25_15_schedule_uses_same_exchange_after_lost_reply
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: sending.production-25-15
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_dispatch.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     async def test_production_25_15_schedule_uses_same_exchange_after_lost_reply(self) -> None:
+#         """sending.production-25-15"""
+#         self.assertEqual((LIMITS["start"], RETRY_SECONDS, TOTAL_SECONDS), (25, 15, 120))
+#         install(self.frame, self.cluster.address, [{"sleep": 26, "raw": ""}, {}])
+#         self.backend.programs.limits["start"] = LIMITS["start"]
+#         self.backend.dispatch.retry, self.backend.dispatch.total = RETRY_SECONDS, TOTAL_SECONDS
+#         params = await self.with_draft(self.payload())
+#         result = await asyncio.wait_for(self.execute(params), 46)
+#         self.assertTrue(result["accepted"])
+#         rows = starts(self.frame)
+#         self.assertEqual(len(rows), 2)
+#         self.assertGreaterEqual(float(rows[1]["at"]) - float(rows[0]["at"]), 39.8)
+#         self.assertLess(float(rows[1]["at"]) - float(rows[0]["at"]), 42)
+#         self.assertTrue(all(not row["collision"] for row in rows))
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_dispatch.py::Sending.test_invalid_inputs_and_draft_ownership_precede_any_file_or_child
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: sending.validate-before-effects
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_dispatch.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     async def test_invalid_inputs_and_draft_ownership_precede_any_file_or_child(self) -> None:
+#         """sending.validate-before-effects"""
+#         base = await self.with_draft(self.payload())
+#         r, w = await self.open()
+#         invalid = [
+#             {**base, "chat": "../chat"}, {**base, "exchange": "../../x"},
+#             {**base, "route": {"driver": "unknown", "subscription": "private", "model": "m"}},
+#             {**base, "route": {"driver": "claude", "subscription": "unknown", "model": "m"}},
+#             {**base, "route": {"driver": "claude", "subscription": "private"}},
+#             {**base, "workingFolder": "relative"}, {**base, "workingFolder": "/absent-arbol-test-folder"},
+#             *({**base, "message": body} for body in ["", " ", "a\0b", "a" * (1024*1024+1)]),
+#             {**base, "draft": {"revision": True}},
+#             {**base, "draft": {"revision": 9999}},
+#             {**base, "draft": {"revision": base["draft"]["revision"], "folder": "/different"}},
+#             {**base, "message": "text not saved as this revision"},
+#         ]
+#         for params in invalid:
+#             reply = await self.call(r, w, "chat.send", params)
+#             self.assertIn(reply["error"]["code"], ("invalid_input", "draft_conflict"))
+#         self.assertEqual(starts(self.frame), [])
+#         self.assertFalse((self.frame.root / "requests").exists())
+#         current = await self.backend.drafts.current({"chat": chat(1)})
+#         assert current
+#         self.assertNotIn("sentAs", current)
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_dispatch.py::Sending.test_new_chat_repository_draft_is_accepted_then_removed
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: sending.repository-draft
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_dispatch.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     async def test_new_chat_repository_draft_is_accepted_then_removed(self) -> None:
+#         """sending.repository-draft"""
+#         params = await self.with_draft(self.payload(id=900), folder=True)
+#         result = await self.execute(params)
+#         self.assertEqual(result["chat"], chat(900))
+#         self.assertIsNone(await self.backend.drafts.current({"folder": str(self.frame.base)}))
+#         self.assertEqual(await self.db.execute("SELECT ongoing FROM chat_marks WHERE chat_id=%s", [chat(900)]), [(True,)])
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_dispatch.py::Sending.test_send_again_uses_old_chat_folder_no_message_and_passes_cannot_replace
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: sending.send-again; sending.cannot-replace
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_dispatch.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     async def test_send_again_uses_old_chat_folder_no_message_and_passes_cannot_replace(self) -> None:
+#         """sending.send-again; sending.cannot-replace"""
+#         await self.db.execute(
+#             "INSERT INTO exchanges(id,chat_id,number,state,trunk,build,route,working_folder,accepted_at,ended_at) "
+#             "VALUES(%s,%s,1,'completed','trivial','0','{}',%s,clock_timestamp(),clock_timestamp())",
+#             [chat(700), chat(2), str(self.frame.base)])
+#         params = {"exchange": chat(700), "newExchange": chat(800), "route": self.payload()["route"]}
+#         r, w = await self.open()
+#         reply = await self.call(r, w, "exchange.sendAgain", params)
+#         self.assertEqual(reply["result"]["chat"], chat(2))
+#         record = starts(self.frame)[0]
+#         self.assertNotIn("message", record["request"])
+#         self.assertEqual(record["request"]["workingFolder"], str(self.frame.base))
+#         self.assertEqual(record["args"][-2:], ["--replaces", chat(700)])
+#         install(self.frame, self.cluster.address, [{"reply": {"error": {"code": "cannot_replace", "message": "Not last."}}}])
+#         reply = await self.call(r, w, "exchange.sendAgain", {**params, "newExchange": chat(801)})
+#         self.assertEqual((reply["error"]["code"], reply["error"]["source"]), ("cannot_replace", "trunk"))
+#         for other in [{**params, "newExchange": chat(700)}, {**params, "exchange": "../x"},
+#                       {**params, "exchange": chat(999)}]:
+#             self.assertIn("error", await self.call(r, w, "exchange.sendAgain", other))
+#         self.assertEqual(len(starts(self.frame)), 2)
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_dispatch.py::Sending.test_malformed_and_mismatched_acceptance_never_clear_draft
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: sending.result-validation
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_dispatch.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     async def test_malformed_and_mismatched_acceptance_never_clear_draft(self) -> None:
+#         """sending.result-validation"""
+#         self.backend.dispatch.total = 0.15
+#         params = await self.with_draft(self.payload())
+#         reply = {"accepted": True, "duplicate": False, "exchange": chat(999), "chat": chat(1), "number": 1}
+#         install(self.frame, self.cluster.address, [{"reply": reply}])
+#         with self.assertRaises(Refused) as caught:
+#             await self.execute(params)
+#         self.assertEqual(caught.exception.code, "no_answer")
+#         current = await self.backend.drafts.current({"chat": chat(1)})
+#         assert current
+#         self.assertEqual(current["sentAs"], params["exchange"])
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_dispatch.py::Sending.test_draft_dispatch_requires_no_schema_or_contract_history_write_permissions
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: sending.no-ddl-history-writes
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_dispatch.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     async def test_draft_dispatch_requires_no_schema_or_contract_history_write_permissions(self) -> None:
+#         """sending.no-ddl-history-writes"""
+#         await self.db.execute("CREATE ROLE draft_client LOGIN")
+#         await self.db.execute("GRANT USAGE ON SCHEMA public TO draft_client")
+#         await self.db.execute("GRANT SELECT ON ALL TABLES IN SCHEMA public TO draft_client")
+#         await self.db.execute("GRANT INSERT,UPDATE,DELETE ON drafts,chat_settings,chat_marks,exchange_notes TO draft_client")
+#         await self.db.execute("GRANT USAGE ON SEQUENCE drafts_revision TO draft_client")
+#         await self.backend.database.execute("SELECT 1")
+#         assert self.backend.database.parameters is not None
+#         self.backend.database.parameters["user"] = "draft_client"
+#         params = await self.with_draft(self.payload())
+#         self.assertTrue((await self.execute(params))["accepted"])
+#         self.assertIsNone(await self.backend.drafts.current({"chat": chat(1)}))
+#         await self.db.execute("SELECT count(*) FROM chats")
+#         self.assertEqual(await self.db.execute("SELECT count(*) FROM messages"), [(1,)])
+#         self.assertEqual(await self.db.execute("SELECT last_value FROM drafts_revision"), [(1,)])
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_dispatch.py::Sending.test_stale_draft_and_existing_other_chat_identifier_have_no_dispatch_effect
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: sending.ownership
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_dispatch.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     async def test_stale_draft_and_existing_other_chat_identifier_have_no_dispatch_effect(self) -> None:
+#         """sending.ownership"""
+#         await self.db.execute(
+#             "INSERT INTO exchanges(id,chat_id,number,state,trunk,build,route,working_folder,accepted_at,ended_at) "
+#             "VALUES(%s,%s,1,'completed','trivial','0','{}',%s,clock_timestamp(),clock_timestamp())",
+#             [chat(800), chat(2), str(self.frame.base)])
+#         with self.assertRaises(Error) as caught:
+#             await self.execute(self.payload())
+#         self.assertEqual(caught.exception.code, "invalid_input")
+#         self.assertFalse((self.frame.root / "requests").exists())
+#         self.assertEqual(starts(self.frame), [])
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_dispatch.py::Sending.test_result_shape_and_safe_forwarding_project_only_known_fields
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: sending.acceptance-shape; sending.error-shape
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_dispatch.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     async def test_result_shape_and_safe_forwarding_project_only_known_fields(self) -> None:
+#         """sending.acceptance-shape; sending.error-shape"""
+#         params = self.payload()
+#         valid = {"accepted": True, "duplicate": True, "exchange": params["exchange"], "chat": params["chat"], "number": 1}
+#         self.assertEqual(self.backend.dispatch.result({**valid, "credential": "ignored"}, params), valid)
+#         invalid: list[Any] = [None, [], {}, {**valid, "accepted": 1}, {**valid, "duplicate": 0},
+#             {**valid, "number": True}, {**valid, "number": 0}, {**valid, "chat": chat(9)},
+#             {**valid, "root": "other"}, {"error": {"code": "bad/code", "message": "x"}},
+#             {"error": {"code": "chat_busy"}}, {"error": {"code": "chat_busy", "message": "x", "source": "unknown"}}]
+#         for value in invalid:
+#             with self.assertRaises(Error) as caught:
+#                 self.backend.dispatch.result(value, params)
+#             self.assertEqual(caught.exception.code, "no_answer")
+#         assert self.backend.database.parameters is not None
+#         self.backend.database.parameters["password"] = "opaquePrivateProofValue"
+#         try:
+#             with self.assertRaises(Error) as caught:
+#                 self.backend.dispatch.result({"error": {"code": "future_code", "source": "root-manager",
+#                     "message": "failure opaquePrivateProofValue"}}, params)
+#             self.assertEqual((caught.exception.code, caught.exception.source), ("future_code", "root-manager"))
+#             self.assertNotIn("opaquePrivateProofValue", str(caught.exception))
+#         finally:
+#             self.backend.database.parameters["password"] = ""
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_dispatch.py::Sending.test_other_chats_progress_while_one_start_waits
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: sending.chat-isolation
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_dispatch.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     async def test_other_chats_progress_while_one_start_waits(self) -> None:
+#         """sending.chat-isolation"""
+#         install(self.frame, self.cluster.address, [{"sleep": 0.65}])
+#         a = asyncio.create_task(self.execute(self.payload()))
+#         await self.wait_starts()
+#         install(self.frame, self.cluster.address, [{}])
+#         before = time.monotonic()
+#         b = await self.execute(self.payload(exchange=801, id=900))
+#         self.assertTrue(b["accepted"])
+#         self.assertLess(time.monotonic() - before, 0.5)
+#         self.assertFalse(a.done())
+#         self.assertTrue((await a)["accepted"])
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_dispatch.py::Sending.test_new_message_after_failed_cancelled_or_interrupted_is_delegated
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: sending.after-ended-exchange
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_dispatch.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     async def test_new_message_after_failed_cancelled_or_interrupted_is_delegated(self) -> None:
+#         """sending.after-ended-exchange"""
+#         for n, state in enumerate(("failed", "cancelled", "interrupted"), 1):
+#             await self.db.execute(
+#                 "INSERT INTO exchanges(id,chat_id,number,state,error,trunk,build,route,working_folder,accepted_at,ended_at) "
+#                 "VALUES(%s,%s,1,%s,CASE WHEN %s='failed' THEN '{\"code\":\"test_failure\"}'::jsonb END,"
+#                 "'trivial','0','{}',%s,clock_timestamp(),clock_timestamp())",
+#                 [chat(700+n), chat(n), state, state, str(self.frame.base)])
+#             result = await self.execute(self.payload(exchange=800+n, id=n))
+#             self.assertEqual((result["accepted"], result["number"]), (True, 2))
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END

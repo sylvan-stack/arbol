@@ -161,3 +161,7 @@ Source remains available; writing or running these checks requires a separate te
 | [`C38`](tests/mid/archived/conformance/scenarios/mimo.py#L479) | C38: killed run ownership and retained-group recovery | Kills a real native run owner, races recovery and verifies a new request never adopts or resubmits the old prompt. |
 | [`C39`](tests/mid/archived/conformance/scenarios/mimo.py#L480) | C39: MIM-A1 second-production refusal, isolated test record and changed-native-UID fencing | Changing a native UID cannot silently rebind an attached production/test account; observes unchanged native auth and zero inference. |
 | [`C42`](tests/mid/archived/conformance/scenarios/mimo.py#L481) | C42: failure after partial output retains closed/unfinished calls and usage | Provider failure after partial text and tool output must preserve observed output/usage, close tools once and avoid replay. |
+
+## Separate testing and low-tier history — SYL-330
+
+All test work, including top tier, belongs to a separate task explicitly requested by the owner. Only the owner decides when implementation is ready for tests. Previous low-tier removals are preserved as commented file-end examples, with reasons and source revisions in [the inventory](docs/test-inventory.md#commented-low-tier-source--syl-330). They add no retained mid-tier cases and must not be enabled or recreated.

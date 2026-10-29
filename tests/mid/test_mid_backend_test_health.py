@@ -72,3 +72,114 @@ class Availability(_support.Availability):
             server.close_clients()
             await server.wait_closed()
 # TEST-TIER-END tests/backend/test_health.py::Availability.test_connection_deadline_is_unavailable_and_the_whole_probe_is_bounded
+
+# LOW TIER — DO NOT ENABLE OR RECREATE
+# Historical examples only. Read before adding related tests; never execute.
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_health.py::Availability.test_actual_loss_opens_attention_for_two_windows_and_probe_return_closes_it
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: recovery.database-loss; recovery.attention; recovery.return
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_health.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     async def test_actual_loss_opens_attention_for_two_windows_and_probe_return_closes_it(self) -> None:
+#         """recovery.database-loss; recovery.attention; recovery.return"""
+#         clients = [await self.open(), await self.open()]
+#         for index, (r, w) in enumerate(clients):
+#             snapshot = await self.subscribe(r, w, str(index), "attention", {})
+#             self.assertNotIn("database_unreachable", [item["id"] for item in snapshot["items"]])
+#         await offline(self.cluster)
+#         before = time.monotonic()
+#         with self.assertRaises(Refused) as caught:
+#             await self.backend.database.execute("SELECT 1")
+#         self.assertEqual(caught.exception.code, "database_unavailable")
+#         self.assertLess(time.monotonic()-before, 5)
+#         self.assertTrue(self.backend.database.away)
+#         since = self.backend.chats.attention.items["database_unreachable"]["since"]
+#         for index, (r, _) in enumerate(clients):
+#             opened = await self.event(r, str(index), "opened")
+#             self.assertEqual(opened["item"]["kind"], "database_unreachable")
+#             self.assertIn("answers in progress go on", opened["item"]["message"])
+#         r, w = await self.open()
+#         before = time.monotonic()
+#         snapshot = await self.subscribe(r, w, "late", "attention", {})
+#         self.assertLess(time.monotonic()-before, 0.5)
+#         self.assertEqual(snapshot["items"][0]["since"], since)
+#         await online(self.cluster)
+#         await self.backend.health.probe()
+#         self.assertFalse(self.backend.database.away)
+#         for index, (r, _) in enumerate(clients):
+#             self.assertEqual((await self.event(r, str(index), "closed"))["id"], "database_unreachable")
+#         self.assertEqual(await self.backend.database.execute("SELECT 42"), [(42,)])
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_health.py::Availability.test_keychain_failure_timeout_exit44_and_secrets_are_classified_without_owner_lookup
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: recovery.keychain-classification; recovery.safe-cause
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_health.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     async def test_keychain_failure_timeout_exit44_and_secrets_are_classified_without_owner_lookup(self) -> None:
+#         """recovery.keychain-classification; recovery.safe-cause"""
+#         folder = self.frame.home / ".arbol"
+#         folder.mkdir()
+#         (folder / "database.json").write_text('{"address":"postgresql://bkd@127.0.0.1:5433"}')
+#         for failure, expected in ((Refused("timeout", "fictional-private-password"), "Keychain did not answer"),
+#                                   (Refused("database_unavailable", "fictional-private-password"), "Keychain lookup failed")):
+#             db = Database(replace(self.backend.identity, home=self.frame.home, database=None))
+#             attention = Attention()
+#             health = Health(db, attention)
+#             try:
+#                 with mock.patch("arbol_backend.database.password", side_effect=failure) as lookup:
+#                     await health.probe()
+#                 self.assertEqual(lookup.call_count, 1)
+#                 self.assertIn(expected, attention.items["database_unreachable"]["message"])
+#                 self.assertNotIn("fictional-private-password", json.dumps(attention.items))
+#             finally:
+#                 await health.close()
+#                 await db.close()
+#         db = Database(replace(self.backend.identity, home=self.frame.home, database=None))
+#         attention = Attention()
+#         health = Health(db, attention)
+#         try:
+#             with mock.patch("arbol_backend.database.password", return_value=""), mock.patch(
+#                     "arbol_backend.database.AsyncConnection.connect", side_effect=psycopg.OperationalError("fictional-private-password")):
+#                 await health.probe()
+#             self.assertNotIn("Keychain", attention.items["database_unreachable"]["message"])
+#             self.assertNotIn("fictional-private-password", json.dumps(attention.items))
+#         finally:
+#             await health.close()
+#             await db.close()
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_health.py::Availability.test_failed_configuration_can_be_corrected_and_retry_re_resolves_it
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: recovery.credentials-refresh; recovery.retry-cadence
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_health.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     async def test_failed_configuration_can_be_corrected_and_retry_re_resolves_it(self) -> None:
+#         """recovery.credentials-refresh; recovery.retry-cadence"""
+#         db = Database(self.backend.identity, seconds=0.15)
+#         attention = Attention()
+#         health = Health(db, attention, retry=0.08)
+#         from arbol_backend.database import credentials
+#         parameters = await credentials(db.identity)
+#         attempts: list[float] = []
+#         async def resolve(identity: object) -> dict[str, str]:
+#             attempts.append(time.monotonic())
+#             if len(attempts) == 1:
+#                 raise Refused("database_unavailable", "private cause")
+#             return parameters
+#         try:
+#             with mock.patch("arbol_backend.database.credentials", side_effect=resolve):
+#                 health.start()
+#                 async with asyncio.timeout(2):
+#                     while len(attempts) < 2 or db.away:
+#                         await asyncio.sleep(0.01)
+#             self.assertGreaterEqual(attempts[1]-attempts[0], 0.07)
+#             self.assertFalse(db.away)
+#             self.assertNotIn("database_unreachable", attention.items)
+#         finally:
+#             await health.close()
+#             await db.close()
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END

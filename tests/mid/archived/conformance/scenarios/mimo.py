@@ -501,3 +501,903 @@ async def run(home: ScenarioHome) -> None:
     if handler is None:
         raise RuntimeError(f"Mimo {home.id} is still unqualified: {SCOPES[home.id]}")
     await handler(home)
+
+# LOW TIER — DO NOT ENABLE OR RECREATE
+# Historical examples only. Read before adding related tests; never execute.
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/mimo.py::run::C1
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: C1: MIM-A1 local default/relabel and explicit second-production-account refusal
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/mimo.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# # Original scope/dispatch rows:
+#     "C1": "MIM-A1 local default/relabel and explicit second-production-account refusal",
+#         "C1": local_records,
+#
+# async def local_records(home: ScenarioHome) -> None:
+#     families = parse((await home.call(["subscriptions", "families"]))["stdout"])
+#     equal("Exactly the native Xiaomi family", [r["id"] for r in families], ["xiaomi"])
+#     equal("Native login semantics", families[0]["auth"], "vendor_login")
+#     initial = await account(home)
+#     equal("Initial binding is unsigned", initial["state"], "signed_out")
+#     await failure(
+#         home,
+#         ["subscriptions", "create", "--family", "xiaomi", "--label", "Second", "--id", "xiaomi-2"],
+#         "invalid_input",
+#     )
+#     changed = await home.json(["subscriptions", "update", "xiaomi", "--label", "Relabelled"])
+#     equal("Local label changes", changed.result["label"], "Relabelled")
+#     equal(
+#         "No native authentication for local records",
+#         [r for r in await home.received() if r.get("stage") != "install"],
+#         [],
+#     )
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/mimo.py::run::C2
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: C2: real pending attachment, replacement, five-minute scaled expiry and device-code refusal
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/mimo.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# # Original scope/dispatch rows:
+#     "C2": "real pending attachment, replacement, five-minute scaled expiry and device-code refusal",
+#         "C2": pending,
+#
+# async def pending(home: ScenarioHome, killed: bool = False) -> None:
+#     await options(home, "pending", authDelayMs=10000)
+#     active = home.start(["subscriptions", "sign-in", "xiaomi"])
+#     try:
+#
+#         async def seen() -> bool:
+#             return any(r.get("stage") == "authentication" for r in await home.received())
+#
+#         await wait_for("Real pending native attachment", seen)
+#         current = await account(home)
+#         equal("Pending is visible", current["state"], "signing_in")
+#         await failure(home, ["subscriptions", "sign-in", "xiaomi", "--by-code"], "unsupported")
+#         if killed:
+#             active.child.kill("SIGKILL")
+#             await active.done
+#             equal("Dead attempt is recovered", (await account(home))["state"], "signed_out")
+#         else:
+#             await options(home, "replacement")
+#             await signed(home)
+#             replaced = await active.done
+#             equal("Old attachment is fenced", json.loads(replaced["stdout"])["error"]["code"], "in_use")
+#     finally:
+#         await active.dispose()
+#     if not killed:
+#         home.env["ARBOL_TEST_TIME_SCALE"] = "60"
+#         await options(home, "pending", authDelayMs=10000)
+#         expired = home.start(["subscriptions", "sign-in", "xiaomi"])
+#         try:
+#             reply = await expired.done
+#             equal("Expired attempt cannot publish late success", json.loads(reply["stdout"])["error"]["code"], "in_use")
+#             equal("Five-minute scaled attempt expires", (await account(home))["state"], "signed_out")
+#         finally:
+#             await expired.dispose()
+#             home.env["ARBOL_TEST_TIME_SCALE"] = "1"
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/mimo.py::run::C3
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: C3: MIM-A2 malformed native-owned credential refuses without deletion
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/mimo.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# # Original scope/dispatch rows:
+#     "C3": "MIM-A2 malformed native-owned credential refuses without deletion",
+#         "C3": malformed,
+#
+# async def malformed(home: ScenarioHome) -> None:
+#     paths = json.loads(Path(home.tool, "fixture-paths.json").read_text())
+#     file = Path(paths["authFile"])
+#     value = json.loads(file.read_text())
+#     value["xiaomi"]["key"] = "invalid-é"
+#     file.write_text(json.dumps(value))
+#     before = file.read_bytes()
+#     result = await home.json(["subscriptions", "sign-in", "xiaomi"])
+#     equal("Malformed native key refuses", result.result["error"]["code"], "invalid_input")
+#     equal("Native credentials remain untouched", file.read_bytes().hex(), before.hex())
+#     equal("No authenticated request", [r for r in await home.received() if r.get("stage") != "install"], [])
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/mimo.py::run::C4
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: C4: rejection/attention state and fresh-check repair
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/mimo.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# # Original scope/dispatch rows:
+#     "C4": "rejection/attention state and fresh-check repair",
+#         "C4": rejection,
+#
+# async def rejection(home: ScenarioHome) -> None:
+#     await signed(home)
+#     await options(home, "rejected", authRejected=True)
+#     await failure(home, ["subscriptions", "check", "xiaomi"], "credential_rejected")
+#     equal("Rejection changes binding state", (await account(home))["state"], "needs_attention")
+#     await options(home, "repair")
+#     await home.json(["subscriptions", "check", "xiaomi"])
+#     equal("Fresh successful check repairs binding", (await account(home))["state"], "signed_in")
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/mimo.py::run::C5
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: C5: native-owned destructive refusal leaves active run untouched
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/mimo.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# # Original scope/dispatch rows:
+#     "C5": "native-owned destructive refusal leaves active run untouched",
+#         "C5": active_refusal,
+#
+# async def active_refusal(home: ScenarioHome) -> None:
+#     await signed(home)
+#     await options(home, "active", silent=True)
+#     active = home.start(
+#         ["run", "--control", "--request", str(request_file(home, runId="active-refusal", workingDirectory=home.home))]
+#     )
+#     try:
+#         await event(active, "started")
+#         for operation in ("remove", "sign-out"):
+#             for extra in ([], ["--force"]):
+#                 await failure(home, ["subscriptions", operation, "xiaomi", *extra], "invalid_input")
+#                 equal("Native-owned refusal leaves live work running", active.done.done(), False)
+#         active.send({"type": "stop"})
+#         stream(await active.done, "cancelled")
+#         equal("Binding remains attached", (await account(home))["state"], "signed_in")
+#     finally:
+#         await active.dispose()
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/mimo.py::run::C9
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: C9: native instructions plus additive caller context and unchanged source
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/mimo.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# # Original scope/dispatch rows:
+#     "C9": "native instructions plus additive caller context and unchanged source",
+#         "C9": context,
+#
+# async def context(home: ScenarioHome, skill: bool = False) -> None:
+#     work = Path(home.home, "project")
+#     work.mkdir()
+#     extra = Path(home.home, "extra")
+#     extra.mkdir()
+#     instructions = work / "AGENTS.md"
+#     instructions.write_text("OWNER_INSTRUCTION_SENTINEL\n")
+#     before = instructions.read_bytes()
+#     values: dict[str, Any] = {
+#         "expect": {"owner": "OWNER_INSTRUCTION_SENTINEL", "caller": "CALLER_CONTEXT_SENTINEL", "additional": str(extra)}
+#     }
+#     if skill:
+#         directory = work / ".mimocode/skills/shared-fixture"
+#         directory.mkdir(parents=True)
+#         (work / ".mimocode/.gitignore").write_text("node_modules\npackage.json\nbun.lock\nbun.lockb\n")
+#         file = directory / "SKILL.md"
+#         file.write_text(
+#             "---\nname: shared-fixture\ndescription: A synthetic qualification skill\n---\nSKILL_BODY_SENTINEL\n"
+#         )
+#         values["calls"] = [{"name": "skill", "arguments": {"name": "shared-fixture"}}]
+#     await signed(home)
+#     await options(home, **values)
+#     records = await request(
+#         home,
+#         workingDirectory=str(work),
+#         systemPrompt="CALLER_CONTEXT_SENTINEL",
+#         additionalDirectories=[str(extra)],
+#         tools="all" if skill else "none",
+#     )
+#     equal(
+#         "Native system retains owner and additive caller context",
+#         (await inputs(home))[0]["checks"]["expect"],
+#         {"owner": True, "caller": True, "additional": True},
+#     )
+#     equal("Owner instructions are unchanged", instructions.read_bytes().hex(), before.hex())
+#     if skill:
+#         check(
+#             "Actual native skill result survives",
+#             "SKILL_BODY_SENTINEL" in json.dumps(records),
+#             "native skill body",
+#             records,
+#         )
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/mimo.py::run::C10
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: C10: fragmented native UTF-8, exact ID/labels and complete blocks
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/mimo.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# # Original scope/dispatch rows:
+#     "C10": "fragmented native UTF-8, exact ID/labels and complete blocks",
+#         "C10": plain,
+#
+# async def plain(home: ScenarioHome) -> None:
+#     await signed(home)
+#     await options(home, fragmentBytes=7, text="Visible 👋 complete block")
+#     records = await request(home, labels={"check": home.id}, runId="exact-request-id")
+#     equal("Exact requested ID", records[-1]["runId"], "exact-request-id")
+#     equal("Caller labels survive every event", all(r.get("labels") == {"check": home.id} for r in records), True)
+#     equal(
+#         "Only complete text block", [r["text"] for r in records if r["type"] == "text"], ["Visible 👋 complete block"]
+#     )
+#     equal("Native request observed once", len(await inputs(home)), 1)
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/mimo.py::run::C11
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: C11: actual native shell command/result and paired public calls
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/mimo.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# # Original scope/dispatch rows:
+#     "C11": "actual native shell command/result and paired public calls",
+#         "C11": shell,
+#
+# async def shell(home: ScenarioHome, large: bool = False, failed: bool = False) -> None:
+#     await signed(home)
+#     command = (
+#         "printf native-shell-result; exit 7"
+#         if failed
+#         else ("python3 -c \"print('é' * 130000)\"" if large else "printf native-shell-result")
+#     )
+#     await options(
+#         home,
+#         "tools",
+#         calls=[{"name": "bash", "arguments": {"command": command, "description": "Synthetic shared shell"}}],
+#         prefixText="before-native-tool" if not large and not failed else "",
+#     )
+#     records = await request(home, tools="all", workingDirectory=home.home)
+#     started = [r for r in records if r["type"] == "tool_started"]
+#     finished = [r for r in records if r["type"] == "tool_finished"]
+#     equal("One native shell call", len(started), 1)
+#     equal("Tool calls balance", [r["callId"] for r in started], [r["callId"] for r in finished])
+#     equal("Original command is preserved", started[0]["input"]["command"], command)
+#     if large:
+#         equal("Native or common truncation is disclosed", finished[0].get("truncated"), True)
+#         check(
+#             "Result is bounded",
+#             len(json.dumps(finished[0], ensure_ascii=False).encode()) <= 205500,
+#             "bounded result",
+#             finished[0],
+#         )
+#     elif failed:
+#         equal("Failed shell remains a tool result", finished[0]["ok"], False)
+#     else:
+#         check(
+#             "Real shell output is retained",
+#             "native-shell-result" in json.dumps(finished[0]),
+#             "native shell result",
+#             finished[0],
+#         )
+#         first = next(i for i, row in enumerate(records) if row["type"] == "tool_started")
+#         last = next(i for i, row in enumerate(records) if row["type"] == "tool_finished")
+#         equal("Complete native prose precedes tool admission", any(r["type"] == "text" and "before-native-tool" in r["text"] for r in records[:first]), True)
+#         equal("Complete native prose follows tool completion", any(r["type"] == "text" for r in records[last + 1:]), True)
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/mimo.py::run::C13
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: C13: native usage and absence of fabricated monetary cost
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/mimo.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# # Original scope/dispatch rows:
+#     "C13": "native usage and absence of fabricated monetary cost",
+#         "C13": usage,
+#
+# async def usage(home: ScenarioHome) -> None:
+#     await signed(home)
+#     await options(
+#         home,
+#         usage={
+#             "prompt_tokens": 17,
+#             "completion_tokens": 11,
+#             "total_tokens": 28,
+#             "prompt_tokens_details": {"cached_tokens": 3},
+#             "completion_tokens_details": {"reasoning_tokens": 5},
+#         },
+#     )
+#     records = await request(home)
+#     reports = [r for r in records if r["type"] == "usage"]
+#     check("Native usage is reported", bool(reports), "native usage event", records)
+#     equal("Inclusive input tokens", reports[-1]["usage"]["inputTokens"], 17)
+#     equal("Inclusive output tokens", reports[-1]["usage"]["outputTokens"], 11)
+#     check("No fabricated cost", "cost" not in reports[-1], "cost absent", reports[-1])
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/mimo.py::run::C15
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: C15: control cancellation during actual shell work and bounded balanced cleanup
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/mimo.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# # Original scope/dispatch rows:
+#     "C15": "control cancellation during actual shell work and bounded balanced cleanup",
+#         "C15": stop,
+#
+# async def stop(home: ScenarioHome, mode: str = "control") -> None:
+#     await signed(home)
+#     await options(
+#         home,
+#         "active",
+#         calls=[{"name": "bash", "arguments": {"command": "sleep 60", "description": "Owned sleeping shell"}}],
+#     )
+#     path = request_file(home, tools="all", workingDirectory=home.home, runId="stopped")
+#     active = home.start(["run", "--control", "--request", str(path)])
+#     try:
+#         await event(active, "tool_started")
+#         started = time.monotonic()
+#         if mode == "signal":
+#             active.child.kill("SIGTERM")
+#         elif mode == "eof":
+#             active.child.stdin.end()
+#         else:
+#             active.send({"type": "stop"})
+#         reply = await active.done
+#         check("Cancelled process exits coherently", reply["status"] == 2, 2, reply)
+#         records = list(stream(reply, "cancelled"))
+#         check("Bounded cleanup", time.monotonic() - started <= 15, "<=15s", time.monotonic() - started)
+#         equal(
+#             "Interrupted tool is balanced",
+#             len([r for r in records if r["type"] == "tool_started"]),
+#             len([r for r in records if r["type"] == "tool_finished"]),
+#         )
+#         equal("Run reservation retired", parse((await home.call(["runs", "list"]))["stdout"]), [])
+#     finally:
+#         await active.dispose()
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/mimo.py::run::C16
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: C16: idempotent public stop for unknown and retired runs
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/mimo.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# # Original scope/dispatch rows:
+#     "C16": "idempotent public stop for unknown and retired runs",
+#         "C16": idempotent,
+#
+# async def idempotent(home: ScenarioHome) -> None:
+#     await home.call(["runs", "stop", "unknown"])
+#     await home.call(["runs", "stop", "unknown"])
+#     await signed(home)
+#     await request(home, runId="ended")
+#     equal("Stop of completed run", (await home.call(["runs", "stop", "ended"]))["status"], 0)
+#     equal("No stale active runs", parse((await home.call(["runs", "list"]))["stdout"]), [])
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/mimo.py::run::C17
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: C17: signal/EOF cleanup during actual shell work
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/mimo.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# # Original scope/dispatch rows:
+#     "C17": "signal/EOF cleanup during actual shell work",
+#         "C17": signal_and_eof,
+#
+# async def signal_and_eof(home: ScenarioHome) -> None:
+#     await stop(home, "signal")
+#     await stop(home, "eof")
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/mimo.py::run::C19
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: C19: actual empty tool set and ephemeral run retirement
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/mimo.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# # Original scope/dispatch rows:
+#     "C19": "actual empty tool set and ephemeral run retirement",
+#         "C19": tools_off,
+#
+# async def tools_off(home: ScenarioHome) -> None:
+#     await signed(home)
+#     await options(home, text="ready")
+#     await request(home)
+#     equal("Actual native model tool set is empty", (await inputs(home))[-1]["checks"]["tools"], [])
+#     equal("No public active runs after ephemeral cleanup", parse((await home.call(["runs", "list"]))["stdout"]), [])
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/mimo.py::run::C20
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: C20: large multibyte native shell result stays bounded
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/mimo.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# # Original scope/dispatch rows:
+#     "C20": "large multibyte native shell result stays bounded",
+#         "C20": lambda h: shell(h, True),
+#
+# async def shell(home: ScenarioHome, large: bool = False, failed: bool = False) -> None:
+#     await signed(home)
+#     command = (
+#         "printf native-shell-result; exit 7"
+#         if failed
+#         else ("python3 -c \"print('é' * 130000)\"" if large else "printf native-shell-result")
+#     )
+#     await options(
+#         home,
+#         "tools",
+#         calls=[{"name": "bash", "arguments": {"command": command, "description": "Synthetic shared shell"}}],
+#         prefixText="before-native-tool" if not large and not failed else "",
+#     )
+#     records = await request(home, tools="all", workingDirectory=home.home)
+#     started = [r for r in records if r["type"] == "tool_started"]
+#     finished = [r for r in records if r["type"] == "tool_finished"]
+#     equal("One native shell call", len(started), 1)
+#     equal("Tool calls balance", [r["callId"] for r in started], [r["callId"] for r in finished])
+#     equal("Original command is preserved", started[0]["input"]["command"], command)
+#     if large:
+#         equal("Native or common truncation is disclosed", finished[0].get("truncated"), True)
+#         check(
+#             "Result is bounded",
+#             len(json.dumps(finished[0], ensure_ascii=False).encode()) <= 205500,
+#             "bounded result",
+#             finished[0],
+#         )
+#     elif failed:
+#         equal("Failed shell remains a tool result", finished[0]["ok"], False)
+#     else:
+#         check(
+#             "Real shell output is retained",
+#             "native-shell-result" in json.dumps(finished[0]),
+#             "native shell result",
+#             finished[0],
+#         )
+#         first = next(i for i, row in enumerate(records) if row["type"] == "tool_started")
+#         last = next(i for i, row in enumerate(records) if row["type"] == "tool_finished")
+#         equal("Complete native prose precedes tool admission", any(r["type"] == "text" and "before-native-tool" in r["text"] for r in records[:first]), True)
+#         equal("Complete native prose follows tool completion", any(r["type"] == "text" for r in records[last + 1:]), True)
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/mimo.py::run::C25
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: C25: native permission handling through production hooks
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/mimo.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# # Original scope/dispatch rows:
+#     "C25": "native permission handling through production hooks",
+#         "C25": permission,
+#
+# async def permission(home: ScenarioHome) -> None:
+#     # Native irreversible-delete confirmation remains distinct from question asks.
+#     victim = Path(home.home, "delete-me")
+#     victim.write_text("disposable")
+#     await signed(home)
+#     await options(
+#         home,
+#         calls=[
+#             {
+#                 "name": "bash",
+#                 "arguments": {"command": "rm " + str(victim), "description": "Synthetic forced delete confirmation"},
+#             }
+#         ],
+#     )
+#     records = await request(home, tools="all", workingDirectory=home.home)
+#     equal("Recognized native delete permission is approved", victim.exists(), False)
+#     equal("Permission is never a public question", len([r for r in records if r["type"] == "ask_opened"]), 0)
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/mimo.py::run::C26
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: C26: native structured failure classification
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/mimo.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# # Original scope/dispatch rows:
+#     "C26": "native structured failure classification",
+#         "C26": classification,
+#
+# async def classification(home: ScenarioHome) -> None:
+#     for status, kind, code in [
+#         (400, "context_length_exceeded", "context_exceeded"),
+#         (413, "fixture_error", "context_exceeded"),
+#         (403, "invalid_api_key", "credential_rejected"),
+#         (403, "permission_denied", "vendor_error"),
+#         (404, "fixture_error", "vendor_error"),
+#         (422, "fixture_error", "vendor_error"),
+#         (500, "fixture_error", "vendor_unavailable"),
+#         (503, "context_length_exceeded", "vendor_unavailable"),
+#     ]:
+#         await signed(home)
+#         await options(home, status=status, errorCode=kind, error="rate authentication misleading prose")
+#         before = len(await inputs(home))
+#         records = await request(home, "failed")
+#         problem = records[-1]["error"]
+#         equal("Structured native classification", problem["code"], code)
+#         equal("Native fields outrank message wording", problem["detail"]["basis"], "fields")
+#         equal("Retry policy is explicit", problem["retryable"], code == "vendor_unavailable")
+#         equal("One provider attempt per refusal", len(await inputs(home)) - before, 1)
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/mimo.py::run::C27
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: C27: first rate rejection stops native retry
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/mimo.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# # Original scope/dispatch rows:
+#     "C27": "first rate rejection stops native retry",
+#         "C27": lambda h: errors(h, 429),
+#
+# async def errors(home: ScenarioHome, status: int) -> None:
+#     await signed(home)
+#     await options(home, "error", status=status, retryAfter="2", error="Synthetic refusal")
+#     records = await request(home, "failed")
+#     code = "credential_rejected" if status == 401 else "rate_limited" if status == 429 else "vendor_unavailable"
+#     equal("First native error is retained", records[-1]["error"]["code"], code)
+#     if status == 429:
+#         equal("Explicit vendor wait uses seconds", records[-1]["error"].get("retryAfterSeconds"), 2)
+#     equal("Only credential rejection marks the binding", (await account(home))["state"], "needs_attention" if status == 401 else "signed_in")
+#     await asyncio.sleep(2.2)
+#     equal("No advertised native retry escaped abort", len(await inputs(home)), 1)
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/mimo.py::run::C30
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: C30: observed run tokens never fabricate native allowance windows or polling
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/mimo.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# # Original scope/dispatch rows:
+#     "C30": "observed run tokens never fabricate native allowance windows or polling",
+#         "C30": latest_allowance,
+#
+# async def latest_allowance(home: ScenarioHome) -> None:
+#     await signed(home)
+#     await options(home, usage={"prompt_tokens": 17, "completion_tokens": 11, "total_tokens": 28})
+#     records = await request(home)
+#     equal("Actual token usage is retained", records[-1]["usage"]["inputTokens"], 17)
+#     before = len(await home.received())
+#     allowance = (await home.json(["subscriptions", "usage", "xiaomi"])).result
+#     equal("Run tokens do not fabricate quota windows", [allowance["outcome"], allowance["windows"]], ["unsupported", []])
+#     equal("Unsupported allowance starts no native operation", len(await home.received()), before)
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/mimo.py::run::C31
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: C31: unqualified native binary/profile refusal
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/mimo.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# # Original scope/dispatch rows:
+#     "C31": "unqualified native binary/profile refusal",
+#         "C31": native_refusal,
+#
+# async def native_refusal(home: ScenarioHome) -> None:
+#     await signed(home)
+#     file = Path(home.tool, "fixture-manifest.json")
+#     manifest = json.loads(file.read_text())
+#     for target, code in [
+#         (str(Path(home.tool, "missing-native")), "tool_missing"),
+#         (str(Path(home.tool, "fake-native")), "tool_unsupported"),
+#     ]:
+#         fake = Path(home.tool, "fake-native")
+#         fake.write_text('#!/bin/sh\ntouch "' + home.tool + '/must-not-execute"\n')
+#         fake.chmod(0o700)
+#         manifest["binary"] = target
+#         file.write_text(json.dumps(manifest))
+#         records = await request(home, "failed")
+#         equal("Native profile refusal", records[-1]["error"]["code"], code)
+#         equal("Unqualified code was never started", Path(home.tool, "must-not-execute").exists(), False)
+#     equal("Native binary refusals spend no inference", await inputs(home), [])
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/mimo.py::run::C32
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: C32: enabled release CLI plus synthetic native development orchestration without real-provider calls
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/mimo.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# # Original scope/dispatch rows:
+#     "C32": "enabled release CLI plus synthetic native development orchestration without real-provider calls",
+#         "C32": development,
+#
+# async def development(home: ScenarioHome) -> None:
+#     identity = (await home.json(["info"])).result
+#     equal("Mimo contract identity", [identity["driver"], identity["contract"]], ["mimo", 2])
+#     equal("Qualified public execution is enabled", identity["capabilities"], {"inference": True, "nativeAttachment": True})
+#     await home.json(
+#         ["subscriptions", "create", "--family", "xiaomi", "--label", "Synthetic test", "--id", "test-xiaomi"]
+#     )
+#     refused = await home.json(["dev", "build-check"])
+#     equal("Unsigned test binding refuses", refused.result["error"]["code"], "not_signed_in")
+#     await signed(home, "test-xiaomi")
+#     await options(home, "build-check", devChecks=True)
+#     before = len(await inputs(home))
+#     build = await home.json(["dev", "build-check"])
+#     equal("Single-message synthetic Build orchestration", build.process["status"], 0)
+#     equal("One actual native provider call", len(await inputs(home)) - before, 1)
+#     equal("Build disables every native tool route", (await inputs(home))[-1]["checks"]["tools"], [])
+#     await options(home, "live-check", devChecks=True)
+#     old = home.timeout_ms
+#     home.timeout_ms = 120000
+#     try:
+#         live = await home.json(["dev", "live-check"])
+#     finally:
+#         home.timeout_ms = old
+#     check("Extended synthetic native orchestration", live.process["status"] == 0, "successful native stages", live.result)
+#     equal("Five stages attempted", live.result["turnsAttempted"], 5)
+#     equal("Spend stays explicit unknown", live.result["spend"], "unknown")
+#     await options(home, "probe")
+#     before = len(await inputs(home))
+#     probe = await home.json(["dev", "probe"])
+#     check("No-prompt probe completes", probe.process["status"] == 0, "successful no-prompt report", probe.result)
+#     equal("Probe spends no model requests", len(await inputs(home)), before)
+#     # Initial stdin request and following control must share one unbuffered stream.
+#     await signed(home)
+#     await options(home, silent=True)
+#     active = home.start(["run", "--request", "-", "--control"])
+#     try:
+#         active.child.stdin.write(
+#             json.dumps(
+#                 {"tools": "none", "history": [], "input": {"role": "user", "text": "stdin-frame"}, "runId": "stdin-run"}
+#             )
+#             + "\n"
+#             + '{"type":"stop"}\n'
+#         )
+#         records = list(stream(await active.done, "cancelled"))
+#         equal("Stdin request ID survives following control", records[-1]["runId"], "stdin-run")
+#     finally:
+#         await active.dispose()
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/mimo.py::run::C33
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: C33: no-control native question is refused before execution
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/mimo.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# # Original scope/dispatch rows:
+#     "C33": "no-control native question is refused before execution",
+#         "C33": lambda h: questions(h, False),
+#
+# async def questions(home: ScenarioHome, controlled: bool = True) -> None:
+#     await signed(home)
+#     await options(home, calls=[{"name": "question", "arguments": QUESTION}])
+#     path = request_file(home, tools="all", workingDirectory=home.home)
+#     if not controlled:
+#         records = list(stream(await home.call(["run", "--request", str(path)])))
+#         equal("Unattended questions never open a public ask", len([r for r in records if r["type"] == "ask_opened"]), 0)
+#         check(
+#             "No-control refusal reaches the model tool result",
+#             "Nobody is connected" in json.dumps(records),
+#             "refusal result",
+#             records,
+#         )
+#         return
+#     active = home.start(["run", "--control", "--request", str(path)])
+#     try:
+#         ask = await event(active, "ask_opened")
+#         answer = {
+#             "type": "answer",
+#             "askId": ask["askId"],
+#             "answer": {"type": "answers", "answers": {"q2": ["X", "Y"], "q1": ["B"]}},
+#         }
+#         active.send({"type": "answer", "askId": ask["askId"], "answer": {"type": "answers", "answers": {"q1": ["A"]}}})
+#         await event(active, "control_refused")
+#         active.send(answer)
+#         active.send(answer)
+#         records = list(stream(await active.done))
+#         equal("One public ask", len([r for r in records if r["type"] == "ask_opened"]), 1)
+#         equal("One ask closure", len([r for r in records if r["type"] == "ask_closed"]), 1)
+#         equal(
+#             "Malformed control is refused once; duplicate valid answer is idempotent",
+#             len([r for r in records if r["type"] == "control_refused"]),
+#             1,
+#         )
+#         results = json.dumps([r for r in records if r["type"] == "tool_finished"])
+#         check(
+#             "Ordered native answer values are returned",
+#             "B" in results and "X" in results and "Y" in results,
+#             "ordered answer result",
+#             results,
+#         )
+#     finally:
+#         await active.dispose()
+#
+#     await options(home, calls=[{"name": "question", "arguments": QUESTION}])
+#     declined = home.start(["run", "--control", "--request", str(request_file(home, tools="all", workingDirectory=home.home))])
+#     try:
+#         ask = await event(declined, "ask_opened")
+#         declined.send({"type": "answer", "askId": ask["askId"], "answer": {"type": "decline"}})
+#         closed = list(stream(await declined.done, "cancelled"))
+#         equal("Caller decline closes the ask once", len([r for r in closed if r["type"] == "ask_closed"]), 1)
+#     finally:
+#         await declined.dispose()
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/mimo.py::run::C35
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: C35: ordinary failed native shell continues with balanced result
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/mimo.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# # Original scope/dispatch rows:
+#     "C35": "ordinary failed native shell continues with balanced result",
+#         "C35": lambda h: shell(h, failed=True),
+#
+# async def shell(home: ScenarioHome, large: bool = False, failed: bool = False) -> None:
+#     await signed(home)
+#     command = (
+#         "printf native-shell-result; exit 7"
+#         if failed
+#         else ("python3 -c \"print('é' * 130000)\"" if large else "printf native-shell-result")
+#     )
+#     await options(
+#         home,
+#         "tools",
+#         calls=[{"name": "bash", "arguments": {"command": command, "description": "Synthetic shared shell"}}],
+#         prefixText="before-native-tool" if not large and not failed else "",
+#     )
+#     records = await request(home, tools="all", workingDirectory=home.home)
+#     started = [r for r in records if r["type"] == "tool_started"]
+#     finished = [r for r in records if r["type"] == "tool_finished"]
+#     equal("One native shell call", len(started), 1)
+#     equal("Tool calls balance", [r["callId"] for r in started], [r["callId"] for r in finished])
+#     equal("Original command is preserved", started[0]["input"]["command"], command)
+#     if large:
+#         equal("Native or common truncation is disclosed", finished[0].get("truncated"), True)
+#         check(
+#             "Result is bounded",
+#             len(json.dumps(finished[0], ensure_ascii=False).encode()) <= 205500,
+#             "bounded result",
+#             finished[0],
+#         )
+#     elif failed:
+#         equal("Failed shell remains a tool result", finished[0]["ok"], False)
+#     else:
+#         check(
+#             "Real shell output is retained",
+#             "native-shell-result" in json.dumps(finished[0]),
+#             "native shell result",
+#             finished[0],
+#         )
+#         first = next(i for i, row in enumerate(records) if row["type"] == "tool_started")
+#         last = next(i for i, row in enumerate(records) if row["type"] == "tool_finished")
+#         equal("Complete native prose precedes tool admission", any(r["type"] == "text" and "before-native-tool" in r["text"] for r in records[:first]), True)
+#         equal("Complete native prose follows tool completion", any(r["type"] == "text" for r in records[last + 1:]), True)
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/mimo.py::run::C36
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: C36: native keyed question validation and exactly-once answers
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/mimo.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# # Original scope/dispatch rows:
+#     "C36": "native keyed question validation and exactly-once answers",
+#         "C36": questions,
+#
+# async def questions(home: ScenarioHome, controlled: bool = True) -> None:
+#     await signed(home)
+#     await options(home, calls=[{"name": "question", "arguments": QUESTION}])
+#     path = request_file(home, tools="all", workingDirectory=home.home)
+#     if not controlled:
+#         records = list(stream(await home.call(["run", "--request", str(path)])))
+#         equal("Unattended questions never open a public ask", len([r for r in records if r["type"] == "ask_opened"]), 0)
+#         check(
+#             "No-control refusal reaches the model tool result",
+#             "Nobody is connected" in json.dumps(records),
+#             "refusal result",
+#             records,
+#         )
+#         return
+#     active = home.start(["run", "--control", "--request", str(path)])
+#     try:
+#         ask = await event(active, "ask_opened")
+#         answer = {
+#             "type": "answer",
+#             "askId": ask["askId"],
+#             "answer": {"type": "answers", "answers": {"q2": ["X", "Y"], "q1": ["B"]}},
+#         }
+#         active.send({"type": "answer", "askId": ask["askId"], "answer": {"type": "answers", "answers": {"q1": ["A"]}}})
+#         await event(active, "control_refused")
+#         active.send(answer)
+#         active.send(answer)
+#         records = list(stream(await active.done))
+#         equal("One public ask", len([r for r in records if r["type"] == "ask_opened"]), 1)
+#         equal("One ask closure", len([r for r in records if r["type"] == "ask_closed"]), 1)
+#         equal(
+#             "Malformed control is refused once; duplicate valid answer is idempotent",
+#             len([r for r in records if r["type"] == "control_refused"]),
+#             1,
+#         )
+#         results = json.dumps([r for r in records if r["type"] == "tool_finished"])
+#         check(
+#             "Ordered native answer values are returned",
+#             "B" in results and "X" in results and "Y" in results,
+#             "ordered answer result",
+#             results,
+#         )
+#     finally:
+#         await active.dispose()
+#
+#     await options(home, calls=[{"name": "question", "arguments": QUESTION}])
+#     declined = home.start(["run", "--control", "--request", str(request_file(home, tools="all", workingDirectory=home.home))])
+#     try:
+#         ask = await event(declined, "ask_opened")
+#         declined.send({"type": "answer", "askId": ask["askId"], "answer": {"type": "decline"}})
+#         closed = list(stream(await declined.done, "cancelled"))
+#         equal("Caller decline closes the ask once", len([r for r in closed if r["type"] == "ask_closed"]), 1)
+#     finally:
+#         await declined.dispose()
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/mimo.py::run::C40
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: C40: unsigned and invalid request refusals before native inference
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/mimo.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# # Original scope/dispatch rows:
+#     "C40": "unsigned and invalid request refusals before native inference",
+#         "C40": refusal,
+#
+# async def refusal(home: ScenarioHome) -> None:
+#     for command in ("check", "models"):
+#         await failure(home, ["subscriptions", command, "xiaomi"], "not_signed_in")
+#     records = await request(home, "failed")
+#     equal("Unsigned run one final", len(records), 1)
+#     equal("Unsigned error", records[-1]["error"]["code"], "not_signed_in")
+#     equal("Unsigned refusal makes no inference", await inputs(home), [])
+#     await signed(home)
+#     for fields in ({"tools": "all"}, {"serviceTier": "unoffered"}, {"limits": {"totalSeconds": True}},
+#                    {"input": {"role": "assistant", "text": "invalid-current-role"}}, {"model": "unknown-model"},
+#                    {"effort": "unoffered-effort"}):
+#         invalid = await request(home, "failed", **fields)
+#         equal("Malformed or unoffered request refuses", invalid[-1]["error"]["code"], "invalid_input")
+#     equal("Invalid requests spend no inference", await inputs(home), [])
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/mimo.py::run::C41
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: C41: authenticated native catalog and explicit allowance applicability
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/mimo.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# # Original scope/dispatch rows:
+#     "C41": "authenticated native catalog and explicit allowance applicability",
+#         "C41": metadata,
+#
+# async def metadata(home: ScenarioHome) -> None:
+#     unsigned = await home.json(["subscriptions", "usage", "xiaomi"])
+#     equal("Unsigned allowance", unsigned.result["outcome"], "needs_sign_in")
+#     await signed(home)
+#     equal(
+#         "Unknown native allowance",
+#         (await home.json(["subscriptions", "usage", "xiaomi"])).result["outcome"],
+#         "unsupported",
+#     )
+#     models = (await home.json(["subscriptions", "models", "xiaomi"])).result
+#     check("Authenticated native catalog", any(m["id"] == MODEL for m in models["models"]), MODEL, models)
+#     equal("Catalog makes no inference", await inputs(home), [])
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/mimo.py::run::C43
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: C43: unwritable run state has one pre-start failure
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/mimo.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# # Original scope/dispatch rows:
+#     "C43": "unwritable run state has one pre-start failure",
+#         "C43": state_failure,
+#
+# async def state_failure(home: ScenarioHome) -> None:
+#     await signed(home)
+#     file = Path(home.home, "state-is-a-file")
+#     file.write_text("owner bytes")
+#     reply = await home.call(["--state-dir", str(file), "run", "--run-id", "failed-state", "synthetic"])
+#     records = list(stream(reply, "failed"))
+#     equal("Exactly one pre-start final", len(records), 1)
+#     equal("Original state file survives", file.read_text(), "owner bytes")
+#     equal("No inference before state refusal", await inputs(home), [])
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END

@@ -132,3 +132,214 @@ class Returned(_support.Returned):
             self.assertEqual((snapshot["exchanges"][0]["state"], snapshot["exchanges"][0]["items"][-1]["text"]),
                              ("completed", "durable newer answer"))
 # TEST-TIER-END tests/backend/test_return.py::Returned.test_delayed_return_snapshot_cannot_reopen_an_already_saved_exchange
+
+# LOW TIER — DO NOT ENABLE OR RECREATE
+# Historical examples only. Read before adding related tests; never execute.
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_return.py::Returned.test_repeated_actual_return_refreshes_every_topic_in_two_windows_and_preserves_draft
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: recovery.all-topic-snapshots; recovery.repeated-return; recovery.draft-preserved
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_return.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     async def test_repeated_actual_return_refreshes_every_topic_in_two_windows_and_preserves_draft(self) -> None:
+#         """recovery.all-topic-snapshots; recovery.repeated-return; recovery.draft-preserved"""
+#         clients = [await self.open(), await self.open()]
+#         params = {"chat": chat(1)}
+#         draft = (await self.call(*clients[0], "draft.save", {**params, "text": "keep this Draft", "baseRevision": None}))["result"]
+#         for r, w in clients:
+#             for topic in ("root", "chats", "chat", "draft", "attention"):
+#                 await self.subscribe(r, w, topic, topic, params if topic in {"chat", "draft"} else {})
+#         install(self.frame, {})
+#         for _ in range(2):
+#             before = len(calls(self.frame, kind="settle", root=self.backend.identity.root))
+#             await offline(self.cluster)
+#             await self.backend.health.probe()
+#             for r, _ in clients:
+#                 await self.event(r, "attention", "opened")
+#             await online(self.cluster)
+#             await self.backend.health.probe()
+#             await self.recovered()
+#             for r, _ in clients:
+#                 await self.event(r, "attention", "closed")
+#                 for topic in ("root", "chats", "chat", "draft", "attention"):
+#                     value = await self.event(r, topic, "snapshot")
+#                     if topic == "draft":
+#                         self.assertEqual((value["draft"]["text"], value["draft"]["revision"]), ("keep this Draft", draft["revision"]))
+#                     if topic == "attention":
+#                         self.assertNotIn("database_unreachable", [item["id"] for item in value["items"]])
+#             async with asyncio.timeout(2):
+#                 while len(calls(self.frame, kind="settle", root=self.backend.identity.root)) <= before:
+#                     await asyncio.sleep(0.01)
+#         self.assertEqual(await self.db.execute("SELECT count(*) FROM drafts"), [(1,)])
+#         self.assertEqual(await self.db.execute("SELECT count(*) FROM exchanges"), [(0,)])
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_return.py::Returned.test_successful_handshake_but_stalled_select_does_not_close_attention
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: recovery.whole-probe-confirmation; recovery.renew-lock-bound
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_return.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     async def test_successful_handshake_but_stalled_select_does_not_close_attention(self) -> None:
+#         """recovery.whole-probe-confirmation; recovery.renew-lock-bound"""
+#         db = Database(self.backend.identity, seconds=0.08)
+#         health = Health(db, Attention())
+#         health.failed("private outage")
+#         returned = mock.AsyncMock()
+#         health.on_return = returned
+#         original = Session.execute
+#         async def stalled(session: Session, sql: str, params: Any = None) -> Any:
+#             if sql == "SELECT 1":
+#                 await asyncio.sleep(1)
+#             return await original(session, sql, params)
+#         try:
+#             with mock.patch.object(Session, "execute", stalled):
+#                 await health.probe()
+#             self.assertTrue(db.away)
+#             self.assertIn("database_unreachable", health.attention.items)
+#             returned.assert_not_awaited()
+#             async with db.credentials_lock:
+#                 before = time.monotonic()
+#                 await health.probe()
+#                 self.assertLess(time.monotonic()-before, 0.3)
+#             self.assertTrue(db.away)
+#             await health.probe()
+#             await asyncio.gather(*list(health.recoveries))
+#             returned.assert_awaited_once()
+#             self.assertFalse(db.away)
+#         finally:
+#             await health.close()
+#             await db.close()
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_return.py::Returned.test_normal_credential_waiter_rechecks_the_away_gate
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: recovery.credential-lock-race
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_return.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     async def test_normal_credential_waiter_rechecks_the_away_gate(self) -> None:
+#         """recovery.credential-lock-race"""
+#         db = Database(self.backend.identity)
+#         health = Health(db, Attention())
+#         try:
+#             async with db.credentials_lock:
+#                 waiting = asyncio.create_task(db.execute("SELECT 1"))
+#                 await asyncio.sleep(0)
+#                 health.failed("private outage")
+#             with self.assertRaises(Refused) as caught:
+#                 await waiting
+#             self.assertEqual(caught.exception.code, "database_unavailable")
+#             self.assertTrue(db.away)
+#             self.assertIsNone(db.parameters)
+#         finally:
+#             await health.close()
+#             await db.close()
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_return.py::Returned.test_delayed_return_snapshot_cannot_overwrite_a_newer_draft_delta
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: recovery.draft-snapshot-race
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_return.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     async def test_delayed_return_snapshot_cannot_overwrite_a_newer_draft_delta(self) -> None:
+#         """recovery.draft-snapshot-race"""
+#         r, w = await self.open()
+#         params = {"chat": chat(1)}
+#         saved = (await self.call(r, w, "draft.save", {**params, "text": "old", "baseRevision": None}))["result"]
+#         await self.subscribe(r, w, "draft", "draft", params)
+#         entered, release = asyncio.Event(), asyncio.Event()
+#         topic = self.backend.drafts.view.topic
+#         original = topic.snapshot
+#         async def delayed(value: Params) -> Snapshot:
+#             snapshot = await original(value)
+#             if not entered.is_set():
+#                 entered.set()
+#                 await release.wait()
+#             return snapshot
+#         with mock.patch.object(topic, "snapshot", delayed):
+#             self.backend.health.failed("private outage")
+#             self.backend.health.connected()
+#             await asyncio.wait_for(entered.wait(), 2)
+#             result = await self.call(r, w, "draft.save", {**params, "text": "newer", "baseRevision": saved["revision"]})
+#             self.assertIn("result", result)
+#             self.assertEqual((await self.event(r, "draft", "draft"))["draft"]["text"], "newer")
+#             release.set()
+#             await self.recovered()
+#             self.assertEqual((await self.event(r, "draft", "snapshot"))["draft"]["text"], "newer")
+#         await self.call(r, w, "subscriptions.check")
+#         self.assertFalse(any(message.get("event", {}).get("kind") == "snapshot" and
+#             message["event"].get("draft", {}).get("text") == "old" for message in self.pending[r]))
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_return.py::Returned.test_slow_other_root_does_not_delay_own_snapshots_or_note_retry_after_settling
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: recovery.independent-discovery; recovery.settled-note-retry
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_return.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     async def test_slow_other_root_does_not_delay_own_snapshots_or_note_retry_after_settling(self) -> None:
+#         """recovery.independent-discovery; recovery.settled-note-retry"""
+#         trunk = await Trunk.make(self.frame, chat(1))
+#         await trunk.accept(self.db)
+#         r, w = await self.open()
+#         await self.subscribe(r, w, "chat", "chat", {"chat": chat(1)})
+#         self.frame.behavior["arbol-roots"]["output"].append({"root": "t2", "name": "Private other", "status": "working", "current": False})
+#         self.frame.configure()
+#         install(self.frame, {"t2": {"list": {"sleep": 1}}})
+#         await offline(self.cluster)
+#         await self.backend.health.probe()
+#         trunk.end("interrupted")
+#         trunk.die()
+#         await self.backend.notes.record(trunk.exchange, chat(1))
+#         assert self.backend.notes.worker
+#         await self.backend.notes.worker
+#         path = self.frame.root / "notes" / (trunk.exchange+".json")
+#         self.assertTrue(path.exists())
+#         await online(self.cluster)
+#         before = time.monotonic()
+#         await self.backend.health.probe()
+#         await self.recovered()
+#         await self.event(r, "chat", "snapshot")
+#         self.assertLess(time.monotonic()-before, 0.8)
+#         self.assertEqual(len(calls(self.frame, kind="list", root="t2", phase="finish")), 0)
+#         if self.backend.notes.worker:
+#             await self.backend.notes.worker
+#         self.assertTrue(path.exists())
+#         await trunk.save(self.db, state="interrupted", remove=False)
+#         self.backend.recovery.settled(self.backend.identity.root)
+#         assert self.backend.notes.worker
+#         await self.backend.notes.worker
+#         self.assertFalse(path.exists())
+#         self.assertEqual(await self.db.execute("SELECT kind FROM exchange_notes"), [("ended_stuck",)])
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_return.py::Returned.test_transient_return_snapshot_refusal_is_retried_without_another_outage
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: recovery.transient-snapshot-retry
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_return.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     async def test_transient_return_snapshot_refusal_is_retried_without_another_outage(self) -> None:
+#         """recovery.transient-snapshot-retry"""
+#         r, w = await self.open()
+#         await self.subscribe(r, w, "draft", "draft", {"chat": chat(1)})
+#         topic = self.backend.drafts.view.topic
+#         original = topic.snapshot
+#         attempts = 0
+#         async def flaky(value: Params) -> Snapshot:
+#             nonlocal attempts
+#             attempts += 1
+#             if attempts == 1:
+#                 raise Refused("timeout", "private delayed read")
+#             return await original(value)
+#         self.backend.recovery.retry = 0.03
+#         with mock.patch.object(topic, "snapshot", flaky):
+#             self.backend.health.failed("private outage")
+#             self.backend.health.connected()
+#             await self.recovered()
+#             self.assertIsNone((await self.event(r, "draft", "snapshot"))["draft"])
+#         self.assertEqual(attempts, 2)
+#         self.assertFalse(self.backend.database.away)
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END

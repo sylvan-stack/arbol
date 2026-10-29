@@ -96,3 +96,65 @@ class Files(_support.Files):
         self.assertFalse(old_temp.exists())
         self.assertTrue(all(p.exists() for p in keep))
 # TEST-TIER-END tests/backend/test_request_files.py::Files.test_startup_removes_only_owned_private_matching_hour_old_files
+
+# LOW TIER — DO NOT ENABLE OR RECREATE
+# Historical examples only. Read before adding related tests; never execute.
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_request_files.py::Files.test_atomic_complete_private_file_and_only_same_payload_adoption
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: sending.private-request
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_request_files.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     def test_atomic_complete_private_file_and_only_same_payload_adoption(self) -> None:
+#         """sending.private-request"""
+#         request = self.files.write(self.exchange, self.request)
+#         path = Path(request.path)
+#         self.assertEqual(json.loads(path.read_bytes()), self.request)
+#         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+#         self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+#         self.assertEqual([p.name for p in path.parent.iterdir()], [self.exchange + ".json"])
+#         adopted = self.files.write(self.exchange, dict(self.request))
+#         self.assertEqual(adopted.inode, request.inode)
+#         with self.assertRaises(Error):
+#             self.files.write(self.exchange, {**self.request, "message": "different"})
+#         self.assertEqual(json.loads(path.read_bytes()), self.request)
+#         request.remove()
+#         adopted.remove()
+#         self.assertFalse(path.exists())
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_request_files.py::Files.test_cleanup_never_unlinks_a_replaced_request
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: sending.request-inode
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_request_files.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     def test_cleanup_never_unlinks_a_replaced_request(self) -> None:
+#         """sending.request-inode"""
+#         request = self.files.write(self.exchange, self.request)
+#         path = Path(request.path)
+#         prior = path.with_suffix(".retained")
+#         path.rename(prior)
+#         path.write_text("replacement")
+#         path.chmod(0o600)
+#         request.remove()
+#         self.assertEqual(path.read_text(), "replacement")
+#         self.assertEqual(json.loads(prior.read_bytes()), self.request)
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/test_mid_backend_test_request_files.py::Files.test_failed_partial_write_and_invalid_identifier_leave_no_file
+# Reason: Reviewed backend source and fixture: straightforward projection/validation, ordinary state transitions or a repeated variant of retained concurrency, durable recovery, isolation and unsafe-file checks; no distinct consequential observation beyond those selections. Case reviewed: sending.request-write-failure
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/test_mid_backend_test_request_files.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     def test_failed_partial_write_and_invalid_identifier_leave_no_file(self) -> None:
+#         """sending.request-write-failure"""
+#         with self.assertRaises(Error):
+#             self.files.write("../escape", self.request)
+#         self.assertFalse((self.frame.root / "requests").exists())
+#         with mock.patch("arbol_backend.requests.os.write", side_effect=OSError("private failure")):
+#             with self.assertRaises(Error):
+#                 self.files.write(self.exchange, self.request)
+#         self.assertEqual(list((self.frame.root / "requests").iterdir()), [])
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END

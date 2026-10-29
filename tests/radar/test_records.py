@@ -58,3 +58,18 @@ class TheReplay(RecordFixture):
 
 
 # Archived complete imports; restore needed names in their original scope, not at this file tail.
+
+# LOW TIER — DO NOT ENABLE OR RECREATE
+# Historical examples only. Read before adding related tests; never execute.
+# LOW-TIER-BEGIN: tests/radar/test_records.py::TheDatabase.test_the_check_database_has_the_three_tables_empty
+# Reason: Asserts only the state created by this test class fixture; adds no application action or failure case.
+# Source: arbol@4c5489dac9c73d28a2fdf232403fdcfd3a2dbbd5:tests/radar/test_records.py
+# Retained evidence at review: TheRecords tests exercise actual profile/report/result writes and quiet repeats.
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+#     async def test_the_check_database_has_the_three_tables_empty(self) -> None:
+#         """radar.layout-database"""
+#         for table in TABLES:
+#             self.assertEqual(await self.count(table), 0)
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END

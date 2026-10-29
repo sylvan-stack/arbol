@@ -400,3 +400,84 @@ c37 = Scenario("C37", "Owner skills and MCP servers",
                ["DRV-3.31", "DRV-0.4"], run_c37)
 
 # Archived complete imports; restore needed names in their original scope, not at this file tail.
+
+# LOW TIER — DO NOT ENABLE OR RECREATE
+# Historical examples only. Read before adding related tests; never execute.
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/tools.py::run_c25
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c25.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/tools.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c25(home: ScenarioHome) -> None:
+#     if await is_codex(home):
+#         await codex_permissions(home)
+#         return
+#     identifier = await signed(home)
+#     records = stream(await home.call(run_args(home, identifier)))
+#     equal("Permission notices",
+#           count(records, lambda event: event["type"] == "notice" and event["code"] == "permission_answered"), 2)
+#     equal("No ask", count(records, lambda event: event["type"] == "ask_opened"), 0)
+#     responses = [record for record in await home.received() if record["stage"] == "response"]
+#
+#     def answer(n: int) -> JSObject:
+#         return object_("Response", object_("Envelope", prop(prop(item(responses, n), "checks"), "input"))["response"])
+#
+#     equal("Permission allowed", object_("Allow", answer(0)["response"]),
+#           {"behavior": "allow", "updatedInput": {"file_path": "fixture", "content": "value"}})
+#     equal("Permission declined", object_("Deny", answer(1)["response"])["behavior"], "deny")
+#     check("Deny has reason", isinstance(object_("Deny", answer(1)["response"])["message"], str), "message", answer(1))
+#     await home.part("missing-id")
+#     failed = stream(await home.call(run_args(home, identifier)), "failed")
+#     equal("Malformed protocol fails", prop(at(failed, -1)["error"], "code"), "tool_unsupported")
+#     await home.part("plain")
+#     stream(await home.call(run_args(home, identifier)))
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/tools.py::run_c35
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c35.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/tools.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c35(home: ScenarioHome) -> None:
+#     if await is_codex(home):
+#         await codex_completed_tools(home)
+#         return
+#     identifier = await signed(home)
+#     records = stream(await home.call(run_args(home, identifier)))
+#     equal("Refused call reason", prop(ended(records, "refused"), "error"), "Claude refused this command.")
+#     equal("Refused call failed", prop(ended(records, "refused"), "ok"), False)
+#     equal("Shell input", prop(begun(records, "refused"), "input"), {"command": "rejected-command", "cwd": home.home})
+#     equal("Main answer",
+#           [event["text"] for event in records if event["type"] == "text" and not truthy(event["parentCallId"])],
+#           ["main-before", "main-after-agent", "main-after-command"])
+#     for event in [event for event in records if event["callId"] == "subcall" or event["text"] == "sub-agent-only"]:
+#         equal("Sub-agent parent", event["parentCallId"], "agent")
+#     for event in [event for event in records if event["type"] == "tool_started"]:
+#         equal("Call paired", paired(records, event), 1)
+#     input_ = find(await home.received(), lambda record: record["stage"] == "input")
+#     for option in ("--tools", "--allowedTools", "--disallowedTools", "--setting-sources", "--strict-mcp-config"):
+#         equal("No restrictive " + option, option in prop(input_, "arguments"), False)
+#     arguments = prop(input_, "arguments")
+#     equal("Trusted mode", item(arguments, index_of(arguments, "--permission-mode") + 1), "bypassPermissions")
+#     equal("Memory disabled", prop(prop(input_, "checks"), "memoryOff"), True)
+#     equal("Background completed",
+#           count(await home.received(), lambda record: record["stage"] == "background-ended"), 1)
+#     output = await home.call([*run_args(home, identifier), "--output", "text"])
+#     equal("Text output completed", output["status"], 0)
+#     equal("Sub-agent excluded", output["stdout"], "main-beforemain-after-agentmain-after-command")
+#     await home.part("early-exit")
+#     failed = stream(await home.call(run_args(home, identifier)), "failed")
+#     equal("Premature exit refused", prop(at(failed, -1)["error"], "code"), "tool_failed")
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
+
+# LOW-TIER-BEGIN: tests/mid/archived/conformance/scenarios/tools.py::run_c9
+# Reason: Reviewed native/stand-in scenario and invoked helpers: routine CRUD, field mapping, happy-path/refusal combinations or repeated orchestration; retained cancellation, history, isolation, credential and recovery scenarios supply the distinct consequential integration evidence. Case reviewed: Run c9.
+# Source: arbol@f66335c7e203794dc84e40fe3106e85f8cae2dd6:tests/mid/archived/conformance/scenarios/tools.py
+# Historical fixtures and class context are available at the source revision; no active dependencies restored.
+# LOW-TIER-SOURCE-BEGIN
+# async def run_c9(home: ScenarioHome) -> None:
+#     await owner_scenario(home, False)
+# LOW-TIER-SOURCE-END
+# LOW-TIER-END
