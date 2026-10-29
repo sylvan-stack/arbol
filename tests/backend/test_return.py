@@ -1,7 +1,11 @@
-# Shared fixtures only; test bodies are in top/ and mid/. See TESTS.md.
+# Shared fixtures; case bodies live in top/ and mid/. See TESTS.md.
 """Actual private outage/return and delayed wire snapshots cannot regress newer state."""
 
 from __future__ import annotations
+import time
+from typing import Any
+from unittest import mock
+
 
 import asyncio
 import sys
@@ -11,6 +15,17 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "runtime/site-packages"))
 sys.path.insert(0, str(ROOT / "tests"))
+from arbol_backend.bridge import Params, Snapshot  # noqa: E402
+from arbol_backend.database import Database, Session  # noqa: E402
+from arbol_backend.health import Health  # noqa: E402
+from arbol_backend.metadata import Attention  # noqa: E402
+from arbol_backend.model import Refused  # noqa: E402
+from arbol_backend.server import Backend  # noqa: E402
+from backend.discovery_support import calls, install  # noqa: E402
+from backend.live_support import Trunk  # noqa: E402
+from backend.recovery_support import offline, online  # noqa: E402
+from backend.test_chat_wire import WindowFixture, chat  # noqa: E402
+
 from backend.test_chat_wire import WindowFixture  # noqa: E402
 
 

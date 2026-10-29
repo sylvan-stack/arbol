@@ -1,15 +1,5 @@
-# Test implementations moved to tests/mid/archived/conformance/scenarios/c31.py.
-"""C31: missing and old vendor tools (DRV-0, DRV-4)."""
-
-from __future__ import annotations
-
-from ..harness import Scenario, ScenarioHome
-
-
-async def run(home: ScenarioHome) -> None:
-    raise RuntimeError('Tests are commented under the tier policy; see TESTS.md. Restore only in an explicitly requested testing task.')  # TEST-TIER-REFUSAL
-
-
-c31 = Scenario("C31", "Missing and old vendor tools", "missing and old", ["DRV-0.6", "DRV-4.14"], run)
-
-# Archived complete imports; restore needed names in their original scope, not at this file tail.
+# Compatibility entry: the mid-tier implementation lives in tests/mid/archived/conformance/scenarios/c31.py.
+# Keep the original module/package and __file__ so existing fixtures resolve unchanged.
+from pathlib import Path as _TierPath
+_tier_source = _TierPath(__file__).resolve().parents[2] / 'tests/mid/archived/conformance/scenarios/c31.py'
+exec(compile(_tier_source.read_bytes(), str(_tier_source), "exec"), globals())

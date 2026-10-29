@@ -1,7 +1,10 @@
-# Shared fixtures only; test bodies are in top/ and mid/. See TESTS.md.
+# Shared fixtures; case bodies live in top/ and mid/. See TESTS.md.
 """Bounded file replay, exact cutoffs and oversized metadata without retained payloads."""
 
 from __future__ import annotations
+import asyncio
+import tracemalloc
+
 
 import json
 import os
@@ -14,6 +17,9 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "runtime/site-packages"))
+from arbol_backend.bridge import MAX_LINE  # noqa: E402
+from arbol_backend.event_file import CHUNK, Envelope, Scanner, completed, meta, metadata, superseded  # noqa: E402
+
 from arbol_backend.event_file import Scanner, completed, superseded  # noqa: E402
 
 

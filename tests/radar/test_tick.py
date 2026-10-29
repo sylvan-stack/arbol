@@ -1,4 +1,4 @@
-# Shared fixtures only; test bodies are in top/ and mid/. See TESTS.md.
+# Shared fixtures; case bodies live in top/ and mid/. See TESTS.md.
 """The recompute tick of Subscriptions Vigor (SGM-1.14, SGM-D30), on a database of the check's own with stand-in Drivers.
 
 Every three minutes while the backend runs: every Driver listed, every newer report recorded, every Subscription
@@ -7,6 +7,9 @@ without the tables left alone. Vigor stays advisory: nothing of the package writ
 """
 
 from __future__ import annotations
+import asyncio
+from datetime import datetime, timedelta
+
 
 import subprocess
 import sys
@@ -19,6 +22,13 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "runtime/site-packages"))
 sys.path.insert(0, str(ROOT / "tests"))
+from arbol_backend.model import Refused  # noqa: E402
+from arbol_radar.drivers import LIST  # noqa: E402
+from arbol_radar.model import FIRST_PROFILE, Profile, Rejected, Weight  # noqa: E402
+from arbol_radar.tick import Tick, Ticker, tick  # noqa: E402
+from radar.fixture import LAYOUT, LISTING, RecordFixture, drivers, record, usage  # noqa: E402
+from radar.support import CLAUDE, CODEX, KIMI, MONDAY, ZAI, at, claude  # noqa: E402
+
 from arbol_backend.process import Programs  # noqa: E402
 from radar.fixture import LISTING, RecordFixture, drivers  # noqa: E402
 
@@ -62,7 +72,6 @@ class TheBackend(RecordFixture):
         assert child.stdin is not None
         child.stdin.close()  # the end of its standard input stops the backend, as the Swift App would
         child.communicate(timeout=10)
-
 
 
 # Archived complete imports; restore needed names in their original scope, not at this file tail.

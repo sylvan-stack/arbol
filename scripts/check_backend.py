@@ -1,18 +1,5 @@
-# Test implementations moved to tests/mid/archived/scripts/check_backend.py.
-"""Check this immutable Arbol image on its own Python and private PostgreSQL."""
-
-import sys
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
-
-
-def main() -> int:
-    raise RuntimeError('Tests are commented under the tier policy; see TESTS.md. Restore only in an explicitly requested testing task.')  # TEST-TIER-REFUSAL
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-
-# Archived complete imports; restore needed names in their original scope, not at this file tail.
+# Compatibility entry: the mid-tier implementation lives in tests/mid/archived/scripts/check_backend.py.
+# Keep the original module/package and __file__ so existing fixtures resolve unchanged.
+from pathlib import Path as _TierPath
+_tier_source = _TierPath(__file__).resolve().parents[1] / 'tests/mid/archived/scripts/check_backend.py'
+exec(compile(_tier_source.read_bytes(), str(_tier_source), "exec"), globals())

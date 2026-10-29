@@ -1,7 +1,13 @@
-# Shared fixtures only; test bodies are in top/ and mid/. See TESTS.md.
+# Shared fixtures; case bodies live in top/ and mid/. See TESTS.md.
 """Private socket and PostgreSQL qualification of BKD-1; never use owner credentials."""
 
 from __future__ import annotations
+import signal
+import socket
+import subprocess
+import time
+from unittest import mock
+
 
 import asyncio
 import sys
@@ -12,6 +18,26 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "runtime/site-packages"))
 sys.path.insert(0, str(ROOT / "tests"))
+from arbol_backend.bridge import (  # noqa: E402
+    MAX_LINE,
+    MAX_WAITING,
+    Connection,
+    Error,
+    Frame,
+    Params,
+    Registry,
+    Snapshot,
+    Subscription,
+    Topic,
+    decode,
+    driver_id,
+    encode,
+    subscription_id,
+    uuid_id,
+)
+from arbol_backend.model import Refused, identity, parse  # noqa: E402
+from backend.support import TEST_BUILD, TEST_ROOT, Cluster  # noqa: E402
+
 from arbol_backend.bridge import (  # noqa: E402
     MAX_LINE,
     Connection,
@@ -114,7 +140,6 @@ class RootWire(unittest.IsolatedAsyncioTestCase):
 
 class Diagnostics(unittest.TestCase):
     pass  # TEST-TIER-EMPTY-SUITE; helpers remain importable.
-
 
 
 # Archived complete imports; restore needed names in their original scope, not at this file tail.

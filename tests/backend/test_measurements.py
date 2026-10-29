@@ -1,7 +1,18 @@
-# Shared fixtures only; test bodies are in top/ and mid/. See TESTS.md.
+# Shared fixtures; case bodies live in top/ and mid/. See TESTS.md.
 """Private PostgreSQL and actual disk tools qualify partial, own-connection measurement."""
 
 from __future__ import annotations
+import asyncio
+import json
+import os
+import shlex
+import signal
+import time
+from collections.abc import Sequence
+from dataclasses import replace
+from typing import Any
+from unittest import mock
+
 
 import sys
 from pathlib import Path
@@ -10,6 +21,15 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "runtime/site-packages"))
 sys.path.insert(0, str(ROOT / "tests"))
+from arbol_backend.bridge import Registry  # noqa: E402
+from arbol_backend.database import Database, Session  # noqa: E402
+from arbol_backend.health import Health  # noqa: E402
+from arbol_backend.measurements import Measurements  # noqa: E402
+from arbol_backend.metadata import Attention  # noqa: E402
+from arbol_backend.process import Programs  # noqa: E402
+from arbol_backend.storage import LocalDisk  # noqa: E402
+from backend.recovery_support import offline  # noqa: E402
+
 from backend.test_chat_wire import WindowFixture  # noqa: E402
 
 

@@ -1,7 +1,13 @@
-# Shared fixtures only; test bodies are in top/ and mid/. See TESTS.md.
+# Shared fixtures; case bodies live in top/ and mid/. See TESTS.md.
 """Private request-file namespace, modes, races and narrowly scoped startup cleanup."""
 
 from __future__ import annotations
+import json
+import os
+import stat
+import time
+from unittest import mock
+
 
 import sys
 import unittest
@@ -12,6 +18,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "runtime/site-packages"))
 sys.path.insert(0, str(ROOT / "tests"))
+from arbol_backend.bridge import Error  # noqa: E402
+
 from arbol_backend.model import identity, parse  # noqa: E402
 from arbol_backend.requests import Requests  # noqa: E402
 from backend.support import Frame  # noqa: E402

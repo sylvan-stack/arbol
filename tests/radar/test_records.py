@@ -1,4 +1,4 @@
-# Shared fixtures only; test bodies are in top/ and mid/. See TESTS.md.
+# Shared fixtures; case bodies live in top/ and mid/. See TESTS.md.
 """Subscriptions Vigor: the Drivers' reports and the records in the Root's database, on a database of the check's own.
 
 The database is made as `tests/backend/support.py` makes one, with the contract's chat tables, and gets the Vigor
@@ -6,6 +6,9 @@ tables from `tests/radar/layout.sql`, a copy of what both Roots' own layouts car
 """
 
 from __future__ import annotations
+import json
+from datetime import timedelta
+
 
 import sys
 import unittest
@@ -16,6 +19,13 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "runtime/site-packages"))
 sys.path.insert(0, str(ROOT / "tests"))
+from arbol_backend.model import Refused  # noqa: E402
+from arbol_radar.drivers import LIST, Listed, Listing, drivers_of, list_subscriptions, records_of  # noqa: E402
+from arbol_radar.model import FIRST_PROFILE, Profile, Rejected, Weight  # noqa: E402
+from arbol_radar.records import loss_row  # noqa: E402
+from radar.fixture import LAYOUT, LISTING, TABLES, RecordFixture, record, usage  # noqa: E402
+from radar.support import CLAUDE, CODEX, FETCHED, KIMI, MONDAY, ZAI, at, claude, codex, kimi, window  # noqa: E402
+
 from arbol_backend.process import Programs  # noqa: E402
 from radar.fixture import RecordFixture  # noqa: E402
 
@@ -45,7 +55,6 @@ class TheRecords(RecordFixture):
 
 class TheReplay(RecordFixture):
     """A named profile replayed over every recorded report of a Subscription gives the recorded results (SGM-1.14)."""
-
 
 
 # Archived complete imports; restore needed names in their original scope, not at this file tail.

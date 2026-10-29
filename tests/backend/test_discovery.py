@@ -1,7 +1,11 @@
-# Shared fixtures only; test bodies are in top/ and mid/. See TESTS.md.
+# Shared fixtures; case bodies live in top/ and mid/. See TESTS.md.
 """Actual private managers qualify Root isolation, bounded fan-out and routed mutations."""
 
 from __future__ import annotations
+import json
+import time
+from unittest import mock
+
 
 import asyncio
 import sys
@@ -12,6 +16,13 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "runtime/site-packages"))
 sys.path.insert(0, str(ROOT / "tests"))
+from arbol_backend.bridge import MAX_LINE, Error, Params  # noqa: E402
+from arbol_backend.chat_data import encoded  # noqa: E402
+from arbol_backend.controls import stop_params  # noqa: E402
+from arbol_backend.discovery import TOTAL  # noqa: E402
+from arbol_backend.listings import CAPACITY  # noqa: E402
+from arbol_backend.model import Refused  # noqa: E402
+
 from arbol_backend.bridge import Params  # noqa: E402
 from arbol_backend.metadata import now  # noqa: E402
 from backend.discovery_support import calls, configure, install  # noqa: E402

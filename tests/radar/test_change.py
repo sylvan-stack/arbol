@@ -1,7 +1,8 @@
-# Shared fixtures only; test bodies are in top/ and mid/. See TESTS.md.
+# Shared fixtures; case bodies live in top/ and mid/. See TESTS.md.
 """Subscriptions Vigor: predicted windows, the next change, stale and unknown, with fixed reports, clock and profile (SGM-1)."""
 
 from __future__ import annotations
+
 
 import sys
 import unittest
@@ -11,6 +12,23 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tests"))
+from arbol_radar.model import FIRST_PROFILE, Profile, Rejected, Weight, Window, stale_after  # noqa: E402
+from arbol_radar.vigor import compute, next_change, predict, unknown_reason  # noqa: E402
+from radar.support import (  # noqa: E402
+    CLAUDE,
+    CODEX,
+    KIMI,
+    MONDAY,
+    ZAI,
+    at,
+    by_label,
+    claude,
+    codex,
+    kimi,
+    report,
+    window,
+)
+
 from radar.support import (  # noqa: E402
     MONDAY,
 )
@@ -33,7 +51,6 @@ class Stale(unittest.TestCase):
 
 class Unknown(unittest.TestCase):
     """A result that cannot be computed is unknown with its reason, never zero (SGM-1.9, SGM-D19)."""
-
 
 
 # Archived complete imports; restore needed names in their original scope, not at this file tail.

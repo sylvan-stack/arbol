@@ -1,6 +1,8 @@
-# Shared fixtures only; test bodies are in top/ and mid/. See TESTS.md.
+# Shared fixtures; case bodies live in top/ and mid/. See TESTS.md.
 """BKD-D36 public readonly bootstrap and first-prompt snapshot input."""
 from __future__ import annotations
+import json
+
 
 import sys
 from pathlib import Path
@@ -8,6 +10,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tests"))
+from arbol_backend.model import settings  # noqa: E402
+from backend.test_chat_wire import WindowFixture, chat  # noqa: E402
+
 from backend.test_chat_wire import WindowFixture  # noqa: E402
 
 

@@ -1,7 +1,10 @@
-# Shared fixtures only; test bodies are in top/ and mid/. See TESTS.md.
+# Shared fixtures; case bodies live in top/ and mid/. See TESTS.md.
 """Private SQL loss/locks never stall an already opened chat's contract-file stream."""
 
 from __future__ import annotations
+import json
+import time
+
 
 import asyncio
 import sys
@@ -11,6 +14,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "runtime/site-packages"))
 sys.path.insert(0, str(ROOT / "tests"))
+from backend.recovery_support import offline, online  # noqa: E402
+
 from backend.live_support import Trunk  # noqa: E402
 from backend.test_chat_wire import WindowFixture, chat  # noqa: E402
 

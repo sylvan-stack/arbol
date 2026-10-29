@@ -1,13 +1,5 @@
-# Test implementations moved to tests/mid/archived/conformance/scenarios/mimo.py.
-"""Mimo qualification is retained for a future explicit testing task."""
-
-
-SCOPES: dict[str, str] = {}
-
-
-async def prepare(*args: object, **kwargs: object) -> None:
-    raise RuntimeError("Required Mimo mid-tier scenarios are disabled; restore them only for an explicit testing task.")
-
-
-async def run(*args: object, **kwargs: object) -> None:
-    raise RuntimeError("Required Mimo mid-tier scenarios are disabled; restore them only for an explicit testing task.")
+# Compatibility entry: the mid-tier implementation lives in tests/mid/archived/conformance/scenarios/mimo.py.
+# Keep the original module/package and __file__ so existing fixtures resolve unchanged.
+from pathlib import Path as _TierPath
+_tier_source = _TierPath(__file__).resolve().parents[2] / 'tests/mid/archived/conformance/scenarios/mimo.py'
+exec(compile(_tier_source.read_bytes(), str(_tier_source), "exec"), globals())

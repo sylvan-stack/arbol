@@ -1,7 +1,11 @@
-# Shared fixtures only; test bodies are in top/ and mid/. See TESTS.md.
+# Shared fixtures; case bodies live in top/ and mid/. See TESTS.md.
 """Private folder boundaries, immutable records and actual clean-UTC process identity."""
 
 from __future__ import annotations
+import asyncio
+from datetime import UTC, timedelta
+from unittest import mock
+
 
 import json
 import os
@@ -15,6 +19,9 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "runtime/site-packages"))
 sys.path.insert(0, str(ROOT / "tests"))
+from arbol_backend.bridge import Error  # noqa: E402
+from arbol_backend.exchange_files import MAX_RECORD, Folders, living, processes, record  # noqa: E402
+
 from arbol_backend.exchange_files import Folders  # noqa: E402
 from arbol_backend.model import identity, parse  # noqa: E402
 from backend.support import Frame  # noqa: E402

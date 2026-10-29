@@ -1,7 +1,12 @@
-# Shared fixtures only; test bodies are in top/ and mid/. See TESTS.md.
+# Shared fixtures; case bodies live in top/ and mid/. See TESTS.md.
 """Real Bridge requests and multiple windows against a disposable Root/database."""
 
 from __future__ import annotations
+import json
+import stat
+import time
+from dataclasses import replace
+
 
 import asyncio
 import sys
@@ -17,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "runtime/site-packages"))
 sys.path.insert(0, str(ROOT / "tests"))
+
 from arbol_backend.bridge import Params, decode, encode  # noqa: E402
 from arbol_backend.database import Database  # noqa: E402
 from arbol_backend.model import identity, parse  # noqa: E402
@@ -126,8 +132,7 @@ class WindowFixture(unittest.IsolatedAsyncioTestCase):
 
 
 class Windows(WindowFixture):
-    pass  # Shared fixture base; case bodies live in top/ and mid/.
-
+    pass  # Shared fixtures; case bodies live in top/ and mid/.
 
 
 # Archived complete imports; restore needed names in their original scope, not at this file tail.

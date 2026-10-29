@@ -1,7 +1,11 @@
-# Shared fixtures only; test bodies are in top/ and mid/. See TESTS.md.
+# Shared fixtures; case bodies live in top/ and mid/. See TESTS.md.
 """Actual contract/layout SQL and concurrent writers, in a private PostgreSQL cluster."""
 
 from __future__ import annotations
+from collections.abc import Sequence
+from typing import Any
+from unittest import mock
+
 
 import asyncio
 import sys
@@ -13,6 +17,9 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "runtime/site-packages"))
 sys.path.insert(0, str(ROOT / "tests"))
+from arbol_backend.chat_data import Reader, encoded  # noqa: E402
+from arbol_backend.database import Database, Session  # noqa: E402
+
 from psycopg.types.json import Jsonb  # noqa: E402
 
 from arbol_backend.chat_data import Reader  # noqa: E402
@@ -72,7 +79,6 @@ class Chats(unittest.IsolatedAsyncioTestCase):
         await self.db.close()
         await asyncio.to_thread(self.cluster.close)
         self.frame.close()
-
 
 
 # Archived complete imports; restore needed names in their original scope, not at this file tail.

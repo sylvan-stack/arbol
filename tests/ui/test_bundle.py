@@ -1,7 +1,8 @@
-# Shared fixtures only; test bodies are in top/ and mid/. See TESTS.md.
+# Shared fixtures; case bodies live in top/ and mid/. See TESTS.md.
 """Renderer identity/CSP/assets survive relocation and reject changed payloads."""
 
 from __future__ import annotations
+
 
 import importlib.util
 import json
