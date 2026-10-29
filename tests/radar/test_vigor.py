@@ -1,7 +1,10 @@
-# Shared fixtures only; test bodies are in top/ and mid/. See TESTS.md.
+# Shared fixtures; case bodies live in top/ and mid/. See TESTS.md.
 """Subscriptions Vigor: the loss of a window and the Vigor of a Subscription, with fixed reports, clock and profile (SGM-1)."""
 
 from __future__ import annotations
+import ast
+from datetime import timedelta
+
 
 import sys
 import unittest
@@ -11,6 +14,23 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tests"))
+from arbol_radar.model import FIRST_PROFILE, Profile, Rejected, Report, Subscription, Weight, Window  # noqa: E402
+from arbol_radar.vigor import compute, loss  # noqa: E402
+from radar.support import (  # noqa: E402
+    CLAUDE,
+    CODEX,
+    KIMI,
+    MONDAY,
+    ZAI,
+    at,
+    by_label,
+    claude,
+    codex,
+    kimi,
+    report,
+    window,
+)
+
 from arbol_radar.model import Rejected  # noqa: E402
 
 
@@ -95,7 +115,6 @@ class Advisory(unittest.TestCase):
         },
     }
     PRINTS = {"cli.py"}  # the one module that answers on standard output
-
 
 
 # Archived complete imports; restore needed names in their original scope, not at this file tail.

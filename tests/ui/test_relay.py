@@ -1,7 +1,11 @@
-# Shared fixtures only; test bodies are in top/ and mid/. See TESTS.md.
+# Shared fixtures; case bodies live in top/ and mid/. See TESTS.md.
 """Private protocol/HTTP checks. No owner services, secrets or browser profile."""
 
 from __future__ import annotations
+import argparse
+import sys
+from urllib.parse import parse_qs, urlsplit
+
 
 import asyncio
 import base64
@@ -141,7 +145,6 @@ class RelayChecks(unittest.IsolatedAsyncioTestCase):
         await writer.drain()
         header = await reader.readuntil(b"\r\n\r\n")
         return reader, writer, header
-
 
 
 # Archived complete imports; restore needed names in their original scope, not at this file tail.

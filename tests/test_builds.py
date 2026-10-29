@@ -1,4 +1,4 @@
-# Shared fixtures only; test bodies are in top/ and mid/. See TESTS.md.
+# Shared fixtures; case bodies live in top/ and mid/. See TESTS.md.
 """arbol-builds and its launchers (BLD-0.1 to 0.17 and 0.21 to 0.24), and the launcher arbol-trunk
 (RCT-0.7 to 0.10): the checks named builds.* in BLD-0 and RCT-0.
 
@@ -9,6 +9,15 @@ Each one builds a small sample component in a fresh home
 folder whose name holds a space and an apostrophe, and starts the tool and the launchers as
 programs. No vendor tool is involved.
 """
+import errno
+import re
+import resource
+import shlex
+import signal
+import threading
+import uuid
+from unittest import mock
+
 
 import ast
 import json
@@ -27,6 +36,12 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+from arbol_builds import mutation, pruning  # noqa: E402
+from arbol_builds.config import component_name  # noqa: E402
+from arbol_builds.launcher import milliseconds, record_start, write_all  # noqa: E402
+from arbol_builds.roots import current_root, read_root, read_roots, roots_folder  # noqa: E402
+from arbol_builds.service import LAUNCHER_MARK, last_start, reserve, write_launcher  # noqa: E402
+
 from arbol_builds.launcher import milliseconds  # noqa: E402
 from arbol_builds.service import write_launcher  # noqa: E402
 
@@ -427,7 +442,6 @@ class Install(unittest.TestCase):
             env["HOME"] = self.f.home
         return subprocess.run([PYTHON, "-I", "-B", INSTALLER, *args], env=env, capture_output=True, timeout=300,
                               check=False)
-
 
 
 # Archived complete imports; restore needed names in their original scope, not at this file tail.

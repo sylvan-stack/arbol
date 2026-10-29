@@ -1,7 +1,12 @@
-# Shared fixtures only; test bodies are in top/ and mid/. See TESTS.md.
+# Shared fixtures; case bodies live in top/ and mid/. See TESTS.md.
 """In-process awake clocks and real private managers qualify causal stuck-force notes."""
 
 from __future__ import annotations
+import json
+import os
+import time
+from unittest import mock
+
 
 import asyncio
 import sys
@@ -12,6 +17,10 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "runtime/site-packages"))
 sys.path.insert(0, str(ROOT / "tests"))
+from arbol_backend.bridge import Error, Params  # noqa: E402
+from arbol_backend.dispatch import Entry  # noqa: E402
+from arbol_backend.stuck import LOOK, UNCHANGED, Stuck, awake  # noqa: E402
+
 from arbol_backend.bridge import Params  # noqa: E402
 from arbol_backend.stuck import Stuck  # noqa: E402
 from backend.discovery_support import calls, configure, install  # noqa: E402

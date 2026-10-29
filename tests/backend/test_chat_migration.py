@@ -1,7 +1,9 @@
-# Shared fixtures only; test bodies are in top/ and mid/. See TESTS.md.
+# Shared fixtures; case bodies live in top/ and mid/. See TESTS.md.
 """Own-Root CLI boundary, coalescing and uncertain mutations, with private PostgreSQL only."""
 
 from __future__ import annotations
+import time
+
 
 import asyncio
 import json
@@ -18,6 +20,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "runtime/site-packages"))
 sys.path.insert(0, str(ROOT / "tests"))
+from arbol_backend.process import LIMITS  # noqa: E402
+
 from arbol_backend.bridge import Params, decode, encode  # noqa: E402
 from arbol_backend.database import Database  # noqa: E402
 from arbol_backend.model import identity, parse  # noqa: E402
@@ -167,7 +171,6 @@ class Delegation(unittest.IsolatedAsyncioTestCase):
         await self.db.close()
         await asyncio.to_thread(self.cluster.close)
         self.frame.close()
-
 
 
 # Archived complete imports; restore needed names in their original scope, not at this file tail.

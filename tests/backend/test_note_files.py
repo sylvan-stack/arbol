@@ -1,7 +1,12 @@
-# Shared fixtures only; test bodies are in top/ and mid/. See TESTS.md.
+# Shared fixtures; case bodies live in top/ and mid/. See TESTS.md.
 """Private note publication survives each crash boundary without replacing other files."""
 
 from __future__ import annotations
+import json
+import os
+from unittest import mock
+from uuid import uuid4
+
 
 import sys
 import unittest
@@ -11,6 +16,9 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "runtime/site-packages"))
 sys.path.insert(0, str(ROOT / "tests"))
+from arbol_backend.bridge import Error, Params  # noqa: E402
+from arbol_backend.note_files import MAX_NOTE, NoteFiles  # noqa: E402
+
 from arbol_backend.bridge import Params  # noqa: E402
 from arbol_backend.model import identity, parse  # noqa: E402
 from arbol_backend.note_files import NoteFiles  # noqa: E402

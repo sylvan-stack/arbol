@@ -1,5 +1,10 @@
-# Shared fixtures only; test bodies are in top/ and mid/. See TESTS.md.
+# Shared fixtures; case bodies live in top/ and mid/. See TESTS.md.
 """The global Root catalogue: private homes and stand-ins, with a separate real-server example (SYL-160)."""
+import ast
+import time
+from collections.abc import Callable
+from unittest import mock
+
 
 import argparse
 import json
@@ -18,6 +23,10 @@ from urllib.parse import quote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+from arbol_builds.roots import current_root, read_roots  # noqa: E402
+from arbol_roots.model import Places, Refused, catalogue, places, save_record  # noqa: E402
+from arbol_roots.operations import Creation, catalogue_lock, create, default_database_name, remove  # noqa: E402
+
 from arbol_roots.database import Database, DatabaseError, environment  # noqa: E402
 from arbol_roots.model import Places, catalogue, places  # noqa: E402
 from arbol_roots.operations import Creation  # noqa: E402
@@ -212,19 +221,5 @@ class DatabaseAccess(unittest.TestCase):
 class Catalogue(unittest.TestCase):
     pass  # TEST-TIER-EMPTY-SUITE; helpers remain importable.
 
-
-if __name__ == "__main__":
-    if "--real-server" in sys.argv:
-        parser = argparse.ArgumentParser(description="Run the explicit private Root/database acceptance example.")
-        parser.add_argument("--real-server", action="store_true")
-        parser.add_argument("--tool")
-        options = parser.parse_args()
-        try:
-            print(json.dumps(real_server_example(options.tool)))
-        except Exception as error:
-            print(json.dumps({"passed": False, "error": str(error)}))
-            sys.exit(1)
-    else:
-        unittest.main()
 
 # Archived complete imports; restore needed names in their original scope, not at this file tail.

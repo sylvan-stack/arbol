@@ -1,4 +1,4 @@
-# Shared fixtures only; test bodies are in top/ and mid/. See TESTS.md.
+# Shared fixtures; case bodies live in top/ and mid/. See TESTS.md.
 """Learning the gate weights of Subscriptions Vigor as a versioned profile (SGM-1.11, SGM-D15, SGM-D17), with fixed reports.
 
 Pairs of consecutive reports and their trust are pure; the runs between two fetch times come from the chat tables of a
@@ -6,6 +6,7 @@ database of the check's own, as `tests/radar/fixture.py` makes it.
 """
 
 from __future__ import annotations
+
 
 import json
 import sys
@@ -19,6 +20,21 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "runtime/site-packages"))
 sys.path.insert(0, str(ROOT / "tests"))
+from arbol_backend.model import Refused  # noqa: E402
+from arbol_radar.learning import (  # noqa: E402
+    Observation,
+    Series,
+    estimate,
+    learn,
+    observations,
+    observe,
+    pairs,
+    runs_between,
+)
+from arbol_radar.model import FIRST_PROFILE, Learning, Report, Subscription, Weight  # noqa: E402
+from arbol_radar.tick import recompute  # noqa: E402
+from radar.support import CLAUDE, CODEX, KIMI, MONDAY, at, codex, kimi, report, window  # noqa: E402
+
 from arbol_radar.drivers import Listed, Listing  # noqa: E402
 from arbol_radar.learning import (  # noqa: E402
     Observation,
@@ -100,8 +116,6 @@ class ChatRecords(RecordFixture):
 
 class TheRuns(ChatRecords):
     """The runs of this Mac between two fetch times, from the Root's chat tables, and the observations over the records."""
-
-
 
 
 RATIOS = TheEstimate.RATIOS
