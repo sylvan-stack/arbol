@@ -1,0 +1,179 @@
+"""Commented mid-tier selections; see MID_TIER.md before restoring a case."""
+
+# Restore the needed imports and class header only for an explicit testing task.
+# import backend.test_note_files as _support
+# from backend.test_note_files import (
+#     Files,
+#     Frame,
+#     NoteFiles,
+#     Params,
+#     Path,
+#     ROOT,
+#     chat,
+#     identity,
+#     parse,
+#     sys,
+#     unittest,
+# )
+
+
+# class Files(_support.Files):
+# TEST-TIER-DISABLED-BEGIN tests/backend/test_note_files.py::Files.test_private_atomic_publication_repeat_and_first_timestamp
+#     def test_private_atomic_publication_repeat_and_first_timestamp(self) -> None:
+#         """notes.private-file; notes.atomic-publication; notes.first-timestamp"""
+#         note = self.files.put(self.value)
+#         self.assertEqual(note.value, self.value)
+#         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+#         self.assertEqual(self.path.parent.stat().st_mode & 0o777, 0o700)
+#         self.assertEqual(self.path.stat().st_nlink, 1)
+#         self.assertEqual(list(self.path.parent.iterdir()), [self.path])
+#         raw = self.path.read_bytes()
+#         self.assertEqual(self.files.put({**self.value, "at": "2026-10-27T01:03:00.000Z"}).value, self.value)
+#         self.assertEqual(self.path.read_bytes(), raw)
+#         with self.assertRaises(Error):
+#             self.files.put({**self.value, "chat": chat(2)})
+#         self.assertEqual(self.path.read_bytes(), raw)
+#         self.files.remove(note)
+#         self.assertFalse(self.path.exists())
+# TEST-TIER-DISABLED-END tests/backend/test_note_files.py::Files.test_private_atomic_publication_repeat_and_first_timestamp
+
+# TEST-TIER-DISABLED-BEGIN tests/backend/test_note_files.py::Files.test_crash_after_link_preserves_a_complete_note_and_repairs_only_its_verified_temp_link
+#     def test_crash_after_link_preserves_a_complete_note_and_repairs_only_its_verified_temp_link(self) -> None:
+#         """notes.crash-publication; notes.verified-temp-recovery"""
+#         unlink = os.unlink
+#         def crash(name: str, **kwargs: int) -> None:
+#             if name.endswith(".new"):
+#                 raise OSError("private simulated crash before temporary unlink")
+#             unlink(name, **kwargs)
+#         with mock.patch("arbol_backend.note_files.os.unlink", side_effect=crash):
+#             with self.assertRaises(OSError):
+#                 self.files.put(self.value)
+#         self.assertEqual(self.path.stat().st_nlink, 2)
+#         self.assertEqual(json.loads(self.path.read_bytes()), self.value)
+#         self.assertEqual(self.files.read(chat(900)).value, self.value)
+#         self.assertEqual(self.path.stat().st_nlink, 1)
+#         self.assertEqual(list(self.path.parent.iterdir()), [self.path])
+#         outside = self.frame.base / "unrelated-hardlink"
+#         os.link(self.path, outside)
+#         with self.assertRaises(Error):
+#             self.files.read(chat(900))
+#         self.assertTrue(outside.exists())
+#         self.assertTrue(self.path.exists())
+# TEST-TIER-DISABLED-END tests/backend/test_note_files.py::Files.test_crash_after_link_preserves_a_complete_note_and_repairs_only_its_verified_temp_link
+
+# TEST-TIER-DISABLED-BEGIN tests/backend/test_note_files.py::Files.test_short_write_and_racing_different_note_never_publish_or_overwrite
+#     def test_short_write_and_racing_different_note_never_publish_or_overwrite(self) -> None:
+#         """notes.short-write; notes.no-overwrite"""
+#         with mock.patch("arbol_backend.note_files.os.write", return_value=1):
+#             with self.assertRaises(Error):
+#                 self.files.put(self.value)
+#         self.assertFalse(self.path.exists())
+#         self.assertEqual(list(self.path.parent.iterdir()), [])
+#         other = {**self.value, "chat": chat(2)}
+#         def winner(*args: object, **kwargs: object) -> None:
+#             self.path.write_text(json.dumps(other))
+#             self.path.chmod(0o600)
+#             raise FileExistsError
+#         with mock.patch("arbol_backend.note_files.os.link", side_effect=winner):
+#             with self.assertRaises(Error):
+#                 self.files.put(self.value)
+#         self.assertEqual(json.loads(self.path.read_bytes()), other)
+#         self.assertEqual(list(self.path.parent.iterdir()), [self.path])
+# TEST-TIER-DISABLED-END tests/backend/test_note_files.py::Files.test_short_write_and_racing_different_note_never_publish_or_overwrite
+
+# TEST-TIER-DISABLED-BEGIN tests/backend/test_note_files.py::Files.test_no_follow_private_regular_and_bounded_validated_contents
+#     def test_no_follow_private_regular_and_bounded_validated_contents(self) -> None:
+#         """notes.file-boundaries; notes.invalid-file"""
+#         self.files.put(self.value)
+#         self.path.chmod(0o644)
+#         with self.assertRaises(Error):
+#             self.files.read(chat(900))
+#         self.path.chmod(0o600)
+#         for value in (b"{"+b"x"*MAX_NOTE, json.dumps({**self.value, "root": "another"}).encode(),
+#                       json.dumps({**self.value, "exchange": "../escape"}).encode(), b'{"root":1,"root":2}',
+#                       b'{"future":NaN}', b"["*1500+b"0"+b"]"*1500):
+#             self.path.write_bytes(value)
+#             with self.assertRaises(Error):
+#                 self.files.read(chat(900))
+#         self.path.unlink()
+#         os.mkfifo(self.path, 0o600)
+#         with self.assertRaises(Error):
+#             self.files.read(chat(900))
+#         self.path.unlink()
+#         outside = self.frame.base / "outside"
+#         outside.write_text(json.dumps(self.value))
+#         outside.chmod(0o600)
+#         self.path.symlink_to(outside)
+#         with self.assertRaises(OSError):
+#             self.files.read(chat(900))
+#         self.assertEqual(json.loads(outside.read_bytes()), self.value)
+# TEST-TIER-DISABLED-END tests/backend/test_note_files.py::Files.test_no_follow_private_regular_and_bounded_validated_contents
+
+# TEST-TIER-DISABLED-BEGIN tests/backend/test_note_files.py::Files.test_conditional_removal_preserves_file_or_directory_replacement
+#     def test_conditional_removal_preserves_file_or_directory_replacement(self) -> None:
+#         """notes.conditional-removal; notes.directory-identity"""
+#         note = self.files.put(self.value)
+#         original = self.path.with_suffix(".old")
+#         self.path.rename(original)
+#         self.path.write_bytes(original.read_bytes())
+#         self.path.chmod(0o600)
+#         with self.assertRaises(Error):
+#             self.files.remove(note)
+#         self.assertTrue(self.path.exists())
+#         note = self.files.read(chat(900))
+#         renamed = self.path.parent.with_name("old-notes")
+#         self.path.parent.rename(renamed)
+#         self.path.parent.mkdir(mode=0o700)
+#         self.path.write_text(json.dumps(self.value))
+#         self.path.chmod(0o600)
+#         with self.assertRaises(Error):
+#             self.files.remove(note)
+#         self.assertTrue(self.path.exists())
+#         self.assertTrue((renamed/self.path.name).exists())
+# TEST-TIER-DISABLED-END tests/backend/test_note_files.py::Files.test_conditional_removal_preserves_file_or_directory_replacement
+
+# TEST-TIER-DISABLED-BEGIN tests/backend/test_note_files.py::Files.test_temp_recovery_rejects_unknown_extra_links_and_unsafe_directory
+#     def test_temp_recovery_rejects_unknown_extra_links_and_unsafe_directory(self) -> None:
+#         """notes.unknown-hardlink; notes.directory-no-follow"""
+#         self.files.put(self.value)
+#         temporary = self.path.parent / ("."+chat(900)+"."+uuid4().hex+".new")
+#         os.link(self.path, temporary)
+#         other = self.frame.base / "another-link"
+#         os.link(self.path, other)
+#         with self.assertRaises(Error):
+#             self.files.read(chat(900))
+#         self.assertTrue(temporary.exists())
+#         self.assertTrue(other.exists())
+#         self.path.parent.rename(self.frame.root / "old-notes")
+#         self.path.parent.symlink_to(self.frame.root / "old-notes", target_is_directory=True)
+#         with self.assertRaises(OSError):
+#             self.files.read(chat(900))
+# TEST-TIER-DISABLED-END tests/backend/test_note_files.py::Files.test_temp_recovery_rejects_unknown_extra_links_and_unsafe_directory
+
+
+# Original deferred imports (restore at the required scope, never blindly at the tail).
+# TEST-TIER-IMPORTS-BEGIN tests/backend/test_note_files.py:5
+# import json
+# TEST-TIER-IMPORTS-END tests/backend/test_note_files.py:5
+
+# TEST-TIER-IMPORTS-BEGIN tests/backend/test_note_files.py:6
+# import os
+# TEST-TIER-IMPORTS-END tests/backend/test_note_files.py:6
+
+# TEST-TIER-IMPORTS-BEGIN tests/backend/test_note_files.py:10
+# from unittest import mock
+# TEST-TIER-IMPORTS-END tests/backend/test_note_files.py:10
+
+# TEST-TIER-IMPORTS-BEGIN tests/backend/test_note_files.py:11
+# from uuid import uuid4
+# TEST-TIER-IMPORTS-END tests/backend/test_note_files.py:11
+
+# TEST-TIER-IMPORTS-BEGIN tests/backend/test_note_files.py:17
+# from arbol_backend.bridge import Error, Params  # noqa: E402
+# TEST-TIER-IMPORTS-END tests/backend/test_note_files.py:17
+
+# TEST-TIER-IMPORTS-BEGIN tests/backend/test_note_files.py:19
+# from arbol_backend.note_files import MAX_NOTE, NoteFiles  # noqa: E402
+# TEST-TIER-IMPORTS-END tests/backend/test_note_files.py:19
+
+raise RuntimeError("Mid-tier tests require an explicitly requested testing task; see MID_TIER.md.")

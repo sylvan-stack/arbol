@@ -1,3 +1,4 @@
+# Test implementations moved to tests/mid/archived/conformance/scenarios/c40.py.
 """C40: refusals before the vendor tool starts: unsigned Subscriptions and invalid run requests (DRV-1, DRV-2)."""
 
 from __future__ import annotations
@@ -32,11 +33,6 @@ async def check_subscription_refusals(home: ScenarioHome, include_runs: bool = F
     equal("The vendor tool is never started", await home.received(), [])
 
 
-# TEST-TIER-DISABLED-BEGIN conformance/scenarios/c40.py::run
-# async def run(home: ScenarioHome) -> None:
-#     await check_subscription_refusals(home, True)
-#     await run_refusals(home)
-# TEST-TIER-DISABLED-END conformance/scenarios/c40.py::run
 async def run(home: ScenarioHome) -> None:
     raise RuntimeError('Tests are commented under the tier policy; see TESTS.md. Restore only in an explicitly requested testing task.')  # TEST-TIER-REFUSAL
 
@@ -46,6 +42,3 @@ c40 = Scenario("C40", "Subscription refusals before starting the tool",
                ["DRV-1.11", "DRV-2.2"], run)
 
 # Archived complete imports; restore needed names in their original scope, not at this file tail.
-# TEST-TIER-IMPORTS-BEGIN conformance/scenarios/c40.py:8
-# from .runs import run_refusals, stream
-# TEST-TIER-IMPORTS-END conformance/scenarios/c40.py:8
