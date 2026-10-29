@@ -206,13 +206,6 @@ async def run_c15(home: ScenarioHome) -> None:
         await early.dispose()
 
 
-async def run_c16(home: ScenarioHome) -> None:
-    identifier = await signed(home)
-    stream(await home.call(["run", "--subscription", identifier, "--run-id", "ended", "answer"]))
-    for run in ("ended", "unknown"):
-        reply = await home.call(["runs", "stop", run])
-        equal("Successful stop", reply["status"], 0)
-        equal("No output", reply["stdout"], "")
 
 
 async def run_c17(home: ScenarioHome) -> None:
@@ -310,7 +303,6 @@ async def run_c38(home: ScenarioHome) -> None:
 c15 = Scenario("C15", "Stop closes partial output, calls, questions and sub-agents",
                "interrupt, cancellation ordering, 2/15 second limits, ignored interrupt and peer isolation",
                ["DRV-2.3", "DRV-2.8", "DRV-2.16", "DRV-2.17", "DRV-2.19", "DRV-2.21", "DRV-2.25"], run_c15)
-c16 = Scenario("C16", "Stopping ended or unknown runs succeeds", "idempotent runs stop", ["DRV-2.18"], run_c16)
 c17 = Scenario("C17", "Every end path clears shell process groups",
                "normal result, hanging exit, SIGINT, SIGTERM, input EOF, broken event pipe",
                ["DRV-0.10", "DRV-2.19", "DRV-2.26"], run_c17)

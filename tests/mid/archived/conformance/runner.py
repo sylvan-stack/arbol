@@ -23,7 +23,7 @@ def scenarios() -> list[Scenario]:
 def select_scenarios(only: str | None = None) -> list[Scenario]:
     available = scenarios()
     if only is None:
-        return available
+        raise ValueError("SYL-327 retains a reduced selection. Explicit --only is required; this is not full qualification.")
     ids = [item for item in re.split(f"(?:{SPACE_CLASS}|,)+", only) if item]
     if not ids:
         raise ValueError("Give --only at least one scenario identifier.")
@@ -113,7 +113,7 @@ async def run_suite(
             await _signals()
             if signal_.aborted:
                 break
-    write(f"{passed}/{len(selected)} scenarios passed.")
+    write(f"{passed}/{len(selected)} selected scenarios passed; not full qualification.")
     if signal_ is not None and signal_.aborted:
         return 2
     return 0 if passed == len(selected) else 1

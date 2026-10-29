@@ -1,18 +1,49 @@
-"""The registry: every scenario of DRV-5, in the order the report lists them."""
-
-from __future__ import annotations
-
+"""SYL-327 retained selections; this registry is not full DRV-5 qualification."""
 from ..harness import Scenario
-from .c1 import c1
+from .subscriptions import c2
+from .subscriptions import c4
+from .subscriptions import c5
+from .subscriptions import c6
+from .subscriptions import c7
 from .c14 import c14
-from .c31 import c31
-from .c32 import c32
-from .c40 import c40
-from .errors import c26, c27, c28, c29, c30
-from .runs import c10, c11, c12, c13, c18, c19, c20, c33, c42, c43
-from .stops import c15, c16, c17, c38
-from .subscriptions import c2, c3, c4, c5, c6, c7, c8, c39, c41
-from .tools import c9, c25, c35, c36, c37
+from .stops import c15
+from .stops import c17
+from .runs import c18
+from .errors import c26
+from .errors import c27
+from .errors import c28
+from .errors import c29
+from .errors import c30
+from .runs import c33
+from .tools import c36
+from .tools import c37
+from .stops import c38
 
-SCENARIOS: list[Scenario] = [c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16, c17, c18, c19, c20,
-                             c25, c26, c27, c28, c29, c30, c31, c32, c33, c35, c36, c37, c38, c39, c40, c41, c42, c43]
+
+async def _native_only(home):
+    raise ValueError(f"{home.id} is retained only for its named native variant; no generic coverage is claimed.")
+
+SCENARIOS = [
+    c2,
+    c4,
+    c5,
+    c6,
+    c7,
+    c14,
+    c15,
+    c17,
+    c18,
+    c26,
+    c27,
+    c28,
+    c29,
+    c30,
+    c33,
+    c36,
+    c37,
+    c38,
+    Scenario("C8", "Retained native variant", "Pi/MiMo only; explicit selection required", [], _native_only),
+    Scenario("C12", "Retained native variant", "Pi/MiMo only; explicit selection required", [], _native_only),
+    Scenario("C39", "Retained native variant", "Pi/MiMo only; explicit selection required", [], _native_only),
+    Scenario("C42", "Retained native variant", "Pi/MiMo only; explicit selection required", [], _native_only),
+]

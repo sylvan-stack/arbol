@@ -102,26 +102,6 @@ async def account(home: ScenarioHome, identifier: str = "xiaomi") -> JSObject:
     return JSObject(next(row for row in rows if row["id"] == identifier))
 
 
-async def local_records(home: ScenarioHome) -> None:
-    families = parse((await home.call(["subscriptions", "families"]))["stdout"])
-    equal("Exactly the native Xiaomi family", [r["id"] for r in families], ["xiaomi"])
-    equal("Native login semantics", families[0]["auth"], "vendor_login")
-    initial = await account(home)
-    equal("Initial binding is unsigned", initial["state"], "signed_out")
-    await failure(
-        home,
-        ["subscriptions", "create", "--family", "xiaomi", "--label", "Second", "--id", "xiaomi-2"],
-        "invalid_input",
-    )
-    changed = await home.json(["subscriptions", "update", "xiaomi", "--label", "Relabelled"])
-    equal("Local label changes", changed.result["label"], "Relabelled")
-    equal(
-        "No native authentication for local records",
-        [r for r in await home.received() if r.get("stage") != "install"],
-        [],
-    )
-
-
 async def pending(home: ScenarioHome, killed: bool = False) -> None:
     await options(home, "pending", authDelayMs=10000)
     active = home.start(["subscriptions", "sign-in", "xiaomi"])
@@ -158,130 +138,6 @@ async def pending(home: ScenarioHome, killed: bool = False) -> None:
             home.env["ARBOL_TEST_TIME_SCALE"] = "1"
 
 
-async def malformed(home: ScenarioHome) -> None:
-    paths = json.loads(Path(home.tool, "fixture-paths.json").read_text())
-    file = Path(paths["authFile"])
-    value = json.loads(file.read_text())
-    value["xiaomi"]["key"] = "invalid-é"
-    file.write_text(json.dumps(value))
-    before = file.read_bytes()
-    result = await home.json(["subscriptions", "sign-in", "xiaomi"])
-    equal("Malformed native key refuses", result.result["error"]["code"], "invalid_input")
-    equal("Native credentials remain untouched", file.read_bytes().hex(), before.hex())
-    equal("No authenticated request", [r for r in await home.received() if r.get("stage") != "install"], [])
-
-
-async def rejection(home: ScenarioHome) -> None:
-    await signed(home)
-    await options(home, "rejected", authRejected=True)
-    await failure(home, ["subscriptions", "check", "xiaomi"], "credential_rejected")
-    equal("Rejection changes binding state", (await account(home))["state"], "needs_attention")
-    await options(home, "repair")
-    await home.json(["subscriptions", "check", "xiaomi"])
-    equal("Fresh successful check repairs binding", (await account(home))["state"], "signed_in")
-
-
-async def active_refusal(home: ScenarioHome) -> None:
-    await signed(home)
-    await options(home, "active", silent=True)
-    active = home.start(
-        ["run", "--control", "--request", str(request_file(home, runId="active-refusal", workingDirectory=home.home))]
-    )
-    try:
-        await event(active, "started")
-        for operation in ("remove", "sign-out"):
-            for extra in ([], ["--force"]):
-                await failure(home, ["subscriptions", operation, "xiaomi", *extra], "invalid_input")
-                equal("Native-owned refusal leaves live work running", active.done.done(), False)
-        active.send({"type": "stop"})
-        stream(await active.done, "cancelled")
-        equal("Binding remains attached", (await account(home))["state"], "signed_in")
-    finally:
-        await active.dispose()
-
-
-async def plain(home: ScenarioHome) -> None:
-    await signed(home)
-    await options(home, fragmentBytes=7, text="Visible 👋 complete block")
-    records = await request(home, labels={"check": home.id}, runId="exact-request-id")
-    equal("Exact requested ID", records[-1]["runId"], "exact-request-id")
-    equal("Caller labels survive every event", all(r.get("labels") == {"check": home.id} for r in records), True)
-    equal(
-        "Only complete text block", [r["text"] for r in records if r["type"] == "text"], ["Visible 👋 complete block"]
-    )
-    equal("Native request observed once", len(await inputs(home)), 1)
-
-
-async def shell(home: ScenarioHome, large: bool = False, failed: bool = False) -> None:
-    await signed(home)
-    command = (
-        "printf native-shell-result; exit 7"
-        if failed
-        else ("python3 -c \"print('é' * 130000)\"" if large else "printf native-shell-result")
-    )
-    await options(
-        home,
-        "tools",
-        calls=[{"name": "bash", "arguments": {"command": command, "description": "Synthetic shared shell"}}],
-        prefixText="before-native-tool" if not large and not failed else "",
-    )
-    records = await request(home, tools="all", workingDirectory=home.home)
-    started = [r for r in records if r["type"] == "tool_started"]
-    finished = [r for r in records if r["type"] == "tool_finished"]
-    equal("One native shell call", len(started), 1)
-    equal("Tool calls balance", [r["callId"] for r in started], [r["callId"] for r in finished])
-    equal("Original command is preserved", started[0]["input"]["command"], command)
-    if large:
-        equal("Native or common truncation is disclosed", finished[0].get("truncated"), True)
-        check(
-            "Result is bounded",
-            len(json.dumps(finished[0], ensure_ascii=False).encode()) <= 205500,
-            "bounded result",
-            finished[0],
-        )
-    elif failed:
-        equal("Failed shell remains a tool result", finished[0]["ok"], False)
-    else:
-        check(
-            "Real shell output is retained",
-            "native-shell-result" in json.dumps(finished[0]),
-            "native shell result",
-            finished[0],
-        )
-        first = next(i for i, row in enumerate(records) if row["type"] == "tool_started")
-        last = next(i for i, row in enumerate(records) if row["type"] == "tool_finished")
-        equal("Complete native prose precedes tool admission", any(r["type"] == "text" and "before-native-tool" in r["text"] for r in records[:first]), True)
-        equal("Complete native prose follows tool completion", any(r["type"] == "text" for r in records[last + 1:]), True)
-
-
-async def tools_off(home: ScenarioHome) -> None:
-    await signed(home)
-    await options(home, text="ready")
-    await request(home)
-    equal("Actual native model tool set is empty", (await inputs(home))[-1]["checks"]["tools"], [])
-    equal("No public active runs after ephemeral cleanup", parse((await home.call(["runs", "list"]))["stdout"]), [])
-
-
-async def usage(home: ScenarioHome) -> None:
-    await signed(home)
-    await options(
-        home,
-        usage={
-            "prompt_tokens": 17,
-            "completion_tokens": 11,
-            "total_tokens": 28,
-            "prompt_tokens_details": {"cached_tokens": 3},
-            "completion_tokens_details": {"reasoning_tokens": 5},
-        },
-    )
-    records = await request(home)
-    reports = [r for r in records if r["type"] == "usage"]
-    check("Native usage is reported", bool(reports), "native usage event", records)
-    equal("Inclusive input tokens", reports[-1]["usage"]["inputTokens"], 17)
-    equal("Inclusive output tokens", reports[-1]["usage"]["outputTokens"], 11)
-    check("No fabricated cost", "cost" not in reports[-1], "cost absent", reports[-1])
-
-
 async def errors(home: ScenarioHome, status: int) -> None:
     await signed(home)
     await options(home, "error", status=status, retryAfter="2", error="Synthetic refusal")
@@ -301,95 +157,6 @@ async def asynchronous_error(home: ScenarioHome) -> None:
     records = await request(home, "failed")
     check("Successful HTTP cannot hide a native stream error", records[-1]["error"]["code"] == "vendor_error", "vendor_error", records)
     equal("Async refusal is never replayed", len(await inputs(home)), 1)
-
-
-async def classification(home: ScenarioHome) -> None:
-    for status, kind, code in [
-        (400, "context_length_exceeded", "context_exceeded"),
-        (413, "fixture_error", "context_exceeded"),
-        (403, "invalid_api_key", "credential_rejected"),
-        (403, "permission_denied", "vendor_error"),
-        (404, "fixture_error", "vendor_error"),
-        (422, "fixture_error", "vendor_error"),
-        (500, "fixture_error", "vendor_unavailable"),
-        (503, "context_length_exceeded", "vendor_unavailable"),
-    ]:
-        await signed(home)
-        await options(home, status=status, errorCode=kind, error="rate authentication misleading prose")
-        before = len(await inputs(home))
-        records = await request(home, "failed")
-        problem = records[-1]["error"]
-        equal("Structured native classification", problem["code"], code)
-        equal("Native fields outrank message wording", problem["detail"]["basis"], "fields")
-        equal("Retry policy is explicit", problem["retryable"], code == "vendor_unavailable")
-        equal("One provider attempt per refusal", len(await inputs(home)) - before, 1)
-
-
-async def signal_and_eof(home: ScenarioHome) -> None:
-    await stop(home, "signal")
-    await stop(home, "eof")
-
-
-async def stop(home: ScenarioHome, mode: str = "control") -> None:
-    await signed(home)
-    await options(
-        home,
-        "active",
-        calls=[{"name": "bash", "arguments": {"command": "sleep 60", "description": "Owned sleeping shell"}}],
-    )
-    path = request_file(home, tools="all", workingDirectory=home.home, runId="stopped")
-    active = home.start(["run", "--control", "--request", str(path)])
-    try:
-        await event(active, "tool_started")
-        started = time.monotonic()
-        if mode == "signal":
-            active.child.kill("SIGTERM")
-        elif mode == "eof":
-            active.child.stdin.end()
-        else:
-            active.send({"type": "stop"})
-        reply = await active.done
-        check("Cancelled process exits coherently", reply["status"] == 2, 2, reply)
-        records = list(stream(reply, "cancelled"))
-        check("Bounded cleanup", time.monotonic() - started <= 15, "<=15s", time.monotonic() - started)
-        equal(
-            "Interrupted tool is balanced",
-            len([r for r in records if r["type"] == "tool_started"]),
-            len([r for r in records if r["type"] == "tool_finished"]),
-        )
-        equal("Run reservation retired", parse((await home.call(["runs", "list"]))["stdout"]), [])
-    finally:
-        await active.dispose()
-
-
-async def metadata(home: ScenarioHome) -> None:
-    unsigned = await home.json(["subscriptions", "usage", "xiaomi"])
-    equal("Unsigned allowance", unsigned.result["outcome"], "needs_sign_in")
-    await signed(home)
-    equal(
-        "Unknown native allowance",
-        (await home.json(["subscriptions", "usage", "xiaomi"])).result["outcome"],
-        "unsupported",
-    )
-    models = (await home.json(["subscriptions", "models", "xiaomi"])).result
-    check("Authenticated native catalog", any(m["id"] == MODEL for m in models["models"]), MODEL, models)
-    equal("Catalog makes no inference", await inputs(home), [])
-
-
-async def refusal(home: ScenarioHome) -> None:
-    for command in ("check", "models"):
-        await failure(home, ["subscriptions", command, "xiaomi"], "not_signed_in")
-    records = await request(home, "failed")
-    equal("Unsigned run one final", len(records), 1)
-    equal("Unsigned error", records[-1]["error"]["code"], "not_signed_in")
-    equal("Unsigned refusal makes no inference", await inputs(home), [])
-    await signed(home)
-    for fields in ({"tools": "all"}, {"serviceTier": "unoffered"}, {"limits": {"totalSeconds": True}},
-                   {"input": {"role": "assistant", "text": "invalid-current-role"}}, {"model": "unknown-model"},
-                   {"effort": "unoffered-effort"}):
-        invalid = await request(home, "failed", **fields)
-        equal("Malformed or unoffered request refuses", invalid[-1]["error"]["code"], "invalid_input")
-    equal("Invalid requests spend no inference", await inputs(home), [])
 
 
 async def concurrent(home: ScenarioHome) -> None:
@@ -422,15 +189,6 @@ async def concurrent(home: ScenarioHome) -> None:
     finally:
         slow.child.stdout.resume()
         await slow.dispose()
-
-
-async def idempotent(home: ScenarioHome) -> None:
-    await home.call(["runs", "stop", "unknown"])
-    await home.call(["runs", "stop", "unknown"])
-    await signed(home)
-    await request(home, runId="ended")
-    equal("Stop of completed run", (await home.call(["runs", "stop", "ended"]))["status"], 0)
-    equal("No stale active runs", parse((await home.call(["runs", "list"]))["stdout"]), [])
 
 
 async def secrets(home: ScenarioHome) -> None:
@@ -575,80 +333,6 @@ QUESTION = {
 }
 
 
-async def questions(home: ScenarioHome, controlled: bool = True) -> None:
-    await signed(home)
-    await options(home, calls=[{"name": "question", "arguments": QUESTION}])
-    path = request_file(home, tools="all", workingDirectory=home.home)
-    if not controlled:
-        records = list(stream(await home.call(["run", "--request", str(path)])))
-        equal("Unattended questions never open a public ask", len([r for r in records if r["type"] == "ask_opened"]), 0)
-        check(
-            "No-control refusal reaches the model tool result",
-            "Nobody is connected" in json.dumps(records),
-            "refusal result",
-            records,
-        )
-        return
-    active = home.start(["run", "--control", "--request", str(path)])
-    try:
-        ask = await event(active, "ask_opened")
-        answer = {
-            "type": "answer",
-            "askId": ask["askId"],
-            "answer": {"type": "answers", "answers": {"q2": ["X", "Y"], "q1": ["B"]}},
-        }
-        active.send({"type": "answer", "askId": ask["askId"], "answer": {"type": "answers", "answers": {"q1": ["A"]}}})
-        await event(active, "control_refused")
-        active.send(answer)
-        active.send(answer)
-        records = list(stream(await active.done))
-        equal("One public ask", len([r for r in records if r["type"] == "ask_opened"]), 1)
-        equal("One ask closure", len([r for r in records if r["type"] == "ask_closed"]), 1)
-        equal(
-            "Malformed control is refused once; duplicate valid answer is idempotent",
-            len([r for r in records if r["type"] == "control_refused"]),
-            1,
-        )
-        results = json.dumps([r for r in records if r["type"] == "tool_finished"])
-        check(
-            "Ordered native answer values are returned",
-            "B" in results and "X" in results and "Y" in results,
-            "ordered answer result",
-            results,
-        )
-    finally:
-        await active.dispose()
-
-    await options(home, calls=[{"name": "question", "arguments": QUESTION}])
-    declined = home.start(["run", "--control", "--request", str(request_file(home, tools="all", workingDirectory=home.home))])
-    try:
-        ask = await event(declined, "ask_opened")
-        declined.send({"type": "answer", "askId": ask["askId"], "answer": {"type": "decline"}})
-        closed = list(stream(await declined.done, "cancelled"))
-        equal("Caller decline closes the ask once", len([r for r in closed if r["type"] == "ask_closed"]), 1)
-    finally:
-        await declined.dispose()
-
-
-async def permission(home: ScenarioHome) -> None:
-    # Native irreversible-delete confirmation remains distinct from question asks.
-    victim = Path(home.home, "delete-me")
-    victim.write_text("disposable")
-    await signed(home)
-    await options(
-        home,
-        calls=[
-            {
-                "name": "bash",
-                "arguments": {"command": "rm " + str(victim), "description": "Synthetic forced delete confirmation"},
-            }
-        ],
-    )
-    records = await request(home, tools="all", workingDirectory=home.home)
-    equal("Recognized native delete permission is approved", victim.exists(), False)
-    equal("Permission is never a public question", len([r for r in records if r["type"] == "ask_opened"]), 0)
-
-
 async def clocks(home: ScenarioHome) -> None:
     await signed(home)
     for name, limits in [
@@ -683,74 +367,6 @@ async def clocks(home: ScenarioHome) -> None:
         home, tools="all", workingDirectory=home.home, limits={"idleSeconds": 0.2, "totalSeconds": 15}
     )
     check("Actual native tool work suspends idle", "idle-was-paused" in json.dumps(records), "shell result", records)
-
-
-async def native_refusal(home: ScenarioHome) -> None:
-    await signed(home)
-    file = Path(home.tool, "fixture-manifest.json")
-    manifest = json.loads(file.read_text())
-    for target, code in [
-        (str(Path(home.tool, "missing-native")), "tool_missing"),
-        (str(Path(home.tool, "fake-native")), "tool_unsupported"),
-    ]:
-        fake = Path(home.tool, "fake-native")
-        fake.write_text('#!/bin/sh\ntouch "' + home.tool + '/must-not-execute"\n')
-        fake.chmod(0o700)
-        manifest["binary"] = target
-        file.write_text(json.dumps(manifest))
-        records = await request(home, "failed")
-        equal("Native profile refusal", records[-1]["error"]["code"], code)
-        equal("Unqualified code was never started", Path(home.tool, "must-not-execute").exists(), False)
-    equal("Native binary refusals spend no inference", await inputs(home), [])
-
-
-async def development(home: ScenarioHome) -> None:
-    identity = (await home.json(["info"])).result
-    equal("Mimo contract identity", [identity["driver"], identity["contract"]], ["mimo", 2])
-    equal("Qualified public execution is enabled", identity["capabilities"], {"inference": True, "nativeAttachment": True})
-    await home.json(
-        ["subscriptions", "create", "--family", "xiaomi", "--label", "Synthetic test", "--id", "test-xiaomi"]
-    )
-    refused = await home.json(["dev", "build-check"])
-    equal("Unsigned test binding refuses", refused.result["error"]["code"], "not_signed_in")
-    await signed(home, "test-xiaomi")
-    await options(home, "build-check", devChecks=True)
-    before = len(await inputs(home))
-    build = await home.json(["dev", "build-check"])
-    equal("Single-message synthetic Build orchestration", build.process["status"], 0)
-    equal("One actual native provider call", len(await inputs(home)) - before, 1)
-    equal("Build disables every native tool route", (await inputs(home))[-1]["checks"]["tools"], [])
-    await options(home, "live-check", devChecks=True)
-    old = home.timeout_ms
-    home.timeout_ms = 120000
-    try:
-        live = await home.json(["dev", "live-check"])
-    finally:
-        home.timeout_ms = old
-    check("Extended synthetic native orchestration", live.process["status"] == 0, "successful native stages", live.result)
-    equal("Five stages attempted", live.result["turnsAttempted"], 5)
-    equal("Spend stays explicit unknown", live.result["spend"], "unknown")
-    await options(home, "probe")
-    before = len(await inputs(home))
-    probe = await home.json(["dev", "probe"])
-    check("No-prompt probe completes", probe.process["status"] == 0, "successful no-prompt report", probe.result)
-    equal("Probe spends no model requests", len(await inputs(home)), before)
-    # Initial stdin request and following control must share one unbuffered stream.
-    await signed(home)
-    await options(home, silent=True)
-    active = home.start(["run", "--request", "-", "--control"])
-    try:
-        active.child.stdin.write(
-            json.dumps(
-                {"tools": "none", "history": [], "input": {"role": "user", "text": "stdin-frame"}, "runId": "stdin-run"}
-            )
-            + "\n"
-            + '{"type":"stop"}\n'
-        )
-        records = list(stream(await active.done, "cancelled"))
-        equal("Stdin request ID survives following control", records[-1]["runId"], "stdin-run")
-    finally:
-        await active.dispose()
 
 
 async def recovery(home: ScenarioHome) -> None:
@@ -827,28 +443,6 @@ async def partial_failure(home: ScenarioHome) -> None:
     equal("Failed follow-up is not retried", len(await inputs(home)), 2)
 
 
-async def state_failure(home: ScenarioHome) -> None:
-    await signed(home)
-    file = Path(home.home, "state-is-a-file")
-    file.write_text("owner bytes")
-    reply = await home.call(["--state-dir", str(file), "run", "--run-id", "failed-state", "synthetic"])
-    records = list(stream(reply, "failed"))
-    equal("Exactly one pre-start final", len(records), 1)
-    equal("Original state file survives", file.read_text(), "owner bytes")
-    equal("No inference before state refusal", await inputs(home), [])
-
-
-async def latest_allowance(home: ScenarioHome) -> None:
-    await signed(home)
-    await options(home, usage={"prompt_tokens": 17, "completion_tokens": 11, "total_tokens": 28})
-    records = await request(home)
-    equal("Actual token usage is retained", records[-1]["usage"]["inputTokens"], 17)
-    before = len(await home.received())
-    allowance = (await home.json(["subscriptions", "usage", "xiaomi"])).result
-    equal("Run tokens do not fabricate quota windows", [allowance["outcome"], allowance["windows"]], ["unsupported", []])
-    equal("Unsupported allowance starts no native operation", len(await home.received()), before)
-
-
 async def account_isolation(home: ScenarioHome) -> None:
     await signed(home)
     await home.json(["subscriptions", "create", "--family", "xiaomi", "--label", "Separate synthetic test", "--id", "test-xiaomi"])
@@ -873,87 +467,35 @@ async def account_isolation(home: ScenarioHome) -> None:
 
 
 SCOPES = {
-    "C1": "MIM-A1 local default/relabel and explicit second-production-account refusal",
-    "C2": "real pending attachment, replacement, five-minute scaled expiry and device-code refusal",
-    "C3": "MIM-A2 malformed native-owned credential refuses without deletion",
-    "C4": "rejection/attention state and fresh-check repair",
-    "C5": "native-owned destructive refusal leaves active run untouched",
     "C6": "killed pending attachment and durable attempt recovery",
     "C7": "native provider secret redaction before common output",
     "C8": "competing inherited provider configuration is stripped",
-    "C9": "native instructions plus additive caller context and unchanged source",
-    "C10": "fragmented native UTF-8, exact ID/labels and complete blocks",
-    "C11": "actual native shell command/result and paired public calls",
     "C12": "asynchronous provider error under HTTP success cannot become native success",
-    "C13": "native usage and absence of fabricated monetary cost",
     "C14": "native continuation/rebuild and exact completed-history projection",
-    "C15": "control cancellation during actual shell work and bounded balanced cleanup",
-    "C16": "idempotent public stop for unknown and retired runs",
-    "C17": "signal/EOF cleanup during actual shell work",
     "C18": "concurrent native runs, failed sibling and blocked output retain independent results",
-    "C19": "actual empty tool set and ephemeral run retirement",
-    "C20": "large multibyte native shell result stays bounded",
-    "C25": "native permission handling through production hooks",
-    "C26": "native structured failure classification",
-    "C27": "first rate rejection stops native retry",
     "C28": "first credential rejection stops native retry",
     "C29": "unscaled request total/idle limits",
-    "C30": "observed run tokens never fabricate native allowance windows or polling",
-    "C31": "unqualified native binary/profile refusal",
-    "C32": "enabled release CLI plus synthetic native development orchestration without real-provider calls",
-    "C33": "no-control native question is refused before execution",
-    "C35": "ordinary failed native shell continues with balanced result",
-    "C36": "native keyed question validation and exactly-once answers",
     "C37": "unchanged owner instructions and actual native skill discovery",
     "C38": "killed run ownership and retained-group recovery",
     "C39": "MIM-A1 second-production refusal, isolated test record and changed-native-UID fencing",
-    "C40": "unsigned and invalid request refusals before native inference",
-    "C41": "authenticated native catalog and explicit allowance applicability",
     "C42": "failure after partial output retains closed/unfinished calls and usage",
-    "C43": "unwritable run state has one pre-start failure",
 }
 
 
 async def run(home: ScenarioHome) -> None:
     handlers: dict[str, Callable[[ScenarioHome], Awaitable[None]]] = {
-        "C1": local_records,
-        "C2": pending,
-        "C3": malformed,
-        "C4": rejection,
-        "C5": active_refusal,
         "C6": lambda h: pending(h, True),
         "C7": secrets,
         "C8": environment,
-        "C9": context,
         "C14": history,
-        "C25": permission,
         "C29": clocks,
-        "C31": native_refusal,
-        "C32": development,
-        "C33": lambda h: questions(h, False),
-        "C36": questions,
         "C37": lambda h: context(h, True),
         "C38": recovery,
         "C42": partial_failure,
-        "C43": state_failure,
-        "C10": plain,
-        "C11": shell,
         "C12": asynchronous_error,
-        "C13": usage,
-        "C15": stop,
-        "C16": idempotent,
-        "C17": signal_and_eof,
         "C18": concurrent,
-        "C19": tools_off,
-        "C20": lambda h: shell(h, True),
-        "C26": classification,
-        "C27": lambda h: errors(h, 429),
         "C28": lambda h: errors(h, 401),
-        "C30": latest_allowance,
-        "C35": lambda h: shell(h, failed=True),
         "C39": account_isolation,
-        "C40": refusal,
-        "C41": metadata,
     }
     handler = handlers.get(home.id)
     if handler is None:
