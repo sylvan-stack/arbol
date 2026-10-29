@@ -999,7 +999,7 @@
       "reason": "Explicit immutable-image orchestration for retained backend checks; not an additional behavioral case.",
       "review": "individually-reviewed-higher-bar",
       "line": 14,
-      "file_sha256": "429faeb8316dacf14315ba978820544feb58d84477952c45e707e7f5e1bb6d0d",
+      "file_sha256": "d9368356bac3672788d80eccccc6f45fb0049b6bcbab4b3faca0a4d7732ac63c",
       "previous_id": "scripts/check_backend.py::main",
       "previous_file": "scripts/check_backend.py",
       "previous_line": 10,

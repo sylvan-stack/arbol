@@ -41,3 +41,7 @@ For a Python method, use the same fixture setup as the top tier, put the mid fol
 Restoration under SYL-326 used static checks only. No tests, Builds, provider calls, Origin migrations or corpus ingest were performed. Original prerequisites and environment limits still apply.
 
 The shared conformance runner requires explicit `--only` selections. Removed scenario IDs are unavailable; native-only retained IDs refuse generic-driver execution. Historical qualification commands that require deleted scenarios remain unsatisfied. The UI runner contains only retained programs and reports a reduced selection. MiMo’s vendored copy retains twelve commented scenarios, accounted separately in its inventory.
+
+## Builds
+
+Since SYL-329 (29 October 2026) a Build runs the top tier only. The backend Build's `unit` check runs every case under `tests/top/`, with its own interpreter and private PostgreSQL. The mid tier runs only when the owner asks for a mid-tier run.
