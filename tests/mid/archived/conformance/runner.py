@@ -1,20 +1,17 @@
 """Running the scenarios and reporting each one (DRV-5, Interface)."""
 
 from __future__ import annotations
-from collections.abc import Callable
-from .inspect import inspect
-
-from .check import Mismatch, message_of
-from .harness import Scenario, ScenarioHome
-from .process import Abort
-
 
 import asyncio
 import re
 import sys
+from collections.abc import Callable
 
-from .harness import Scenario
+from .check import Mismatch, message_of
+from .harness import Scenario, ScenarioHome
+from .inspect import inspect
 from .js import SPACE_CLASS
+from .process import Abort
 
 
 def scenarios() -> list[Scenario]:
@@ -120,6 +117,3 @@ async def run_suite(
     if signal_ is not None and signal_.aborted:
         return 2
     return 0 if passed == len(selected) else 1
-
-async def run_suite(*args: object, **kwargs: object) -> int:
-    raise RuntimeError("Required shared mid-tier scenarios are disabled; restore them only for an explicit testing task.")

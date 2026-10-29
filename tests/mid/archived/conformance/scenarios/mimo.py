@@ -707,7 +707,7 @@ async def native_refusal(home: ScenarioHome) -> None:
 async def development(home: ScenarioHome) -> None:
     identity = (await home.json(["info"])).result
     equal("Mimo contract identity", [identity["driver"], identity["contract"]], ["mimo", 2])
-    equal("Public execution remains gated", identity["capabilities"], {"inference": False, "nativeAttachment": False})
+    equal("Qualified public execution is enabled", identity["capabilities"], {"inference": True, "nativeAttachment": True})
     await home.json(
         ["subscriptions", "create", "--family", "xiaomi", "--label", "Synthetic test", "--id", "test-xiaomi"]
     )
@@ -900,7 +900,7 @@ SCOPES = {
     "C29": "unscaled request total/idle limits",
     "C30": "observed run tokens never fabricate native allowance windows or polling",
     "C31": "unqualified native binary/profile refusal",
-    "C32": "public CLI plus synthetic native development orchestration; paid gate remains closed",
+    "C32": "enabled release CLI plus synthetic native development orchestration without real-provider calls",
     "C33": "no-control native question is refused before execution",
     "C35": "ordinary failed native shell continues with balanced result",
     "C36": "native keyed question validation and exactly-once answers",
