@@ -39,7 +39,7 @@
       "end_before": 100,
       "reason": "Shared scenario runner covering Driver integration; execute only as a separately requested testing task.",
       "review": "SYL-314 explicit Mimo qualification: complete restored runner matches independently qualified Build 4; obsolete overriding refusal removed only after required source restoration.",
-      "line": 56,
+      "line": 53,
       "file_sha256": "a1a9326e00e6e564c2a69af30f52772abb4b615062144ea8db8a5ec297e3366c",
       "previous_id": "conformance/runner.py::run_suite",
       "previous_file": "conformance/runner.py",
