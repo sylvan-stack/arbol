@@ -4,28 +4,19 @@
 """
 
 from __future__ import annotations
+
 import asyncio
 import json
-import shutil
-import stat
-import tempfile
-from typing import Any
-
-
-import dataclasses
 import os
 import sys
 import unittest
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-from conformance.command import command_words, resolve_command, shell_quote  # noqa: E402
 from conformance.harness import Scenario, ScenarioHome  # noqa: E402
-from conformance.process import Abort, invoke  # noqa: E402
 from conformance.runner import run_suite  # noqa: E402
-
-from conformance.harness import Scenario  # noqa: E402
 
 FAKE = str(ROOT / "conformance/tests/fake_driver.py")
 CLI = str(ROOT / "conformance/bin/arbol-conformance.py")

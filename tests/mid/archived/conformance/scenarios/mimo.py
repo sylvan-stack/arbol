@@ -16,12 +16,12 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from ..check import check, equal
-from ..harness import ScenarioHome
-from ..js import JSObject, parse
-from ..process import invoke
-from .runs import stream
-from .stops import some_line, wait_for
+from conformance.check import check, equal
+from conformance.harness import ScenarioHome
+from conformance.js import JSObject, parse
+from conformance.process import invoke
+from conformance.scenarios.runs import stream
+from conformance.scenarios.stops import some_line, wait_for
 
 MODEL = "arbol-mimo-fixture"
 KEY = "arbol-mimo-fixture-disposable-only"

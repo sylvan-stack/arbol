@@ -2,22 +2,6 @@
 
 from __future__ import annotations
 
-from .support import (
-    at,
-    delay,
-    find,
-    index_of,
-    item,
-    mkdir,
-    now_monotonic,
-    read_file,
-    readdir,
-    readlink,
-    test,
-    write_file,
-)
-
-
 import base64
 import os
 import re
@@ -25,12 +9,12 @@ import stat
 from collections.abc import Callable
 from typing import Any
 
-from ..check import ScenarioError, check, equal, object_
-from ..harness import Scenario, ScenarioHome, fs_error
-from ..js import SPACE_CLASS, JSArray, JSObject, join, stringify, text_of, trim, truthy
-from .errors import prop, same, to_string
-from .runs import signed, stream
-from .support import (
+from conformance.check import check, equal, object_
+from conformance.harness import Scenario, ScenarioHome, fs_error
+from conformance.js import JSArray, JSObject, join, stringify, text_of
+from conformance.scenarios.errors import prop, same, to_string
+from conformance.scenarios.runs import signed, stream
+from conformance.scenarios.support import (
     at,
     delay,
     find,
@@ -40,6 +24,7 @@ from .support import (
     read_file,
     readdir,
     readlink,
+    test,
     write_file,
 )
 

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import test_unused as _support
-from test_unused import (Fixture ,Path ,TRUNK_PROGRAM ,document ,finish ,first_line ,json ,open_use_guard ,subprocess)
+from test_unused import TRUNK_PROGRAM, Fixture, Path, document, finish, first_line, json, open_use_guard, subprocess
 
 
 class UseGuards(_support.UseGuards):

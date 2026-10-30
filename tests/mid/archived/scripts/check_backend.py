@@ -1,14 +1,11 @@
 """Check this immutable Arbol image on its own Python and private PostgreSQL."""
 import subprocess
-
-
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 from backend_package import verify  # noqa: E402
-
 
 
 def main() -> int:

@@ -1,27 +1,34 @@
 """C14: resume or rebuild the caller conversation (DRV-2, DRV-6)."""
 
 from __future__ import annotations
-import hashlib
-import re
-
-from ..check import ScenarioError, check, equal, object_, text
-from ..js import UNDEFINED, JSArray, JSObject, get, join, parse, stringify, text_of, truthy
-from .runs import signed, stream
-from .stops import method_find, prop, sorted_readdir, strictly_equal
-from .support import at, delay, exists, index_of, item, mkdir, null_check, read_file, read_json, stat, write_file
-
 
 import ctypes
+import hashlib
 import math
 import os
+import re
 import stat as stat_module
 import struct
 from typing import Any
 
-from ..check import ScenarioError
-from ..harness import Scenario, ScenarioHome, fs_error
-from ..js import UNDEFINED, JSArray, JSObject, join, parse, text_of
-from .support import null_check
+from conformance.check import ScenarioError, check, equal, object_, text
+from conformance.harness import Scenario, ScenarioHome, fs_error
+from conformance.js import UNDEFINED, JSArray, JSObject, get, join, parse, stringify, text_of, truthy
+from conformance.scenarios.runs import signed, stream
+from conformance.scenarios.stops import method_find, prop, sorted_readdir, strictly_equal
+from conformance.scenarios.support import (
+    at,
+    delay,
+    exists,
+    index_of,
+    item,
+    mkdir,
+    null_check,
+    read_file,
+    read_json,
+    stat,
+    write_file,
+)
 
 
 def to_string(value: Any) -> str:

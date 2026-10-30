@@ -2,10 +2,6 @@
 """Own-Root queue reasons, database gating, listing identity and retained real children."""
 
 from __future__ import annotations
-import os
-import time
-from unittest import mock
-
 
 import asyncio
 import shlex
@@ -16,12 +12,6 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "runtime/site-packages"))
 sys.path.insert(0, str(ROOT / "tests"))
-from arbol_backend.bridge import Error, Params  # noqa: E402
-from arbol_backend.model import Refused  # noqa: E402
-from arbol_backend.process import LIMITS  # noqa: E402
-from arbol_backend.settling import listing  # noqa: E402
-from backend.live_support import Trunk, now  # noqa: E402
-
 from arbol_backend.bridge import Params  # noqa: E402
 from backend.live_support import now  # noqa: E402
 from backend.support import STANDIN  # noqa: E402

@@ -1,30 +1,25 @@
 """Native-managed-key variants of the shared scenarios, judged only through the CLI."""
 
 from __future__ import annotations
+
 import asyncio
 import base64
 import hashlib
-import re
-import struct
-import time
-import zlib
-
-from ..check import ScenarioError, check, equal
-from .stops import gone, input_, some_line, wait_for
-
-
 import json
 import os
+import struct
+import time
 import uuid
+import zlib
 from pathlib import Path
 from typing import Any
 
-from ..check import equal
-from ..harness import ScenarioHome
-from ..js import JSObject
-from ..process import invoke
-from .runs import stream
-from .stops import some_line, wait_for
+from conformance.check import ScenarioError, check, equal
+from conformance.harness import ScenarioHome
+from conformance.js import JSObject
+from conformance.process import invoke
+from conformance.scenarios.runs import stream
+from conformance.scenarios.stops import gone, input_, some_line, wait_for
 
 SECRET = "fixture-selected-key-SECRET-781"
 
@@ -752,7 +747,7 @@ async def run(home: ScenarioHome) -> None:
 # Historical fixtures and class context are available at the source revision; no active dependencies restored.
 # LOW-TIER-SOURCE-BEGIN
 # async def run_c1(home: ScenarioHome) -> None:
-#     from .c1 import run as local_records
+#     from conformance.scenarios.c1 import run as local_records
 #     await local_records(home)
 #     equal("Local commands do not resolve credentials", len([
 #         r for r in await home.received() if r.get("stage") in ("credential-export", "authentication", "input")
@@ -1207,7 +1202,7 @@ async def run(home: ScenarioHome) -> None:
 # Historical fixtures and class context are available at the source revision; no active dependencies restored.
 # LOW-TIER-SOURCE-BEGIN
 # async def run_c32(home: ScenarioHome) -> None:
-#     from .info import inspect_info
+#     from conformance.scenarios.info import inspect_info
 #     identity: dict[str, Any] | None = None
 #     for override in (None, str(Path(home.home, "explicit-state"))):
 #         identity_result = await home.json(["info", *(["--state-dir", override] if override else [])])

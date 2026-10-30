@@ -3,24 +3,14 @@ from __future__ import annotations
 
 import backend.test_health as _support
 from backend.test_health import (
+    RETRY,
+    SECONDS,
     Attention,
-    Availability,
     Database,
     Health,
-    Path,
-    RETRY,
-    ROOT,
     Refused,
-    SECONDS,
-    WindowFixture,
     asyncio,
-    json,
-    mock,
-    offline,
-    online,
-    psycopg,
     replace,
-    sys,
     time,
 )
 

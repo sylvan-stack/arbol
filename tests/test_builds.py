@@ -9,41 +9,37 @@ Each one builds a small sample component in a fresh home
 folder whose name holds a space and an apostrophe, and starts the tool and the launchers as
 programs. No vendor tool is involved.
 """
-import errno
-import re
-import resource
-import shlex
-import signal
-import threading
-import uuid
-from unittest import mock
-
+__all__ = [
+    "BUILD", "CHECK", "Callable", "ENV", "EXECVE", "Fixture", "HOLDER", "LAUNCHER_MARK", "PYTHON", "Path", "ROOT",
+    "Result", "SIGNALS", "TOOL", "Trunks", "WRITER", "alive", "document", "finish", "first_line", "json",
+    "milliseconds", "os", "resource", "root_record", "shlex", "shutil", "signal", "stat", "subprocess",
+    "threading", "time", "uuid", "wait_until", "waiting", "write_all", "write_root",
+]
 
 import ast
 import json
 import os
+import resource
 import select
+import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-from arbol_builds import mutation, pruning  # noqa: E402
-from arbol_builds.config import component_name  # noqa: E402
-from arbol_builds.launcher import milliseconds, record_start, write_all  # noqa: E402
-from arbol_builds.roots import current_root, read_root, read_roots, roots_folder  # noqa: E402
-from arbol_builds.service import LAUNCHER_MARK, last_start, reserve, write_launcher  # noqa: E402
-
-from arbol_builds.launcher import milliseconds  # noqa: E402
-from arbol_builds.service import write_launcher  # noqa: E402
+from arbol_builds.launcher import milliseconds, write_all  # noqa: E402
+from arbol_builds.service import LAUNCHER_MARK, write_launcher  # noqa: E402
 
 PYTHON = sys.executable
 ENTRY = str(ROOT / "bin/builds_entry.py")

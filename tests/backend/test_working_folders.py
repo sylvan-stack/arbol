@@ -2,9 +2,6 @@
 """Private real request/SQL receipts qualify stable folders and explicit repository moves."""
 
 from __future__ import annotations
-import os
-from unittest import mock
-
 
 import sys
 from pathlib import Path
@@ -13,8 +10,6 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "runtime/site-packages"))
 sys.path.insert(0, str(ROOT / "tests"))
-from backend.dispatch_support import install, starts  # noqa: E402
-
 from arbol_backend.bridge import Params  # noqa: E402
 from backend.dispatch_support import install  # noqa: E402
 from backend.test_chat_wire import WindowFixture, chat  # noqa: E402

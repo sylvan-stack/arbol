@@ -2,16 +2,20 @@
 """In-process awake clocks and real private managers qualify causal stuck-force notes."""
 
 from __future__ import annotations
+
+__all__ = [
+    "Any", "Clock", "Entry", "Error", "LOOK", "Outside", "Params", "Path", "ROOT", "Stuck", "Trunk", "UNCHANGED",
+    "WindowFixture", "asyncio", "awake", "calls", "chat", "configure", "install", "json", "mock", "now", "os",
+    "sys", "time",
+]
+import asyncio
 import json
 import os
-import time
-from unittest import mock
-
-
-import asyncio
 import sys
+import time
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
@@ -20,9 +24,6 @@ sys.path.insert(0, str(ROOT / "tests"))
 from arbol_backend.bridge import Error, Params  # noqa: E402
 from arbol_backend.dispatch import Entry  # noqa: E402
 from arbol_backend.stuck import LOOK, UNCHANGED, Stuck, awake  # noqa: E402
-
-from arbol_backend.bridge import Params  # noqa: E402
-from arbol_backend.stuck import Stuck  # noqa: E402
 from backend.discovery_support import calls, configure, install  # noqa: E402
 from backend.live_support import Trunk, now  # noqa: E402
 from backend.test_chat_wire import WindowFixture, chat  # noqa: E402

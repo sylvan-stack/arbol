@@ -6,12 +6,18 @@ tables from `tests/radar/layout.sql`, a copy of what both Roots' own layouts car
 """
 
 from __future__ import annotations
+
+__all__ = [
+    "Any", "CLAUDE", "CODEX", "FETCHED", "FIRST_PROFILE", "KIMI", "LAYOUT", "LIST", "LISTING", "LayoutCopy",
+    "Listed", "Listing", "MERGED", "MONDAY", "Path", "Profile", "Programs", "ROOT", "RecordFixture", "Refused",
+    "Rejected", "TABLES", "TheDrivers", "TheRecords", "TheReplay", "Weight", "ZAI", "at", "claude", "codex",
+    "drivers_of", "json", "kimi", "list_subscriptions", "loss_row", "record", "records_of", "sys", "timedelta",
+    "unittest", "usage", "window",
+]
 import json
-from datetime import timedelta
-
-
 import sys
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -20,14 +26,12 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "runtime/site-packages"))
 sys.path.insert(0, str(ROOT / "tests"))
 from arbol_backend.model import Refused  # noqa: E402
+from arbol_backend.process import Programs  # noqa: E402
 from arbol_radar.drivers import LIST, Listed, Listing, drivers_of, list_subscriptions, records_of  # noqa: E402
 from arbol_radar.model import FIRST_PROFILE, Profile, Rejected, Weight  # noqa: E402
 from arbol_radar.records import loss_row  # noqa: E402
 from radar.fixture import LAYOUT, LISTING, TABLES, RecordFixture, record, usage  # noqa: E402
 from radar.support import CLAUDE, CODEX, FETCHED, KIMI, MONDAY, ZAI, at, claude, codex, kimi, window  # noqa: E402
-
-from arbol_backend.process import Programs  # noqa: E402
-from radar.fixture import RecordFixture  # noqa: E402
 
 MERGED = Path.home() / "repos/sylvan-stack/readonly/arbol-root"
 
