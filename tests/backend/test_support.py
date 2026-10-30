@@ -1,13 +1,15 @@
+# Shared fixtures; case bodies live in top/ and mid/. See TESTS.md.
 """The check frame's own support: the private PostgreSQL starts in a session without a locale."""
 
 from __future__ import annotations
-
 import asyncio
+from unittest import mock
+
+
 import os
 import sys
 import unittest
 from pathlib import Path
-from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tests"))
@@ -21,56 +23,11 @@ def without_locale() -> dict[str, str]:
 
 
 class Locale(unittest.TestCase):
-    def test_locale_added_when_the_session_has_none(self) -> None:
-        """backend.cluster-locale-added"""
-        plain = without_locale()
-        with mock.patch.dict(os.environ, plain, clear=True):
-            environment = cluster_environment()
-        self.assertEqual(environment, {**plain, "LC_ALL": "C.UTF-8"})
-
-    def test_locale_of_the_session_kept(self) -> None:
-        """backend.cluster-locale-kept"""
-        plain = without_locale()
-        for variables in (
-            {"LANG": "C.UTF-8"},
-            {"LANG": "en_US.UTF-8"},
-            {"LC_ALL": "fictional"},
-            {"LANG": "C", "LC_ALL": "C"},
-        ):
-            with self.subTest(variables=variables), mock.patch.dict(os.environ, {**plain, **variables}, clear=True):
-                self.assertEqual(cluster_environment(), {**plain, **variables})
-
-    def test_lc_ctype_alone_is_no_locale(self) -> None:
-        """backend.cluster-locale-ctype"""
-        plain = without_locale()
-        with mock.patch.dict(os.environ, {**plain, "LC_CTYPE": "C.UTF-8"}, clear=True):
-            environment = cluster_environment()
-        self.assertEqual(environment, {**plain, "LC_CTYPE": "C.UTF-8", "LC_ALL": "C.UTF-8"})
-
-    def test_cluster_starts_without_a_locale(self) -> None:
-        """backend.cluster-without-locale"""
-        with mock.patch.dict(os.environ, without_locale(), clear=True):
-            cluster = Cluster()
-        try:
-            self.assertTrue(cluster.address.startswith("postgresql://bkd@"))
-            self.assertIsNotNone(cluster.child)
-            self.assertNotIn(b"multithreaded", cluster.log.read_bytes())
-        finally:
-            cluster.close()
+    pass  # TEST-TIER-EMPTY-SUITE; helpers remain importable.
 
 
 class Restart(unittest.IsolatedAsyncioTestCase):
-    async def test_restart_after_an_outage_drill_starts_without_a_locale(self) -> None:
-        """backend.cluster-restart-without-locale"""
-        with mock.patch.dict(os.environ, without_locale(), clear=True):
-            cluster = await asyncio.to_thread(Cluster)
-            try:
-                await offline(cluster)
-                await online(cluster)
-                self.assertNotIn(b"multithreaded", cluster.log.read_bytes())
-            finally:
-                cluster.close()
+    pass  # TEST-TIER-EMPTY-SUITE; helpers remain importable.
 
 
-if __name__ == "__main__":
-    unittest.main()
+# Archived complete imports; restore needed names in their original scope, not at this file tail.

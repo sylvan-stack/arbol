@@ -1,3 +1,4 @@
+# Shared fixtures; case bodies live in top/ and mid/. See TESTS.md.
 """Private PostgreSQL and actual disk tools qualify partial, own-connection measurement."""
 
 from __future__ import annotations
@@ -44,37 +45,6 @@ class Storage(WindowFixture):
               for root, database in other]]
         self.frame.configure()
 
-    async def test_actual_sizes_and_data_folder_use_only_the_own_connection_and_global_catalogue(self) -> None:
-        """measurement.own-connection; measurement.actual-sizes; measurement.local-disk; measurement.no-foreign-files"""
-        await self.db.execute('CREATE DATABASE "private other; literal"')
-        self.catalogue(("t2", "private other; literal"), ("missing", "private_missing"), ("invalid", "postgres"))
-        observed: list[tuple[str, str, Sequence[Any] | None]] = []
-        original = Session.execute
-        async def recorded(session: Session, sql: str, params: Sequence[Any] | None = None) -> list[tuple[Any, ...]]:
-            observed.append((session.connection.info.dbname, sql, params))
-            return await original(session, sql, params)
-        with mock.patch.object(Session, "execute", recorded):
-            r, w = await self.open()
-            reply = await self.call(r, w, "health.measure")
-        report = reply["result"]
-        self.assertTrue(report["server"]["ok"])
-        rows = {row["root"]: row for row in report["roots"]}
-        self.assertGreater(rows[self.backend.identity.root]["bytes"], 0)
-        self.assertGreater(rows["t2"]["bytes"], 0)
-        self.assertEqual(rows["t2"]["database"], "private other; literal")
-        for root in ("missing", "invalid"):
-            self.assertIn("problem", rows[root])
-            self.assertNotIn("bytes", rows[root])
-        self.assertEqual(rows["invalid"]["database"], "")
-        sizes = [entry for entry in observed if entry[1].startswith("SELECT pg_database_size")]
-        self.assertEqual([row[2] for row in sizes], [["arbol_test"], ["private other; literal"], ["private_missing"]])
-        self.assertTrue(all(row[0] == "arbol_test" for row in sizes))
-        self.assertGreater(report["dataFolderBytes"], 0)
-        self.assertEqual(report["dataFolderBytes"] % 1024, 0)
-        self.assertGreater(report["freeBytes"], 0)
-        self.assertNotIn("diskProblem", report)
-        self.assertFalse((self.frame.root.parent / "t2").exists())
-        self.assertNotIn("database", (await self.backend.roots.refresh()).event["root"])
 
     async def test_size_permission_failure_is_partial_without_escalation_or_an_outage(self) -> None:
         """measurement.permission-partial; measurement.no-escalation; measurement.data-directory-permission"""
@@ -286,3 +256,4 @@ class Storage(WindowFixture):
             self.assertEqual(listed["root"], "catalogue")
         finally:
             programs.close()
+# Archived complete imports; restore needed names in their original scope, not at this file tail.

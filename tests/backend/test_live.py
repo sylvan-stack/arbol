@@ -1,3 +1,4 @@
+# Shared fixtures; case bodies live in top/ and mid/. See TESTS.md.
 """Multiple real socket windows follow private contract folders from their first line."""
 
 from __future__ import annotations
@@ -28,39 +29,6 @@ class Windows(WindowFixture):
             found += (await self.event(reader, id, "lines"))["lines"]
         return found
 
-    async def test_three_late_windows_get_complete_compacted_history_and_new_whole_lines(self) -> None:
-        """live.windows; live.replay; live.poll-latency"""
-        trunk = await Trunk.make(self.frame, chat(1))
-        await trunk.accept(self.db)
-        source = [trunk.event("started", subscriptionId="private", toolVersion="fixture", driverBuild="0"),
-            trunk.event("text_delta", text="a"), trunk.event("text_delta", text="b"), trunk.event("text", text="ab"),
-            trunk.event("thinking_delta", text="piece"), trunk.event("thinking", text="whole"),
-            trunk.event("tool_started", callId="c", name="shell", input={"command": "private"}),
-            trunk.event("tool_output_delta", callId="c", text="piece"),
-            trunk.event("tool_finished", callId="c", ok=True, result="whole"),
-            trunk.event("text_delta", text="unfinished")]
-        for n in range(11, 41):
-            source.append(trunk.event("notice", code="private_notice", message=str(n), future={"shape": [1, 2]}))
-        expected = [line for line in source if line["n"] not in {2, 3, 5, 8}]
-        clients = []
-        for index in range(3):
-            reader, writer = await self.open()
-            snapshot = await self.subscribe(reader, writer, "chat-"+str(index), "chat", {"chat": chat(1)})
-            self.assertEqual(snapshot["exchanges"][0]["items"], [{"position": 0, "kind": "message", "role": "user", "text": "private request"}])
-            self.assertEqual(await self.lines(reader, "chat-"+str(index), 40), expected)
-            clients.append((reader, writer, "chat-"+str(index)))
-        raw = json.dumps({"n": 41, "event": {"runId": trunk.exchange+".1", "seq": 41,
-            "at": "2026-10-27T00:00:00Z", "type": "text_delta", "text": "partial becomes whole line"}}, separators=(",", ":")).encode()
-        trunk.append(raw)
-        reader, _, id = clients[0]
-        with self.assertRaises(TimeoutError):
-            async with asyncio.timeout(0.3):
-                await self.event(reader, id, "lines")
-        before = time.monotonic()
-        trunk.append(b"\n")
-        for reader, _, id in clients:
-            self.assertEqual((await self.lines(reader, id, 41))[-1], json.loads(raw))
-        self.assertLess(time.monotonic()-before, 0.25)
 
     async def test_replacement_snapshot_and_truncated_file_restart_replay(self) -> None:
         """live.snapshot-generation; live.truncated-file"""
@@ -233,3 +201,4 @@ class Windows(WindowFixture):
             while any(sub.id == "slow" for sub in self.backend.chats.chat_view.topic.listeners):
                 await asyncio.sleep(0.05)
         self.assertTrue(any(sub.id == "good" for sub in self.backend.chats.chat_view.topic.listeners))
+# Archived complete imports; restore needed names in their original scope, not at this file tail.

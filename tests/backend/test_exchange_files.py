@@ -1,3 +1,4 @@
+# Shared fixtures; case bodies live in top/ and mid/. See TESTS.md.
 """Private folder boundaries, immutable records and actual clean-UTC process identity."""
 
 from __future__ import annotations
@@ -51,30 +52,6 @@ class Files(unittest.IsolatedAsyncioTestCase):
         temporary.chmod(0o600)
         temporary.replace(path)
 
-    async def test_valid_records_truthful_states_unknown_fields_and_immutable_identity(self) -> None:
-        """live.records; live.states"""
-        self.value["future"] = {"extra": "ignored"}
-        self.save()
-        item = self.reader.read(self.exchange)
-        self.assertEqual(item.status(True)["state"], "accepting")  # type: ignore[index]
-        self.assertIsNone(item.status(False))
-        self.value["acceptedAt"] = "2026-10-27T00:00:01Z"
-        self.value["signsOfLife"]["waitingFor"] = "future_wait"
-        self.save()
-        item = self.reader.read(self.exchange)
-        self.assertEqual(item.status(True)["waitingFor"], "future_wait")  # type: ignore[index]
-        self.assertEqual(item.status(False)["state"], "gone")  # type: ignore[index]
-        self.assertEqual(item.status(True, stopping=True)["state"], "stopping")  # type: ignore[index]
-        self.value["end"] = {"state": "future_end", "at": "2026-10-27T00:00:02Z"}
-        self.save()
-        item = self.reader.read(self.exchange)
-        self.assertEqual(item.status(True)["state"], "ending")  # type: ignore[index]
-        self.assertEqual(item.status(False)["state"], "unsaved")  # type: ignore[index]
-        self.assertEqual(item.end, {"state": "future_end", "at": "2026-10-27T00:00:02.000Z"})
-        self.value["process"]["pid"] += 1
-        self.save()
-        with self.assertRaises(Error):
-            self.reader.read(self.exchange)
 
     async def test_atomically_retired_record_events_and_control_are_transient_missing(self) -> None:
         """live.retired-inode; live.retired-control-no-append"""
@@ -211,3 +188,4 @@ class Files(unittest.IsolatedAsyncioTestCase):
         with mock.patch("arbol_backend.exchange_files.asyncio.create_subprocess_exec", return_value=child):
             with self.assertRaises(Error):
                 await processes({1})
+# Archived complete imports; restore needed names in their original scope, not at this file tail.

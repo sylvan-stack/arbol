@@ -12,6 +12,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 SOURCE = Path(__file__).resolve().parents[1]
 ROOT_DRILLS = Path.home() / "repos/sylvan-stack/readonly/arbol-root/roots/sapling/drills"
@@ -34,12 +35,12 @@ frame = Frame(OUT)
 frame.bin = P / "installed-session/bin"
 ins = Inspector(Places.owner(), psql="/opt/homebrew/opt/postgresql@17/bin/psql")
 service = Installed(Places.owner(), ins)
-proof = {}
-req = None
-b = None
+proof: dict[str, Any] = {}
+req: dict[str, Any] | None = None
+b: Bridge | None = None
 
 
-async def until(check, seconds=25):
+async def until(check: Any, seconds: float = 25) -> Any:
     end = time.monotonic() + seconds
     while time.monotonic() < end:
         result = check()
@@ -49,7 +50,7 @@ async def until(check, seconds=25):
     raise RuntimeError("Actual recovery observation deadline expired")
 
 
-async def cue(expected, seconds=240):
+async def cue(expected: str, seconds: float = 240) -> None:
     end = time.monotonic() + seconds
     while time.monotonic() < end:
         if select.select([sys.stdin], [], [], 0)[0]:
@@ -59,25 +60,27 @@ async def cue(expected, seconds=240):
     raise RuntimeError("Private drill command expired")
 
 
-async def connect():
+async def connect() -> Bridge:
     return await Bridge.connect(R / "backend.sock")
 
 
-async def subscribe(topic, params):
+async def subscribe(topic: str, params: dict[str, Any]) -> str:
+    assert b is not None
     key = str(uuid.uuid4())
     b.writer.write((json.dumps({"type": "subscribe", "id": key, "topic": topic, "params": params}) + "\n").encode())
     await b.writer.drain()
     return key
 
 
-async def close():
+async def close() -> None:
     try:
-        await b.close()
+        if b is not None:
+            await b.close()
     except (ConnectionError, BrokenPipeError):
         pass
 
 
-async def run():
+async def run() -> None:
     global req, b
     roots = frame.command("arbol-roots", "list")
     require(next(x for x in roots if x["current"])["root"] == "jensen", "Current Root changed.")
@@ -129,7 +132,7 @@ async def run():
         (control / "finish").write_text("finish\n")
         (control / "finish").chmod(0o600)
 
-        async def ended():
+        async def ended() -> Any:
             value = json.loads((R / "exchanges" / req["exchange"] / "record.json").read_text())
             pid = value["process"]["pid"]
             seen = (await processes({pid}))[pid]
@@ -141,6 +144,7 @@ async def run():
             value = await ended()
             await asyncio.sleep(0.25)
         require(value, "Trunk did not leave an unsaved end during outage.")
+        assert value is not None
         private_json(OUT / "unsaved-record.json", value)
         proof["unsaved"] = value["end"]
         await until(
@@ -159,7 +163,7 @@ async def run():
             proof["automaticRestore"] = True
     print("Actual database restored; awaiting saved reconciliation.", flush=True)
 
-    def canonical():
+    def canonical() -> Any:
         for row in reversed(b.events):
             event = row.get("event", {})
             items = (

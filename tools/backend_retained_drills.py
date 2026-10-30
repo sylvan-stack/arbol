@@ -9,6 +9,7 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 SOURCE = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(SOURCE), str(SOURCE / "src")]
@@ -22,12 +23,12 @@ OUT.mkdir(mode=0o700, exist_ok=False)
 ROOT = Path.home() / "Library/Application Support/Arbol/roots/sapling"
 CONTROL = P / "fault-driver"
 frame = Frame(OUT)
-owned = []
-proof = {}
-b = None
+owned: list[dict[str, Any]] = []
+proof: dict[str, Any] = {}
+b: Bridge | None = None
 
 
-async def until(check, seconds=25):
+async def until(check: Any, seconds: float = 25) -> Any:
     end = time.monotonic() + seconds
     while time.monotonic() < end:
         result = check()
@@ -37,7 +38,8 @@ async def until(check, seconds=25):
     raise RuntimeError("Actual retained drill observation deadline expired")
 
 
-async def subscribe(chat):
+async def subscribe(chat: str) -> str:
+    assert b is not None
     key = str(uuid.uuid4())
     b.writer.write(
         (json.dumps({"type": "subscribe", "id": key, "topic": "chat", "params": {"chat": chat}}) + "\n").encode()
@@ -46,8 +48,9 @@ async def subscribe(chat):
     return key
 
 
-async def new(name, model="hold"):
-    request = {
+async def new(name: str, model: str = "hold") -> dict[str, Any]:
+    assert b is not None
+    request: dict[str, Any] = {
         "chat": str(uuid.uuid4()),
         "exchange": str(uuid.uuid4()),
         "message": "SYL-257 " + name + " controlled installed fault; no vendor request.",
@@ -71,19 +74,20 @@ async def new(name, model="hold"):
     return request
 
 
-async def checked_signal(request, number):
+async def checked_signal(request: dict[str, Any], number: int) -> None:
     pid = request["process"]["pid"]
     observed = (await processes({pid}))[pid]
     require(observed == datetime.fromisoformat(request["process"]["startedAt"]), "Owned Trunk identity changed.")
     os.kill(pid, number)
 
 
-def events(request):
+def events(request: dict[str, Any]) -> list[Any]:
+    assert b is not None
     return [r["event"] for r in b.events if r.get("type") == "event" and r.get("id") == request["subscription"]]
 
 
-async def saved(request, state, seconds=40):
-    def probe():
+async def saved(request: dict[str, Any], state: str, seconds: float = 40) -> Any:
+    def probe() -> Any:
         for e in reversed(events(request)):
             if e.get("kind") == "saved" and e.get("exchange", {}).get("exchange") == request["exchange"]:
                 return e["exchange"]
@@ -98,7 +102,7 @@ async def saved(request, state, seconds=40):
     return value
 
 
-async def clean_driver(r):
+async def clean_driver(r: dict[str, Any]) -> None:
     pid = r["driverProcess"]["pid"]
     seen = (await processes({pid}))[pid]
     if seen is not None:
@@ -106,7 +110,7 @@ async def clean_driver(r):
         os.kill(pid, signal.SIGKILL)
 
 
-async def run():
+async def run() -> None:
     global b
     roots = frame.command("arbol-roots", "list")
     require(next(x for x in roots if x["current"])["root"] == "jensen", "Current Root changed.")

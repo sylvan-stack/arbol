@@ -39,6 +39,22 @@ def package(root: Path = ROOT) -> Path:
     shutil.copytree(root / "tests/backend", folder / "tests/backend", ignore=ignore)
     shutil.copytree(root / "tests/radar", folder / "tests/radar", ignore=ignore)
     shutil.copytree(root / "tests/ui", folder / "tests/ui", ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.mjs"))
+    # Package the tier selections belonging to the same private Backend image.
+    # The original modules now contain shared fixtures rather than case bodies.
+    inventory = json.loads((root / "test-tiers.json").read_text())
+    selections = {
+        item["file"] for item in inventory["tests"]
+        if item["kind"] == "python" and (
+            item.get("support_file", "").startswith(("tests/backend/", "tests/radar/", "tests/ui/"))
+            or item.get("support_file") == "tests/test_backend.py"
+        )
+    }
+    selections.update(("tests/top/__init__.py", "tests/mid/__init__.py",
+                       "tests/mid/archived/scripts/check_backend.py"))
+    for relative in sorted(selections):
+        destination_path = folder / relative
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(root / relative, destination_path)
     (folder / "tools").mkdir()
     for name in ("__init__.py", "bridge_relay.py", "elma_bundle.py", "backend_journeys.py", "backend_fault_driver.py"):
         shutil.copy2(root / "tools" / name, folder / "tools" / name)

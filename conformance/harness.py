@@ -266,7 +266,7 @@ class ScenarioHome:
         write_file(join(self.tool, "scenario"), f"{self.id} {part}\n", 0o600)
         settings = text_of(stringify({"toolPath": join(self.tool, "nonexistent") if missing else self.tool_path}))
         # Both contract filenames are installed before discovering the Driver with info.
-        for driver in ("claude", "codex", "pi"):
+        for driver in ("claude", "codex", "pi", "mimo"):
             write_file(join(self.home, ".arbol", f"arbol-{driver}-driver.json"), settings, 0o600)
 
     async def call(self, args: list[str]) -> JSObject:
@@ -286,7 +286,7 @@ class ScenarioHome:
 
     async def settings(self, value: dict[str, Any]) -> None:
         text = text_of(stringify({"toolPath": self.tool_path, **value}))
-        for driver in ("claude", "codex", "pi"):
+        for driver in ("claude", "codex", "pi", "mimo"):
             write_file(join(self.home, ".arbol", f"arbol-{driver}-driver.json"), text, 0o600)
 
     async def json(self, args: list[str]) -> JsonResult:
