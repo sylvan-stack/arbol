@@ -7,6 +7,15 @@ database of the check's own, as `tests/radar/fixture.py` makes it.
 
 from __future__ import annotations
 
+__all__ = [
+    "Any", "CLAUDE", "CODEX", "ChatRecords", "FIRST_PROFILE", "KIMI", "LEARNING", "Learning", "Listed", "Listing",
+    "MONDAY", "Observation", "Path", "ProfileRecords", "RATIOS", "ROOT", "RecordFixture", "Refused", "Report",
+    "Series", "Subscription", "TheCommands", "TheEstimate", "ThePairs", "TheProfiles", "TheRuns", "Weight", "at",
+    "claude_report", "claude_windows", "codex", "datetime", "estimate", "json", "kimi", "learn", "observation",
+    "observations", "observe", "one", "pairs", "recompute", "record", "report", "runs_between", "sys", "timedelta",
+    "unittest", "usage", "uuid", "window",
+]
+
 
 import json
 import sys
@@ -21,6 +30,7 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "runtime/site-packages"))
 sys.path.insert(0, str(ROOT / "tests"))
 from arbol_backend.model import Refused  # noqa: E402
+from arbol_radar.drivers import Listed, Listing  # noqa: E402
 from arbol_radar.learning import (  # noqa: E402
     Observation,
     Series,
@@ -33,16 +43,8 @@ from arbol_radar.learning import (  # noqa: E402
 )
 from arbol_radar.model import FIRST_PROFILE, Learning, Report, Subscription, Weight  # noqa: E402
 from arbol_radar.tick import recompute  # noqa: E402
-from radar.support import CLAUDE, CODEX, KIMI, MONDAY, at, codex, kimi, report, window  # noqa: E402
-
-from arbol_radar.drivers import Listed, Listing  # noqa: E402
-from arbol_radar.learning import (  # noqa: E402
-    Observation,
-    observe,
-)
-from arbol_radar.model import Learning, Report, Subscription  # noqa: E402
 from radar.fixture import RecordFixture, record, usage  # noqa: E402
-from radar.support import CLAUDE, MONDAY, at, report, window  # noqa: E402
+from radar.support import CLAUDE, CODEX, KIMI, MONDAY, at, codex, kimi, report, window  # noqa: E402
 
 LEARNING = Learning()  # the proposed defaults: a store change of 2 points, 10 pairs, the median
 

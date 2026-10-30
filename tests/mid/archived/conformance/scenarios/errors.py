@@ -3,8 +3,12 @@ property reads the scenarios of this file and of `tools` make on Driver data."""
 
 from __future__ import annotations
 
-from ..check import ScenarioError, check, equal, object_
-from ..js import (
+import math
+from typing import Any
+
+from conformance.check import ScenarioError, check, equal, object_
+from conformance.harness import Scenario, ScenarioHome
+from conformance.js import (
     UNDEFINED,
     JSArray,
     JSObject,
@@ -19,31 +23,10 @@ from ..js import (
     truthy,
     utf8_length,
 )
-from .runs import events as parse_events
-from .runs import signed, stream
-from .subscriptions import check_resources
-from .support import at, delay, exists, find, is_integer, item, now_monotonic, write_file
-
-
-import math
-from typing import Any
-
-from ..check import ScenarioError, object_
-from ..harness import Scenario, ScenarioHome
-from ..js import (
-    UNDEFINED,
-    JSArray,
-    JSObject,
-    get,
-    is_number,
-    len16,
-    parse,
-    same_value,
-    text_of,
-    truthy,
-    utf8_length,
-)
-from .support import at, find
+from conformance.scenarios.runs import events as parse_events
+from conformance.scenarios.runs import signed, stream
+from conformance.scenarios.subscriptions import check_resources
+from conformance.scenarios.support import at, delay, exists, find, is_integer, item, now_monotonic, write_file
 
 # --- JavaScript's reads, with V8's errors ----------------------------------------------------------------
 

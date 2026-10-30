@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import test_roots_sql as _support
-from test_roots_sql import (Path ,Refused ,image ,json ,os ,selected_sql ,signal ,subprocess ,sys ,test_roots ,time)
+from test_roots_sql import Path, Refused, image, json, os, selected_sql, signal, subprocess, sys, test_roots, time
 
 
 class Selection(_support.Selection):

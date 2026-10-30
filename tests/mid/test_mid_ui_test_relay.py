@@ -3,25 +3,14 @@ from __future__ import annotations
 
 import ui.test_relay as _support
 from ui.test_relay import (
-    Path,
-    RelayChecks,
     TOOL,
-    argparse,
     asyncio,
     base64,
-    contextlib,
-    importlib,
     json,
     parse_qs,
     read_frame,
-    relay,
-    secrets,
     send_frame,
-    spec,
-    struct,
     sys,
-    tempfile,
-    unittest,
     urlsplit,
 )
 

@@ -3,26 +3,13 @@ from __future__ import annotations
 
 import backend.test_event_file as _support
 from backend.test_event_file import (
-    Any,
     CHUNK,
-    Envelope,
-    Files,
     MAX_LINE,
-    Path,
-    ROOT,
     Scanner,
     asyncio,
-    completed,
     event,
-    json,
-    meta,
-    metadata,
     os,
-    superseded,
-    sys,
-    tempfile,
     tracemalloc,
-    unittest,
 )
 
 

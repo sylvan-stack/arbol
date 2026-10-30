@@ -6,40 +6,6 @@ The TypeScript `checkSubscriptionRemoval` is not ported: only the Codex Driver's
 
 from __future__ import annotations
 
-from ..js import (
-    UNDEFINED,
-    JSArray,
-    JSObject,
-    get,
-    is_number,
-    join,
-    loose_includes,
-    parse,
-    stringify,
-    text_of,
-    trim,
-    well_formed,
-)
-from .support import (
-    at,
-    delay,
-    exists,
-    find,
-    includes,
-    item,
-    mkdir,
-    now_monotonic,
-    now_ms,
-    null_check,
-    read_file,
-    read_json,
-    readdir,
-    record,
-    test,
-    write_file,
-)
-
-
 import asyncio
 import errno
 import ipaddress
@@ -55,13 +21,14 @@ from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler
 from typing import Any
 
-from ..check import ScenarioError, check, equal, object_, text
-from ..harness import Scenario, ScenarioHome, fs_error
-from ..js import (
+from conformance.check import ScenarioError, check, equal, object_, text
+from conformance.harness import Scenario, ScenarioHome, fs_error
+from conformance.js import (
     UNDEFINED,
     JSArray,
     JSObject,
     get,
+    is_number,
     join,
     loose_includes,
     parse,
@@ -70,18 +37,23 @@ from ..js import (
     trim,
     well_formed,
 )
-from .runs import stream
-from .support import (
+from conformance.scenarios.runs import stream
+from conformance.scenarios.support import (
     at,
+    delay,
+    exists,
     find,
     includes,
     item,
     mkdir,
+    now_monotonic,
     now_ms,
     null_check,
     read_file,
+    read_json,
     readdir,
     record,
+    test,
     write_file,
 )
 

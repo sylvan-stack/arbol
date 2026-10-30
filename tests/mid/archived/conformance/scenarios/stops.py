@@ -3,11 +3,16 @@ DRV-2, DRV-6), and `wait_for`, the deadline poll other scenarios use. Also the J
 `prop`, `strictly_equal`, `method_find` and `sorted_readdir`."""
 
 from __future__ import annotations
+
 import asyncio
 import hashlib
+import os
+from collections.abc import Awaitable, Callable
+from typing import Any
 
-from ..check import ScenarioError, check, equal, object_, text
-from ..js import (
+from conformance.check import ScenarioError, check, equal, object_, text
+from conformance.harness import Scenario, ScenarioHome
+from conformance.js import (
     UNDEFINED,
     JSArray,
     JSObject,
@@ -20,8 +25,8 @@ from ..js import (
     text_of,
     truthy,
 )
-from .runs import signed, stream
-from .support import (
+from conformance.scenarios.runs import signed, stream
+from conformance.scenarios.support import (
     alive,
     at,
     delay,
@@ -33,32 +38,6 @@ from .support import (
     read_file,
     readdir,
     write_file,
-)
-
-
-import os
-from collections.abc import Awaitable, Callable
-from typing import Any
-
-from ..check import ScenarioError, check
-from ..harness import Scenario, ScenarioHome
-from ..js import (
-    UNDEFINED,
-    JSArray,
-    get,
-    is_number,
-    same_value,
-    text_of,
-)
-from .support import (
-    alive,
-    at,
-    delay,
-    find,
-    is_integer,
-    now_monotonic,
-    null_check,
-    readdir,
 )
 
 # --- JavaScript readings --------------------------------------------------------------------------------

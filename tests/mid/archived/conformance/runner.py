@@ -7,15 +7,15 @@ import re
 import sys
 from collections.abc import Callable
 
-from .check import Mismatch, message_of
-from .harness import Scenario, ScenarioHome
-from .inspect import inspect
-from .js import SPACE_CLASS
-from .process import Abort
+from conformance.check import Mismatch, message_of
+from conformance.harness import Scenario, ScenarioHome
+from conformance.inspect import inspect
+from conformance.js import SPACE_CLASS
+from conformance.process import Abort
 
 
 def scenarios() -> list[Scenario]:
-    from .scenarios import SCENARIOS
+    from conformance.scenarios import SCENARIOS
 
     return list(SCENARIOS)
 
@@ -37,7 +37,7 @@ def select_scenarios(only: str | None = None) -> list[Scenario]:
 
 
 def _stdout(line: str) -> None:
-    from .cli import write
+    from conformance.cli import write
 
     write(sys.stdout, line + "\n")
 
@@ -83,13 +83,13 @@ async def run_suite(
                 signal_.throw_if_aborted()
             fixture = await ScenarioHome.create(scenario.id, command, timeout_ms, signal_)
             if native_mimo:
-                from .scenarios.mimo import SCOPES, prepare, run
+                from conformance.scenarios.mimo import SCOPES, prepare, run
 
                 scope = SCOPES[scenario.id]
                 await prepare(fixture)
                 await run(fixture)
             elif native_pi:
-                from .scenarios.pi import SCOPES, prepare, run
+                from conformance.scenarios.pi import SCOPES, prepare, run
 
                 scope = SCOPES.get(scenario.id, "unimplemented Pi variant")
                 await prepare(fixture)

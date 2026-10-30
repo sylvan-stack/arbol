@@ -5,9 +5,6 @@ The rollup checks need no database: they take results computed from the chapter'
 """
 
 from __future__ import annotations
-import json
-from datetime import UTC, datetime, timedelta
-
 
 import sys
 import unittest
@@ -19,11 +16,6 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "runtime/site-packages"))
 sys.path.insert(0, str(ROOT / "tests"))
-from arbol_backend.model import Refused, parse  # noqa: E402
-from arbol_radar.cli import Options, options, read  # noqa: E402
-from arbol_radar.rollup import Entry, Rollup, as_text, rollup, when  # noqa: E402
-from radar.fixture import LAYOUT, LISTING, RecordFixture, drivers, usage  # noqa: E402
-
 from arbol_radar.model import FIRST_PROFILE, Subscription  # noqa: E402
 from arbol_radar.rollup import Entry  # noqa: E402
 from arbol_radar.vigor import compute  # noqa: E402

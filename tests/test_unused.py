@@ -1,10 +1,12 @@
 # Shared fixtures; case bodies live in top/ and mid/. See TESTS.md.
 """Unused pruning and nonblocking process-use protection, in private registries only."""
-import subprocess
-
+__all__ = [
+    "Fixture", "Path", "TRUNK_PROGRAM", "document", "finish", "first_line", "json", "open_use_guard", "subprocess",
+]
 
 import json
 import os
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -15,9 +17,9 @@ from test_builds import Fixture
 from arbol_builds.unused import Usage
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from test_builds import TRUNK_PROGRAM, Fixture, document, finish, first_line
+from test_builds import TRUNK_PROGRAM, document, finish, first_line
+
 from arbol_builds.launcher import open_use_guard
-from unused_drill import drill  # noqa: E402
 
 
 class MixedRegistry(unittest.TestCase):

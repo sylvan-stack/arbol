@@ -3,31 +3,11 @@ from __future__ import annotations
 
 import backend.test_stuck as _support
 from backend.test_stuck import (
-    Any,
-    Clock,
     Entry,
-    Error,
-    LOOK,
-    Outside,
     Params,
-    Path,
-    ROOT,
-    Stuck,
-    Trunk,
-    UNCHANGED,
-    WindowFixture,
     asyncio,
-    awake,
-    calls,
     chat,
     configure,
-    install,
-    json,
-    mock,
-    now,
-    os,
-    sys,
-    time,
 )
 
 

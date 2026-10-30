@@ -3,6 +3,13 @@
 
 from __future__ import annotations
 
+__all__ = [
+    "CLAUDE", "CODEX", "FIRST_PROFILE", "FIVE_HOURS", "KIMI", "MONDAY", "Path", "PredictedWindows", "Profile",
+    "RESET", "ROOT", "Rejected", "Stale", "TheNextChange", "Unknown", "Weight", "Window", "ZAI", "at", "by_label",
+    "claude", "codex", "compute", "kimi", "next_change", "predict", "report", "stale_after", "sys", "timedelta",
+    "unittest", "unknown_reason", "window",
+]
+
 
 import sys
 import unittest
@@ -27,10 +34,6 @@ from radar.support import (  # noqa: E402
     kimi,
     report,
     window,
-)
-
-from radar.support import (  # noqa: E402
-    MONDAY,
 )
 
 RESET = MONDAY + timedelta(hours=3, minutes=20)  # the worked example's five-hour reset, 13:20
