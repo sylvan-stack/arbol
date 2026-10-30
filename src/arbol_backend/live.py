@@ -386,6 +386,7 @@ class Live:
                 try:
                     await self.step(sub, state)
                 except Restart:
+                    await asyncio.sleep(0)  # Let record scans and committed-row observations resolve the restart.
                     continue
                 await asyncio.sleep(POLL)
         except asyncio.CancelledError:

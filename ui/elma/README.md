@@ -134,3 +134,19 @@ arbol:tests/ui/accounts_browser.mjs
 arbol:tests/ui/recovery_browser.mjs
 arbol:tests/ui/reimport_browser.mjs
 -->
+
+### Deliberate installed First Sapling qualification
+
+`tools/backend_journeys.py` supplies private immutable receipts, a five-reservation ceiling, test-state forwarding to the real installed CLIs and a correlated installed Unix Bridge client. `tests/backend/test_journeys.py` checks replay/ceiling/journal/locking and forwarding safeguards without contacting a vendor. The `installed_first_path.mjs` browser journey is deliberately absent from `tests/ui/run.mjs`: it requires `ARBOL_INSTALLED_JOURNEY=1`, a private exact-prompt reservation and exclusive per-attempt receipts. It sends one message through the actual installed renderer/relay/Backend/Root/Trunk/test Driver, closes and reopens during streamed text, checks saved completion/answer clipboard and reopens from latest chats. Keep its input, wire frames, outcomes, costs and screenshots outside Git. Inspect a failed or ambiguous existing attempt before deciding any further action; never rerun a script to obtain a fresh submission automatically. Swift delivery remains a separate qualification.
+
+SYL-257's explicit `installed_metadata.mjs` and `installed_paste.mjs` exercise
+only newly owned retained chats, preserve immutable proof and never send a
+message. The paste journey verifies the real private Root file and an
+acknowledged Draft across reload, then restores the original Draft.
+`installed_native_stop.mjs` requires the same exact-prompt reservation and
+exclusive-start guard as the first path. `tools/backend_retained_drills.py`
+requires `ARBOL_INSTALLED_FAULT_PROOF=1`, refuses pre-existing active work and
+existing evidence, and uses only the separately named no-vendor fixture.
+It verifies exact owned process/start identities before signals and restores
+paused processes in cleanup. Fault-input checks are not vendor SDK coverage.
+These programs are deliberately excluded from automatic checks.

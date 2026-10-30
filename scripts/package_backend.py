@@ -56,7 +56,7 @@ def package(root: Path = ROOT) -> Path:
         destination_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(root / relative, destination_path)
     (folder / "tools").mkdir()
-    for name in ("__init__.py", "bridge_relay.py", "elma_bundle.py"):
+    for name in ("__init__.py", "bridge_relay.py", "elma_bundle.py", "backend_journeys.py", "backend_fault_driver.py"):
         shutil.copy2(root / "tools" / name, folder / "tools" / name)
     shutil.copy2(root / "tests/test_backend.py", folder / "tests/test_backend.py")
     (folder / "scripts").mkdir()

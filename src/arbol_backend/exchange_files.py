@@ -128,7 +128,11 @@ class Folder:
         flags = (os.O_WRONLY | os.O_APPEND) if append else os.O_RDONLY
         fd = os.open(name, flags | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=self.descriptor)
         try:
-            if not private(os.fstat(fd)):
+            info = os.fstat(fd)
+            if (info.st_nlink == 0 and stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+                    and stat.S_IMODE(info.st_mode) == 0o600):
+                raise FileNotFoundError("The private Exchange file was atomically replaced or removed.")
+            if not private(info):
                 raise Error("no_answer")
             return fd
         except BaseException:

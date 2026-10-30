@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Callable
 
 from .bridge import Error, Params, Registry
+from .database import Session
 from .health import Health
 from .metadata import now
 from .model import Refused
@@ -68,6 +69,27 @@ class Measurements:
         except Exception:
             report["diskProblem"] = DISK_PROBLEM
 
+    async def limited_disk(self, report: Params, session: Session) -> tuple[str, str, str | None] | None:
+        """Confirm the installed server without granting the limited role settings access."""
+        try:
+            rows = await session.execute("SELECT pg_backend_pid(), EXTRACT(EPOCH FROM pg_postmaster_start_time())::double precision, inet_server_addr()::text")
+            if (len(rows) != 1 or len(rows[0]) != 3 or type(rows[0][0]) is not int
+                    or type(rows[0][1]) not in (int, float)
+                    or rows[0][2] is not None and not isinstance(rows[0][2], str)):
+                raise ValueError("No authenticated process metadata.")
+            pid, started, server = rows[0]
+            host = session.connection.info.host
+            if not self.disk.local(host, server):
+                raise ValueError("The database server is not local.")
+            candidate = self.database.identity.home / "Library/Application Support/Arbol/database/data"
+            path = await asyncio.to_thread(self.disk.confirm, candidate, pid, float(started))
+            return str(path), host, server
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            report["diskProblem"] = DISK_PROBLEM
+            return None
+
     async def collect(self) -> Params:
         report: Params = {"measuredAt": now(), "server": {"ok": False, "problem": "The database check did not finish."}, "roots": []}
         disk_task: asyncio.Task[None] | None = None
@@ -95,7 +117,9 @@ class Measurements:
                                 else:
                                     disk_task = asyncio.create_task(self.read_disk(report, rows[0][0], session.connection.info.host, rows[0][1]))
                             except Refused:
-                                report["diskProblem"] = DISK_PROBLEM
+                                attested = await self.limited_disk(report, session)
+                                if attested is not None:
+                                    disk_task = asyncio.create_task(self.read_disk(report, *attested))
                             for row in report["roots"]:
                                 if not row["database"]:
                                     continue
