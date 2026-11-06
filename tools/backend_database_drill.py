@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 SOURCE = Path(__file__).resolve().parents[1]
-ROOT_DRILLS = Path.home() / "repos/sylvan-stack/readonly/arbol-root/roots/sapling/drills"
+ROOT_DRILLS = Path.home() / "repos/sylvan-stack/arbol-root/roots/sapling/drills"
 sys.path[:0] = [str(SOURCE), str(SOURCE / "src"), str(ROOT_DRILLS)]
 from drill_support import Inspector, Places  # noqa: E402
 from sapling_outage import Installed, stopped  # noqa: E402
@@ -96,7 +96,7 @@ async def run() -> None:
         "exchange": str(uuid.uuid4()),
         "message": "SYL-257 actual reconnect/database recovery; controlled no-vendor input.",
         "route": {"driver": "journey-fixture", "subscription": "private-fixture", "model": "hold"},
-        "workingFolder": str(Path.home() / "repos/sylvan-stack/readonly/arbol-trunk"),
+        "workingFolder": str(Path.home() / "repos/sylvan-stack/arbol-trunk"),
     }
     private_json(OUT / "request.json", req)
     control = C / (req["exchange"] + ".1")

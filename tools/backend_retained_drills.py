@@ -55,7 +55,7 @@ async def new(name: str, model: str = "hold") -> dict[str, Any]:
         "exchange": str(uuid.uuid4()),
         "message": "SYL-257 " + name + " controlled installed fault; no vendor request.",
         "route": {"driver": "journey-fixture", "subscription": "private-fixture", "model": model},
-        "workingFolder": str(Path.home() / "repos/sylvan-stack/readonly/arbol-trunk"),
+        "workingFolder": str(Path.home() / "repos/sylvan-stack/arbol-trunk"),
     }
     private_json(OUT / (name + "-request.json"), request)
     owned.append(request)
