@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Literal
 
 from .model import (
     AgentRecord,
@@ -55,18 +56,18 @@ def optional_event_text(event: dict[str, object], key: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def adopt(processes: Processes, tool: str, pid: int, existing: str | None = None) -> tuple[Owner, str | None]:
-    return Owner(pid, processes.started(pid)), processes.entrypoint(tool, pid, existing)
+def adopt(processes: Processes, tool: str, pid: int) -> tuple[Owner, str | None]:
+    return Owner(pid, processes.started(pid)), processes.entrypoint(tool, pid)
 
 
-def refresh(record: AgentRecord, at: str) -> None:
+def refresh(record: AgentRecord, at: str, turn_wait: Literal["message", "driver"] | None = None) -> None:
     previous = record.waitingFor
     if any(call.asks for call in record.calls):
         target = "answer"
     elif record.calls:
         target = "tool"
     else:
-        target = "message" if previous == "message" else "driver"
+        target = turn_wait or ("message" if previous == "message" else "driver")
     if record.calls:
         record.toolName = record.calls[-1].name
     else:
@@ -127,6 +128,7 @@ def handle(tool: str, value: dict[str, object], location: Path | None = None) ->
         record = store.read(tool, session)
         candidate = processes.candidate(tool, record.owner.pid if record is not None else None)
         compact = name == "SessionStart" and optional_event_text(event, "source") == "compact"
+        is_subagent = event.get("agent_id") is not None
 
         if record is None:
             owner, entrypoint = adopt(processes, tool, candidate)
@@ -136,19 +138,21 @@ def handle(tool: str, value: dict[str, object], location: Path | None = None) ->
                 record.lastEvent = LastEvent(name, at)
                 store.write(record)
             return
-        else:
-            different = candidate != record.owner.pid
-            if name == "SessionEnd" and different and record.end is None and processes.alive(record.owner):
-                return
-            if record.end is not None and not different and name != "SessionStart":
-                return
-            if name == "SessionStart" or different:
+        elif not is_subagent:
+            if candidate != record.owner.pid:
                 if name == "SessionStart" or record.end is not None or not processes.alive(record.owner):
-                    existing = record.entrypoint if candidate == record.owner.pid else None
-                    record.owner, record.entrypoint = adopt(processes, tool, candidate, existing)
+                    record.owner, record.entrypoint = adopt(processes, tool, candidate)
                     record.end = None
+                elif name == "SessionEnd":
+                    return
+            elif name == "SessionStart":
+                record.entrypoint = processes.entrypoint(tool, candidate, record.entrypoint)
+            elif record.end is not None:
+                return
+        elif record.end is not None:
+            return
 
-        if event.get("agent_id") is not None:
+        if is_subagent:
             subagent(record, event, name, tool, at)
             store.write(record)
             return
@@ -157,33 +161,36 @@ def handle(tool: str, value: dict[str, object], location: Path | None = None) ->
         if working_folder is not None:
             record.workingFolder = working_folder
 
+        model = optional_event_text(event, "model")
+        if name == "SessionStart" or (tool == "codex" and model is not None and name not in LIFE_ONLY_EVENTS):
+            record.model = model
+
+        turn_wait: Literal["message", "driver"] | None = None
         if name == "SessionStart":
             record.transcript = optional_event_text(event, "transcript_path")
-            record.model = optional_event_text(event, "model")
-            record.entrypoint = processes.entrypoint(tool, record.owner.pid, record.entrypoint)
             record.background = None
             record.calls.clear()
-            record.waitingFor = "message"
+            turn_wait = "message"
             record.end = None
         elif name == "UserPromptSubmit":
             transcript = optional_event_text(event, "transcript_path")
             if transcript is not None:
                 record.transcript = transcript
-            record.waitingFor = "driver"
+            turn_wait = "driver"
         elif name in TURN_END_EVENTS:
             record.calls.clear()
-            record.waitingFor = "message"
+            turn_wait = "message"
             if tool == "claude-code":
                 tasks = event.get("background_tasks")
                 record.background = len(tasks) if isinstance(tasks, list) else 0
         elif name == "Notification" and optional_event_text(event, "notification_type") == "idle_prompt":
             record.calls.clear()
-            record.waitingFor = "message"
+            turn_wait = "message"
         elif name == "SessionEnd":
             record.end = End(at, optional_event_text(event, "reason") or "other")
         elif name not in LIFE_ONLY_EVENTS:
             apply_call_event(record, event, name, tool)
 
-        refresh(record, at)
+        refresh(record, at, turn_wait)
         record.lastEvent = LastEvent(name, at)
         store.write(record)

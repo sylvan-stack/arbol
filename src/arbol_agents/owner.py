@@ -55,7 +55,7 @@ class Processes:
             return pid
         command = self.command(pid)
         executable = command.split(maxsplit=1)[0].rsplit("/", 1)[-1] if command else ""
-        if executable not in SHELLS:
+        if executable.lstrip("-") not in SHELLS:
             return pid
         return self.parent(pid)
 

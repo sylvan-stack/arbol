@@ -204,8 +204,13 @@ def install(args: list[str]) -> dict[str, object]:
         roots_program = folder / "arbol-roots"
         agents_program = folder / "arbol-agents"
         for path, module in ((program, "arbol_builds"), (roots_program, "arbol_roots"), (agents_program, "arbol_agents")):
+            launch = f"from {module}.cli import entry\nentry()\n"
+            if module == "arbol_agents":
+                # A hook can arrive while the package is between renames during a reinstall.
+                launch = ("try:\n    from arbol_agents.cli import entry\n"
+                          "except Exception:\n    pass\nelse:\n    entry()\n")
             atomic_write(str(path), (f"{first}\n{SIGINT_LINE}\nsys.path.insert(0, {str(library)!r})\n"
-                                     f"from {module}.cli import entry\nentry()\n").encode(), 0o755)
+                                     f"{launch}").encode(), 0o755)
             os.chmod(path, 0o755)
         launchers: list[str] = []
         for path in sorted(folder.iterdir()):
