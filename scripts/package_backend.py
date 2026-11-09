@@ -67,14 +67,14 @@ def package(root: Path = ROOT) -> Path:
         shutil.copy2(root / "bin" / name, folder / "bin" / name)
     for name in ("package.json", "pyproject.toml", ".python-version", "uv.lock", "arbol-build.json"):
         shutil.copy2(root / name, folder / name)
-    contract = Path.home() / "repos/sylvan-stack/readonly/arbol-root/contract/1/layout.sql"
+    contract = Path.home() / "repos/sylvan-stack/arbol-root/contract/1/layout.sql"
     if not contract.is_file():
-        # A private test HOME changes no source input: locate the same stack's merged readonly copy.
+        # A private test HOME changes no source input: locate the same stack's merged checkout.
         contract = next(
             (
-                parent / "readonly/arbol-root/contract/1/layout.sql"
+                parent / "arbol-root/contract/1/layout.sql"
                 for parent in root.resolve().parents
-                if (parent / "readonly/arbol-root/contract/1/layout.sql").is_file()
+                if (parent / "arbol-root/contract/1/layout.sql").is_file()
             ),
             contract,
         )

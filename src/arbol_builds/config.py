@@ -47,9 +47,9 @@ def component_name(name: str) -> str:
 
 
 def default_repository(component: str) -> str:
-    """~/repos/sylvan-stack/readonly/<component>, and for a Trunk its folder trunks/<code name>/ in arbol-trunk: the
-    clones that always hold the last merged main, never the repositories' own folders (BLD-D18)."""
-    folder = os.path.join(os.path.expanduser("~"), "repos/sylvan-stack/readonly")
+    """~/repos/sylvan-stack/<component>, and for a Trunk its folder trunks/<code name>/ in arbol-trunk: the
+    shared checkouts on main (FOR-D2; BLD-D18 superseded by the single-checkout migration)."""
+    folder = os.path.join(os.path.expanduser("~"), "repos/sylvan-stack")
     if trunk(component):
         return os.path.join(folder, TRUNKS, "trunks", component[len(TRUNKS) + 1:])
     return os.path.join(folder, component)

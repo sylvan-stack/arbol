@@ -1,4 +1,4 @@
-"""Read-only renderer bootstrap of public readonly slots/defaults (BKD-D36)."""
+"""Read-only renderer bootstrap of shared-checkout repository slots/defaults (BKD-D36)."""
 from __future__ import annotations
 
 import asyncio
@@ -13,7 +13,7 @@ class Workspace:
         registry.method("workspace.get", self.get)
 
     def read(self) -> Params:
-        folder = self.home / "repos/sylvan-stack/readonly"
+        folder = self.home / "repos/sylvan-stack"
         try:
             repositories: list[Params] = [{"name": "sylvan-stack", "folder": str(folder),
                                           "route": self.settings.for_repository("sylvan-stack")}]
