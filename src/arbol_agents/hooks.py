@@ -126,6 +126,7 @@ def handle(tool: str, value: dict[str, object], location: Path | None = None) ->
     at = timestamp()
     with store.locked():
         record = store.read(tool, session)
+        existing = record is not None
         candidate = processes.candidate(tool, record.owner.pid if record is not None else None)
         compact = name == "SessionStart" and optional_event_text(event, "source") == "compact"
         is_subagent = event.get("agent_id") is not None
@@ -157,12 +158,21 @@ def handle(tool: str, value: dict[str, object], location: Path | None = None) ->
             store.write(record)
             return
 
+        notification = optional_event_text(event, "notification_type") if name == "Notification" else None
+        life_only = name in LIFE_ONLY_EVENTS or (
+            name == "Notification" and notification not in {"idle_prompt", "permission_prompt", "elicitation_dialog"}
+        )
+        if existing and life_only:
+            record.lastEvent = LastEvent(name, at)
+            store.write(record)
+            return
+
         working_folder = optional_event_text(event, "cwd")
         if working_folder is not None:
             record.workingFolder = working_folder
 
         model = optional_event_text(event, "model")
-        if name == "SessionStart" or (tool == "codex" and model is not None and name not in LIFE_ONLY_EVENTS):
+        if name == "SessionStart" or (tool == "codex" and model is not None and not life_only):
             record.model = model
 
         turn_wait: Literal["message", "driver"] | None = None
@@ -183,12 +193,12 @@ def handle(tool: str, value: dict[str, object], location: Path | None = None) ->
             if tool == "claude-code":
                 tasks = event.get("background_tasks")
                 record.background = len(tasks) if isinstance(tasks, list) else 0
-        elif name == "Notification" and optional_event_text(event, "notification_type") == "idle_prompt":
+        elif notification == "idle_prompt":
             record.calls.clear()
             turn_wait = "message"
         elif name == "SessionEnd":
             record.end = End(at, optional_event_text(event, "reason") or "other")
-        elif name not in LIFE_ONLY_EVENTS:
+        elif not life_only:
             apply_call_event(record, event, name, tool)
 
         refresh(record, at, turn_wait)
