@@ -14,6 +14,8 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
+ELMA_ENTRIES = ["index.html"]
+SHARED_ENTRIES = ["index.html", "seqoya.html"]
 CSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'"
 
 
@@ -37,12 +39,14 @@ class Index(HTMLParser):
         self.csp = ""
         self.assets: list[str] = []
         self.inline = False
+        self.has_script = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         values = dict(attrs)
         if tag == "meta" and (values.get("http-equiv") or "").lower() == "content-security-policy":
             self.csp = values.get("content") or ""
         if tag == "script":
+            self.has_script |= bool(values.get("src"))
             self.inline |= not bool(values.get("src"))
             self.assets.append(values.get("src") or "")
         if tag == "link" and values.get("rel") in {"stylesheet", "modulepreload"}:
@@ -54,13 +58,17 @@ def verify(folder: Path, build: str) -> dict[str, Any]:
     if (data.get("format") != 1 or data.get("build") != build or data.get("files") != payload(folder)
             or not re.fullmatch(r"[0-9a-f]{40}", data.get("designSystem", {}).get("commit", ""))):
         raise ValueError("The renderer must match its Build, design provenance and every asset hash.")
-    index = Index()
-    index.feed((folder / "index.html").read_text())
-    if index.csp != CSP or index.inline or not index.assets:
-        raise ValueError("The renderer needs its exact local-only CSP and external bundle scripts.")
-    for asset in index.assets:
-        if not re.fullmatch(r"\./assets/[A-Za-z0-9_.-]+", asset) or not (folder / asset).is_file():
-            raise ValueError("Every renderer script and stylesheet must be a local bundle asset.")
+    entries = data.get("entries", ELMA_ENTRIES)
+    if entries not in (ELMA_ENTRIES, SHARED_ENTRIES) or (entries == SHARED_ENTRIES and not data.get("sourceCommit")):
+        raise ValueError("The renderer manifest has invalid entry points.")
+    for entry in entries:
+        index = Index()
+        index.feed((folder / entry).read_text())
+        if index.csp != CSP or index.inline or not index.has_script:
+            raise ValueError(f"{entry} needs its exact local-only CSP and external bundle scripts.")
+        for asset in index.assets:
+            if not re.fullmatch(r"\./assets/[A-Za-z0-9_.-]+", asset) or not (folder / asset).is_file():
+                raise ValueError(f"Every script and stylesheet in {entry} must be a local bundle asset.")
     fonts = [p for p in (folder / "assets").iterdir() if p.suffix in {".woff", ".woff2"}]
     if len(fonts) < 2 or not (folder / "LICENSES.json").is_file():
         raise ValueError("The renderer must carry its fonts and license notices.")
@@ -109,7 +117,8 @@ def package(root: Path, destination: Path, build: str, *, source_commit: str | N
     shutil.copytree(source / "dist", destination)
     licenses(source, destination)
     snapshot = json.loads((source / "design-system/manifest.json").read_text())
-    source_files = ["package.json", "package-lock.json", "index.html", "vite.config.ts", "svelte.config.js", "tsconfig.json"]
+    entries = SHARED_ENTRIES if source_commit is not None else ELMA_ENTRIES
+    source_files = [*entries, "package.json", "package-lock.json", "vite.config.ts", "svelte.config.js", "tsconfig.json"]
     source_files += [str(p.relative_to(source)) for base in ("src", "design-system") for p in (source / base).rglob("*") if p.is_file()]
     data = {"format": 1, "build": build, "designSystem": {"repository": snapshot["repository"], "commit": snapshot["commit"],
             "manifestSha256": digest(source / "design-system/manifest.json")},
@@ -117,12 +126,13 @@ def package(root: Path, destination: Path, build: str, *, source_commit: str | N
             "files": payload(destination)}
     if source_commit is not None:
         data["sourceCommit"] = source_commit
+        data["entries"] = entries
     (destination / "bundle.json").write_text(json.dumps(data, indent=2) + "\n")
     return verify(destination, build)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Package the shared Elma renderer for an App Build.")
+    parser = argparse.ArgumentParser(description="Package the shared renderer for an App Build.")
     parser.add_argument("--destination", type=Path, required=True)
     parser.add_argument("--build", required=True)
     parser.add_argument("--source-commit", required=True)

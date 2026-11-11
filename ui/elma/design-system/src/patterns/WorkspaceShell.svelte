@@ -21,7 +21,8 @@
       'Monitoring',
     ],
     children,
-    headerContent, headerLead, headerExtras, headerWindowControls, root, rootSelector, navigation, status, fitted = false, elma = false,
+    headerContent, headerLead, headerExtras, headerWindowControls, root, rootSelector, navigation, status,
+    navigationFooter = true, fitted = false, elma = false,
     onnavigate = () => {},
   }: {
     workspace?: string;
@@ -34,7 +35,7 @@
     headerWindowControls?: Snippet;
     root?: WorkspaceRoot;
     rootSelector?: WorkspaceRootSelector;
-    navigation?: Snippet; status?: Snippet; fitted?: boolean; elma?: boolean;
+    navigation?: Snippet; status?: Snippet | null; navigationFooter?: boolean; fitted?: boolean; elma?: boolean;
     onnavigate?: (page: string) => void;
   } = $props();
   let expanded = $state(false);
@@ -181,9 +182,9 @@
             expanded = false;
           }}>{destination}</button
         >{/each}
-      <div class="nav-foot">
+      {#if navigationFooter}<div class="nav-foot">
         <span class="small muted">Connected knowledge.<br />Thoughtful work.</span>
-      </div>
+      </div>{/if}
       {/if}
     </nav>
     <main>
@@ -195,7 +196,7 @@
         </div>{/if}
     </main>
   </div>
-  <footer>{#if status}{@render status()}{:else}<span>● Fixture mode</span><span>Local sample data · No native services</span>{/if}</footer>
+  {#if status !== null}<footer>{#if status}{@render status()}{:else}<span>● Fixture mode</span><span>Local sample data · No native services</span>{/if}</footer>{/if}
 </div>
 
 <style>

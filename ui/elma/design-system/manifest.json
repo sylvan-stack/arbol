@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/sylvan-stack/arbol-design-system",
-  "commit": "0aa3b85af947ea874bcf51a8d20ec3843626a006",
+  "commit": "d311be2c7b2cb6a498bb21352fa972e3c93fdd61",
   "files": {
     "docs/licenses/Hanken-Grotesk-OFL.txt": "f45f60ca871850c58d8dc9c973bd6fcad40c137e9d037172b961e8ca68c87ef7",
     "docs/licenses/Spline-Sans-Mono-OFL.txt": "3127290ccd196ec0c4ffa60296845224a034b92c81de8231b0916278ed7607e1",
@@ -16,6 +16,7 @@
     "src/entities.ts": "85a15407512163cfcaca957f947516bd6089473509ce629cff4285ce4f238f10",
     "src/json.ts": "9101532d0ae7e1c0ed89b6eaf3bbe00b7c1727b5946e7429fe5d24a34ad75396",
     "src/markdown.ts": "3879de5cdf3bb5c48a2f29639e3237a41d700d487f88571181a908b27c2d1e0e",
+    "src/pages/SeqoyaLab.svelte": "294f22c0f73669ce33bae73599de4beb5acacf413ee62b9e5de6ce3852a70ce8",
     "src/patterns/CommandPalette.svelte": "a48722ad4b2fb3ac7e96773ffe99a5899e6f37688ac4d7f9fee33f7c9356e149",
     "src/patterns/ConfirmAction.svelte": "105af94d18ae735133ce670385c390eb235f57c7822f1927b60823cb344f380b",
     "src/patterns/EntityPicker.svelte": "7a95b85208eba0ae70e531ac6091895c8e751654c35d943096541f4ef6023389",
@@ -24,7 +25,8 @@
     "src/patterns/InlineRename.svelte": "859fe6e9a5a4046f8d543613bb0a7289e5c3ff3e1bc21807c4ef77247794e254",
     "src/patterns/Modal.svelte": "6732a9949f94eec50530cc7e92893b69570bedfcf291816356bf53731f74aa6c",
     "src/patterns/Notice.svelte": "b2d76e8101550ea9006c791266b1b4ae45092b5dd481dd1e147883f5fc790f79",
-    "src/patterns/WorkspaceShell.svelte": "138ddb1ae15a1e81ad8cef0a5709db49c494d02a8e9af07df61dfbbf262caf5f",
+    "src/patterns/PageHeader.svelte": "6a6514e5fddc38dbb904e86be9d9a7d007dbe43fd4aef5ac8406a2718477876a",
+    "src/patterns/WorkspaceShell.svelte": "fba05995182c93eb078924f6cb75a7a490e7fbc6a6d4fe88f692d2b471eed478",
     "src/sections/AskUserQuestion.svelte": "40aac40331bb5d7087dc7c0a263564a2bf859669b0ea62335dbae710a96c2d78",
     "src/sections/Composer.svelte": "d9ae9912d8a371093de9e3908b76e87bff2dbb58c84c467a7c9b61a1e37d8d06",
     "src/sections/ElmaFrame.svelte": "2b88721a8a328d543a061f5daa9694fc29528625b02e84d550171e99c567c5bb",
