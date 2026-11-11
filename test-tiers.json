@@ -16,10 +16,10 @@
     "low_removed_previously": 12,
     "mimo_registry_cases_active": 0,
     "mimo_registry_cases_commented": 0,
-    "mid_available": 151,
+    "mid_available": 152,
     "mid_by_kind": {
       "entrypoint": 2,
-      "scenario": 42,
+      "scenario": 43,
       "support": 2,
       "python": 88,
       "program": 17
@@ -672,6 +672,28 @@
       "restored_from_revision": "71c4909bb8a9c7a24b5743bd830fde7066068e05",
       "previous_reason": "Contract scenario with a multi-step fixture and compatibility assertions. Reserved for explicit qualification; this reset does not establish a reason to keep the whole scenario active.",
       "quality_review_revision": "f66335c7e203794dc84e40fe3106e85f8cae2dd6"
+    },
+    {
+      "repo": "arbol",
+      "file": "tests/mid/archived/conformance/scenarios/runs.py",
+      "id": "tests/mid/archived/conformance/scenarios/runs.py::run_c44",
+      "name": "run_c44",
+      "class": "",
+      "kind": "scenario",
+      "tier": "mid",
+      "status": "available",
+      "reason": "Admitted under SYL-399 (DRV-2.37): a wrong or inherited Arbol chat identity at tool launch lets a Forester booking name the wrong chat. Observes, through a real Driver launch of each stand-in, the request pair over stale inherited ARBOL_* values, the absence of an unrelated caller variable, an opaque chat without rootId, and refusal before launch. Distinct from retained cases: none observes the Arbol identity; archived C8/C40 stay archived.",
+      "review": "individually-reviewed-higher-bar",
+      "line": 310,
+      "file_sha256": "5ebf09570df9accc957f86454a72273a80640f3d4e37969cd08c08c17e3e817b",
+      "support_file": "conformance/scenarios/runs.py",
+      "description": "C44: Arbol chat identity at tool launch.",
+      "assertion_examples": [],
+      "execution": "explicit-testing-task-only",
+      "added_by": "SYL-399",
+      "added_date": "2026-11-11",
+      "executed": false,
+      "execution_note": "Written under SYL-399; not run: explicit mid-tier execution scope is pending."
     },
     {
       "repo": "arbol",

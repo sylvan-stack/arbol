@@ -1,6 +1,6 @@
 # Mid-tier tests: arbol
 
-Reviewed under SYL-327 against revision `f66335c7e203794dc84e40fe3106e85f8cae2dd6`. **656 → 151 retained mid-tier inventory entries**; 505 low-tier entries removed in this review. Counts mix separately labelled definitions, scenarios and orchestration entries, not runtime-discovered cases.
+Reviewed under SYL-327 against revision `f66335c7e203794dc84e40fe3106e85f8cae2dd6`. **656 → 151 retained mid-tier inventory entries**; 505 low-tier entries removed in this review. SYL-399 (11 November 2026) admitted C44, so 152 are now listed. Counts mix separately labelled definitions, scenarios and orchestration entries, not runtime-discovered cases.
 
 Each selection must expose a consequential risk through real integration or an independent difficult invariant, observe a trustworthy result, and add information beyond another retained case. Ordinary branch, field, formatting and default coverage is insufficient.
 
@@ -33,6 +33,7 @@ Source remains available; writing or running these checks requires a separate te
 | [`run`](tests/mid/archived/conformance/scenarios/pi.py#L739) | Run. | Dispatch helper for retained Pi variants; not an independent behavioral scenario. |
 | [`run_c18`](tests/mid/archived/conformance/scenarios/runs.py#L207) | Run c18. | A blocked output reader and failed native child must not block or corrupt another concurrent run; observes independent real child outputs. |
 | [`run_c33`](tests/mid/archived/conformance/scenarios/runs.py#L259) | Run c33. | A second real process stops a publicly listed run; verifies the final event precedes stop completion and unattended questions do not stall the child. |
+| [`run_c44`](tests/mid/archived/conformance/scenarios/runs.py#L310) | C44: Arbol chat identity at tool launch. Written under SYL-399, not yet run (mid-tier scope pending). | Admitted under SYL-399 (DRV-2.37): a wrong or inherited Arbol chat identity at tool launch lets a Forester booking name the wrong chat. Observes, through a real Driver launch of each stand-in, the request pair over stale inherited ARBOL_* values, the absence of an unrelated caller variable, an opaque chat without rootId, and refusal before launch. Distinct from retained cases: none observes the Arbol identity; archived C8/C40 stay archived. |
 | [`run_c15`](tests/mid/archived/conformance/scenarios/stops.py#L138) | Run c15. | Control cancellation while actual tools/subagents and TERM-resistant children run must close events and reap owned work within the deadline. |
 | [`run_c17`](tests/mid/archived/conformance/scenarios/stops.py#L211) | Run c17. | Signals, control EOF and broken caller output must reap actual child groups while preserving balanced final output where writable. |
 | [`run_c38`](tests/mid/archived/conformance/scenarios/stops.py#L245) | Run c38. | SIGKILL followed by competing recovery processes must retire stale ownership without reusing invalid conversation maps. |
