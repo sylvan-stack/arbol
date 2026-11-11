@@ -8,14 +8,14 @@
   import InlineRename from '../patterns/InlineRename.svelte';
   import type { WorkspaceRoot, WorkspaceRootSelector } from '../types';
   let {
-    root = {name:'Fixture Root',status:'working'}, rootSelector, title='New Chat', placeholder=false, titleIdentity='',
+    root = {name:'Fixture Root',status:'working'}, rootSelector, headerWindowControls, title='New Chat', placeholder=false, titleIdentity='',
     turn=0, total=0, hasChat=false, working=false, ongoing=false, inputTokens=0, outputTokens=0,
     repository='sylvan-stack', route={} as ElmaRoute, repositories=[] as {name:string;folder:string}[],
     routes=[] as {driver:string;subscription:string;unavailable?:string}[], accountProblems=[] as string[], accountBusy=false,onrefreshAccounts,onrefreshAccount, fitted=false,routeBusy=false,routeSaving=false,routeProblem='',onretryRoute,
     readingWidth=$bindable(720), uiScale=$bindable(0), contentScale=$bindable(0), theme=$bindable(''),
     onpreferences=()=>{}, onolder, onnewer, onhistory, onrepository, onroute, onmodel, oneffort, onother, onquick, onongoing, onrename, rename, onRenameInput, onRenameSave, onRenameCancel, metadataBusy=false, children,
   }: {
-    root?:WorkspaceRoot;rootSelector?:WorkspaceRootSelector;title?:string;titleIdentity?:string;placeholder?:boolean;turn?:number;total?:number;hasChat?:boolean;working?:boolean;ongoing?:boolean;
+    root?:WorkspaceRoot;rootSelector?:WorkspaceRootSelector;headerWindowControls?:Snippet;title?:string;titleIdentity?:string;placeholder?:boolean;turn?:number;total?:number;hasChat?:boolean;working?:boolean;ongoing?:boolean;
     inputTokens?:number;outputTokens?:number;repository?:string;route?:ElmaRoute;repositories?:{name:string;folder:string}[];routes?:{driver:string;subscription:string;unavailable?:string}[];
     accountProblems?:string[];accountBusy?:boolean;onrefreshAccounts?:()=>void;onrefreshAccount?:(driver:string,subscription:string)=>void;fitted?:boolean;routeBusy?:boolean;routeSaving?:boolean;routeProblem?:string;onretryRoute?:()=>void;readingWidth?:number;uiScale?:number;contentScale?:number;theme?:string;onpreferences?:()=>void;
     onolder?:()=>void;onnewer?:()=>void;onhistory?:()=>void;onrepository?:(folder:string)=>void;onroute?:(driver:string,subscription:string)=>void;onmodel?:()=>void;oneffort?:()=>void;onother?:()=>void;onquick?:()=>void;onongoing?:()=>void;onrename?:()=>void;rename?:{value:string;busy:boolean;problem:string}|null;onRenameInput?:(value:string)=>void;onRenameSave?:()=>void;onRenameCancel?:()=>void;metadataBusy?:boolean;children?:Snippet;
@@ -33,7 +33,7 @@
 </script>
 
 <div class="elma-frame" data-theme={theme||undefined} style:--font-scale={uiScale||undefined} style:--elma-content-scale={contentScale||undefined} style:--elma-reading-width={readingWidth+'px'}>
-<WorkspaceShell workspace="Elma" {fitted} elma {root} {rootSelector}>
+<WorkspaceShell workspace="Elma" {fitted} elma {root} {rootSelector} {headerWindowControls}>
   {#snippet headerLead()}
     <span class:working class="mark"><WorkspaceGlyph workspace="Elma" size={21}/></span>
     <div class="title-area">{#if rename}<h1 class="title-prefix">Elma Chat</h1><InlineRename label="Chat title" value={rename.value} busy={rename.busy} problem={rename.problem} max={240} oninput={onRenameInput} onsave={onRenameSave} oncancel={onRenameCancel}/>{:else}<h1 class:placeholder>Elma Chat · <button bind:this={titleButton} class="title-action" title="Rename chat session (⌘-click)" disabled={!onrename||metadataBusy} onclick={event=>{if(event.metaKey||event.detail===0)onrename?.();}}>{title}</button></h1>{/if}</div>
