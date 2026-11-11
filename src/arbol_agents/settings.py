@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import tempfile
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+
+from .model import object_value
 
 
 class SettingsError(ValueError):
@@ -78,3 +82,115 @@ class SettingsFile:
             self.path.unlink()
         else:
             write_complete(self.path, self.contents, self.mode)
+
+
+@dataclass(frozen=True)
+class HookEdit:
+    contents: bytes | None
+    count: int
+
+
+def json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError("Duplicate JSON key.")
+    return result
+
+
+def reject_constant(_: str) -> object:
+    raise ValueError("Non-JSON number.")
+
+
+def timeout_for(tool: str, event: str) -> int:
+    return 3 if tool == "codex" and event == "SessionEnd" else 5
+
+
+@dataclass(frozen=True)
+class HookGroup:
+    fields: dict[str, object]
+    handlers: list[dict[str, object]]
+
+    @classmethod
+    def parse(cls, raw: object) -> HookGroup:
+        fields = object_value(raw)
+        handlers = fields.pop("hooks", None)
+        if not isinstance(handlers, list):
+            raise ValueError("Expected a list of hook handlers.")
+        return cls(fields, [object_value(handler) for handler in handlers])
+
+    def json(self) -> dict[str, object]:
+        return {**self.fields, "hooks": self.handlers}
+
+
+class JsonHooks:
+    def __init__(self, snapshot: SettingsFile, tool: str, command: str, events: Iterable[str]) -> None:
+        self.snapshot = snapshot
+        self.tool = tool
+        self.command = command
+        self.events = sorted(events)
+        self.groups: dict[str, list[HookGroup]] = {}
+        try:
+            raw = json.loads(
+                snapshot.contents if snapshot.contents is not None else b"{}",
+                object_pairs_hook=json_object,
+                parse_constant=reject_constant,
+            )
+            self.document = object_value(raw)
+            for event, groups in object_value(self.document.get("hooks", {})).items():
+                if not isinstance(groups, list):
+                    raise ValueError("Expected a list of matcher groups.")
+                self.groups[event] = [HookGroup.parse(group) for group in groups]
+        except (ValueError, RecursionError):
+            raise SettingsError(f"Invalid JSON hook settings: {snapshot.path}") from None
+
+    def installed(self) -> bool:
+        return all(
+            any(
+                group.fields.get("matcher") in (None, "")
+                and handler.get("type") == "command"
+                and handler.get("command") == self.command
+                and handler.get("timeout") == timeout_for(self.tool, event)
+                and not handler.get("async")
+                and not handler.get("once")
+                for group in self.groups.get(event, [])
+                for handler in group.handlers
+            )
+            for event in self.events
+        )
+
+    def install(self) -> HookEdit:
+        groups = self.groups.copy()
+        count = 0
+        for event in self.events:
+            existing = groups.get(event, [])
+            if any(handler.get("command") == self.command for group in existing for handler in group.handlers):
+                continue
+            handler = {"type": "command", "command": self.command, "timeout": timeout_for(self.tool, event)}
+            groups[event] = [*existing, HookGroup({}, [handler])]
+            count += 1
+        return self.encode(groups, count)
+
+    def uninstall(self) -> HookEdit:
+        groups: dict[str, list[HookGroup]] = {}
+        count = 0
+        for event, existing in self.groups.items():
+            kept = []
+            for group in existing:
+                handlers = [handler for handler in group.handlers if handler.get("command") != self.command]
+                removed = len(group.handlers) - len(handlers)
+                count += removed
+                if not removed or handlers:
+                    kept.append(HookGroup(group.fields, handlers))
+            if kept or not existing:
+                groups[event] = kept
+        return self.encode(groups, count)
+
+    def encode(self, groups: dict[str, list[HookGroup]], count: int) -> HookEdit:
+        if not count:
+            return HookEdit(self.snapshot.contents, 0)
+        document = self.document.copy()
+        if groups:
+            document["hooks"] = {event: [group.json() for group in rows] for event, rows in groups.items()}
+        else:
+            document.pop("hooks", None)
+        return HookEdit((json.dumps(document, indent=2) + "\n").encode("utf-8"), count)
