@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import WorkspaceHeader from './WorkspaceHeader.svelte';
-  import type { WorkspaceRoot, WorkspaceRootSelector } from '../types';
+  import type { WorkspaceTrunkSelector } from '../types';
   let {
     workspace = 'Seqoya',
     current = 'Dashboard',
@@ -20,7 +20,7 @@
     ],
     children,
     headerTitle, headerTitleDetail, headerTitleEditor, headerBusy,
-    headerContent, headerLead, headerExtras, headerWindowControls, root, rootSelector, navigation, status,
+    headerContent, headerLead, headerExtras, headerWindowControls, trunk, trunkSelector, navigation, status,
     navigationFooter = true, fitted = false, elma = false,
     onnavigate = () => {},
   }: {
@@ -36,8 +36,8 @@
     headerLead?: Snippet;
     headerExtras?: Snippet;
     headerWindowControls?: Snippet;
-    root?: WorkspaceRoot;
-    rootSelector?: WorkspaceRootSelector;
+    trunk?: string;
+    trunkSelector?: WorkspaceTrunkSelector;
     navigation?: Snippet; status?: Snippet | null; navigationFooter?: boolean; fitted?: boolean; elma?: boolean;
     onnavigate?: (page: string) => void;
   } = $props();
@@ -47,7 +47,7 @@
 <div class="workspace" class:fitted class:elma>
   <WorkspaceHeader {workspace} title={headerTitle} titleDetail={headerTitleDetail} titleEditor={headerTitleEditor}
     busy={headerBusy} content={headerContent} lead={headerLead} extras={headerExtras}
-    windowControls={headerWindowControls} {root} {rootSelector} onToggleNavigation={() => (expanded = !expanded)} />
+    windowControls={headerWindowControls} {trunk} {trunkSelector} onToggleNavigation={() => (expanded = !expanded)} />
   <div class="layout" class:expanded>
     <nav aria-label={workspace + ' navigation'}>
       {#if navigation}{@render navigation()}{:else}

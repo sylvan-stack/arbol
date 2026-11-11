@@ -18,7 +18,8 @@ const limit=16*1024*1024;
 const error=(code:string,message:string)=>new Refusal({code,message});
 export function deadline(method:string):number {return ['chat.send','exchange.sendAgain'].includes(method)?150000:['exchange.stop','chat.reimport'].includes(method)?120000:30000;}
 export class Bridge {
- private serial=0;private online=false;private stopped=false;private versionOk=true;
+ private serial=0;private online=false;private stopped=false;private versionOk=true;private trunkSelection=false;
+ get supportsTrunkSelection(){return this.trunkSelection;}
  private pending=new Map<string,Pending>();private topics=new Set<Subscription>();
  private socket?:WebSocket;private reconnect?:ReturnType<typeof setTimeout>;private reloading=false;private backendBuild?:string;
  private reloads=new Set(new URL(location.href).searchParams.getAll('reloadedFor'));
@@ -45,6 +46,9 @@ export class Bridge {
  }
  call<T=unknown>(method:string,params:Fields={}):Promise<T>{
   if(!this.online||!this.versionOk)return Promise.reject(error('disconnected','The backend is disconnected.'));
+  if((method==='chat.send'||method==='exchange.sendAgain')&&params.trunk!==undefined&&params.trunk!=='trivial'&&!this.trunkSelection){
+   return Promise.reject(error('trunk_selection_unavailable','This Root’s backend needs an update to use the selected Trunk.'));
+  }
   const id=this.id();return new Promise<T>((resolve,reject)=>{
    const timer=setTimeout(()=>{this.pending.delete(id);reject(error('no_answer','The backend did not answer in time.'));},this.options.deadline?.(method)??deadline(method));
    this.pending.set(id,{resolve:value=>resolve(value as T),reject,timer});
@@ -75,7 +79,7 @@ export class Bridge {
   if(m.type==='hello'){
    this.lost(false);if(m.bridge!==1){this.versionOk=false;this.state('This window cannot work with this Bridge version.');return;}
    if(!m.root||typeof m.root!=='object'||typeof m.build!=='string')return;
-   this.versionOk=true;this.online=true;this.backendBuild=m.build;this.state('Connected');this.options.onhello?.(m.root as unknown as RootInfo,m.build);
+   this.versionOk=true;this.online=true;this.trunkSelection=m.trunkSelection===true;this.backendBuild=m.build;this.state('Connected');this.options.onhello?.(m.root as unknown as RootInfo,m.build);
    for(const sub of this.topics)if(!sub.active)this.start(sub);
    void this.reloadFor(m.build);return;
   }
@@ -98,6 +102,6 @@ export class Bridge {
   catch{this.state('The page could not be reloaded; its unsaved text is kept.');}
   finally{this.reloading=false;if(this.online&&this.backendBuild&&this.backendBuild!==build)void this.reloadFor(this.backendBuild);}
  }
- private lost(notify=true){this.online=false;for(const p of this.pending.values()){clearTimeout(p.timer);p.reject(error('disconnected','The backend is disconnected.'));}this.pending.clear();for(const sub of this.topics)sub.active=false;if(notify)this.state('Reconnecting…');}
+ private lost(notify=true){this.online=false;this.trunkSelection=false;for(const p of this.pending.values()){clearTimeout(p.timer);p.reject(error('disconnected','The backend is disconnected.'));}this.pending.clear();for(const sub of this.topics)sub.active=false;if(notify)this.state('Reconnecting…');}
  close(){this.stopped=true;clearTimeout(this.reconnect);document.removeEventListener('visibilitychange',this.visibility);if(window.arbolBridge?.receive===this.receiveBound)delete window.arbolBridge;this.lost(false);this.socket?.close();this.topics.clear();}
 }

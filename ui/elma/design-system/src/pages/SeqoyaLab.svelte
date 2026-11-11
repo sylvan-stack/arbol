@@ -2,11 +2,11 @@
   import type { Snippet } from 'svelte';
   import PageHeader from '../patterns/PageHeader.svelte';
   import WorkspaceShell from '../patterns/WorkspaceShell.svelte';
-  import type { WorkspaceRoot, WorkspaceRootSelector } from '../types';
+  import type { WorkspaceTrunkSelector } from '../types';
 
-  let { root, rootSelector, headerWindowControls, connectionStatus = '', fitted = false }: {
-    root?: WorkspaceRoot;
-    rootSelector?: WorkspaceRootSelector;
+  let { trunk, trunkSelector, headerWindowControls, connectionStatus = '', fitted = false }: {
+    trunk?: string;
+    trunkSelector?: WorkspaceTrunkSelector;
     headerWindowControls?: Snippet;
     connectionStatus?: string;
     fitted?: boolean;
@@ -28,7 +28,7 @@
 
 {#snippet connection()}<span role="status">{connectionStatus}</span>{/snippet}
 
-<WorkspaceShell workspace="Seqoya" headerTitle="Seqoya Lab" {current} {destinations} {root} {rootSelector} {headerWindowControls}
+<WorkspaceShell workspace="Seqoya" headerTitle="Seqoya Lab" {current} {destinations} {trunk} {trunkSelector} {headerWindowControls}
   onnavigate={navigate} status={connectionStatus ? connection : null} navigationFooter={false} {fitted}>
   <div class="page-content seqoya-page">
     <PageHeader title={current} description="" />

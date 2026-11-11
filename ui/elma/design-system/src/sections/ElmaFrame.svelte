@@ -5,16 +5,16 @@
   import type { ElmaRoute } from './elma-types';
   import {signInCommand} from './elma-response';
   import InlineRename from '../patterns/InlineRename.svelte';
-  import type { WorkspaceRoot, WorkspaceRootSelector } from '../types';
+  import type { WorkspaceTrunkSelector } from '../types';
   let {
-    root = {name:'Fixture Root',status:'working'}, rootSelector, headerWindowControls, title='New Chat', placeholder=false, titleIdentity='',
+    trunk = 'trivial', trunkSelector, headerWindowControls, title='New Chat', placeholder=false, titleIdentity='',
     turn=0, total=0, hasChat=false, working=false, ongoing=false, inputTokens=0, outputTokens=0,
     repository='sylvan-stack', route={} as ElmaRoute, repositories=[] as {name:string;folder:string}[],
     routes=[] as {driver:string;subscription:string;unavailable?:string}[], accountProblems=[] as string[], accountBusy=false,onrefreshAccounts,onrefreshAccount, fitted=false,routeBusy=false,routeSaving=false,routeProblem='',onretryRoute,
     readingWidth=$bindable(720), uiScale=$bindable(0), contentScale=$bindable(0), theme=$bindable(''),
     onpreferences=()=>{}, onolder, onnewer, onhistory, onrepository, onroute, onmodel, oneffort, onother, onquick, onongoing, onrename, rename, onRenameInput, onRenameSave, onRenameCancel, metadataBusy=false, children,
   }: {
-    root?:WorkspaceRoot;rootSelector?:WorkspaceRootSelector;headerWindowControls?:Snippet;title?:string;titleIdentity?:string;placeholder?:boolean;turn?:number;total?:number;hasChat?:boolean;working?:boolean;ongoing?:boolean;
+    trunk?:string;trunkSelector?:WorkspaceTrunkSelector;headerWindowControls?:Snippet;title?:string;titleIdentity?:string;placeholder?:boolean;turn?:number;total?:number;hasChat?:boolean;working?:boolean;ongoing?:boolean;
     inputTokens?:number;outputTokens?:number;repository?:string;route?:ElmaRoute;repositories?:{name:string;folder:string}[];routes?:{driver:string;subscription:string;unavailable?:string}[];
     accountProblems?:string[];accountBusy?:boolean;onrefreshAccounts?:()=>void;onrefreshAccount?:(driver:string,subscription:string)=>void;fitted?:boolean;routeBusy?:boolean;routeSaving?:boolean;routeProblem?:string;onretryRoute?:()=>void;readingWidth?:number;uiScale?:number;contentScale?:number;theme?:string;onpreferences?:()=>void;
     onolder?:()=>void;onnewer?:()=>void;onhistory?:()=>void;onrepository?:(folder:string)=>void;onroute?:(driver:string,subscription:string)=>void;onmodel?:()=>void;oneffort?:()=>void;onother?:()=>void;onquick?:()=>void;onongoing?:()=>void;onrename?:()=>void;rename?:{value:string;busy:boolean;problem:string}|null;onRenameInput?:(value:string)=>void;onRenameSave?:()=>void;onRenameCancel?:()=>void;metadataBusy?:boolean;children?:Snippet;
@@ -43,7 +43,7 @@
 <div class="elma-frame" data-theme={theme||undefined} style:--font-scale={uiScale||undefined} style:--elma-content-scale={contentScale||undefined} style:--elma-reading-width={readingWidth+'px'}>
 <WorkspaceShell workspace="Elma" headerTitle="Elma Chat" headerBusy={working}
   headerTitleDetail={rename ? undefined : chatTitle} headerTitleEditor={rename ? chatTitleEditor : undefined}
-  {fitted} elma {root} {rootSelector} {headerWindowControls}>
+  {fitted} elma {trunk} {trunkSelector} {headerWindowControls}>
   {#snippet headerExtras()}
     <div class="preferences">
       <label class="width">Reading width <select aria-label="Reading width" bind:value={readingWidth} onchange={onpreferences}>{#each Array.from({length:10},(_,i)=>600+i*120) as width}<option value={width}>{width} px</option>{/each}</select></label>

@@ -3,11 +3,11 @@
   import WorkspaceGlyph from '../components/WorkspaceGlyph.svelte';
   import IconButton from '../components/IconButton.svelte';
   import Button from '../components/Button.svelte';
-  import type { WorkspaceRoot, WorkspaceRootChoice, WorkspaceRootSelector } from '../types';
+  import type { WorkspaceTrunkSelector } from '../types';
 
   let {
     workspace, title, titleDetail, titleEditor, busy = false, content, lead, extras, windowControls,
-    root, rootSelector, onToggleNavigation,
+    trunk, trunkSelector, onToggleNavigation,
   }: {
     workspace: string;
     title?: string;
@@ -18,77 +18,77 @@
     lead?: Snippet;
     extras?: Snippet;
     windowControls?: Snippet;
-    root?: WorkspaceRoot;
-    rootSelector?: WorkspaceRootSelector;
+    trunk?: string;
+    trunkSelector?: WorkspaceTrunkSelector;
     onToggleNavigation: () => void;
   } = $props();
-  const surfaceHeader = $derived(Boolean(title || lead || extras || root));
+  const surfaceHeader = $derived(Boolean(title || lead || extras || trunk || trunkSelector));
 
-  const rootPickerId = $props.id();
-  let rootTrigger = $state<HTMLButtonElement>();
-  let rootPicker = $state<HTMLDivElement>();
-  let loadingRoots = $state(false);
-  let openingRoot = $state<string>();
-  let rootChoices = $state<WorkspaceRootChoice[]>([]);
-  let rootProblem = $state('');
+  const trunkPickerId = $props.id();
+  let trunkTrigger = $state<HTMLButtonElement>();
+  let trunkPicker = $state<HTMLDivElement>();
+  let loadingTrunks = $state(false);
+  let selectingTrunk = $state<string>();
+  let trunkChoices = $state<string[]>([]);
+  let trunkProblem = $state('');
   let readGeneration = 0;
 
-  function positionRootPicker() {
-    if (!rootTrigger || !rootPicker) return;
-    const anchor = rootTrigger.getBoundingClientRect();
+  function positionTrunkPicker() {
+    if (!trunkTrigger || !trunkPicker) return;
+    const anchor = trunkTrigger.getBoundingClientRect();
     const width = Math.max(0, Math.min(320, window.innerWidth - 16));
     const below = window.innerHeight - anchor.bottom - 12;
     const above = anchor.top - 12;
     const openAbove = below < 180 && above > below;
-    rootPicker.style.left = Math.max(8, Math.min(anchor.left, window.innerWidth - width - 8)) + 'px';
-    rootPicker.style.width = width + 'px';
-    rootPicker.style.top = openAbove ? 'auto' : anchor.bottom + 4 + 'px';
-    rootPicker.style.bottom = openAbove ? window.innerHeight - anchor.top + 4 + 'px' : 'auto';
-    rootPicker.style.maxHeight = Math.max(0, openAbove ? above : below) + 'px';
+    trunkPicker.style.left = Math.max(8, Math.min(anchor.left, window.innerWidth - width - 8)) + 'px';
+    trunkPicker.style.width = width + 'px';
+    trunkPicker.style.top = openAbove ? 'auto' : anchor.bottom + 4 + 'px';
+    trunkPicker.style.bottom = openAbove ? window.innerHeight - anchor.top + 4 + 'px' : 'auto';
+    trunkPicker.style.maxHeight = Math.max(0, openAbove ? above : below) + 'px';
   }
 
-  function rootPickerToggling(event: ToggleEvent) {
+  function trunkPickerToggling(event: ToggleEvent) {
     if (event.newState === 'open') {
-      positionRootPicker();
-      if (!openingRoot) void loadRoots();
+      positionTrunkPicker();
+      if (!selectingTrunk) void loadTrunks();
     } else {
       readGeneration += 1;
     }
   }
 
   function repositionOpenPicker() {
-    if (rootPicker?.matches(':popover-open')) positionRootPicker();
+    if (trunkPicker?.matches(':popover-open')) positionTrunkPicker();
   }
 
-  async function loadRoots() {
-    if (!rootSelector) return;
+  async function loadTrunks() {
+    if (!trunkSelector) return;
     const generation = ++readGeneration;
-    rootChoices = [];
-    rootProblem = '';
-    loadingRoots = true;
+    trunkChoices = [];
+    trunkProblem = '';
+    loadingTrunks = true;
     try {
-      const choices = await rootSelector.load();
-      if (generation === readGeneration) rootChoices = choices;
+      const choices = await trunkSelector.load();
+      if (generation === readGeneration) trunkChoices = choices;
     } catch (error) {
       if (generation === readGeneration) {
-        rootProblem = error instanceof Error ? error.message : 'Could not read Roots.';
+        trunkProblem = error instanceof Error ? error.message : 'Could not read Trunks.';
       }
     } finally {
-      if (generation === readGeneration) loadingRoots = false;
+      if (generation === readGeneration) loadingTrunks = false;
     }
   }
 
-  async function chooseRoot(choice: WorkspaceRootChoice) {
-    if (!rootSelector || openingRoot || choice.root === root?.root || choice.unavailable) return;
-    openingRoot = choice.root;
-    rootProblem = '';
+  async function chooseTrunk(choice: string) {
+    if (!trunkSelector || selectingTrunk || choice === trunk) return;
+    selectingTrunk = choice;
+    trunkProblem = '';
     try {
-      await rootSelector.open(choice.root);
-      rootPicker?.hidePopover();
+      await trunkSelector.select(choice);
+      trunkPicker?.hidePopover();
     } catch (error) {
-      rootProblem = error instanceof Error ? error.message : 'Could not open the selected Root.';
+      trunkProblem = error instanceof Error ? error.message : 'Could not select the Trunk.';
     } finally {
-      openingRoot = undefined;
+      selectingTrunk = undefined;
     }
   }
 </script>
@@ -111,43 +111,38 @@
         </div>
       {/if}
     </div>
-    {#if root}
-      <div class="window-root" data-arbol-no-drag>
-        {#if rootSelector && root.root}
-          <button type="button" class="root-trigger" popovertarget={rootPickerId} bind:this={rootTrigger}
-            title="Open this UI in another Root">
-            <span class="sr-only">Root </span>{root.name}<span aria-hidden="true">▾</span>
+    {#if trunk || trunkSelector}
+      <div class="window-trunk" data-arbol-no-drag>
+        {#if trunkSelector}
+          <button type="button" class="trunk-trigger" popovertarget={trunkPickerId} bind:this={trunkTrigger}
+            title="Choose a Trunk for this window">
+            <span class="sr-only">Trunk </span>{trunk || 'Select Trunk'}<span aria-hidden="true">▾</span>
           </button>
-          <div id={rootPickerId} popover="auto" class="root-picker" role="group" aria-label="Open in Root"
-            bind:this={rootPicker} onbeforetoggle={rootPickerToggling}>
-            {#if loadingRoots}<p role="status">Loading Roots…</p>{/if}
-            {#if openingRoot}<p role="status">Opening Root…</p>{/if}
-            {#if rootProblem}<p class="root-state" role="alert">{rootProblem}</p>{/if}
-            {#if rootChoices.length}
-              <ul class="clean root-choices">
-                {#each rootChoices as choice (choice.root)}
+          <div id={trunkPickerId} popover="auto" class="trunk-picker" role="group" aria-label="Choose a Trunk"
+            bind:this={trunkPicker} onbeforetoggle={trunkPickerToggling}>
+            {#if loadingTrunks}<p role="status">Loading Trunks…</p>{/if}
+            {#if selectingTrunk}<p role="status">Selecting Trunk…</p>{/if}
+            {#if trunkProblem}<p class="trunk-state" role="alert">{trunkProblem}</p>{/if}
+            {#if trunkChoices.length}
+              <ul class="clean trunk-choices">
+                {#each trunkChoices as choice (choice)}
                   <li>
-                    <button type="button" class="root-option" aria-current={choice.root === root.root ? 'true' : undefined}
-                      disabled={choice.root === root.root || !!choice.unavailable} aria-disabled={openingRoot ? 'true' : undefined}
-                      onclick={() => void chooseRoot(choice)}>
-                      <span>{choice.name}</span>
-                      {#if choice.root === root.root}<span class="small muted">This window</span>{/if}
-                      {#if choice.status !== 'working'}<span class="small muted">{choice.status}</span>{/if}
-                      {#if choice.unavailable}<span class="small root-state">{choice.unavailable}</span>{/if}
+                    <button type="button" class="trunk-option" aria-current={choice === trunk ? 'true' : undefined}
+                      disabled={choice === trunk} aria-disabled={selectingTrunk ? 'true' : undefined}
+                      onclick={() => void chooseTrunk(choice)}>
+                      <span>{choice}</span>
+                      {#if choice === trunk}<span class="small muted">This window</span>{/if}
                     </button>
                   </li>
                 {/each}
               </ul>
-            {:else if !loadingRoots}
-              {#if rootProblem}<Button label="Retry" onclick={() => void loadRoots()} />
-              {:else}<p class="muted">No Roots available.</p>{/if}
+            {:else if !loadingTrunks}
+              {#if trunkProblem}<Button label="Retry" onclick={() => void loadTrunks()} />
+              {:else}<p class="muted">No compatible Trunks available.</p>{/if}
             {/if}
           </div>
         {:else}
-          <span><span class="sr-only">Root </span>{root.name}</span>
-        {/if}
-        {#if root.status !== 'working'}
-          <span class="root-state">{root.status}{root.failed ? ': ' + root.failed.reason : ''}</span>
+          <span><span class="sr-only">Trunk </span>{trunk}</span>
         {/if}
       </div>
     {/if}
@@ -204,9 +199,9 @@
     overflow-wrap: anywhere;
   }
   .title-area h1.editing { font-size: 12px; color: var(--muted); }
-  .window-root { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; overflow-wrap: anywhere; }
-  .root-state { color: var(--warning); overflow-wrap: anywhere; }
-  .root-trigger {
+  .window-trunk { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; overflow-wrap: anywhere; }
+  .trunk-state { color: var(--warning); overflow-wrap: anywhere; }
+  .trunk-trigger {
     display: inline-flex;
     align-items: center;
     gap: 8px;
@@ -220,8 +215,8 @@
     font-weight: 600;
     text-align: start;
   }
-  .root-trigger:hover, .root-trigger:has(+ :popover-open) { border-color: var(--muted); }
-  .root-picker {
+  .trunk-trigger:hover, .trunk-trigger:has(+ :popover-open) { border-color: var(--muted); }
+  .trunk-picker {
     position: fixed;
     inset: auto;
     box-sizing: border-box;
@@ -235,9 +230,9 @@
     overflow: auto;
     overflow-wrap: anywhere;
   }
-  .root-picker p { margin: 6px 8px; }
-  .root-choices { display: grid; gap: 2px; }
-  .root-option {
+  .trunk-picker p { margin: 6px 8px; }
+  .trunk-choices { display: grid; gap: 2px; }
+  .trunk-option {
     display: grid;
     gap: 2px;
     width: 100%;
@@ -250,8 +245,8 @@
     text-align: start;
     overflow-wrap: anywhere;
   }
-  .root-option:disabled, .root-option[aria-disabled='true'] { color: var(--muted); }
-  .root-option[aria-current], .root-option:hover:enabled { background: var(--selected); }
+  .trunk-option:disabled, .trunk-option[aria-disabled='true'] { color: var(--muted); }
+  .trunk-option[aria-current], .trunk-option:hover:enabled { background: var(--selected); }
   @media (prefers-reduced-motion: reduce) {
     .workspace-mark.busy { animation: none; }
   }

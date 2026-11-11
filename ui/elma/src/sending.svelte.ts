@@ -1,5 +1,6 @@
 /** Persist one exact request per unconfirmed Exchange. Receipts, never time, decide its outcome. */
 import { Refusal,type Bridge,type Fields,type BridgeError } from './bridge';
+import { isTrunkCode } from './app-channel';
 import { parseWire,stringifyWire,validRevision } from './wire-json';
 import type { DraftEditor,DraftScope } from './drafts.svelte';
 import type { ElmaRoute } from '../design-system/src/sections/elma-types';
@@ -12,7 +13,7 @@ const route=(value:unknown):value is ElmaRoute=>['driver','subscription','model'
 const scopeKey=(root:string,scope:DraftScope)=>root+':'+JSON.stringify(scope);
 function valid(value:unknown,root:string):value is SendIntent {
  const v=object(value),p=object(v.params),s=object(v.scope);
- if(v.version!==1||v.root!==root||!uuid(v.chat)||!uuid(v.exchange)||!Number.isSafeInteger(v.number)||Number(v.number)<1||typeof v.existing!=='boolean'||!route(p.route))return false;
+ if(v.version!==1||v.root!==root||!uuid(v.chat)||!uuid(v.exchange)||!Number.isSafeInteger(v.number)||Number(v.number)<1||typeof v.existing!=='boolean'||!route(p.route)||('trunk' in p&&!isTrunkCode(p.trunk)))return false;
  if(('chat' in s)===('folder' in s)||('chat' in s?!uuid(s.chat):!folder(s.folder)))return false;
  if(v.method==='chat.send'){const d=object(p.draft),selected=v.purpose==='continue'?v.existing===true&&p.message==='proceed'&&!('draft' in p)&&s.chat===v.chat:validRevision(d.revision)&&('folder' in s?d.folder===s.folder&&p.workingFolder===s.folder:!('folder' in d)&&s.chat===v.chat);return p.chat===v.chat&&p.exchange===v.exchange&&typeof p.message==='string'&&!!p.message.trim()&&!p.message.includes('\0')&&folder(p.workingFolder)&&selected;}
  return v.method==='exchange.sendAgain'&&uuid(p.exchange)&&p.newExchange===v.exchange&&p.exchange!==v.exchange&&s.chat===v.chat&&v.existing===true&&typeof v.prompt==='string'&&folder(v.retryFolder);
@@ -49,14 +50,18 @@ export class Sending {
   void Promise.resolve().then(()=>Promise.resolve()).then(()=>{for(const op of this.operations.values())if(op.pending&&op.intent.root===root)void this.run(op);});
  }
  marked(root:string,editor:DraftEditor,visible:boolean){
-  const draft=editor.canonical,request=object(draft?.sentRequest);if(!draft?.sentAs||!uuid(draft.sentAs)||!uuid(request.chat)||!route(request.route)||!folder(request.workingFolder))return;
+  const draft=editor.canonical,request=object(draft?.sentRequest);if(!draft?.sentAs||!uuid(draft.sentAs)||!uuid(request.chat)||!route(request.route)||!folder(request.workingFolder)||('trunk' in request&&!isTrunkCode(request.trunk)))return;
   if(this.forEditor(root,editor)||this.finished.has(root+':'+draft.sentAs))return;
-  const scope=editor.scope;this.start({version:1,root,scope,chat:request.chat,exchange:draft.sentAs,method:'chat.send',params:{chat:request.chat,exchange:draft.sentAs,message:draft.text,route:request.route,workingFolder:request.workingFolder,draft:{revision:draft.revision,...('folder' in scope?{folder:scope.folder}:{})}},number:1,existing:'chat' in scope},visible,true);
+  const scope=editor.scope;this.start({version:1,root,scope,chat:request.chat,exchange:draft.sentAs,method:'chat.send',params:{chat:request.chat,exchange:draft.sentAs,message:draft.text,route:request.route,workingFolder:request.workingFolder,...(typeof request.trunk==='string'?{trunk:request.trunk}:{}),draft:{revision:draft.revision,...('folder' in scope?{folder:scope.folder}:{})}},number:1,existing:'chat' in scope},visible,true);
  }
  offline(){this.online=false;}
  private async run(op:SendOperation){
   if(this.closed||!this.online||op.running||!op.pending||op.intent.root!==this.root)return;
-  clearTimeout(op.timer);op.running=true;op.status=op.attempts?'Waiting for send receipt…':'Sending…';op.attempts++;
+  clearTimeout(op.timer);
+  if(typeof op.intent.params.trunk==='string'&&op.intent.params.trunk!=='trivial'&&!this.bridge.supportsTrunkSelection){
+   op.status='Waiting for a backend that supports the selected Trunk…';return;
+  }
+  op.running=true;op.status=op.attempts?'Waiting for send receipt…':'Sending…';op.attempts++;
   try{
    const value=await this.bridge.call<Accepted>(op.intent.method,op.intent.params);
    if(value?.accepted!==true||typeof value.duplicate!=='boolean'||value.chat!==op.intent.chat||value.exchange!==op.intent.exchange||!Number.isSafeInteger(value.number)||value.number<1)throw new Refusal({code:'no_answer',message:'The backend did not return a valid send receipt.'});

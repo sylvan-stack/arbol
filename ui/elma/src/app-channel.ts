@@ -1,43 +1,54 @@
 /** BKD-1 app channel. Browser development adapter never sends to backend.sock. */
 import { Refusal, type Fields } from './bridge';
-import type { WorkspaceRootChoice, WorkspaceRootSelector } from '../design-system/src/types';
+import type { WorkspaceTrunkSelector } from '../design-system/src/types';
 
-type RootMethod = 'app.listRoots' | 'app.openRoot';
-type AppMethod = 'app.pickFolder' | 'app.openLink' | 'app.takeOpen' | RootMethod;
+type TrunkMethod = 'app.currentTrunk' | 'app.listTrunks' | 'app.selectTrunk';
+type AppMethod = 'app.pickFolder' | 'app.openLink' | 'app.takeOpen' | TrunkMethod;
 
-function isRootChoice(value: unknown): value is WorkspaceRootChoice {
- if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
- const {root, name, status, unavailable} = value as Fields;
- return typeof root === 'string' && /^[a-z0-9]+$/.test(root)
-  && typeof name === 'string' && name.length > 0
-  && (status === 'working' || status === 'preparing' || status === 'failed')
-  && (unavailable === undefined || typeof unavailable === 'string');
+export function isTrunkCode(value: unknown): value is string {
+ return typeof value === 'string' && /^[a-z][a-z0-9]{0,31}$/.test(value)
+  && !['run', 'settle', 'list'].includes(value);
 }
 
 export class AppChannel {
  private next=0;private waiting=new Map<string,{resolve:(value:Fields)=>void;reject:(error:Refusal)=>void;timer:ReturnType<typeof setTimeout>}>();
  private openTaken=false;private listeners=new Set<()=>void>();
  private receiveBound=(text:string)=>this.receive(text);
- readonly rootSelector: WorkspaceRootSelector | undefined = window.webkit?.messageHandlers?.arbolApp ? {
-  load: async () => {
-   const {roots} = await this.callRoot('app.listRoots');
-   if (!Array.isArray(roots) || !roots.every(isRootChoice) || new Set(roots.map(row => row.root)).size !== roots.length) {
-    throw new Error('The App returned an invalid Root list.');
-   }
-   return roots;
-  },
-  open: async root => { await this.callRoot('app.openRoot', {root}); },
- } : undefined;
  constructor(){window.arbolApp={receive:this.receiveBound};}
  onopen(listener:()=>void){this.listeners.add(listener);return ()=>this.listeners.delete(listener);}
- private async callRoot(method: RootMethod, params: Fields = {}): Promise<Fields> {
-  try { return await this.call(method, params); }
-  catch (error) {
-   if (error instanceof Refusal && error.detail.code === 'unknown_method') {
-    throw new Error('Update the Arbol App to open another Root from this header.');
-   }
+ async currentTrunk(): Promise<string> {
+  if (!window.webkit?.messageHandlers?.arbolApp) return 'trivial';
+  try {
+   const {trunk} = await this.call('app.currentTrunk');
+   if (!isTrunkCode(trunk)) throw new Error('The App returned an invalid Trunk.');
+   return trunk;
+  } catch (error) {
+   // Older native hosts and the browser relay support the original default path.
+   if (error instanceof Refusal && error.detail.code === 'unknown_method') return 'trivial';
    throw error;
   }
+ }
+ trunkSelector(onSelected: (trunk: string) => void): WorkspaceTrunkSelector | undefined {
+  if (!window.webkit?.messageHandlers?.arbolApp) return undefined;
+  let reading: Promise<string[]> | undefined;
+  return {
+   load: () => reading ??= this.call('app.listTrunks').then(({trunks}) => {
+    if (!Array.isArray(trunks) || !trunks.every(isTrunkCode) || new Set(trunks).size !== trunks.length) {
+     throw new Error('The App returned an invalid Trunk list.');
+    }
+    return trunks;
+   }).catch(error => {
+    if (error instanceof Refusal && error.detail.code === 'unknown_method') {
+     throw new Error('Update the Arbol App to choose a Trunk.');
+    }
+    throw error;
+   }).finally(() => { reading = undefined; }),
+   select: async code => {
+    const {trunk} = await this.call('app.selectTrunk', {trunk: code});
+    if (trunk !== code) throw new Error('The App returned a different Trunk.');
+    onSelected(code);
+   },
+  };
  }
  call(method:AppMethod,params:Fields={}):Promise<Fields>{
   if(method==='app.openLink'){
@@ -52,7 +63,7 @@ export class AppChannel {
   // The relay's browser host answers locally. No app envelope reaches the Bridge.
   if(method==='app.openLink'){window.open(String(params.url),'_blank','noopener,noreferrer');return Promise.resolve({});}
   if(method==='app.pickFolder'){const value=window.prompt('Folder',typeof params.start==='string'?params.start:'');return Promise.resolve({folder:value?.trim()||null});}
-  if(method==='app.listRoots'||method==='app.openRoot')return Promise.reject(new Refusal({code:'unknown_method',message:'Root selection requires the native App.'}));
+  if(method==='app.currentTrunk'||method==='app.listTrunks'||method==='app.selectTrunk')return Promise.reject(new Refusal({code:'unknown_method',message:'Trunk selection requires the native App.'}));
   if(this.openTaken)return Promise.resolve({});this.openTaken=true;
   const chat=new URL(location.href).searchParams.get('open');return Promise.resolve(chat&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(chat)?{chat}:{});
  }

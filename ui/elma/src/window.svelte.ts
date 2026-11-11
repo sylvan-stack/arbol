@@ -28,6 +28,8 @@ export class ElmaWindow {
  selected=$state<string|null>(null);more=$state(false);pageBusy=$state(false);pageProblem=$state('');historyOpen=$state(false);settings=$state<ChatSnapshot['settings']>({});ongoing=$state(false);archived=$state(false);
  repositories=$state<Repository[]>([]);folder=$state('');defaultRoute=$state<ElmaRoute>({});private workspaceRoute:ElmaRoute={};routing:Routing;private settingsQueues=new Map<string,Promise<unknown>>();
  preferences=$state<Preferences>(readPreferences(''));bridge:Bridge;app=new AppChannel();drafts:Drafts;
+ trunk=$state<string>();
+ readonly trunkSelector=this.app.trunkSelector(trunk=>{if(!this.closed)this.trunk=trunk;});
  rename=$state<RenameEditor|null>(null);actionNotice=$state('');actionProblem=$state('');mutations:Mutations;private titleObservation=0;private marksObservation=0;
  quickOpen=$state(false);archive=$state<ArchiveIntent|null>(null);private stateWaiters=new Set<()=>void>();
  latestOpen=$state(false);latestProblem=$state('');latestBusy=$state(false);chats:Chats;opening:Opening;attention:Attention;private chatProblem='';
@@ -35,7 +37,7 @@ export class ElmaWindow {
  composerOpen=$state(false);sendWait=$state('');stopping=$state<string[]>([]);sending:Sending;stopConfirmation=$state<PendingMessage|null>(null);private stopQueue?:PendingMessage&{finish:()=>void};private previousSelection=new Map<string,string|null>();private replacements=new Map<string,ElmaExchange>();private stopCalls=new Map<string,Promise<void>>();private answerSerial=0;private answerStates=$state<Record<string,{token:number;pending:boolean;problem:string;after:number}>>({});
  repositoryNotice=$state('');repositoryChange=$state<{root:string;chat:string;folder:string;generation:number}|null>(null);
  private pageTicket=0;private generation=0;private settingsObservation=0;private chatSub?:{close:()=>void;retry:()=>void};private bootstrapGeneration=0;private closed=false;private cancelOpening?:()=>void;
- constructor(){this.bridge=new Bridge({build:__ARBOL_BUILD__,onstate:s=>{this.connection=s;if(s==='Reconnecting…'||s==='Connecting…'||s.includes('Bridge version')){this.sending?.offline();this.mutations?.offline();}},beforeReload:async()=>{await this.drafts.beforeReload();this.opening.beforeReload();},onhello:(root)=>{if(this.root.root&&this.root.root!==root.root){this.clear();this.rootNames=[];this.rootNamesProblem='';this.reimportBusy=false;this.folder='';this.stopping=[];this.stopCalls.clear();}this.drafts?.rootChanged(root.root);this.root=root;this.sending?.hello(root.root);this.mutations?.hello(root.root);this.chats?.hello(root.root);this.opening?.hello(root.root);this.attention?.hello(root.root);this.preferences=readPreferences(root.root);void this.bootstrap();void this.loadAccounts();void this.loadRootNames();const rootId=root.root;setTimeout(()=>{if(this.root.root===rootId)for(const id of this.stopping)void this.stopExchange(id,true);},0);}});
+ constructor(){this.bridge=new Bridge({build:__ARBOL_BUILD__,onstate:s=>{this.connection=s;if(s==='Reconnecting…'||s==='Connecting…'||s.includes('Bridge version')){this.sending?.offline();this.mutations?.offline();}},beforeReload:async()=>{await this.drafts.beforeReload();this.opening.beforeReload();},onhello:(root)=>{if(this.root.root&&this.root.root!==root.root){this.clear();this.trunk=undefined;this.rootNames=[];this.rootNamesProblem='';this.reimportBusy=false;this.folder='';this.stopping=[];this.stopCalls.clear();}this.drafts?.rootChanged(root.root);this.root=root;void this.readTrunk(root.root);this.sending?.hello(root.root);this.mutations?.hello(root.root);this.chats?.hello(root.root);this.opening?.hello(root.root);this.attention?.hello(root.root);this.preferences=readPreferences(root.root);void this.bootstrap();void this.loadAccounts();void this.loadRootNames();const rootId=root.root;setTimeout(()=>{if(this.root.root===rootId)for(const id of this.stopping)void this.stopExchange(id,true);},0);}});
   this.mutations=new Mutations(this.bridge,done=>this.drafts.holdSend(done));
   this.chats=new Chats(this.bridge);this.attention=new Attention(this.bridge);
   this.drafts=new Drafts(this.bridge,(root,editor)=>this.sending?.marked(root,editor,this.drafts.current===editor));this.sending=new Sending(this.bridge,(root,scope)=>this.drafts.owner(root,scope),done=>this.drafts.holdSend(done),{provisional:op=>this.provisional(op),accepted:(op,result)=>this.accepted(op,result),refused:(op,error)=>this.refused(op,error)});this.routing=new Routing(this.bridge,(chat,route)=>this.saveSettings(chat,{route}));
@@ -225,7 +227,7 @@ export class ElmaWindow {
    if(editor.dirty||editor.conflict||editor.recovery!==null)throw new Error('Save or resolve the Draft before continuing.');
    const exchange=crypto.randomUUID(),common={version:1 as const,root,scope:{chat},chat,exchange,existing:true};
    const intent:SendIntent=continueFrom?{...common,method:'chat.send',purpose:'continue',params:{chat,exchange,message:'proceed',route:{...this.route},workingFolder:this.settings.workingFolder??this.folder},number:(this.info?.exchangeCount??0)+1}:{...common,method:'exchange.sendAgain',params:{exchange:row.exchange,newExchange:exchange,route:{...this.route}},prompt:this.prompt,retryFolder:row.workingFolder,number:row.number};
-   this.sending.start(intent);transferred=true;
+   await this.dispatchWithTrunk(intent,editor,generation);transferred=true;
   }catch(e){editor.sendProblem='Not sent: '+(e instanceof Refusal?describe(e.detail):e instanceof Error?e.message:'Recovery could not start.');this.composerOpen=true;}
   finally{this.sendWait='';if(!transferred)editor.pendingSend=false;finish();}
  }
@@ -240,9 +242,19 @@ export class ElmaWindow {
    const intent:SendIntent={version:1,root,scope:editor.scope,chat,exchange,method:'chat.send',params:{chat,exchange,message:editor.text,route:{...this.route},workingFolder,draft:{revision:editor.revision,...('folder' in editor.scope?{folder:editor.scope.folder}:{})}},number:(this.info?.exchangeCount??0)+1,existing:!!this.info};
    const working=this.exchanges.find(row=>!['completed','failed','cancelled','interrupted'].includes(row.state));
    if(working){this.stopConfirmation={intent,editor,generation,exchange:working.exchange};this.sendWait='';transferred=true;return;}
-   this.sending.start(intent);this.sendWait='';transferred=true;
+   await this.dispatchWithTrunk(intent,editor,generation);this.sendWait='';transferred=true;
   }catch(e){const message=e instanceof Error?e.message:'The message could not be sent.';editor.sendProblem=message.startsWith('Not sent:')?message:'Not sent: '+message;this.composerOpen=true;}
   finally{if(!transferred){editor.pendingSend=false;this.sendWait='';}}
+ }
+ private async readTrunk(root:string){
+  try{const trunk=await this.app.currentTrunk();if(!this.closed&&root===this.root.root&&this.trunk===undefined)this.trunk=trunk;}
+  catch{/* The selector can still read the live catalogue and display an error. */}
+ }
+ private async dispatchWithTrunk(intent:SendIntent,editor:DraftEditor,generation:number){
+  const trunk=await this.app.currentTrunk();
+  if(this.closed||intent.root!==this.root.root||generation!==this.generation||editor!==this.drafts.current)throw new Error('The composition changed before the message was sent.');
+  if(trunk!=='trivial'&&!this.bridge.supportsTrunkSelection)throw new Error('This Root’s backend needs an update to use the selected Trunk.');
+  this.sending.start({...intent,params:{...intent.params,...(trunk==='trivial'?{}:{trunk})}});
  }
  private provisionalRow(op:SendOperation,number=op.intent.number):ElmaExchange{return{exchange:op.intent.exchange,number,state:'accepting',route:op.intent.params.route as ElmaRoute,workingFolder:op.intent.retryFolder??(typeof op.intent.params.workingFolder==='string'?op.intent.params.workingFolder:this.folder),acceptedAt:'',items:[{position:0,kind:'message',role:'user',text:op.message}],runs:[]};}
  private provisional(op:SendOperation){
@@ -272,7 +284,15 @@ export class ElmaWindow {
   let finish!:()=>void;const done=new Promise<void>(resolve=>finish=resolve);this.stopQueue={...pending,finish};this.drafts.holdSend(done);this.sendWait='Waiting for the current response to be saved…';this.composerOpen=false;this.afterChatState();if(this.stopQueue)await this.stopExchange(pending.exchange);
  }
  private cancelQueued(){const pending=this.stopConfirmation;this.stopConfirmation=null;if(pending){pending.editor.pendingSend=false;pending.editor.sendProblem='The queued message is kept in its Draft.';}if(this.stopQueue){this.stopQueue.editor.pendingSend=false;this.stopQueue.editor.sendProblem='The queued message is kept in its Draft.';this.stopQueue.finish();this.stopQueue=undefined;}this.sendWait='';}
- private afterChatState(){this.notifyState();this.stopping=this.stopping.filter(id=>!this.exchanges.some(row=>row.exchange===id&&['completed','failed','cancelled','interrupted'].includes(row.state)));const queued=this.stopQueue;if(!queued)return;const row=this.exchanges.find(row=>row.exchange===queued.exchange);if(!row||!['completed','failed','cancelled','interrupted'].includes(row.state))return;this.stopQueue=undefined;this.sendWait='';queued.editor.pendingSend=false;try{this.sending.start(queued.intent);}catch(e){queued.editor.sendProblem=e instanceof Error?e.message:'Not sent';this.composerOpen=true;}queued.finish();}
+ private afterChatState(){this.notifyState();this.stopping=this.stopping.filter(id=>!this.exchanges.some(row=>row.exchange===id&&['completed','failed','cancelled','interrupted'].includes(row.state)));const queued=this.stopQueue;if(!queued)return;const row=this.exchanges.find(row=>row.exchange===queued.exchange);if(!row||!['completed','failed','cancelled','interrupted'].includes(row.state))return;this.stopQueue=undefined;void this.dispatchQueued(queued);}
+ private async dispatchQueued(queued:PendingMessage&{finish:()=>void}){
+  try{await this.dispatchWithTrunk(queued.intent,queued.editor,queued.generation);}
+  catch(e){
+   queued.editor.pendingSend=false;
+   queued.editor.sendProblem='Not sent: '+(e instanceof Error?e.message:'The queued message could not be sent.');
+   if(queued.generation===this.generation)this.composerOpen=true;
+  }finally{if(queued.generation===this.generation)this.sendWait='';queued.finish();}
+ }
  stopCurrent(){const row=[...this.exchanges].reverse().find(value=>!['completed','failed','cancelled','interrupted'].includes(value.state));if(row)void this.stopExchange(row.exchange);}
  async stopExchange(exchange:string,retry=false):Promise<void>{
   const root=this.root.root,previous=this.stopCalls.get(exchange);if(previous){await previous;if(retry&&root===this.root.root&&this.stopping.includes(exchange)){if(this.stopCalls.get(exchange)===previous)this.stopCalls.delete(exchange);await this.stopExchange(exchange,true);}return;}

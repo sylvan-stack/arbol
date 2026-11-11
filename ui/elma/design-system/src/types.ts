@@ -34,3 +34,8 @@ export interface WorkspaceRootSelector {
   load: () => Promise<WorkspaceRootChoice[]>;
   open: (root: string) => Promise<void>;
 }
+
+export interface WorkspaceTrunkSelector {
+  load: () => Promise<string[]>;
+  select: (trunk: string) => Promise<void>;
+}
