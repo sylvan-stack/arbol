@@ -227,6 +227,8 @@ class Drafts:
             return None
         await self.chats.own_layout()
         request = {name: params[name] for name in ("chat", "route", "workingFolder")}
+        if "trunk" in params:
+            request["trunk"] = params["trunk"]
         if "folder" in key:
             if key["folder"] != params["workingFolder"]:
                 raise Error("invalid_input")

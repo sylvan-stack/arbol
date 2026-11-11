@@ -73,6 +73,8 @@ def draft(row: tuple[Any, ...] | None) -> Params | None:
             # Pending dispatch data has only these public fields, never arbitrary configuration.
             result["sentRequest"] = {"chat": str(request.get("chat", "")), "route": route(request.get("route")),
                                      "workingFolder": request.get("workingFolder", "")}
+            if isinstance(request.get("trunk"), str):
+                result["sentRequest"]["trunk"] = request["trunk"]
     return result
 
 

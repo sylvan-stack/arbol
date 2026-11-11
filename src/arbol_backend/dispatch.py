@@ -26,6 +26,14 @@ TOTAL_SECONDS = 120.0
 ROOT_CODES = {"unknown_root", "unknown_trunk", "no_fit", "contract_mismatch", "trunk_unavailable"}
 
 
+def selected_trunk(params: Params) -> Params:
+    code = params.get("trunk", "trivial")
+    if (not isinstance(code, str) or not re.fullmatch(r"[a-z][a-z0-9]{0,31}", code)
+            or code in ("run", "settle", "list")):
+        raise Error("invalid_input")
+    return {} if code == "trivial" else {"trunk": code}
+
+
 class Forwarded(Error):
     def __init__(self, code: str, source: str, explanation: str) -> None:
         super().__init__(code, source=source)
@@ -70,6 +78,7 @@ class Dispatch:
                 result["draft"]["folder"] = folder(selected["folder"])
                 if result["draft"]["folder"] != result["workingFolder"]:
                     raise Error("invalid_input")
+        result.update(selected_trunk(params))
         result["route"] = await self.chats.catalogues.route(params.get("route"))
         return result
 
@@ -77,6 +86,7 @@ class Dispatch:
         previous, exchange = uuid_id(params.get("exchange")), uuid_id(params.get("newExchange"))
         if previous == exchange:
             raise Error("invalid_input")
+        trunk = selected_trunk(params)
         route = await self.chats.catalogues.route(params.get("route"))
         async with self.chats.reader.session() as (session, _):
             rows = await session.execute("SELECT chat_id,working_folder FROM exchanges WHERE id=%s", [previous])
@@ -86,7 +96,7 @@ class Dispatch:
         if not Path(path).is_dir():
             raise Error("invalid_input")
         return {"chat": uuid_id(str(rows[0][0])), "exchange": exchange, "replaces": previous,
-                "route": route, "workingFolder": path}
+                "route": route, "workingFolder": path, **trunk}
 
     def active(self, exchange: str) -> bool:
         child = self.programs.running.get(("start", exchange))
@@ -194,7 +204,10 @@ class Dispatch:
                         await self.drafts.finish(params, entry.marked, accepted=False)
                         entry.marked = None
                     raise
-                args = ["start", "--exchange", exchange, "--request", entry.request.path]
+                args = ["start"]
+                if "trunk" in params:
+                    args.append(params["trunk"])
+                args += ["--exchange", exchange, "--request", entry.request.path]
                 if "replaces" in params:
                     args += ["--replaces", params["replaces"]]
                 entry.dispatched = True

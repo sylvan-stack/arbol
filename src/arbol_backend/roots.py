@@ -121,7 +121,8 @@ class Roots:
 
     async def hello(self) -> Params:
         snapshot = await self.refresh()
-        return {"type": "hello", "bridge": 1, "root": snapshot.event["root"], "build": self.identity.build}
+        return {"type": "hello", "bridge": 1, "root": snapshot.event["root"],
+                "build": self.identity.build, "trunkSelection": True}
 
     async def get(self, params: Params) -> Params:
         snapshot = await self.refresh()
