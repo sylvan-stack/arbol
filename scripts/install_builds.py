@@ -1,10 +1,10 @@
-"""Install arbol-builds and arbol-roots with their pinned Python, and rewrite component launchers.
+"""Install arbol-builds, arbol-roots and arbol-agents with their pinned Python, and rewrite component launchers.
 
     uv run --no-sync python scripts/install_builds.py [--bin-dir <folder>]
 
 BLD-0, "Where the build tool and the launchers are", with BLD-D14 and BLD-D15. Into
 `<folder>/.arbol-builds` go the pinned standalone CPython that every Build carries, unpacked once
-from the checked archive, and the packages arbol_builds and arbol_roots, compiled. The two global
+from the checked archive, and the packages arbol_builds, arbol_roots and arbol_agents, compiled. The three global
 tools start with that Python. Every launcher already in the folder, written by this tool or by the
 earlier Node.js tool, is written again with the current launcher code, for the same component
 and registry; so is arbol-trunk, the launcher every Trunk shares. Any other file there is left
@@ -39,7 +39,7 @@ from arbol_builds.service import LAUNCHER_MARK, SIGINT_LINE, atomic_write, sheba
 USAGE = "Usage: uv run --no-sync python scripts/install_builds.py [--bin-dir <folder>]"
 NODE_LAUNCH = re.compile(r'launch\(("(?:[^"\\\n]|\\.)*"), ("(?:[^"\\\n]|\\.)*"), process\.argv\.slice\(2\)\);')
 NODE_FILES = ("cli.js", "config.js", "records.js", "service.js", "mutation.js", "package.json")
-PACKAGES = ("arbol_builds", "arbol_roots")
+PACKAGES = ("arbol_builds", "arbol_roots", "arbol_agents")
 LAUNCHER_LIMIT = 1024 * 1024
 # A temporary file of service.atomic_write: <name>.<pid>.<uuid>.tmp.
 TEMPORARY = re.compile(r"(?P<name>[a-z][a-z0-9]*(?:-[a-z0-9]+)*)\.(?P<pid>[0-9]+)\.[0-9a-f-]{36}\.tmp")
@@ -194,7 +194,7 @@ def install(args: list[str]) -> dict[str, object]:
         for leftover in folder.glob("*.tmp"):
             # The program's, and a launcher's whose writer has ended; a build that runs now keeps its own.
             temporary = TEMPORARY.fullmatch(leftover.name)
-            if temporary and not leftover.is_symlink() and (temporary["name"] in ("arbol-builds", "arbol-roots")
+            if temporary and not leftover.is_symlink() and (temporary["name"] in ("arbol-builds", "arbol-roots", "arbol-agents")
                                                             or not alive(int(temporary["pid"]))):
                 leftover.unlink(missing_ok=True)
         python = runtime(library)
@@ -202,9 +202,15 @@ def install(args: list[str]) -> dict[str, object]:
             install_package(library, python, name)
         program = folder / "arbol-builds"
         roots_program = folder / "arbol-roots"
-        for path, module in ((program, "arbol_builds"), (roots_program, "arbol_roots")):
+        agents_program = folder / "arbol-agents"
+        for path, module in ((program, "arbol_builds"), (roots_program, "arbol_roots"), (agents_program, "arbol_agents")):
+            launch = f"from {module}.cli import entry\nentry()\n"
+            if module == "arbol_agents":
+                # A hook can arrive while the package is between renames during a reinstall.
+                launch = ("try:\n    from arbol_agents.cli import entry\n"
+                          "except Exception:\n    pass\nelse:\n    entry()\n")
             atomic_write(str(path), (f"{first}\n{SIGINT_LINE}\nsys.path.insert(0, {str(library)!r})\n"
-                                     f"from {module}.cli import entry\nentry()\n").encode(), 0o755)
+                                     f"{launch}").encode(), 0o755)
             os.chmod(path, 0o755)
         launchers: list[str] = []
         for path in sorted(folder.iterdir()):
@@ -216,7 +222,7 @@ def install(args: list[str]) -> dict[str, object]:
         for name in NODE_FILES:
             (library / name).unlink(missing_ok=True)
     return {"bin": str(folder), "program": str(program), "rootsProgram": str(roots_program),
-            "python": str(python), "launchers": launchers}
+            "agentsProgram": str(agents_program), "python": str(python), "launchers": launchers}
 
 
 def stopped(number: int, frame: FrameType | None) -> None:
