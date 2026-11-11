@@ -52,7 +52,6 @@ class Hook:
     hash: str
     command: str | None
     trusted: bool
-    enabled: bool
 
 
 class AppServer:
@@ -116,7 +115,6 @@ class AppServer:
                 hash=text_value(row, "currentHash"),
                 command=optional_text(row, "command"),
                 trusted=text_value(row, "trustStatus") == "trusted",
-                enabled=row.get("enabled") is True,
             )
             for row in rows
         ]
@@ -207,13 +205,16 @@ class CodexTrust:
     def install(self, hooks: JsonHooks) -> None:
         with app_server(self.config) as server:
             owned = self.installed_hooks(server, hooks)
-            server.write_trust(self.config, {
+            pending: dict[str, object] = {
                 hook.key: {"trusted_hash": hook.hash} for hook in owned if not hook.trusted
-            }, merge="upsert")
+            }
+            server.write_trust(self.config, pending, merge="upsert")
+        if pending and not self.trusted(hooks):
+            raise SettingsError(f"Codex did not recognize the new hook trust for {hooks.snapshot.path}.")
 
     def trusted(self, hooks: JsonHooks) -> bool:
         with app_server(self.config) as server:
-            return all(hook.trusted and hook.enabled for hook in self.installed_hooks(server, hooks))
+            return all(hook.trusted for hook in self.installed_hooks(server, hooks))
 
     def uninstall(self, hooks: JsonHooks, edit: HookEdit) -> None:
         if not edit.count or edit.contents is None:
@@ -225,6 +226,7 @@ class CodexTrust:
             raise SettingsError(f"Codex did not discover the hooks to remove in {hooks.snapshot.path}.")
         foreign = [hook for hook in before if hook.command != hooks.command]
         hooks.snapshot.save(edit.contents)
+        patch: dict[str, object] = {}
         try:
             with app_server(self.config) as server:
                 after = server.hooks(hooks.snapshot.path)
@@ -241,9 +243,16 @@ class CodexTrust:
                         changes[previous.key] = None
                     if previous.key in self.state or current.key in self.state:
                         moved[current.key] = self.state.get(previous.key)
-                server.write_trust(self.config, {**changes, **moved}, merge="replace")
+                patch = {**changes, **moved}
+                server.write_trust(self.config, patch, merge="replace")
         except (SettingsError, OSError):
-            # Roll back only while both files still match what this operation observed.
-            if SettingsFile.read(self.config.path) == self.config:
+            if not patch:
+                hooks.snapshot.restore(edit.contents)
+                raise
+            current_state = self.read(SettingsFile.read(self.config.path)).state
+            # A dropped reply can leave a successfully committed batch.
+            if all(current_state.get(key) == value for key, value in patch.items()):
+                return
+            if all(current_state.get(key) == self.state.get(key) for key in patch):
                 hooks.snapshot.restore(edit.contents)
             raise
