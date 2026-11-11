@@ -42,7 +42,7 @@ def select_root(name: str | None) -> Record:
     """A named retained Root in any state, or the current working Root; never another fallback."""
     folder = roots_folder()
     if name is None:
-        record = current_root(read_roots(folder))
+        record = current_root(read_roots(folder), folder=folder)
         if record is None:
             raise RootRefused("unknown_root", "No Root is named and none is working; name one with --root <root>.")
         return record

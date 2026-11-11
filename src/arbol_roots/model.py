@@ -99,7 +99,7 @@ def catalogue(paths: Places) -> list[Record]:
 
 def list_roots(paths: Places) -> list[Record]:
     records = catalogue(paths)
-    current = current_root(records)
+    current = current_root(records, folder=str(paths.roots))
     return [{**record, "current": current is not None and record["root"] == current["root"]}
             for record in sorted(records, key=lambda item: (milliseconds(item["createdAt"]), item["root"]), reverse=True)]
 
@@ -107,7 +107,7 @@ def list_roots(paths: Places) -> list[Record]:
 def selected(paths: Places, name: str | None) -> Record:
     records = catalogue(paths)
     if name is None:
-        found = current_root(records)
+        found = current_root(records, folder=str(paths.roots))
     else:
         identifier(name)
         found = next((record for record in records if record["root"] == name), None)

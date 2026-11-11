@@ -325,7 +325,8 @@ def list_builds(registry: str, component: str | None = None, root: str | None = 
             raise ValueError("--root applies to inventory of arbol and arbol-root, or to the whole registry.")
         selected_root = select_root(root)["root"]
     elif any(name in ROOT_COMPONENTS for name in components):
-        current = current_root(read_roots(roots_folder()))
+        folder = roots_folder()
+        current = current_root(read_roots(folder), folder=folder)
         if current is not None:
             selected_root = current["root"]
     listed: list[Record] = []

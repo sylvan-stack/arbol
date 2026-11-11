@@ -90,7 +90,7 @@ def the_root(name: str | None) -> Record:
     """The Root named with --root, or else the current Root (BLD-D17)."""
     folder = roots_folder()
     if name is None:
-        record = current_root(read_roots(folder))
+        record = current_root(read_roots(folder), folder=folder)
         if record is None:
             raise Refused("unknown_root", "No Root is named and none is working, so there is no current Root: "
                                           "name one with --root <root>.")

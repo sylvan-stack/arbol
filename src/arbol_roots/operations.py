@@ -162,7 +162,7 @@ def remove(paths: Places, root: str) -> Record:
     with catalogue_lock(paths):
         record = selected(paths, root)
         records = catalogue(paths)
-        current = current_root(records)
+        current = current_root(records, folder=str(paths.roots))
         if current is not None and current["root"] == root:
             raise Refused("current_root", "The current Root cannot be removed.")
         name = database_name(record.get("database"))

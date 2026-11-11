@@ -7,10 +7,12 @@ left out, and the names it imports are those of the text before it.
 
 import json
 import os
+import stat
 
 from .launcher import ROOT_PATTERN, Record, date, js_integer, milliseconds, positive, refuse_constant, root_identifier
 
 ROOT_STATES = ("preparing", "working", "failed")
+CURRENT_ROOT_FILE = ".current-root.json"
 
 
 def roots_folder() -> str:
@@ -50,9 +52,34 @@ def read_roots(folder: str) -> list[Record]:
     return [record for name in names if (record := read_root(folder, name)) is not None]
 
 
-def current_root(records: list[Record]) -> Record | None:
-    """The Root created last among those in the state working (ARC-1, "The states of a Root and the current Root"),
-    worked out from the records at every call; of two created at the same millisecond, the one whose identifier sorts
-    last (BLD-D17). A Root that is preparing or failed is never current."""
-    return max((record for record in records if record["status"] == "working"),
+def current_root_preference(folder: str) -> tuple[str, str] | None:
+    """Read the saved identity without following a link or waiting on a nonregular file."""
+    try:
+        fd = os.open(os.path.join(folder, CURRENT_ROOT_FILE), os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return None
+            payload = os.read(fd, 4097)
+        finally:
+            os.close(fd)
+        if len(payload) > 4096:
+            return None
+        value = json.loads(payload)
+    except (OSError, ValueError, RecursionError):
+        return None
+    if isinstance(value, dict):
+        root, created_at = value.get("root"), value.get("createdAt")
+        if isinstance(root, str) and root_identifier(root) and isinstance(created_at, str) and date(created_at):
+            return root, created_at
+    return None
+
+def current_root(records: list[Record], *, folder: str | None = None) -> Record | None:
+    """Choose the saved working Root, or the newest working record in automatic mode (ARC-1.7)."""
+    working = [record for record in records if record["status"] == "working"]
+    if folder is not None:
+        preference = current_root_preference(folder)
+        for record in working:
+            if (record["root"], record["createdAt"]) == preference:
+                return record
+    return max(working,
                key=lambda record: (milliseconds(record["createdAt"]), record["root"]), default=None)
