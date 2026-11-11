@@ -109,9 +109,9 @@
 
 <svelte:window onresize={repositionOpenPicker} onscroll={repositionOpenPicker} />
 <div class="workspace" class:fitted class:elma>
-  <header class="chrome" class:with-slots={!!(headerLead || headerExtras || root)} data-arbol-window-header
+  <header class="chrome" class:with-slots={!!(headerLead || headerExtras || root)} data-arbol-window-header data-arbol-window-drag
     data-arbol-native-controls={headerWindowControls ? '' : undefined}>
-    {#if headerWindowControls}<div class="window-controls">{@render headerWindowControls()}</div>{/if}
+    {#if headerWindowControls}<div class="window-controls" data-arbol-no-drag>{@render headerWindowControls()}</div>{/if}
     {#if headerContent}{@render headerContent()}
       <IconButton label="Toggle navigation" icon="☰" onclick={() => (expanded = !expanded)} />
     {:else if headerLead || headerExtras || root}
@@ -120,7 +120,7 @@
         {:else}<WorkspaceGlyph {workspace} size={24} /><strong>{workspace}</strong>{/if}
       </div>
       {#if root}
-        <div class="window-root">
+        <div class="window-root" data-arbol-no-drag>
           {#if rootSelector && root.root}
             <button type="button" class="root-trigger" popovertarget={rootPickerId} bind:this={rootTrigger}
               title="Open this UI in another Root">
