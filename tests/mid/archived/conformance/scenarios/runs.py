@@ -287,6 +287,75 @@ c33 = Scenario("C33", "Run input and active records",
                ["DRV-2.25", "DRV-2.26", "DRV-2.27", "DRV-2.28", "DRV-3.30", "DRV-6.7", "DRV-6.8"], run_c33)
 
 
+# --- C44 -------------------------------------------------------------------------------------------------
+# Admitted under SYL-399: a wrong or inherited chat identity at tool launch would let a Forester booking name the
+# wrong Arbol chat. Only a real Driver launch shows the environment it assembles; archived C8/C40 stay archived.
+
+UNRELATED = "SYL_C44_UNRELATED"
+
+
+async def identity_run(home: ScenarioHome, request: JSObject) -> tuple[JSObject, list[JSObject]]:
+    """One run from a request on standard input, and the stand-in records it added."""
+    before = len(await home.received())
+    run = home.start(["run", "--request", "-"])
+    try:
+        run.send(request)
+        run.child.stdin.end()
+        reply = await run.done
+    finally:
+        await run.dispose()
+    return reply, (await home.received())[before:]
+
+
+async def run_c44(home: ScenarioHome) -> None:
+    identifier = await signed(home)
+    home.env.update(ARBOL_ROOT="stale", ARBOL_CHAT="0f0e0d0c-0b0a-4908-8706-050403020100", **{UNRELATED: "caller"})
+    base = {"subscriptionId": identifier, "history": [], "tools": "none", "input": {"role": "user", "text": "answer"}}
+
+    chat = "c3d4e5f6-0718-4293-a4b5-c6d7e8f90a1b"
+    reply, records = await identity_run(home, JSObject(base, rootId="sapling", chatSessionId=chat))
+    stream(reply)
+    carrying = 0
+    for record in records:
+        names = array_of(record["environment"])
+        check("Unrelated caller variable", UNRELATED not in names, f"no {UNRELATED}", names)
+        if "ARBOL_ROOT" in names or "ARBOL_CHAT" in names:
+            # A launch that carries identity carries the request's pair, never the stale inherited one.
+            checks = object_("Stand-in checks", record["checks"])
+            equal("ARBOL_ROOT at launch", checks["arbolRoot"], "sapling")
+            equal("ARBOL_CHAT at launch", checks["arbolChat"], chat)
+            carrying += 1
+    check("The run's tool launch carries the identity", carrying > 0, "at least one launch with both values",
+          records)
+
+    reply, records = await identity_run(home, JSObject(base, chatSessionId="opaque chat 7"))
+    stream(reply)
+    check("Opaque chat run started the stand-in", len(records) > 0, "at least one stand-in record", records)
+    for record in records:
+        names = array_of(record["environment"])
+        check("No identity without rootId", "ARBOL_ROOT" not in names and "ARBOL_CHAT" not in names,
+              "neither ARBOL_ROOT nor ARBOL_CHAT", names)
+
+    for label, fields in (("Malformed rootId", {"rootId": "Sapling", "chatSessionId": chat}),
+                          ("Upper-case chat", {"rootId": "sapling", "chatSessionId": chat.upper()})):
+        reply, records = await identity_run(home, JSObject(base, **fields))
+        refused = stream(reply, "failed")
+        equal(f"{label} only final", len(refused), 1)
+        equal(f"{label} refusal", prop(refused[0]["error"], "code"), "invalid_input")
+        equal(f"{label} starts no tool", len(records), 0)
+
+
+def array_of(value: Any) -> list[Any]:
+    check("Environment names", isinstance(value, list), "array of names", value)
+    return list(value)
+
+
+c44 = Scenario("C44", "Arbol chat identity at tool launch",
+               "request identity over stale inherited values, no unrelated caller variable, opaque chat without "
+               "rootId, refusal before launch of a malformed rootId and an upper-case chat",
+               ["DRV-2.37", "CLD-2.26", "CDX-2.22"], run_c44)
+
+
 
 
 

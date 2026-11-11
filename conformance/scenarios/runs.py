@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING as _TYPE_CHECKING
 if _TYPE_CHECKING:
     from mid.archived.conformance.scenarios.runs import c18 as c18
     from mid.archived.conformance.scenarios.runs import c33 as c33
+    from mid.archived.conformance.scenarios.runs import c44 as c44
     from mid.archived.conformance.scenarios.runs import events as events
     from mid.archived.conformance.scenarios.runs import signed as signed
     from mid.archived.conformance.scenarios.runs import stream as stream
