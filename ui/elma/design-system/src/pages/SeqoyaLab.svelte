@@ -1,6 +1,5 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
-  import WorkspaceGlyph from '../components/WorkspaceGlyph.svelte';
   import PageHeader from '../patterns/PageHeader.svelte';
   import WorkspaceShell from '../patterns/WorkspaceShell.svelte';
   import type { WorkspaceRoot, WorkspaceRootSelector } from '../types';
@@ -29,12 +28,8 @@
 
 {#snippet connection()}<span role="status">{connectionStatus}</span>{/snippet}
 
-<WorkspaceShell workspace="Seqoya" {current} {destinations} {root} {rootSelector} {headerWindowControls}
+<WorkspaceShell workspace="Seqoya" headerTitle="Seqoya Lab" {current} {destinations} {root} {rootSelector} {headerWindowControls}
   onnavigate={navigate} status={connectionStatus ? connection : null} navigationFooter={false} {fitted}>
-  {#snippet headerLead()}
-    <WorkspaceGlyph workspace="Seqoya" size={24} />
-    <strong>Seqoya Lab</strong>
-  {/snippet}
   <div class="page-content seqoya-page">
     <PageHeader title={current} description="" />
     <div class="panel seqoya-empty"><p class="muted">{sections[current]}</p></div>

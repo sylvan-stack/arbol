@@ -1,7 +1,6 @@
 <script lang="ts">
   import {tick,type Snippet} from 'svelte';
   import WorkspaceShell from '../patterns/WorkspaceShell.svelte';
-  import WorkspaceGlyph from '../components/WorkspaceGlyph.svelte';
   import { THEMES } from '../themes';
   import type { ElmaRoute } from './elma-types';
   import {signInCommand} from './elma-response';
@@ -32,12 +31,19 @@
   }
 </script>
 
+{#snippet chatTitle()}<button bind:this={titleButton} class="title-action" class:placeholder
+  title="Rename chat session (⌘-click)" disabled={!onrename || metadataBusy}
+  onclick={(event) => { if (event.metaKey || event.detail === 0) onrename?.(); }}>{title}</button>
+{/snippet}
+{#snippet chatTitleEditor()}
+  {#if rename}<InlineRename label="Chat title" value={rename.value} busy={rename.busy} problem={rename.problem}
+    max={240} oninput={onRenameInput} onsave={onRenameSave} oncancel={onRenameCancel} />{/if}
+{/snippet}
+
 <div class="elma-frame" data-theme={theme||undefined} style:--font-scale={uiScale||undefined} style:--elma-content-scale={contentScale||undefined} style:--elma-reading-width={readingWidth+'px'}>
-<WorkspaceShell workspace="Elma" {fitted} elma {root} {rootSelector} {headerWindowControls}>
-  {#snippet headerLead()}
-    <span class:working class="mark"><WorkspaceGlyph workspace="Elma" size={21}/></span>
-    <div class="title-area">{#if rename}<h1 class="title-prefix">Elma Chat</h1><InlineRename label="Chat title" value={rename.value} busy={rename.busy} problem={rename.problem} max={240} oninput={onRenameInput} onsave={onRenameSave} oncancel={onRenameCancel}/>{:else}<h1 class:placeholder>Elma Chat · <button bind:this={titleButton} class="title-action" title="Rename chat session (⌘-click)" disabled={!onrename||metadataBusy} onclick={event=>{if(event.metaKey||event.detail===0)onrename?.();}}>{title}</button></h1>{/if}</div>
-  {/snippet}
+<WorkspaceShell workspace="Elma" headerTitle="Elma Chat" headerBusy={working}
+  headerTitleDetail={rename ? undefined : chatTitle} headerTitleEditor={rename ? chatTitleEditor : undefined}
+  {fitted} elma {root} {rootSelector} {headerWindowControls}>
   {#snippet headerExtras()}
     <div class="preferences">
       <label class="width">Reading width <select aria-label="Reading width" bind:value={readingWidth} onchange={onpreferences}>{#each Array.from({length:10},(_,i)=>600+i*120) as width}<option value={width}>{width} px</option>{/each}</select></label>
@@ -64,13 +70,11 @@
 </div>
 
 <style>
-.title-area{min-width:0;flex:1}.title-area h1{margin:0}.title-action{font:inherit;color:inherit;background:transparent;border:0;padding:0;text-align:left;overflow-wrap:anywhere}.title-prefix{font-size:12px;color:var(--muted)}
+.title-action{font:inherit;color:inherit;background:transparent;border:0;padding:0;text-align:left;overflow-wrap:anywhere}
 
 .elma-frame{min-width:0;color:var(--text);font:calc(13.5px * var(--font-scale))/1.5 var(--font-ui)}
-h1{min-width:0;flex:1;font:600 calc(13.5px * var(--font-scale))/1.4 var(--font-ui);overflow-wrap:anywhere}
-.placeholder{font-weight:400;color:var(--muted)}.mark{display:flex;color:var(--accent);flex-shrink:0}.working{animation:breathe 1.6s ease-in-out infinite}@keyframes breathe{50%{opacity:.4;transform:rotate(-12deg)}}
+.placeholder{font-weight:400;color:var(--muted)}
 .preferences{display:flex;gap:4px;align-items:center;flex-wrap:wrap;font-size:calc(11.5px * var(--font-scale))}.preferences button,.preferences select{min-height:28px;background:var(--inset);color:var(--text);border:1px solid var(--border);border-radius:5px;padding:2px 5px}.width{font-size:0}.width select{font-size:calc(11.5px * var(--font-scale))}
 .account-problem{color:var(--warning);font-size:calc(11.5px * var(--font-scale));overflow-wrap:anywhere}.nav-title{font-weight:600;overflow-wrap:anywhere}.turn-count,.cockpit,.history-heading{color:var(--muted);font-size:calc(11.5px * var(--font-scale))}.cockpit{display:flex;flex-direction:column;gap:4px;margin:12px 0}.cockpit button{border:1px solid var(--border);border-radius:20px;background:var(--inset);color:var(--text);padding:4px 8px;align-self:start}.group,.nav-row{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;text-align:left;min-height:30px;background:transparent;border:0;color:var(--text);padding:4px 0}.group{font-size:calc(11.5px * var(--font-scale));color:var(--muted);font-weight:700;margin-top:12px;text-transform:uppercase}.nav-row span{overflow-wrap:anywhere;min-width:0}.nav-row kbd{white-space:nowrap;flex-shrink:0;color:var(--muted)}.history-heading{border-top:1px solid var(--border);padding-top:12px;margin-top:12px;text-transform:uppercase}.status-text{overflow-wrap:anywhere;white-space:normal}.empty{margin:auto;padding:32px;color:var(--muted)}
-@media(prefers-reduced-motion:reduce){.working{animation:none}}
-@media(max-width:800px){.preferences{margin-left:auto}.preferences .width{display:none}.mark{display:none}}
+@media(max-width:800px){.preferences{margin-left:auto}.preferences .width{display:none}}
 </style>
