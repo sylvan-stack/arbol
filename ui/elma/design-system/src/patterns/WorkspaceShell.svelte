@@ -21,6 +21,8 @@
     children,
     headerTitle, headerTitleDetail, headerTitleEditor, headerBusy,
     headerContent, headerLead, headerExtras, headerWindowControls, trunk, trunkSelector, navigation, status,
+    headerAppearance, onAppearanceChange,
+    theme = $bindable(''), uiScale = $bindable(0), contentScale = $bindable<number>(),
     navigationFooter = true, fitted = false, elma = false,
     onnavigate = () => {},
   }: {
@@ -36,6 +38,11 @@
     headerLead?: Snippet;
     headerExtras?: Snippet;
     headerWindowControls?: Snippet;
+    headerAppearance?: 'enabled' | 'disabled';
+    theme?: string;
+    uiScale?: number;
+    contentScale?: number;
+    onAppearanceChange?: () => void;
     trunk?: string;
     trunkSelector?: WorkspaceTrunkSelector;
     navigation?: Snippet; status?: Snippet | null; navigationFooter?: boolean; fitted?: boolean; elma?: boolean;
@@ -44,10 +51,12 @@
   let expanded = $state(false);
 </script>
 
-<div class="workspace" class:fitted class:elma>
+<div class="workspace" class:fitted class:elma class:appearance={!!headerAppearance}
+  data-theme={theme || undefined} style:--font-scale={uiScale || undefined}>
   <WorkspaceHeader {workspace} title={headerTitle} titleDetail={headerTitleDetail} titleEditor={headerTitleEditor}
     busy={headerBusy} content={headerContent} lead={headerLead} extras={headerExtras}
-    windowControls={headerWindowControls} {trunk} {trunkSelector} onToggleNavigation={() => (expanded = !expanded)} />
+    windowControls={headerWindowControls} {trunk} {trunkSelector} onToggleNavigation={() => (expanded = !expanded)}
+    appearance={headerAppearance} bind:theme bind:uiScale bind:contentScale {onAppearanceChange} />
   <div class="layout" class:expanded>
     <nav aria-label={workspace + ' navigation'}>
       {#if navigation}{@render navigation()}{:else}
@@ -84,6 +93,7 @@
   .elma nav { padding: 12px; }
   .elma footer { min-height: 40px; padding: 6px 12px; }
   .elma .layout { grid-template-columns: 248px minmax(0, 1fr); }
+  .appearance { color: var(--text); font: calc(13.5px * var(--font-scale))/1.5 var(--font-ui); }
   @media (max-width: 800px) { .elma .layout { grid-template-columns: 1fr; } }
 
   .workspace {

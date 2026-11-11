@@ -4,12 +4,19 @@
   import WorkspaceShell from '../patterns/WorkspaceShell.svelte';
   import type { WorkspaceTrunkSelector } from '../types';
 
-  let { trunk, trunkSelector, headerWindowControls, connectionStatus = '', fitted = false }: {
+  let {
+    trunk, trunkSelector, headerWindowControls, connectionStatus = '', fitted = false,
+    theme = $bindable(''), uiScale = $bindable(0), appearanceReady = true, onAppearanceChange,
+  }: {
     trunk?: string;
     trunkSelector?: WorkspaceTrunkSelector;
     headerWindowControls?: Snippet;
     connectionStatus?: string;
     fitted?: boolean;
+    theme?: string;
+    uiScale?: number;
+    appearanceReady?: boolean;
+    onAppearanceChange?: () => void;
   } = $props();
 
   const sections = {
@@ -29,6 +36,7 @@
 {#snippet connection()}<span role="status">{connectionStatus}</span>{/snippet}
 
 <WorkspaceShell workspace="Seqoya" headerTitle="Seqoya Lab" {current} {destinations} {trunk} {trunkSelector} {headerWindowControls}
+  headerAppearance={appearanceReady ? 'enabled' : 'disabled'} bind:theme bind:uiScale {onAppearanceChange}
   onnavigate={navigate} status={connectionStatus ? connection : null} navigationFooter={false} {fitted}>
   <div class="page-content seqoya-page">
     <PageHeader title={current} description="" />

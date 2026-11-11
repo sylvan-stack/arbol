@@ -1,7 +1,6 @@
 <script lang="ts">
   import {tick,type Snippet} from 'svelte';
   import WorkspaceShell from '../patterns/WorkspaceShell.svelte';
-  import { THEMES } from '../themes';
   import type { ElmaRoute } from './elma-types';
   import {signInCommand} from './elma-response';
   import InlineRename from '../patterns/InlineRename.svelte';
@@ -23,12 +22,6 @@
   $effect(()=>{const active=!!rename,key=titleIdentity;if(active&&!wasRenaming)editIdentity=key;if(wasRenaming&&!active&&editIdentity===key)void tick().then(()=>titleButton?.focus());wasRenaming=active;});
   let repoOpen=$state(true), intelligenceOpen=$state(true), priorEmpty=true;
   $effect(()=>{const empty=total===0;if(empty!==priorEmpty){repoOpen=empty;intelligenceOpen=empty;priorEmpty=empty;}});
-  const rounded=(n:number)=>Math.round(n*100)/100;
-  function font(increase:boolean){let ui=uiScale||1,content=contentScale||ui;const maxUI=23/13.5,maxContent=32/13.5,min=11.5/13.5;
-    if(increase){if(ui<maxUI){ui=Math.min(maxUI,rounded(ui+.1));content=ui;}else content=Math.min(maxContent,rounded(content+.1));}
-    else if(content>ui)content=Math.max(ui,rounded(content-.1));else {ui=Math.max(min,rounded(ui-.1));content=ui;}
-    uiScale=ui;contentScale=content;onpreferences();
-  }
 </script>
 
 {#snippet chatTitle()}<button bind:this={titleButton} class="title-action" class:placeholder
@@ -40,17 +33,13 @@
     max={240} oninput={onRenameInput} onsave={onRenameSave} oncancel={onRenameCancel} />{/if}
 {/snippet}
 
-<div class="elma-frame" data-theme={theme||undefined} style:--font-scale={uiScale||undefined} style:--elma-content-scale={contentScale||undefined} style:--elma-reading-width={readingWidth+'px'}>
+<div class="elma-frame" style:--elma-content-scale={contentScale||undefined} style:--elma-reading-width={readingWidth+'px'}>
 <WorkspaceShell workspace="Elma" headerTitle="Elma Chat" headerBusy={working}
   headerTitleDetail={rename ? undefined : chatTitle} headerTitleEditor={rename ? chatTitleEditor : undefined}
+  headerAppearance="enabled" bind:theme bind:uiScale bind:contentScale onAppearanceChange={onpreferences}
   {fitted} elma {trunk} {trunkSelector} {headerWindowControls}>
   {#snippet headerExtras()}
-    <div class="preferences">
-      <label class="width">Reading width <select aria-label="Reading width" bind:value={readingWidth} onchange={onpreferences}>{#each Array.from({length:10},(_,i)=>600+i*120) as width}<option value={width}>{width} px</option>{/each}</select></label>
-      <button aria-label="Decrease text size" disabled={(uiScale||1)<=11.5/13.5&&(contentScale||1)<=(uiScale||1)} onclick={()=>font(false)}>A−</button>
-      <button aria-label="Increase text size" disabled={(contentScale||1)>=32/13.5} onclick={()=>font(true)}>A+</button>
-      <select aria-label="Theme" bind:value={theme} onchange={onpreferences}>{#if !theme}<option value="">Current theme</option>{/if}{#each THEMES as item}<option value={item.id}>{item.name}</option>{/each}</select>
-    </div>
+    <select class="reading-width" aria-label="Reading width" bind:value={readingWidth} onchange={onpreferences}>{#each Array.from({length:10},(_,i)=>600+i*120) as width}<option value={width}>{width} px</option>{/each}</select>
   {/snippet}
   {#snippet navigation()}
     <div class="nav-title" class:placeholder>{title}</div>
@@ -72,9 +61,9 @@
 <style>
 .title-action{font:inherit;color:inherit;background:transparent;border:0;padding:0;text-align:left;overflow-wrap:anywhere}
 
-.elma-frame{min-width:0;color:var(--text);font:calc(13.5px * var(--font-scale))/1.5 var(--font-ui)}
+.elma-frame{min-width:0}
 .placeholder{font-weight:400;color:var(--muted)}
-.preferences{display:flex;gap:4px;align-items:center;flex-wrap:wrap;font-size:calc(11.5px * var(--font-scale))}.preferences button,.preferences select{min-height:28px;background:var(--inset);color:var(--text);border:1px solid var(--border);border-radius:5px;padding:2px 5px}.width{font-size:0}.width select{font-size:calc(11.5px * var(--font-scale))}
+.reading-width{font-size:calc(11.5px * var(--font-scale));min-height:28px;background:var(--inset);color:var(--text);border:1px solid var(--border);border-radius:5px;padding:2px 5px}
 .account-problem{color:var(--warning);font-size:calc(11.5px * var(--font-scale));overflow-wrap:anywhere}.nav-title{font-weight:600;overflow-wrap:anywhere}.turn-count,.cockpit,.history-heading{color:var(--muted);font-size:calc(11.5px * var(--font-scale))}.cockpit{display:flex;flex-direction:column;gap:4px;margin:12px 0}.cockpit button{border:1px solid var(--border);border-radius:20px;background:var(--inset);color:var(--text);padding:4px 8px;align-self:start}.group,.nav-row{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;text-align:left;min-height:30px;background:transparent;border:0;color:var(--text);padding:4px 0}.group{font-size:calc(11.5px * var(--font-scale));color:var(--muted);font-weight:700;margin-top:12px;text-transform:uppercase}.nav-row span{overflow-wrap:anywhere;min-width:0}.nav-row kbd{white-space:nowrap;flex-shrink:0;color:var(--muted)}.history-heading{border-top:1px solid var(--border);padding-top:12px;margin-top:12px;text-transform:uppercase}.status-text{overflow-wrap:anywhere;white-space:normal}.empty{margin:auto;padding:32px;color:var(--muted)}
-@media(max-width:800px){.preferences{margin-left:auto}.preferences .width{display:none}}
+@media(max-width:800px){.reading-width{display:none}}
 </style>

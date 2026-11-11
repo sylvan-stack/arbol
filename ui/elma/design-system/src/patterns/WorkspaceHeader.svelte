@@ -3,11 +3,13 @@
   import WorkspaceGlyph from '../components/WorkspaceGlyph.svelte';
   import IconButton from '../components/IconButton.svelte';
   import Button from '../components/Button.svelte';
+  import { THEMES } from '../themes';
   import type { WorkspaceTrunkSelector } from '../types';
 
   let {
     workspace, title, titleDetail, titleEditor, busy = false, content, lead, extras, windowControls,
-    trunk, trunkSelector, onToggleNavigation,
+    trunk, trunkSelector, onToggleNavigation, appearance, onAppearanceChange,
+    theme = $bindable(''), uiScale = $bindable(0), contentScale = $bindable<number>(),
   }: {
     workspace: string;
     title?: string;
@@ -21,8 +23,36 @@
     trunk?: string;
     trunkSelector?: WorkspaceTrunkSelector;
     onToggleNavigation: () => void;
+    appearance?: 'enabled' | 'disabled';
+    theme?: string;
+    uiScale?: number;
+    contentScale?: number;
+    onAppearanceChange?: () => void;
   } = $props();
-  const surfaceHeader = $derived(Boolean(title || lead || extras || trunk || trunkSelector));
+  const surfaceHeader = $derived(Boolean(title || lead || extras || trunk || trunkSelector || appearance));
+
+  const minScale = 11.5 / 13.5;
+  const maxUiScale = 23 / 13.5;
+  const maxContentScale = 32 / 13.5;
+  const windowScale = $derived(uiScale || 1);
+  const readingScale = $derived(contentScale || windowScale);
+  const canDecrease = $derived(windowScale > minScale || readingScale > windowScale);
+  const canIncrease = $derived(
+    contentScale === undefined ? windowScale < maxUiScale : readingScale < maxContentScale,
+  );
+
+  function adjustText(increase: boolean) {
+    const rounded = (value: number) => Math.round(value * 100) / 100;
+    if (increase ? windowScale < maxUiScale : readingScale <= windowScale) {
+      uiScale = Math.min(maxUiScale, Math.max(minScale, rounded(windowScale + (increase ? 0.1 : -0.1))));
+      if (contentScale !== undefined) contentScale = uiScale;
+    } else if (contentScale !== undefined) {
+      contentScale = increase
+        ? Math.min(maxContentScale, rounded(readingScale + 0.1))
+        : Math.max(windowScale, rounded(readingScale - 0.1));
+    }
+    onAppearanceChange?.();
+  }
 
   const trunkPickerId = $props.id();
   let trunkTrigger = $state<HTMLButtonElement>();
@@ -111,6 +141,7 @@
         </div>
       {/if}
     </div>
+    {@render extras?.()}
     {#if trunk || trunkSelector}
       <div class="window-trunk" data-arbol-no-drag>
         {#if trunkSelector}
@@ -146,7 +177,19 @@
         {/if}
       </div>
     {/if}
-    {#if extras}{@render extras()}{/if}
+    {#if appearance}
+      <div class="appearance">
+        <button type="button" aria-label="Decrease text size" disabled={appearance === 'disabled' || !canDecrease}
+          onclick={() => adjustText(false)}>A−</button>
+        <button type="button" aria-label="Increase text size" disabled={appearance === 'disabled' || !canIncrease}
+          onclick={() => adjustText(true)}>A+</button>
+        <select aria-label="Theme" disabled={appearance === 'disabled'} value={theme}
+          onchange={(event) => { theme = event.currentTarget.value; onAppearanceChange?.(); }}>
+          {#if !theme}<option value="">Current theme</option>{/if}
+          {#each THEMES as item (item.id)}<option value={item.id}>{item.name}</option>{/each}
+        </select>
+      </div>
+    {/if}
   {:else}
     <div class="brand"><WorkspaceGlyph {workspace} size={24} /><strong>{workspace}</strong></div>
     <span class="small muted">Arbol / Design system</span>
@@ -199,6 +242,15 @@
     overflow-wrap: anywhere;
   }
   .title-area h1.editing { font-size: 12px; color: var(--muted); }
+  .appearance { display: flex; gap: 4px; align-items: center; font-size: calc(11.5px * var(--font-scale)); }
+  .appearance button, .appearance select {
+    min-height: 28px;
+    background: var(--inset);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 2px 5px;
+  }
   .window-trunk { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; overflow-wrap: anywhere; }
   .trunk-state { color: var(--warning); overflow-wrap: anywhere; }
   .trunk-trigger {
