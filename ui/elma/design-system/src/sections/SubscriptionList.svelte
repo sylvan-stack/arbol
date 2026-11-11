@@ -5,12 +5,19 @@
   import Meter from '../components/Meter.svelte';
   import Notice from '../patterns/Notice.svelte';
   import PageHeader from '../patterns/PageHeader.svelte';
-  import type { SubscriptionView } from './seqoya-subscriptions';
+  import { subscriptionKey, type SubscriptionView } from './seqoya-subscriptions';
 
   let {
     view = { connected: false },
     onRefresh,
-  }: { view?: SubscriptionView; onRefresh?: () => void } = $props();
+    onRefreshUsage,
+    onOpenMiMo,
+  }: {
+    view?: SubscriptionView;
+    onRefresh?: () => void;
+    onRefreshUsage?: (driver: string, subscription: string) => void;
+    onOpenMiMo?: () => void;
+  } = $props();
 
   const vendors = new Map([
     ['anthropic', 'Claude Code'],
@@ -40,6 +47,10 @@
   function formatTime(value: string) {
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? 'Time unavailable' : dateTime.format(date);
+  }
+  const integer = new Intl.NumberFormat();
+  function tokens(value?: string) {
+    return typeof value === 'string' && /^[0-9]+$/.test(value) ? integer.format(BigInt(value)) : 'Unavailable';
   }
 
   const failures = $derived(view.listing?.drivers.filter((entry) => entry.error) ?? []);
@@ -80,9 +91,16 @@
 
   {#if rows.length}
     <ul class="accounts" aria-label="Subscription accounts">
-      {#each rows as { driver, subscription, vendor } (JSON.stringify([driver, subscription.id]))}
+      {#each rows as { driver, subscription, vendor } (subscriptionKey(driver, subscription.id))}
         {@const status = states.get(subscription.state)}
         {@const usage = subscription.lastUsage}
+        {@const deepseek = subscription.family === 'deepseek'}
+        {@const zai = subscription.family === 'zai'}
+        {@const mimo = subscription.family === 'xiaomi' && driver === 'mimo'}
+        {@const refreshable = (deepseek || zai) && subscription.state === 'signed_in' && onRefreshUsage}
+        {@const usageRequest = view.usageRequests?.[subscriptionKey(driver, subscription.id)]}
+        {@const balances = deepseek && Array.isArray(usage?.extra?.balances) ? usage.extra.balances : []}
+        {@const insufficient = deepseek && usage?.extra?.apiAvailable === false}
         <li class="panel stack account">
           <div class="row spread">
             <h2>{vendor}</h2>
@@ -98,6 +116,10 @@
           {#if usage}
             <div class="stack usage">
               <p class="small muted">Usage recorded <time datetime={usage.fetchedAt}>{formatTime(usage.fetchedAt)}</time>{#if usage.plan} · {usage.plan}{/if}</p>
+              {#each balances as balance (balance.currency)}
+                <p>API balance <strong>{balance.amount} {balance.currency}</strong></p>
+              {/each}
+              {#if insufficient}<p class="small warning">The balance is insufficient for API calls.</p>{/if}
               {#each usage.windows as window}
                 <div class="stack usage-window">
                   <Meter label={window.label + (window.resource ? ` · ${window.resource}` : '')} value={window.usedPercent} unknown={window.usedPercent === undefined} />
@@ -110,11 +132,43 @@
                   {/if}
                 </div>
               {:else}
-                <p class="small muted">No usage limits reported.</p>
+                {#if !balances.length && !insufficient}<p class="small muted">No usage limits reported.</p>{/if}
               {/each}
             </div>
-          {:else}
-            <p class="small muted">No saved usage.</p>
+          {:else if !mimo}
+            <p class="small muted">
+              {refreshable ? (deepseek ? 'Refresh usage to check your API balance.' : 'Refresh usage to check your Coding Plan quota.') : 'No saved usage.'}
+            </p>
+          {/if}
+          {#if refreshable}
+            <div>
+              <Button label="Refresh usage" onclick={() => onRefreshUsage?.(driver, subscription.id)}
+                busy={usageRequest?.pending} disabled={!view.connected} />
+            </div>
+          {/if}
+          {#if usageRequest?.error}<p class="small warning" role="status">{usageRequest.error}</p>{/if}
+          {#if mimo}
+            <div class="stack usage">
+              <p class="small muted">Arbol activity in this Root · Last 30 days</p>
+              {#if subscription.activity}
+                {@const activity = subscription.activity}
+                <p>{integer.format(activity.runCount)} {activity.runCount === 1 ? 'run' : 'runs'} recorded</p>
+                {#if activity.runCount}
+                  <p class="small">Input tokens: {tokens(activity.inputTokens)} · Output tokens: {tokens(activity.outputTokens)}</p>
+                  {#if activity.lastRunAt}
+                    <p class="small muted">Last run <time datetime={activity.lastRunAt}>{formatTime(activity.lastRunAt)}</time></p>
+                  {/if}
+                {/if}
+              {:else if subscription.activityError}
+                <p class="small warning" role="status">{subscription.activityError}</p>
+              {:else}
+                <p class="small muted">{view.connected ? 'Reading Root activity…' : 'Root activity unavailable while disconnected.'}</p>
+              {/if}
+              {#if onOpenMiMo}
+                <div><Button label="Open MiMo console" tone="ghost" onclick={onOpenMiMo} /></div>
+              {/if}
+              {#if view.consoleError}<p class="small warning" role="status">{view.consoleError}</p>{/if}
+            </div>
           {/if}
         </li>
       {/each}

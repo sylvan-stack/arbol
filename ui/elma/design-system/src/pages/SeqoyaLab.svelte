@@ -10,6 +10,7 @@
     trunk, trunkSelector, headerWindowControls, connectionStatus = '', fitted = false,
     theme = $bindable(''), uiScale = $bindable(0), appearanceReady = true, onAppearanceChange,
     subscriptions, onRefreshSubscriptions, onPageChange,
+    onRefreshUsage, onOpenMiMo,
   }: {
     trunk?: string;
     trunkSelector?: WorkspaceTrunkSelector;
@@ -23,6 +24,8 @@
     subscriptions?: SubscriptionView;
     onRefreshSubscriptions?: () => void;
     onPageChange?: (page: string) => void;
+    onRefreshUsage?: (driver: string, subscription: string) => void;
+    onOpenMiMo?: () => void;
   } = $props();
 
   const sections = {
@@ -49,7 +52,7 @@
   onnavigate={navigate} status={connectionStatus ? connection : null} navigationFooter={false} {fitted}>
   <div class="page-content seqoya-page">
     {#if current === 'Subscriptions'}
-      <SubscriptionList view={subscriptions} onRefresh={onRefreshSubscriptions} />
+      <SubscriptionList view={subscriptions} onRefresh={onRefreshSubscriptions} {onRefreshUsage} {onOpenMiMo} />
     {:else}
       <PageHeader title={current} description="" />
       <div class="panel seqoya-empty"><p class="muted">{sections[current]}</p></div>

@@ -6,6 +6,8 @@ export interface SubscriptionRecord {
   auth: string;
   state: string;
   problem?: { message: string };
+  activity?: SubscriptionActivity;
+  activityError?: string;
   lastUsage?: {
     fetchedAt: string;
     plan?: string;
@@ -16,7 +18,18 @@ export interface SubscriptionRecord {
       resetsAt?: string;
       limitReached?: boolean;
     }[];
+    extra?: {
+      balances?: { currency: 'USD' | 'CNY'; amount: string }[];
+      apiAvailable?: boolean;
+    };
   };
+}
+
+export interface SubscriptionActivity {
+  runCount: number;
+  inputTokens?: string;
+  outputTokens?: string;
+  lastRunAt?: string;
 }
 
 export interface SubscriptionListing {
@@ -32,4 +45,10 @@ export interface SubscriptionView {
   loading?: boolean;
   listing?: SubscriptionListing;
   error?: string;
+  usageRequests?: Record<string, { pending?: boolean; error?: string }>;
+  consoleError?: string;
+}
+
+export function subscriptionKey(driver: string, subscription: string): string {
+  return JSON.stringify([driver, subscription]);
 }
