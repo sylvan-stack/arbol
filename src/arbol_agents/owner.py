@@ -62,6 +62,8 @@ class Processes:
     def entrypoint(self, tool: str, pid: int, existing: str | None = None) -> str | None:
         if tool == "claude-code":
             return os.environ.get("CLAUDE_CODE_ENTRYPOINT")
+        if tool == "kimi-code":
+            return None
         if existing is not None:
             return existing
         command = self.command(pid)

@@ -14,7 +14,7 @@ from pathlib import Path
 from .model import AgentRecord
 
 IDENTIFIER = re.compile(r"[A-Za-z0-9-]+")
-TOOLS = {"claude-code", "codex"}
+TOOLS = {"claude-code", "codex", "kimi-code"}
 
 
 def folder() -> Path:

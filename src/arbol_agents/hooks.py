@@ -1,8 +1,9 @@
-"""Apply Claude Code and Codex events to one agent record (AGR-1.1 to AGR-1.4)."""
+"""Apply provider events to one agent record (AGR-1.1 to AGR-1.4)."""
 
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -41,10 +42,20 @@ CLAUDE_EVENTS = COMMON_EVENTS | {
     "StopFailure",
 }
 CODEX_EVENTS = COMMON_EVENTS | {"Interrupt"}
-EVENTS = {"claude-code": CLAUDE_EVENTS, "codex": CODEX_EVENTS}
+KIMI_LIFE_EVENTS = {"SessionHeartbeat", "TaskStarted", "UserPromptQueued", "Notification"}
+KIMI_EVENTS = COMMON_EVENTS | KIMI_LIFE_EVENTS | {
+    "Interrupt",
+    "PermissionResult",
+    "PostToolUseFailure",
+    "StopFailure",
+    "TurnStarted",
+}
+EVENTS = {"claude-code": CLAUDE_EVENTS, "codex": CODEX_EVENTS, "kimi-code": KIMI_EVENTS}
+KIMI_SESSION = re.compile(r"session_([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})", re.IGNORECASE | re.ASCII)
 ASKING_TOOLS = {
     "claude-code": {"AskUserQuestion", "ExitPlanMode"},
     "codex": {"request_user_input"},
+    "kimi-code": {"AskUserQuestion", "ExitPlanMode"},
 }
 CALL_END_EVENTS = {"PostToolUse", "PostToolUseFailure", "PermissionDenied"}
 TURN_END_EVENTS = {"Stop", "StopFailure", "Interrupt"}
@@ -85,14 +96,21 @@ def mark_last(record: AgentRecord, asks: bool, tool_name: str | None = None) -> 
 
 
 def apply_call_event(record: AgentRecord, event: dict[str, object], name: str, tool: str) -> None:
+    id_field = "tool_call_id" if tool == "kimi-code" else "tool_use_id"
     if name == "PreToolUse":
-        identifier = text_value(event, "tool_use_id")
+        identifier = text_value(event, id_field)
         tool_name = text_value(event, "tool_name")
         record.calls = [call for call in record.calls if call.id != identifier]
         record.calls.append(Call(identifier, tool_name, tool_name in ASKING_TOOLS[tool]))
     elif name in CALL_END_EVENTS:
-        identifier = text_value(event, "tool_use_id")
+        identifier = text_value(event, id_field)
         record.calls = [call for call in record.calls if call.id != identifier]
+    elif tool == "kimi-code" and name in {"PermissionRequest", "PermissionResult"}:
+        permission_call = optional_event_text(event, id_field)
+        for call in record.calls:
+            if call.id == permission_call:
+                call.asks = name == "PermissionRequest"
+                break
     elif name == "PermissionRequest":
         mark_last(record, True, text_value(event, "tool_name"))
     elif name == "ElicitationResult":
@@ -119,6 +137,12 @@ def handle(tool: str, value: dict[str, object], location: Path | None = None) ->
     session = text_value(event, "session_id")
     if name not in EVENTS[tool]:
         return
+    kimi = tool == "kimi-code"
+    if kimi:
+        matched = KIMI_SESSION.fullmatch(session)
+        if matched is None:
+            return
+        session = "session-" + matched[1]
 
     store = Store(location)
     store.path(tool, session)
@@ -128,8 +152,9 @@ def handle(tool: str, value: dict[str, object], location: Path | None = None) ->
         record = store.read(tool, session)
         existing = record is not None
         candidate = processes.candidate(tool, record.owner.pid if record is not None else None)
-        compact = name == "SessionStart" and optional_event_text(event, "source") == "compact"
-        is_subagent = event.get("agent_id") is not None
+        compact = not kimi and name == "SessionStart" and optional_event_text(event, "source") == "compact"
+        agent_id = event.get("agent_id")
+        is_subagent = agent_id is not None and (not kimi or agent_id != "main")
 
         if record is None:
             owner, entrypoint = adopt(processes, tool, candidate)
@@ -158,8 +183,8 @@ def handle(tool: str, value: dict[str, object], location: Path | None = None) ->
             store.write(record)
             return
 
-        notification = optional_event_text(event, "notification_type") if name == "Notification" else None
-        life_only = name in LIFE_ONLY_EVENTS or (
+        notification = optional_event_text(event, "notification_type") if name == "Notification" and not kimi else None
+        life_only = name in LIFE_ONLY_EVENTS or (kimi and name in KIMI_LIFE_EVENTS) or (
             name == "Notification" and notification not in {"idle_prompt", "permission_prompt", "elicitation_dialog"}
         )
         if existing and life_only:
@@ -177,13 +202,13 @@ def handle(tool: str, value: dict[str, object], location: Path | None = None) ->
 
         turn_wait: Literal["message", "driver"] | None = None
         if name == "SessionStart":
-            record.transcript = optional_event_text(event, "transcript_path")
+            record.transcript = None if kimi else optional_event_text(event, "transcript_path")
             record.background = None
             record.calls.clear()
             turn_wait = "message"
             record.end = None
-        elif name == "UserPromptSubmit":
-            transcript = optional_event_text(event, "transcript_path")
+        elif name in {"UserPromptSubmit", "TurnStarted"}:
+            transcript = None if kimi else optional_event_text(event, "transcript_path")
             if transcript is not None:
                 record.transcript = transcript
             turn_wait = "driver"
@@ -197,6 +222,9 @@ def handle(tool: str, value: dict[str, object], location: Path | None = None) ->
             record.calls.clear()
             turn_wait = "message"
         elif name == "SessionEnd":
+            if kimi:
+                record.calls.clear()
+                turn_wait = "message"
             record.end = End(at, optional_event_text(event, "reason") or "other")
         elif not life_only:
             apply_call_event(record, event, name, tool)
