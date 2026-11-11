@@ -10,19 +10,38 @@ from typing import Any
 
 from .account_data import CODE, Public
 from .bridge import MAX_LINE, Error, Params, Registry, driver_id, encode
+from .database import Database
 from .dispatch import Forwarded
+from .metadata import iso
 from .migration import message
 from .process import Programs
 from .validation import Catalogues
 
 TOTAL = 25.0
 CAPACITY = 8
+ACTIVITY = """
+    SELECT count(*),
+           sum(CASE WHEN jsonb_typeof(r.usage->'inputTokens') = 'number'
+                    AND r.usage->>'inputTokens' ~ '^[0-9]{1,20}$'
+                    THEN (r.usage->>'inputTokens')::numeric END)::text,
+           sum(CASE WHEN jsonb_typeof(r.usage->'outputTokens') = 'number'
+                    AND r.usage->>'outputTokens' ~ '^[0-9]{1,20}$'
+                    THEN (r.usage->>'outputTokens')::numeric END)::text,
+           max(r.ended_at)
+    FROM runs r JOIN exchanges e ON e.id = r.exchange_id
+    WHERE r.kind = 'agent'
+      AND r.ended_at BETWEEN statement_timestamp() - interval '30 days' AND statement_timestamp()
+      AND e.route->>'driver' = %s
+      AND coalesce(r.started->>'subscriptionId', e.route->>'subscription') = %s
+"""
 
 
 class Accounts:
     def __init__(self, programs: Programs, catalogues: Catalogues, registry: Registry,
-                 secrets: Callable[[], tuple[str, ...]], *, total: float = TOTAL, capacity: int = CAPACITY) -> None:
+                 secrets: Callable[[], tuple[str, ...]], *, total: float = TOTAL, capacity: int = CAPACITY,
+                 database: Database | None = None) -> None:
         self.programs, self.catalogues, self.secrets = programs, catalogues, secrets
+        self.database = database
         self.total, self.capacity = total, asyncio.Semaphore(capacity)
         self.raws: dict[str, asyncio.Task[list[Any] | Error]] = {}
         self.actions: dict[tuple[str, str, str], asyncio.Task[Params | Error]] = {}
@@ -31,6 +50,8 @@ class Accounts:
         registry.method("accounts.list", self.list)
         for operation in ("check", "usage", "models"):
             registry.method("accounts."+operation, partial(self.action, operation), self.target)
+        if database is not None:
+            registry.method("accounts.activity", self.activity, self.target)
 
     def scan(self) -> list[str]:
         drivers = self.programs.find_drivers()
@@ -131,6 +152,26 @@ class Accounts:
         except Error as error:
             raise Error("invalid_input") from error
         return {"driver": driver, "subscription": subscription}
+
+    async def activity(self, params: Params) -> Params:
+        """Aggregate this Root's recorded agent runs without contacting a Driver or vendor."""
+        if self.closed or self.database is None:
+            raise Error("ended")
+        try:
+            async with asyncio.timeout(self.total), self.capacity, self.database.session(snapshot=True) as session:
+                (runs, input_tokens, output_tokens, last_run), = await session.execute(
+                    ACTIVITY, [params["driver"], params["subscription"]]
+                )
+        except TimeoutError as error:
+            raise Error("timeout") from error
+        result: Params = {"runCount": runs}
+        if input_tokens is not None:
+            result["inputTokens"] = input_tokens
+        if output_tokens is not None:
+            result["outputTokens"] = output_tokens
+        if last_run is not None:
+            result["lastRunAt"] = iso(last_run)
+        return result
 
     async def action_outcome(self, key: tuple[str, str, str]) -> Params | Error:
         operation, driver, subscription = key

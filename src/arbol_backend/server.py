@@ -54,7 +54,8 @@ class Backend:
         self.health = Health(self.database, self.chats.attention)
         self.measurements = Measurements(self.health, self.roots, self.registry)
         self.accounts = Accounts(self.programs, self.chats.catalogues, self.registry,
-                                 lambda: ((self.database.parameters or {}).get("password", ""),))
+                                 lambda: ((self.database.parameters or {}).get("password", ""),),
+                                 database=self.database)
         self.drafts = Drafts(self.chats, self.registry)
         self.dispatch = Dispatch(identity, self.programs, self.chats, self.drafts, self.registry, self.settings)
         self.live = Live(identity, self.chats, self.dispatch)
