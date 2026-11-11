@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
@@ -92,15 +93,19 @@ def licenses(source: Path, folder: Path) -> None:
     (folder / "LICENSES.json").write_text(json.dumps(records, indent=2) + "\n")
 
 
-def package(root: Path, destination: Path, build: str) -> dict[str, Any]:
+def package(root: Path, destination: Path, build: str, *, source_commit: str | None = None) -> dict[str, Any]:
     if not re.fullmatch(r"[0-9a-z]+", build):
         raise ValueError("A numbered Build is required for the renderer.")
+    if source_commit is not None and not re.fullmatch(r"[0-9a-f]{40}", source_commit):
+        raise ValueError("The shared renderer requires a full source commit ID.")
     source = root / "ui/elma"
     subprocess.run([sys.executable, "-I", "-B", str(root / "tools/sync_elma_design.py"), "--check"], check=True, cwd=root)
     subprocess.run(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], check=True, cwd=source, timeout=180)
     subprocess.run(["npm", "run", "check"], check=True, cwd=source, timeout=60)
-    subprocess.run(["npm", "run", "build"], check=True, cwd=source, timeout=120,
-                   env={**os.environ, "ARBOL_BUILD_NUMBER": build})
+    subprocess.run(
+        ["npm", "run", "build"], check=True, cwd=source, timeout=120,
+        env={**os.environ, "ARBOL_BUILD_NUMBER": build, "ARBOL_SHARED_ELMA_RENDERER": "1" if source_commit else "0"},
+    )
     shutil.copytree(source / "dist", destination)
     licenses(source, destination)
     snapshot = json.loads((source / "design-system/manifest.json").read_text())
@@ -110,5 +115,21 @@ def package(root: Path, destination: Path, build: str) -> dict[str, Any]:
             "manifestSha256": digest(source / "design-system/manifest.json")},
             "lockSha256": digest(source / "package-lock.json"), "sources": {name: digest(source / name) for name in sorted(source_files)},
             "files": payload(destination)}
+    if source_commit is not None:
+        data["sourceCommit"] = source_commit
     (destination / "bundle.json").write_text(json.dumps(data, indent=2) + "\n")
     return verify(destination, build)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Package the shared Elma renderer for an App Build.")
+    parser.add_argument("--destination", type=Path, required=True)
+    parser.add_argument("--build", required=True)
+    parser.add_argument("--source-commit", required=True)
+    args = parser.parse_args()
+    root = Path(__file__).resolve().parents[1]
+    package(root, args.destination, args.build, source_commit=args.source_commit)
+
+
+if __name__ == "__main__":
+    main()
