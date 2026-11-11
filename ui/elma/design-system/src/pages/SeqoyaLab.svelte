@@ -2,11 +2,14 @@
   import type { Snippet } from 'svelte';
   import PageHeader from '../patterns/PageHeader.svelte';
   import WorkspaceShell from '../patterns/WorkspaceShell.svelte';
+  import SubscriptionList from '../sections/SubscriptionList.svelte';
+  import type { SubscriptionView } from '../sections/seqoya-subscriptions';
   import type { WorkspaceTrunkSelector } from '../types';
 
   let {
     trunk, trunkSelector, headerWindowControls, connectionStatus = '', fitted = false,
     theme = $bindable(''), uiScale = $bindable(0), appearanceReady = true, onAppearanceChange,
+    subscriptions, onRefreshSubscriptions, onPageChange,
   }: {
     trunk?: string;
     trunkSelector?: WorkspaceTrunkSelector;
@@ -17,11 +20,14 @@
     uiScale?: number;
     appearanceReady?: boolean;
     onAppearanceChange?: () => void;
+    subscriptions?: SubscriptionView;
+    onRefreshSubscriptions?: () => void;
+    onPageChange?: (page: string) => void;
   } = $props();
 
   const sections = {
     'Intelligence Providers': 'Provider configuration will appear here.',
-    Subscriptions: 'Subscription management will appear here.',
+    Subscriptions: '',
     Usage: 'Usage and limits will appear here.',
   };
   type Section = keyof typeof sections;
@@ -29,7 +35,10 @@
   let current = $state<Section>('Intelligence Providers');
 
   function navigate(page: string) {
-    if (Object.hasOwn(sections, page)) current = page as Section;
+    if (Object.hasOwn(sections, page) && current !== page) {
+      current = page as Section;
+      onPageChange?.(current);
+    }
   }
 </script>
 
@@ -39,8 +48,12 @@
   headerAppearance={appearanceReady ? 'enabled' : 'disabled'} bind:theme bind:uiScale {onAppearanceChange}
   onnavigate={navigate} status={connectionStatus ? connection : null} navigationFooter={false} {fitted}>
   <div class="page-content seqoya-page">
-    <PageHeader title={current} description="" />
-    <div class="panel seqoya-empty"><p class="muted">{sections[current]}</p></div>
+    {#if current === 'Subscriptions'}
+      <SubscriptionList view={subscriptions} onRefresh={onRefreshSubscriptions} />
+    {:else}
+      <PageHeader title={current} description="" />
+      <div class="panel seqoya-empty"><p class="muted">{sections[current]}</p></div>
+    {/if}
   </div>
 </WorkspaceShell>
 
