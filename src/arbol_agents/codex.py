@@ -21,20 +21,21 @@ APP_CLI = "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/C
 RPC_TIMEOUT = 15
 
 
-def login_environment(**overrides: str) -> dict[str, str]:
+def login_environment() -> dict[str, str]:
     environment = {key: os.environ[key] for key in ("HOME", "USER", "LOGNAME") if key in os.environ}
-    return {**environment, "TERM": "xterm-256color", **overrides}
+    return {**environment, "TERM": "xterm-256color"}
 
 
 def login_command(*args: str) -> list[str]:
     return ["/bin/zsh", "-l", "-i", "-c", 'exec "$@"', "arbol-agents", *args]
 
 
-def codex_command(*args: str) -> list[str]:
+def codex_command(*args: str, home: Path | None = None) -> list[str]:
     return [
         "/bin/zsh", "-l", "-i", "-c",
-        'fallback=$1; shift; if command -v codex >/dev/null; then exec codex "$@"; fi; exec "$fallback" "$@"',
-        "arbol-agents", APP_CLI, *args,
+        'if [[ -n "$1" ]]; then export CODEX_HOME="$1"; fi; '
+        'fallback=$2; shift 2; if command -v codex >/dev/null; then exec codex "$@"; fi; exec "$fallback" "$@"',
+        "arbol-agents", "" if home is None else str(home), APP_CLI, *args,
     ]
 
 
@@ -152,11 +153,11 @@ class AppServer:
 def app_server(config: SettingsFile) -> Iterator[AppServer]:
     try:
         with subprocess.Popen(
-            codex_command("app-server"),
+            codex_command("app-server", home=config.path.parent),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            env=login_environment(CODEX_HOME=str(config.path.parent)),
+            env=login_environment(),
             cwd=Path.home(),
         ) as process, selectors.DefaultSelector() as selector:
             assert process.stdout is not None and process.stdin is not None
