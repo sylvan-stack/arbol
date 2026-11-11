@@ -307,8 +307,25 @@ async def identity_run(home: ScenarioHome, request: JSObject) -> tuple[JSObject,
     return reply, (await home.received())[before:]
 
 
+async def c44_subscription(home: ScenarioHome) -> str:
+    """C44's own disposable Subscription, `test-c44`, in the vendor-login family the Driver reports. A `test-`
+    Subscription keeps its home in the state folder on every Driver (CLD-D20); the built-in one that `signed()` uses
+    is the owner's real home on the Claude Driver (DRV-D42), which a scenario must never reach."""
+    home.env["ARBOL_TEST_TIME_SCALE"] = "10"
+    await home.part("success")
+    families: Any = parse((await home.call(["subscriptions", "families"]))["stdout"])
+    check("Families", isinstance(families, list), "an array of families", families)
+    family = text("Vendor login family", get(find(families, lambda value: get(value, "auth") == "vendor_login"), "id"))
+    created = await home.call(["subscriptions", "create", "--family", family, "--label", "C44", "--id", "test-c44"])
+    equal("Create exit", created["status"], 0)
+    result = await home.call(["subscriptions", "sign-in", "test-c44"])
+    equal("Sign-in exit", result["status"], 0)
+    await home.part("plain")
+    return "test-c44"
+
+
 async def run_c44(home: ScenarioHome) -> None:
-    identifier = await signed(home)
+    identifier = await c44_subscription(home)
     home.env.update(ARBOL_ROOT="stale", ARBOL_CHAT="0f0e0d0c-0b0a-4908-8706-050403020100", **{UNRELATED: "caller"})
     base = {"subscriptionId": identifier, "history": [], "tools": "none", "input": {"role": "user", "text": "answer"}}
 
