@@ -13,7 +13,7 @@ from pathlib import Path
 from types import TracebackType
 
 from arbol_builds.launcher import BUILD_PATTERN, SAFE_INTEGER, Record, default_record, read_records
-from arbol_builds.roots import current_root
+from arbol_builds.roots import CURRENT_ROOT_FILE, current_root
 from arbol_builds.service import atomic_write, json_text, now
 
 from .database import Database, DatabaseError
@@ -132,6 +132,21 @@ def fail(paths: Places, root: str, reason: object) -> Record:
         record["status"] = "failed"
         record["failed"] = {"at": now(), "reason": explanation}
         save_record(paths, record)
+        return record
+
+
+def use(paths: Places, root: str | None) -> Record | None:
+    with catalogue_lock(paths):
+        preference = paths.roots / CURRENT_ROOT_FILE
+        if root is None:
+            automatic = current_root(catalogue(paths))
+            preference.unlink(missing_ok=True)
+            return automatic
+        record = selected(paths, root)
+        if record["status"] != "working":
+            raise Refused("invalid_input", f"Root {root} must be working to become current.")
+        identity = {"root": root, "createdAt": record["createdAt"]}
+        atomic_write(str(preference), json_text(identity) + b"\n")
         return record
 
 

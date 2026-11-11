@@ -6,17 +6,18 @@ from arbol_builds.cli import options
 from arbol_builds.launcher import json_line, standard_descriptors, write_all
 
 from .model import Refused, identifier, list_roots, places, selected
-from .operations import app, create, fail, ready, remove
+from .operations import app, create, fail, ready, remove, use
 from .sql import layout, migrate
 
 USAGE = ("arbol-roots create <root> --name <text> [--from <root>] [--root-contract <version>] "
-         "[--database-name <name>] | list | show [<root>] | ready <root> | fail <root> --reason <text> "
+         "[--database-name <name>] | list | show [<root>] | use <root> | use --auto | ready <root> | fail <root> --reason <text> "
          "| app <root> <build> | remove <root> | layout <root> | migrate <root> [--check | --chat <uuid>]; "
          "options: --roots-dir <folder>, --settings-dir <folder>, "
          "--registry-dir <folder>, --database-config <file>, --psql <program>, --security <program>")
 GLOBAL = ("--roots-dir", "--settings-dir", "--registry-dir", "--database-config", "--psql", "--security")
-LOCAL = {"create": ("--name", "--from", "--root-contract", "--database-name"), "fail": ("--reason",), "migrate": ("--check","--chat")}
-COUNTS = {"create": (1,), "list": (0,), "show": (0, 1), "ready": (1,), "fail": (1,), "app": (2,), "remove": (1,),
+LOCAL = {"create": ("--name", "--from", "--root-contract", "--database-name"), "fail": ("--reason",),
+         "migrate": ("--check", "--chat"), "use": ("--auto",)}
+COUNTS = {"create": (1,), "list": (0,), "show": (0, 1), "use": (0, 1), "ready": (1,), "fail": (1,), "app": (2,), "remove": (1,),
           "layout": (1,), "migrate": (1,)}
 
 
@@ -25,7 +26,11 @@ def main(args: list[str]) -> int:
         if args == ["--help"]:
             write_all(1, json_line({"usage": USAGE}))
             return 0
-        words, values = options(args, [*GLOBAL, "--name", "--from", "--root-contract", "--database-name", "--reason", "--check", "--chat"], flags={"--check"})
+        words, values = options(
+            args,
+            [*GLOBAL, "--name", "--from", "--root-contract", "--database-name", "--reason", "--check", "--chat", "--auto"],
+            flags={"--check", "--auto"},
+        )
         command = words[0] if words else ""
         arguments = words[1:]
         if command not in COUNTS or len(arguments) not in COUNTS[command]:
@@ -33,6 +38,8 @@ def main(args: list[str]) -> int:
         for key in values:
             if key not in GLOBAL and key not in LOCAL.get(command, ()):
                 raise Refused("invalid_input", f"Option {key} does not apply to {command}.")
+        if command == "use" and bool(arguments) == ("--auto" in values):
+            raise Refused("invalid_input", "Name a Root or use --auto.")
         if arguments:
             identifier(arguments[0])
         paths = places(values)
@@ -41,6 +48,8 @@ def main(args: list[str]) -> int:
             result = list_roots(paths)
         elif command == "show":
             result = selected(paths, arguments[0] if arguments else None)
+        elif command == "use":
+            result = use(paths, arguments[0] if arguments else None)
         elif command == "create":
             result = create(paths, arguments[0], values)
         elif command == "ready":
