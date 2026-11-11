@@ -14,4 +14,4 @@ The committed fixtures keep that evidence for the Drivers' own tests.
 
 The standalone packaging and offline registry rehearsal live in each Driver's `scripts/`. `verify_build.py` uses only disposable fixture repositories and registries; it does not establish a working production Build. Each Driver's `arbol-build.json` runs the packaged unit tests, the complete contract suite and exactly one test-account `dev build-check`.
 
-Evidence belongs to the applicable Artifact Corpus, with source, artifact, runtime and tool provenance. Historical TypeScript records stay available and must not be represented as Python validation. Publication changes use `.claude/linear-publish/edit.py` and `conv.py`; local specifications remain the originals.
+Evidence belongs to the applicable Artifact Corpus, with source, artifact, runtime and tool provenance. Historical TypeScript records stay available and must not be represented as Python validation. Publish specification changes by committing and pushing the updated Markdown in its owning artifact repository.
