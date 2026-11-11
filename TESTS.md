@@ -44,7 +44,7 @@ The shared conformance runner requires explicit `--only` selections. Removed sce
 
 ## Builds
 
-Since SYL-329 (29 October 2026) a Build runs the top tier only. The backend Build's `unit` check runs every case under `tests/top/`, with its own interpreter and private PostgreSQL. The mid tier runs only when the owner asks for a mid-tier run.
+Since SYL-329 (29 October 2026) a Build runs the top tier only. The Arbol Build runs the two packaged backend cases in `unit` with the Build's interpreter and private PostgreSQL. It runs the global Root catalogue recovery case from source in `roots-unit`, with disposable files and stand-ins. The mid tier runs only when the owner asks for a mid-tier run.
 
 ## Owner-controlled testing and archived examples — SYL-330
 

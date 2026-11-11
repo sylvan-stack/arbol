@@ -13,6 +13,11 @@
       "name": "unit",
       "kind": "unit",
       "command": "\"$ARBOL_BUILD_DIR/runtime/python/bin/python3.14\" -I -B \"$ARBOL_BUILD_DIR/scripts/check_backend.py\""
+    },
+    {
+      "name": "roots-unit",
+      "kind": "unit",
+      "command": "PYTHONPATH=tests:tests/top uv run --no-sync python -B -m unittest -v test_top_roots.DatabaseAccess.test_roots_creation_retains_a_recovery_receipt_for_uncertain_outcomes_or_failed_rollback"
     }
   ]
 }
