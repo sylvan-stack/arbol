@@ -8,7 +8,7 @@ Reviewed revision: `f66335c7e203794dc84e40fe3106e85f8cae2dd6` under SYL-327 (29 
 
 ## Selection and limits
 
-3 top-tier inventory entries and 152 mid-tier entries are available: 151 after the higher-bar review and C44, admitted by SYL-399 and not yet run. 505 low-tier entries were removed under SYL-327. Definitions, scenarios, programs and entry points overlap; this is not a runtime suite count. Top-tier bodies are unchanged. Retained mid-tier sources remain uncommented.
+3 top-tier inventory entries and 152 mid-tier entries are available: 151 after the higher-bar review and C44, admitted by SYL-399 and passed on 11 November 2026 against both installed Drivers. 505 low-tier entries were removed under SYL-327. Definitions, scenarios, programs and entry points overlap; this is not a runtime suite count. Top-tier bodies are unchanged. Retained mid-tier sources remain uncommented.
 
 ## Active top tier
 

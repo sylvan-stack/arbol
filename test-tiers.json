@@ -684,16 +684,16 @@
       "status": "available",
       "reason": "Admitted under SYL-399 (DRV-2.37): a wrong or inherited Arbol chat identity at tool launch lets a Forester booking name the wrong chat. Observes, through a real Driver launch of each stand-in, the request pair over stale inherited ARBOL_* values, the absence of an unrelated caller variable, an opaque chat without rootId, and refusal before launch. Distinct from retained cases: none observes the Arbol identity; archived C8/C40 stay archived.",
       "review": "individually-reviewed-higher-bar",
-      "line": 310,
-      "file_sha256": "5ebf09570df9accc957f86454a72273a80640f3d4e37969cd08c08c17e3e817b",
+      "line": 327,
+      "file_sha256": "52fa211a021a5bcfc31d37e8b57b1347e170cc399ee19501222165c6bd39a7cf",
       "support_file": "conformance/scenarios/runs.py",
       "description": "C44: Arbol chat identity at tool launch.",
       "assertion_examples": [],
       "execution": "explicit-testing-task-only",
       "added_by": "SYL-399",
       "added_date": "2026-11-11",
-      "executed": false,
-      "execution_note": "Written under SYL-399; not run: explicit mid-tier execution scope is pending."
+      "executed": true,
+      "execution_note": "Passed 11 November 2026 (SYL-399) against installed Claude Build 11 and Codex Build b, suite arbol@6b2f5ba, offline with stand-ins and a disposable test-c44 Subscription; selected by the owner's explicit mid-tier request."
     },
     {
       "repo": "arbol",
