@@ -65,8 +65,13 @@ class SettingsFile:
 
     def backup(self) -> None:
         self.verify_current()
-        if self.contents is not None:
-            backup = self.path.with_name(f"{self.path.name}.before-arbol-agents")
+        backup = self.path.with_name(f"{self.path.name}.before-arbol-agents")
+        absent = backup.with_name(f"{backup.name}.absent")
+        if self.read(backup).contents is not None or self.read(absent).contents is not None:
+            return
+        if self.contents is None:
+            write_complete(absent, b"", 0o600, first_only=True)
+        else:
             write_complete(backup, self.contents, 0o600, first_only=True)
 
     def save(self, contents: bytes) -> None:
