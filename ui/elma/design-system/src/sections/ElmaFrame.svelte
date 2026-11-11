@@ -6,15 +6,16 @@
   import type { ElmaRoute } from './elma-types';
   import {signInCommand} from './elma-response';
   import InlineRename from '../patterns/InlineRename.svelte';
+  import type { WorkspaceRoot, WorkspaceRootSelector } from '../types';
   let {
-    root = {name:'Fixture Root',status:'working',failed:undefined as {reason:string}|undefined}, title='New Chat', placeholder=false, titleIdentity='',
+    root = {name:'Fixture Root',status:'working'}, rootSelector, title='New Chat', placeholder=false, titleIdentity='',
     turn=0, total=0, hasChat=false, working=false, ongoing=false, inputTokens=0, outputTokens=0,
     repository='sylvan-stack', route={} as ElmaRoute, repositories=[] as {name:string;folder:string}[],
     routes=[] as {driver:string;subscription:string;unavailable?:string}[], accountProblems=[] as string[], accountBusy=false,onrefreshAccounts,onrefreshAccount, fitted=false,routeBusy=false,routeSaving=false,routeProblem='',onretryRoute,
     readingWidth=$bindable(720), uiScale=$bindable(0), contentScale=$bindable(0), theme=$bindable(''),
     onpreferences=()=>{}, onolder, onnewer, onhistory, onrepository, onroute, onmodel, oneffort, onother, onquick, onongoing, onrename, rename, onRenameInput, onRenameSave, onRenameCancel, metadataBusy=false, children,
   }: {
-    root?:{name:string;status:string;failed?:{reason:string}};title?:string;titleIdentity?:string;placeholder?:boolean;turn?:number;total?:number;hasChat?:boolean;working?:boolean;ongoing?:boolean;
+    root?:WorkspaceRoot;rootSelector?:WorkspaceRootSelector;title?:string;titleIdentity?:string;placeholder?:boolean;turn?:number;total?:number;hasChat?:boolean;working?:boolean;ongoing?:boolean;
     inputTokens?:number;outputTokens?:number;repository?:string;route?:ElmaRoute;repositories?:{name:string;folder:string}[];routes?:{driver:string;subscription:string;unavailable?:string}[];
     accountProblems?:string[];accountBusy?:boolean;onrefreshAccounts?:()=>void;onrefreshAccount?:(driver:string,subscription:string)=>void;fitted?:boolean;routeBusy?:boolean;routeSaving?:boolean;routeProblem?:string;onretryRoute?:()=>void;readingWidth?:number;uiScale?:number;contentScale?:number;theme?:string;onpreferences?:()=>void;
     onolder?:()=>void;onnewer?:()=>void;onhistory?:()=>void;onrepository?:(folder:string)=>void;onroute?:(driver:string,subscription:string)=>void;onmodel?:()=>void;oneffort?:()=>void;onother?:()=>void;onquick?:()=>void;onongoing?:()=>void;onrename?:()=>void;rename?:{value:string;busy:boolean;problem:string}|null;onRenameInput?:(value:string)=>void;onRenameSave?:()=>void;onRenameCancel?:()=>void;metadataBusy?:boolean;children?:Snippet;
@@ -32,11 +33,12 @@
 </script>
 
 <div class="elma-frame" data-theme={theme||undefined} style:--font-scale={uiScale||undefined} style:--elma-content-scale={contentScale||undefined} style:--elma-reading-width={readingWidth+'px'}>
-<WorkspaceShell workspace="Elma" {fitted} elma>
-  {#snippet headerContent()}
+<WorkspaceShell workspace="Elma" {fitted} elma {root} {rootSelector}>
+  {#snippet headerLead()}
     <span class:working class="mark"><WorkspaceGlyph workspace="Elma" size={21}/></span>
-    <div class="title-area">{#if rename}<h1 class="title-prefix">Elma Chat · {root.name}</h1><InlineRename label="Chat title" value={rename.value} busy={rename.busy} problem={rename.problem} max={240} oninput={onRenameInput} onsave={onRenameSave} oncancel={onRenameCancel}/>{:else}<h1 class:placeholder>Elma Chat · {root.name} - <button bind:this={titleButton} class="title-action" title="Rename chat session (⌘-click)" disabled={!onrename||metadataBusy} onclick={event=>{if(event.metaKey||event.detail===0)onrename?.();}}>{title}</button></h1>{/if}</div>
-    {#if root.status!=='working'}<span class="root-state">{root.status}{root.failed ? ': '+root.failed.reason : ''}</span>{/if}
+    <div class="title-area">{#if rename}<h1 class="title-prefix">Elma Chat</h1><InlineRename label="Chat title" value={rename.value} busy={rename.busy} problem={rename.problem} max={240} oninput={onRenameInput} onsave={onRenameSave} oncancel={onRenameCancel}/>{:else}<h1 class:placeholder>Elma Chat · <button bind:this={titleButton} class="title-action" title="Rename chat session (⌘-click)" disabled={!onrename||metadataBusy} onclick={event=>{if(event.metaKey||event.detail===0)onrename?.();}}>{title}</button></h1>{/if}</div>
+  {/snippet}
+  {#snippet headerExtras()}
     <div class="preferences">
       <label class="width">Reading width <select aria-label="Reading width" bind:value={readingWidth} onchange={onpreferences}>{#each Array.from({length:10},(_,i)=>600+i*120) as width}<option value={width}>{width} px</option>{/each}</select></label>
       <button aria-label="Decrease text size" disabled={(uiScale||1)<=11.5/13.5&&(contentScale||1)<=(uiScale||1)} onclick={()=>font(false)}>A−</button>
@@ -67,7 +69,7 @@
 .elma-frame{min-width:0;color:var(--text);font:calc(13.5px * var(--font-scale))/1.5 var(--font-ui)}
 h1{min-width:0;flex:1;font:600 calc(13.5px * var(--font-scale))/1.4 var(--font-ui);overflow-wrap:anywhere}
 .placeholder{font-weight:400;color:var(--muted)}.mark{display:flex;color:var(--accent);flex-shrink:0}.working{animation:breathe 1.6s ease-in-out infinite}@keyframes breathe{50%{opacity:.4;transform:rotate(-12deg)}}
-.preferences{display:flex;gap:4px;align-items:center;flex-wrap:wrap;font-size:calc(11.5px * var(--font-scale))}.preferences button,.preferences select{min-height:28px;background:var(--inset);color:var(--text);border:1px solid var(--border);border-radius:5px;padding:2px 5px}.width{font-size:0}.width select{font-size:calc(11.5px * var(--font-scale))}.root-state{color:var(--warning);overflow-wrap:anywhere}
+.preferences{display:flex;gap:4px;align-items:center;flex-wrap:wrap;font-size:calc(11.5px * var(--font-scale))}.preferences button,.preferences select{min-height:28px;background:var(--inset);color:var(--text);border:1px solid var(--border);border-radius:5px;padding:2px 5px}.width{font-size:0}.width select{font-size:calc(11.5px * var(--font-scale))}
 .account-problem{color:var(--warning);font-size:calc(11.5px * var(--font-scale));overflow-wrap:anywhere}.nav-title{font-weight:600;overflow-wrap:anywhere}.turn-count,.cockpit,.history-heading{color:var(--muted);font-size:calc(11.5px * var(--font-scale))}.cockpit{display:flex;flex-direction:column;gap:4px;margin:12px 0}.cockpit button{border:1px solid var(--border);border-radius:20px;background:var(--inset);color:var(--text);padding:4px 8px;align-self:start}.group,.nav-row{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;text-align:left;min-height:30px;background:transparent;border:0;color:var(--text);padding:4px 0}.group{font-size:calc(11.5px * var(--font-scale));color:var(--muted);font-weight:700;margin-top:12px;text-transform:uppercase}.nav-row span{overflow-wrap:anywhere;min-width:0}.nav-row kbd{white-space:nowrap;flex-shrink:0;color:var(--muted)}.history-heading{border-top:1px solid var(--border);padding-top:12px;margin-top:12px;text-transform:uppercase}.status-text{overflow-wrap:anywhere;white-space:normal}.empty{margin:auto;padding:32px;color:var(--muted)}
 @media(prefers-reduced-motion:reduce){.working{animation:none}}
 @media(max-width:800px){.preferences{margin-left:auto}.preferences .width{display:none}.mark{display:none}}

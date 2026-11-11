@@ -15,3 +15,22 @@ export type FieldSpec = {
   hint?: string;
   options?: string[];
 };
+
+export interface WorkspaceRoot {
+  root?: string;
+  name: string;
+  status: string;
+  failed?: { reason: string };
+}
+
+export interface WorkspaceRootChoice {
+  root: string;
+  name: string;
+  status: 'preparing' | 'working' | 'failed';
+  unavailable?: string;
+}
+
+export interface WorkspaceRootSelector {
+  load: () => Promise<WorkspaceRootChoice[]>;
+  open: (root: string) => Promise<void>;
+}

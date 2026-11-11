@@ -2,6 +2,9 @@
   import type { Snippet } from 'svelte';
   import WorkspaceGlyph from '../components/WorkspaceGlyph.svelte';
   import IconButton from '../components/IconButton.svelte';
+  import Button from '../components/Button.svelte';
+  import Modal from './Modal.svelte';
+  import type { WorkspaceRoot, WorkspaceRootChoice, WorkspaceRootSelector } from '../types';
   let {
     workspace = 'Seqoya',
     current = 'Dashboard',
@@ -19,22 +22,92 @@
       'Monitoring',
     ],
     children,
-    headerContent, navigation, status, fitted = false, elma = false,
+    headerContent, headerLead, headerExtras, root, rootSelector, navigation, status, fitted = false, elma = false,
     onnavigate = () => {},
   }: {
     workspace?: string;
     current?: string;
     destinations?: string[];
     children?: Snippet;
-    headerContent?: Snippet; navigation?: Snippet; status?: Snippet; fitted?: boolean; elma?: boolean;
+    headerContent?: Snippet;
+    headerLead?: Snippet;
+    headerExtras?: Snippet;
+    root?: WorkspaceRoot;
+    rootSelector?: WorkspaceRootSelector;
+    navigation?: Snippet; status?: Snippet; fitted?: boolean; elma?: boolean;
     onnavigate?: (page: string) => void;
   } = $props();
   let expanded = $state(false);
+  let pickerOpen = $state(false);
+  let loadingRoots = $state(false);
+  let openingRoot = $state<string>();
+  let rootChoices = $state<WorkspaceRootChoice[]>([]);
+  let rootProblem = $state('');
+  let readGeneration = 0;
+
+  function closeRootSelector() {
+    if (openingRoot) return;
+    pickerOpen = false;
+    readGeneration += 1;
+  }
+
+  async function loadRoots() {
+    if (!rootSelector) return;
+    const generation = ++readGeneration;
+    rootChoices = [];
+    rootProblem = '';
+    loadingRoots = true;
+    try {
+      const choices = await rootSelector.load();
+      if (generation === readGeneration) rootChoices = choices;
+    } catch (error) {
+      if (generation === readGeneration) {
+        rootProblem = error instanceof Error ? error.message : 'Could not read Roots.';
+      }
+    } finally {
+      if (generation === readGeneration) loadingRoots = false;
+    }
+  }
+
+  async function chooseRoot(choice: WorkspaceRootChoice) {
+    if (!rootSelector || openingRoot || choice.root === root?.root || choice.unavailable) return;
+    openingRoot = choice.root;
+    rootProblem = '';
+    try {
+      await rootSelector.open(choice.root);
+      pickerOpen = false;
+    } catch (error) {
+      rootProblem = error instanceof Error ? error.message : 'Could not open the selected Root.';
+    } finally {
+      openingRoot = undefined;
+    }
+  }
 </script>
 
 <div class="workspace" class:fitted class:elma>
-  <header class="chrome">
+  <header class="chrome" class:with-slots={!!(headerLead || headerExtras || root)}>
     {#if headerContent}{@render headerContent()}
+      <IconButton label="Toggle navigation" icon="☰" onclick={() => (expanded = !expanded)} />
+    {:else if headerLead || headerExtras || root}
+      <div class="header-lead">
+        {#if headerLead}{@render headerLead()}
+        {:else}<WorkspaceGlyph {workspace} size={24} /><strong>{workspace}</strong>{/if}
+      </div>
+      {#if root}
+        <div class="window-root">
+          {#if rootSelector && root.root}
+            <Button title="Open this UI in another Root" onclick={() => { pickerOpen = true; void loadRoots(); }}>
+              <span class="sr-only">Root </span>{root.name}<span aria-hidden="true">▾</span>
+            </Button>
+          {:else}
+            <span><span class="sr-only">Root </span>{root.name}</span>
+          {/if}
+          {#if root.status !== 'working'}
+            <span class="root-state">{root.status}{root.failed ? ': ' + root.failed.reason : ''}</span>
+          {/if}
+        </div>
+      {/if}
+      {#if headerExtras}{@render headerExtras()}{/if}
       <IconButton label="Toggle navigation" icon="☰" onclick={() => (expanded = !expanded)} />
     {:else}
     <div class="brand"><WorkspaceGlyph {workspace} size={24} /><strong>{workspace}</strong></div>
@@ -71,6 +144,32 @@
     </main>
   </div>
   <footer>{#if status}{@render status()}{:else}<span>● Fixture mode</span><span>Local sample data · No native services</span>{/if}</footer>
+  {#if pickerOpen}
+    <Modal title="Open in Root" width={460} onclose={closeRootSelector}>
+      {#if loadingRoots}<p role="status">Loading Roots…</p>{/if}
+      {#if rootProblem}<p class="root-state" role="alert">{rootProblem}</p>{/if}
+      {#if rootChoices.length}
+        <ul class="clean root-choices">
+          {#each rootChoices as choice (choice.root)}
+            <li class="root-choice">
+              <Button
+                label={choice.name}
+                busy={openingRoot === choice.root}
+                disabled={choice.root === root?.root || !!choice.unavailable || !!openingRoot}
+                onclick={() => void chooseRoot(choice)}
+              />
+              {#if choice.root === root?.root}<span class="small muted">This window</span>{/if}
+              {#if choice.status !== 'working'}<span class="small muted">{choice.status}</span>{/if}
+              {#if choice.unavailable}<span class="small root-state">{choice.unavailable}</span>{/if}
+            </li>
+          {/each}
+        </ul>
+      {:else if !loadingRoots}
+        {#if rootProblem}<Button label="Retry" onclick={() => void loadRoots()} />
+        {:else}<p class="muted">No Roots available.</p>{/if}
+      {/if}
+    </Modal>
+  {/if}
 </div>
 
 <style>
@@ -106,6 +205,12 @@
     gap: 10px;
     min-width: 208px;
   }
+  .chrome.with-slots { gap: 8px; flex-wrap: wrap; }
+  .header-lead { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+  .window-root { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; overflow-wrap: anywhere; }
+  .root-state { color: var(--warning); overflow-wrap: anywhere; }
+  .root-choices { display: grid; gap: 12px; }
+  .root-choice { display: grid; justify-items: start; gap: 4px; overflow-wrap: anywhere; }
   .layout {
     display: grid;
     grid-template-columns: 248px minmax(0, 1fr);

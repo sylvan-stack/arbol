@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/sylvan-stack/arbol-design-system",
-  "commit": "0a96871f9b22ad921bc2ae3e51ff831692cd5721",
+  "commit": "8dd995eaa45d6deff8a9f5c632082832fbce59f0",
   "files": {
     "docs/licenses/Hanken-Grotesk-OFL.txt": "f45f60ca871850c58d8dc9c973bd6fcad40c137e9d037172b961e8ca68c87ef7",
     "docs/licenses/Spline-Sans-Mono-OFL.txt": "3127290ccd196ec0c4ffa60296845224a034b92c81de8231b0916278ed7607e1",
@@ -24,10 +24,10 @@
     "src/patterns/InlineRename.svelte": "859fe6e9a5a4046f8d543613bb0a7289e5c3ff3e1bc21807c4ef77247794e254",
     "src/patterns/Modal.svelte": "6732a9949f94eec50530cc7e92893b69570bedfcf291816356bf53731f74aa6c",
     "src/patterns/Notice.svelte": "b2d76e8101550ea9006c791266b1b4ae45092b5dd481dd1e147883f5fc790f79",
-    "src/patterns/WorkspaceShell.svelte": "2260cffb92134f07e2065e9b56dcc13a8450c3fbd233a4a7cb179d2d05ed600c",
+    "src/patterns/WorkspaceShell.svelte": "51c75d28539e005539d5c6d128f2fbebfac48309c2379a1f5d0ee2fd9c4f778b",
     "src/sections/AskUserQuestion.svelte": "40aac40331bb5d7087dc7c0a263564a2bf859669b0ea62335dbae710a96c2d78",
     "src/sections/Composer.svelte": "d9ae9912d8a371093de9e3908b76e87bff2dbb58c84c467a7c9b61a1e37d8d06",
-    "src/sections/ElmaFrame.svelte": "d793ad24feab258897b78680f050f0900a5bfa994fcf158f32eb7ee89751fdb4",
+    "src/sections/ElmaFrame.svelte": "e11077f37c56198914fa4f16a7edbb5d61055de0993141cede84478374c4658b",
     "src/sections/HistoryTree.svelte": "87c65f8dae23f3d41c100aa283b64bdb98b7f463a8f169f17897291f88eabd67",
     "src/sections/PinnedMessage.svelte": "06bd36f23fcb76b80aa3947a368cf6d9f63ecfa44a2ea315eb7c80da55223caf",
     "src/sections/Response.svelte": "f97b39eb28a8cc0f2ea7b177824da226976fb4befa44b7fa64f8a48c372b31e2",
@@ -40,6 +40,6 @@
     "src/styles/system.css": "2ad2d5c3ad36925863f2037ef450c07b5d547cb4ff492e07a8a7a032cb1e0d15",
     "src/styles/tokens.css": "99f1089102c8180f3ec57cb0d5b0ca41ba4635879f23c060a0a35b683ce5f0a3",
     "src/themes.ts": "a70ddf61fe59497f2525198f521c8234ed8e9f627a63d15442cd2c3f9b938589",
-    "src/types.ts": "be6351a86cda1861879f04e2054271a5a413c8437a05219d67793db4b07e045c"
+    "src/types.ts": "bacc6c0a4e2455f840937869c25044824915a20b9150543dcd1410a648be13c8"
   }
 }
