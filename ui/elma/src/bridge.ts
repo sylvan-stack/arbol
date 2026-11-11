@@ -8,7 +8,8 @@ export class Refusal extends Error { constructor(public detail:BridgeError){supe
 interface Pending {resolve:(value:unknown)=>void;reject:(error:Refusal)=>void;timer:ReturnType<typeof setTimeout>}
 interface Subscription {id:string;topic:string;params:Fields;seq:number;active:boolean;failure?:string;receive:(event:Fields)=>void;ended:(error?:BridgeError)=>void}
 export interface BridgeOptions {
- build:string; onstate?:(state:string)=>void; onhello?:(root:RootInfo,build:string)=>void;
+ // Only legacy renderers packaged by a backend specify its Build.
+ build?:string; onstate?:(state:string)=>void; onhello?:(root:RootInfo,build:string)=>void;
  beforeReload?:()=>Promise<void>; reload?:(url:string)=>void;
  /** Test seam for the exact production deadline, not a different protocol. */
  deadline?:(method:string)=>number;
@@ -91,7 +92,7 @@ export class Bridge {
   if(sub.topic==='attention'&&(event.kind==='closed'&&event.id==='database_unreachable'||event.kind==='snapshot'&&Array.isArray(event.items)&&!event.items.some(item=>item&&typeof item==='object'&&(item as Fields).id==='database_unreachable')))for(const failed of this.topics)if(!failed.active&&failed.failure==='database_unavailable')this.start(failed);
  }
  private async reloadFor(build:string){
-  if(build===this.options.build||this.reloads.has(build)||this.reloading)return;
+  if(this.options.build===undefined||build===this.options.build||this.reloads.has(build)||this.reloading)return;
   this.reloading=true;
   try{await this.options.beforeReload?.();if(this.stopped||!this.online||this.backendBuild!==build)return;this.reloads.add(build);const url=new URL(location.href);url.searchParams.append('reloadedFor',build);(this.options.reload??(url=>location.replace(url)))(url.href);}
   catch{this.state('The page could not be reloaded; its unsaved text is kept.');}
