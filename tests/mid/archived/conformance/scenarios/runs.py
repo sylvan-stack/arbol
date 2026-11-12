@@ -6,7 +6,9 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import uuid
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from conformance.check import ScenarioError, check, equal, object_, text
@@ -308,53 +310,59 @@ async def identity_run(home: ScenarioHome, request: JSObject) -> tuple[JSObject,
 
 
 async def c44_subscription(home: ScenarioHome) -> str:
-    """C44's own disposable Subscription, `test-c44`, in the vendor-login family the Driver reports. A `test-`
-    Subscription keeps its home in the state folder on every Driver (CLD-D20); the built-in one that `signed()` uses
-    is the owner's real home on the Claude Driver (DRV-D42), which a scenario must never reach."""
+    """Use the owner's existing profile directly; the private settings override only the tool."""
+    raw = os.environ.get("ASD14_DRIVER_STATE", "")
+    identifier = os.environ.get("ASD14_SUBSCRIPTION", "")
+    check("Existing real Subscription", bool(identifier) and not identifier.startswith("test-"),
+          "ASD14_SUBSCRIPTION names an existing real profile", identifier)
+    check("Existing Driver state", bool(raw) and Path(raw).is_absolute(), "absolute existing state", raw)
+    record_path = Path(raw) / "subscriptions" / identifier / "record.json"
+    check("Registered existing profile", record_path.is_file(), "existing record.json", str(record_path))
+    record = object_("Existing profile", parse(record_path.read_text()))
+    equal("Existing profile ID", record["id"], identifier)
+    equal("Existing signed-in profile", record["state"], "signed_in")
+    home.command = [*home.command, "--state-dir", raw]
     home.env["ARBOL_TEST_TIME_SCALE"] = "10"
-    await home.part("success")
-    families: Any = parse((await home.call(["subscriptions", "families"]))["stdout"])
-    check("Families", isinstance(families, list), "an array of families", families)
-    family = text("Vendor login family", get(find(families, lambda value: get(value, "auth") == "vendor_login"), "id"))
-    created = await home.call(["subscriptions", "create", "--family", family, "--label", "C44", "--id", "test-c44"])
-    equal("Create exit", created["status"], 0)
-    result = await home.call(["subscriptions", "sign-in", "test-c44"])
-    equal("Sign-in exit", result["status"], 0)
     await home.part("plain")
-    return "test-c44"
+    return identifier
 
 
 async def run_c44(home: ScenarioHome) -> None:
     identifier = await c44_subscription(home)
     home.env.update(ARBOL_ROOT="stale", ARBOL_CHAT="0f0e0d0c-0b0a-4908-8706-050403020100", **{UNRELATED: "caller"})
-    base = {"subscriptionId": identifier, "history": [], "tools": "none", "input": {"role": "user", "text": "answer"}}
+    base = {"subscriptionId": identifier, "history": [], "tools": "none",
+            "workingDirectory": home.home, "input": {"role": "user", "text": "answer"}}
 
-    chat = "c3d4e5f6-0718-4293-a4b5-c6d7e8f90a1b"
-    reply, records = await identity_run(home, JSObject(base, rootId="sapling", chatSessionId=chat))
+    chat = str(uuid.uuid4())
+    reply, records = await identity_run(home, JSObject(base, arbolChat=True, chatSessionId=chat))
     stream(reply)
     carrying = 0
     for record in records:
         names = array_of(record["environment"])
         check("Unrelated caller variable", UNRELATED not in names, f"no {UNRELATED}", names)
-        if "ARBOL_ROOT" in names or "ARBOL_CHAT" in names:
-            # A launch that carries identity carries the request's pair, never the stale inherited one.
+        check("Root absent at every launch", "ARBOL_ROOT" not in names, "no ARBOL_ROOT", names)
+        if "ARBOL_CHAT" in names:
             checks = object_("Stand-in checks", record["checks"])
-            equal("ARBOL_ROOT at launch", checks["arbolRoot"], "sapling")
             equal("ARBOL_CHAT at launch", checks["arbolChat"], chat)
             carrying += 1
-    check("The run's tool launch carries the identity", carrying > 0, "at least one launch with both values",
-          records)
+    check("The run's tool launch carries the identity", carrying > 0, "at least one launch with the UUID", records)
 
-    reply, records = await identity_run(home, JSObject(base, chatSessionId="opaque chat 7"))
-    stream(reply)
-    check("Opaque chat run started the stand-in", len(records) > 0, "at least one stand-in record", records)
-    for record in records:
-        names = array_of(record["environment"])
-        check("No identity without rootId", "ARBOL_ROOT" not in names and "ARBOL_CHAT" not in names,
-              "neither ARBOL_ROOT nor ARBOL_CHAT", names)
+    for opaque in ("opaque chat " + uuid.uuid4().hex, str(uuid.uuid4())):
+        reply, records = await identity_run(home, JSObject(base, chatSessionId=opaque))
+        stream(reply)
+        check("Standalone run started the stand-in", len(records) > 0, "at least one stand-in record", records)
+        for record in records:
+            names = array_of(record["environment"])
+            check("No unmarked Arbol identity", "ARBOL_ROOT" not in names and "ARBOL_CHAT" not in names,
+                  "neither ARBOL_ROOT nor ARBOL_CHAT", names)
 
-    for label, fields in (("Malformed rootId", {"rootId": "Sapling", "chatSessionId": chat}),
-                          ("Upper-case chat", {"rootId": "sapling", "chatSessionId": chat.upper()})):
+    refusals: list[tuple[str, dict[str, Any]]] = [("Legacy rootId", {"rootId": "sapling", "chatSessionId": chat}),
+                ("Upper-case UUID", {"arbolChat": True, "chatSessionId": chat.upper()}),
+                ("Malformed UUID", {"arbolChat": True, "chatSessionId": "opaque"}),
+                ("Missing UUID", {"arbolChat": True})]
+    refusals += [("Non-true marker " + repr(marker), {"arbolChat": marker, "chatSessionId": chat})
+                 for marker in (False, None, 1, "true")]
+    for label, fields in refusals:
         reply, records = await identity_run(home, JSObject(base, **fields))
         refused = stream(reply, "failed")
         equal(f"{label} only final", len(refused), 1)
