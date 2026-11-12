@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from .database import Unavailable
+from .exchange_admission import GENERATION_ENV, Admission
 from .exchange_command import UUID, Command
 from .exchange_context import Context, Refusal
 from .exchange_launcher import MAX_REPLY, Reply, object_line, select_build
@@ -124,15 +125,23 @@ def start(context: Context, command: Command, *, timeout: float = ACCEPT_SECONDS
     request = Path(command.options["--request"])
     folders = tuple(context.exchanges / name for name in (exchange, f".{exchange}.new", f".{exchange}.old"))
     lock_file = context.identity.folder / "exchange-starts" / exchange
+    admission = Admission(context.identity.folder)
+    expected = os.environ.get(GENERATION_ENV)
     try:
-        prior = asyncio.run(receipt(context, exchange, max(0, deadline - time.monotonic())))
-    except Refused:
+        # An already accepted UUID may be recovered during draining. This read
+        # neither consumes the request nor grants permission to start a Trunk.
+        with admission.lease("controlled", generation=expected) as read:
+            generation = read.state.generation
+            prior = asyncio.run(receipt(context, exchange, max(0, deadline - time.monotonic())))
+    except Refused as refusal:
+        if refusal.code == "maintenance":
+            raise
         if any(os.path.lexists(path) for path in (*folders, lock_file)):
             raise Refusal("in_progress", "The database could not resolve this earlier Exchange start.") from None
         raise
     if prior is not None:
         return prior
-    with launch_lock(context, exchange) as (lock, lock_path):
+    with admission.lease("normal", generation=generation), launch_lock(context, exchange) as (lock, lock_path):
         try:
             prior = asyncio.run(receipt(context, exchange, max(0, deadline - time.monotonic()), wait_for_commit=True))
         except Refused:
@@ -163,7 +172,8 @@ def start(context: Context, command: Command, *, timeout: float = ACCEPT_SECONDS
         # An anonymous output file keeps a late acceptance independent of the caller.
         with tempfile.TemporaryFile() as output:
             try:
-                child = subprocess.Popen(arguments, env=context.environment(), start_new_session=True,
+                env = {**context.environment(), GENERATION_ENV: generation}
+                child = subprocess.Popen(arguments, env=env, start_new_session=True,
                                          stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.DEVNULL,
                                          pass_fds=(lock,))
             except (OSError, ValueError):
