@@ -16,7 +16,6 @@ from .database import Database, protected_thread
 from .metadata import Attention, iso
 from .model import Identity, Refused
 from .process import Programs
-from .roots import Roots
 from .validation import Catalogues, chat, integer, save_paste, text
 from .views import View
 
@@ -84,9 +83,9 @@ async def paste_params(params: Params) -> Params:
 
 
 class Chats:
-    def __init__(self, identity: Identity, database: Database, programs: Programs, roots: Roots,
+    def __init__(self, identity: Identity, database: Database, programs: Programs,
                  registry: Registry) -> None:
-        self.identity, self.database, self.roots = identity, database, roots
+        self.identity, self.database = identity, database
         self.attention = Attention()
         self.reader = Reader(database, self.attention)
         self.catalogues = Catalogues(identity, programs)

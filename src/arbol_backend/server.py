@@ -30,7 +30,7 @@ from .model import Identity, Refused, private_directory, settings
 from .notes import Notes
 from .process import Programs, backend_ready
 from .recovery import Recovery
-from .roots import Installation, Roots
+from .roots import Installation
 from .settling import Settling
 from .stuck import Stuck
 from .workspace import Workspace
@@ -44,10 +44,9 @@ class Backend:
         self.database = Database(identity)
         self.registry = Registry()
         self.workspace = Workspace(identity, self.settings, self.registry)
-        self.roots = Roots(identity, self.programs, self.database)
         self.installation = Installation(identity, self.database, self.registry)
         self.ticker = Ticker(self.programs, Records(self.database))  # Subscriptions Vigor every three minutes (SGM-1.14)
-        self.chats = Chats(identity, self.database, self.programs, self.roots, self.registry)
+        self.chats = Chats(identity, self.database, self.programs, self.registry)
         self.health = Health(self.database, self.chats.attention)
         self.health.on_status = self.installation.publish
         self.measurements = Measurements(self.health, self.registry)
@@ -60,11 +59,10 @@ class Backend:
         self.live = Live(identity, self.chats, self.dispatch, self.listings)
         self.notes = Notes(identity, self.database, self.chats, self.live)
         self.controls = Controls(self.programs, self.dispatch, self.live, self.registry)
-        self.settling = Settling(self.programs, self.database, self.live)
+        self.settling = Settling(self.programs, self.database, self.listings.get)
         self.stuck = Stuck(self.listings, self.controls, self.notes, self.chats.attention)
         self.listings.on_rows = self.listed
         self.listings.on_failed = self.stuck.failed
-        self.settling.read_listing = self.listings.get
         self.discovery = Discovery(self.listings, self.registry)
         self.recovery = Recovery(self.health, self.chats, self.registry, self.settling, self.notes, self.discovery, self.stuck)
         self.recovery.on_returned = self.measurements.returned
@@ -180,7 +178,6 @@ class Backend:
             await self.dispatch.close()
             await self.accounts.close()
             await self.chats.close()
-            await self.roots.close()
             await self.database.close()
             self.programs.close()
             lifetime.close()

@@ -39,8 +39,8 @@ class Recovery:
         return (not self.closed and not self.health.database.away
                 and self.health.database.schema.state == "ready" and self.health.epoch == epoch)
 
-    def settled(self, root: str) -> None:
-        if root == self.chats.identity.root and not self.closed:
+    def settled(self) -> None:
+        if not self.closed:
             self.notes.request()
             self.chats.invalidate()
 
@@ -50,7 +50,7 @@ class Recovery:
         except asyncio.CancelledError:
             raise
         except Exception:
-            pass  # Discovery's own Root-scoped result remains available to the next caller.
+            pass  # A later inventory observation can retry independently.
 
     async def refresh(self, epoch: int, subscriptions: list[Subscription]) -> None:
         first = subscriptions[0]

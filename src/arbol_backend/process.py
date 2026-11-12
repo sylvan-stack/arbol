@@ -17,17 +17,15 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, BinaryIO
-from uuid import UUID
 
 from .bridge import BRIDGE_VERSION, constant, finite, pairs
 from .database import configured_target, explicit_target
-from .model import ROOT_ID, Identity, Refused
+from .model import Identity, Refused
 
-LIMITS = {"start": 25.0, "stop": 90.0, "settle": 120.0, "list": 10.0, "account": 10.0, "migrate-check": 90.0, "reimport": 90.0}
+LIMITS = {"start": 25.0, "stop": 90.0, "settle": 120.0, "list": 10.0, "account": 10.0}
 DRIVERS = {"claude", "codex", "pi"}
 ACCOUNT_COMMANDS = {"check", "usage", "models"}
 MAX_OUTPUT = 1024 * 1024
-GLOBAL_CATALOGUE = "roots.catalogue"
 
 
 START_SECONDS = 12.0
@@ -194,17 +192,8 @@ class Programs:
                 child.close()
                 del self.running[key]
 
-    def command_key(self, kind: str, key: str, root: str | None = None) -> tuple[str, str]:
-        selected = self.identity.root if root is None else root
-        return kind, key if selected == self.identity.root else selected+":"+key
-
-    async def call(self, program: str, args: list[str], *, kind: str, key: str = "", root: str | None = None) -> Any:
-        selected = self.identity.root if root is None else root
-        if (program in ("arbol-root", "arbol-roots") and (not isinstance(selected, str) or not ROOT_ID.fullmatch(selected))
-                or root is not None and program != "arbol-root"
-                or selected != self.identity.root and kind not in ("list", "stop", "settle")):
-            raise Refused("invalid_input", "Unsupported explicit Root command.")
-        allowed = {"arbol-exchanges", "arbol-root", "arbol-roots", *("arbol-" + x + "-driver" for x in self.drivers)}
+    async def call(self, program: str, args: list[str], *, kind: str, key: str = "") -> Any:
+        allowed = {"arbol-exchanges", *("arbol-" + name + "-driver" for name in self.drivers)}
         if program not in allowed or kind not in LIMITS:
             raise Refused("invalid_input", "Unsupported backend child command.")
         if program.endswith("-driver"):
@@ -217,31 +206,10 @@ class Programs:
             )
             if kind != "account" or not account:
                 raise Refused("invalid_input", "Only Driver account/catalogue commands are allowed.")
-        elif program == "arbol-roots":
-            valid = kind == "list" and args == ["list"]
-            if kind == "migrate-check" and args == ["migrate", self.identity.root, "--check"]:
-                valid, key = True, self.identity.root
-            if kind == "reimport" and len(args) == 4 and args[:3] == ["migrate", self.identity.root, "--chat"]:
-                try:
-                    valid = str(UUID(args[3])) == args[3]
-                except ValueError:
-                    valid = False
-                key = args[3]
-            if not valid:
-                raise Refused("invalid_input", "Unsupported own-Root catalogue or migration command.")
         elif kind not in ("start", "stop", "settle", "list") or not args or args[0] != kind:
-            raise Refused("invalid_input", "Root command and deadline must agree.")
-        if "--root" in args:
-            raise Refused("invalid_input", "A child cannot override this backend's Root.")
+            raise Refused("invalid_input", "Runtime command and deadline must agree.")
         self.reap()
-        if program == "arbol-root" and kind in ("settle", "list"):
-            key = selected
-        if program == "arbol-root" and kind in ("start", "stop") and "--exchange" in args:
-            index = args.index("--exchange")
-            if index + 1 == len(args):
-                raise Refused("invalid_input", "An Exchange identifier is required.")
-            key = args[index + 1]
-        identity = self.command_key(kind, key or self.identity.root, selected)
+        identity = kind, key
         if identity in self.running:
             raise Refused("in_progress", "This command is still running.")
         if program == "arbol-exchanges":
@@ -254,8 +222,6 @@ class Programs:
                 arguments += ["--runtime-dir", str(self.identity.folder), "--bin-dir", str(self.identity.bin_dir)]
         else:
             arguments = [str(self.identity.bin_dir / program)]
-        if program == "arbol-root":
-            arguments += ["--root", selected]
         arguments += args
         env = {key: value for key, value in os.environ.items()
                if not key.startswith("PG") and key not in
@@ -293,7 +259,7 @@ class Programs:
                     try:
                         value = (json.loads(child.data, object_pairs_hook=pairs, parse_constant=constant, parse_float=finite)
                                  if kind == "account" else json.loads(child.data))
-                        structured_refusal = (kind in ("start", "stop", "settle", "list", "migrate-check", "reimport", "account") and status == 1
+                        structured_refusal = (kind in ("start", "stop", "settle", "list", "account") and status == 1
                                               and isinstance(value, dict) and isinstance(value.get("error"), dict))
                         if status != 0 and not structured_refusal:
                             raise Refused("no_answer", "The launcher returned no bounded successful reply.")

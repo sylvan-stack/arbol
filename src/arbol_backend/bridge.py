@@ -34,7 +34,7 @@ MESSAGES = {
     "no_answer": "The requested program did not provide a valid answer.",
     "slow_reader": "This window has more than 64 MiB waiting to be sent.",
 }
-SOURCES = {"trunk", "runtime", "root-manager", "roots", "driver"}
+SOURCES = {"trunk", "runtime", "driver"}
 Params = dict[str, Any]
 Validator = Callable[[Params], Awaitable[Params]]
 Handler = Callable[[Params], Awaitable[Any]]

@@ -94,28 +94,6 @@ class Identity:
     compatibility: tuple[tuple[int, int], ...]
     fixture: bool = False
 
-    @property
-    def root(self) -> str:
-        # Removed with the remaining legacy projections; never select a Root.
-        return ""
-
-
-def root_record(folder: Path, selected: str) -> dict[str, Any]:
-    try:
-        record = object_file(folder / "root.json")
-        if (
-            record.get("root") != selected
-            or record.get("status") not in ("preparing", "working", "failed")
-            or not isinstance(record.get("database"), str)
-            or not record["database"]
-            or not isinstance(record.get("name"), str)
-            or not record["name"]
-        ):
-            raise ValueError("Invalid Root header.")
-        return record
-    except (OSError, ValueError, UnicodeError) as error:
-        raise Refused("unknown_root", "The selected Root has no readable valid root.json.") from error
-
 
 def schema_compatibility(value: object) -> tuple[tuple[int, int], ...]:
     if not isinstance(value, list) or not value:
