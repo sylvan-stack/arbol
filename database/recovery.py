@@ -7,10 +7,12 @@ import importlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 from collections.abc import Callable
 from contextlib import AbstractContextManager
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -298,6 +300,136 @@ def production_exclusive(source: Identity, session: str) -> AbstractContextManag
     return cast(AbstractContextManager[str], boundary(source, session))
 
 
+def read_private(path: Path) -> tuple[dict[str, Any], str]:
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise RecoveryError("Recovery receipts and archives must be private regular files.")
+    payload = path.read_bytes()
+    value = json.loads(payload)
+    if not isinstance(value, dict):
+        raise RecoveryError("Invalid recovery receipt.")
+    return value, sha(payload)
+
+
+def validate_snapshot(snapshot_dir: Path) -> tuple[dict[str, Any], str, Path]:
+    folder = private_dir(snapshot_dir)
+    snapshot, checksum = read_private(folder / SNAPSHOT)
+    archive = folder / ARCHIVE
+    info = archive.lstat()
+    if (snapshot.get("format") != 1 or snapshot.get("kind") != "arbol-recovery-snapshot"
+            or not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077
+            or snapshot.get("archiveSha256") != digest(archive)):
+        raise RecoveryError("The private archive differs from its snapshot receipt.")
+    verify_release(Path(snapshot["releaseDirectory"]), snapshot["releaseSha256"])
+    return snapshot, checksum, archive
+
+
+def check_isolated(connection: Database, target: Target, snapshot: dict[str, Any]) -> str:
+    check_version(connection)
+    if not target.host.startswith("/"):
+        raise RecoveryError("Restore requires an isolated private PostgreSQL socket.")
+    source_identity(connection, target.host, target.port)
+    cluster = control_identity(connection)
+    if cluster is None or cluster == snapshot["sourceCluster"]:
+        raise RecoveryError("The restore cluster must differ from the source cluster.")
+    live = Places(Path.home()).data.resolve()
+    isolated = connection.execute(
+        """
+        SELECT current_setting('listen_addresses'), current_setting('data_directory'),
+               (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user)
+        """
+    ).fetchone()
+    if (isolated is None or isolated[0] != "" or isolated[2] is not True
+            or Path(isolated[1]).resolve(strict=True) == live):
+        raise RecoveryError("Use an isolated socket-only cluster and its administrator for restore.")
+    return cluster
+
+
+def restore(target: Target, snapshot_dir: Path, attempt_dir: Path) -> Path:
+    if not target.host.startswith("/"):
+        raise RecoveryError("Restore requires an explicit isolated private socket.")
+    snapshot, snapshot_sha256, archive = validate_snapshot(snapshot_dir)
+    if target.database != snapshot["source"]["database"]:
+        raise RecoveryError("The fresh isolated database must use the original archive's database name.")
+    check_archive_name(archive, target.database)
+    admin = replace(target, database="postgres")
+    with admin.connect() as connection:
+        cluster = check_isolated(connection, admin, snapshot)
+        if connection.execute("SELECT 1 FROM pg_catalog.pg_database WHERE datname = %s",
+                              (target.database,)).fetchone() is not None:
+            raise RecoveryError("The isolated restore target already exists.")
+        roles = snapshot.get("roles")
+        if not isinstance(roles, list) or any(not isinstance(role, str) or not role for role in roles):
+            raise RecoveryError("The archive role inventory is invalid.")
+        # Publish an incomplete record before the first mutation, so command loss is never proof.
+        with publish_directory(attempt_dir) as staging:
+            write_private(staging / "restore.json", {
+                "format": 1, "kind": "arbol-recovery-restore", "status": "incomplete",
+                "snapshotSha256": snapshot_sha256, "archiveSha256": snapshot["archiveSha256"],
+                "target": {"host": target.host, "port": target.port, "database": target.database},
+                "targetCluster": cluster, "startedAt": timestamp(),
+            })
+        attempt_dir = private_dir(attempt_dir)
+        with connection.transaction():
+            for role in roles:
+                existing = connection.execute("SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = %s", (role,))
+                if existing.fetchone() is None:
+                    connection.execute(sql.SQL("CREATE ROLE {} NOLOGIN").format(sql.Identifier(role)))
+        # --create restores database-level settings/ACLs and creates the database named in the archive.
+        # PostgreSQL CREATE DATABASE cannot run inside pg_restore's single-transaction mode.
+        tool("pg_restore", ["--create", "--exit-on-error", *connection_arguments(admin), str(archive)], admin)
+
+    with target.connect() as connection, connection.transaction():
+        connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        if check_isolated(connection, target, snapshot) != cluster:
+            raise RecoveryError("The isolated cluster changed during restore.")
+        recovered_target = source_identity(connection, target.host, target.port)
+        recovered = observations(connection, snapshot["schema"].get("legacyRelease"))
+    if recovered != snapshot["observation"] or recovered["schema"] != snapshot["schema"]:
+        raise RecoveryError("The recovered schema or representative rows differ from the source snapshot.")
+    # Recheck private dependencies and archive after the database operation, before marking success.
+    _, verified_sha256, _ = validate_snapshot(snapshot_dir)
+    if verified_sha256 != snapshot_sha256:
+        raise RecoveryError("The recovery inputs changed during restore.")
+    result = {"format": 1, "kind": "arbol-recovery-restore", "status": "verified",
+              "snapshotDirectory": str(snapshot_dir.resolve()), "snapshotSha256": snapshot_sha256,
+              "archiveSha256": snapshot["archiveSha256"], "source": snapshot["source"],
+              "sourceCluster": snapshot["sourceCluster"], "target": recovered_target, "targetCluster": cluster,
+              "schema": recovered["schema"], "observation": recovered, "releaseSha256": snapshot["releaseSha256"],
+              "maintenanceSession": snapshot["maintenanceSession"], "verifiedAt": timestamp()}
+    receipt = attempt_dir / "restore.json"
+    final = attempt_dir / ".verified.json"
+    write_private(final, result)
+    final.replace(receipt)
+    return receipt
+
+
+def verify_recovery(
+    snapshot_dir: Path, restore_receipt: Path, *, source: Identity, schema: Identity,
+    release_sha256: str, maintenance_session: str,
+) -> dict[str, Any]:
+    """Verify the existing proof against the caller's live exclusive handoff and starting pair."""
+    snapshot, snapshot_sha256, _ = validate_snapshot(snapshot_dir)
+    receipt, receipt_sha256 = read_private(private_dir(restore_receipt.parent) / restore_receipt.name)
+    expected = {"source": source, "schema": schema, "releaseSha256": release_sha256,
+                "maintenanceSession": maintenance_session}
+    if any(snapshot.get(key) != value or receipt.get(key) != value for key, value in expected.items()):
+        raise RecoveryError("Recovery evidence is for a different source, schema, prior release or maintenance session.")
+    target = receipt.get("target")
+    cluster = receipt.get("targetCluster")
+    if (receipt.get("format") != 1 or receipt.get("kind") != "arbol-recovery-restore"
+            or receipt.get("status") != "verified" or receipt.get("snapshotSha256") != snapshot_sha256
+            or receipt.get("archiveSha256") != snapshot["archiveSha256"]
+            or receipt.get("sourceCluster") != snapshot["sourceCluster"]
+            or not isinstance(cluster, str) or not cluster.isdecimal() or cluster == snapshot["sourceCluster"]
+            or not isinstance(target, dict) or target.get("database") != source["database"]
+            or not isinstance(target.get("host"), str) or not target["host"].startswith("/")
+            or type(target.get("port")) is not int or type(target.get("databaseOid")) is not int
+            or receipt.get("observation") != snapshot["observation"]):
+        raise RecoveryError("No matching successful isolated restore was recorded.")
+    return {**receipt, "receiptSha256": receipt_sha256}
+
+
 def main(argv: list[str] | None = None, *, exclusive: Exclusive | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", required=True)
@@ -310,20 +442,28 @@ def main(argv: list[str] | None = None, *, exclusive: Exclusive | None = None) -
     snapshot.add_argument("--output", type=Path, required=True)
     snapshot.add_argument("--session", required=True)
     snapshot.add_argument("--legacy-release")
+    isolated = sub.add_parser("restore")
+    isolated.add_argument("--snapshot", type=Path, required=True)
+    isolated.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
-        if args.legacy_release and exclusive is None:
-            raise RecoveryError("Legacy capture requires the cutover adapter that verifies both writer sets are fenced.")
+        if args.command == "restore" and args.socket is None:
+            raise RecoveryError("Restore requires an explicit isolated private socket.")
         target = database_target(args.database, socket=args.socket, port=args.port, user=args.user)
-        result = capture(target, args.release, args.output, maintenance_session=args.session,
-                         exclusive=exclusive or production_exclusive, legacy_release=args.legacy_release)
+        if args.command == "restore":
+            result = restore(target, args.snapshot, args.output)
+        else:
+            if args.legacy_release and exclusive is None:
+                raise RecoveryError("Legacy capture requires the cutover adapter that verifies both writer sets are fenced.")
+            result = capture(target, args.release, args.output, maintenance_session=args.session,
+                             exclusive=exclusive or production_exclusive, legacy_release=args.legacy_release)
     except (RecoveryError, Refusal) as error:
         print(str(error), file=sys.stderr)
         return 1
     except (OSError, psycopg.Error, ValueError, TypeError, KeyError, subprocess.SubprocessError):
         print("Recovery refused: a required database or private recovery input could not be verified.", file=sys.stderr)
         return 1
-    print(json.dumps({"snapshot": str(result)}))
+    print(json.dumps({args.command: str(result)}))
     return 0
 
 
