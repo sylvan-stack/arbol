@@ -128,8 +128,85 @@ class ForesterProbe:
         calls = [row for row in self.shell_calls() if row.get("type") == "started" and row.get("arbolChat") == chat]
         check("Shell calls by chat UUID", len(calls) >= 4, "normal and managed calls across both sessions", calls)
         equal("Shell calls resolve UUID booking", sorted({row.get("booking") for row in calls}), [booked["id"]])
+        self.verify_legacy()
         destination = os.environ.get("ASD14_EVIDENCE_DIR")
         if destination:
             target = Path(destination)
             target.mkdir(parents=True, exist_ok=True, mode=0o700)
             shutil.copytree(self.root, target / "forester", dirs_exist_ok=True)
+
+    def verify_legacy(self) -> None:
+        import uuid
+
+        root = self.root / "legacy"
+        root.mkdir()
+        checkout, corpus, remote = root / "checkout", root / "corpus", root / "remote.git"
+        for folder in (checkout, corpus):
+            folder.mkdir()
+            command(["git", "init", "-b", "main"], folder)
+        for name in ("owned.txt", "other.txt"):
+            (checkout / name).write_text("retained\n")
+        command(["git", "add", "owned.txt", "other.txt"], checkout)
+        command(["git", "commit", "-m", "Initial legacy fixture"], checkout)
+        (corpus / "README.md").write_text("Private legacy ownership qualification.\n")
+        command(["git", "add", "README.md"], corpus)
+        command(["git", "commit", "-m", "Initial private history corpus"], corpus)
+        command(["git", "init", "--bare", str(remote)], root)
+        command(["git", "remote", "add", "origin", str(remote)], corpus)
+        command(["git", "push", "-u", "origin", "main"], corpus)
+        config = root / "mycel.toml"
+        config.write_text('[repos.legacy]\nenabled = false\ncode_root = ' + json.dumps(str(checkout))
+                          + '\nartifact_root = ' + json.dumps(str(root / "artifacts")) + '\n')
+        env = {**os.environ, "FORESTER_ROOT": str(corpus), "MYCEL_CONFIG": str(config)}
+        for key in ("ARBOL_ROOT", "ARBOL_CHAT", "CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID"):
+            env.pop(key, None)
+        journal: list[dict[str, Any]] = []
+
+        def call(arguments: list[str], status: int = 0) -> dict[str, Any]:
+            result = subprocess.run([self.entry, *arguments], cwd=checkout, env=env,
+                                    capture_output=True, text=True, timeout=45)
+            item = {"arguments": arguments, "exit": result.returncode,
+                    "stdout": result.stdout, "stderr": result.stderr}
+            journal.append(item)
+            (root / "commands.json").write_text(json.dumps(journal, indent=2))
+            equal("Legacy command exit", result.returncode, status)
+            return item
+
+        chat = str(uuid.uuid4())
+        owners = ["legacy-a/" + chat, "legacy-b/" + chat]
+        historical: list[tuple[str, str]] = []
+        for owner in owners:
+            booked = json.loads(call(["book", "--for", "C44 legacy history", "--files", "legacy:owned.txt",
+                                      "--tool", "arbol", "--session", owner])["stdout"])
+            equal("Recorded legacy owner", booked["sessions"], ["arbol:" + owner])
+            call(["release", "--booking", booked["id"], "--tool", "arbol", "--session", owner])
+            historical.append((booked["id"], owner))
+        for booking, owner in historical:
+            history = json.loads(call(["history", "--booking", booking, "--json"])["stdout"])
+            opened = [row for row in history["bookingRecords"] if row["type"] == "booking.opened"]
+            equal("Exact historical owner lookup", [row["data"]["sessions"] for row in opened], [["arbol:" + owner]])
+        live = json.loads(call(["book", "--for", "C44 live legacy settlement", "--files", "legacy:owned.txt",
+                                "--tool", "arbol", "--session", owners[0]])["stdout"])
+        call(["intend", "--files", "legacy:owned.txt", "--no-origin", "Disposable legacy qualification",
+              "--why", "Verify open Intention settlement", "--tool", "arbol", "--session", owners[0]])
+        refused = call(["release", "--booking", live["id"], "--tool", "arbol", "--session", owners[0]], 1)
+        check("Open legacy Intention blocks release", "Intention" in refused["stderr"], "Intention refusal", refused)
+        env["ARBOL_CHAT"] = chat
+        uuid_booking = json.loads(call(["book", "--for", "C44 UUID-only owner", "--files", "legacy:other.txt"])["stdout"])
+        equal("New owner remains UUID-only", uuid_booking["sessions"], ["arbol:" + chat])
+        refused = call(["release", "--booking", live["id"]], 1)
+        check("UUID cannot claim legacy booking", "another session" in refused["stderr"], "owner refusal", refused)
+        call(["release", "--booking", uuid_booking["id"]])
+        env.pop("ARBOL_CHAT")
+        call(["intend", "--close", "dropped", "--tool", "arbol", "--session", owners[0]])
+        call(["release", "--booking", live["id"], "--tool", "arbol", "--session", owners[0]])
+        history = json.loads(call(["history", "--booking", live["id"], "--json"])["stdout"])
+        released = [row for row in history["bookingRecords"] if row["type"] == "booking.released"]
+        equal("Released owner remains exact", [row["data"]["booking"]["sessions"] for row in released],
+              [["arbol:" + owners[0]]])
+        written = json.loads(call(["history", "--booking", live["id"], "--write"])["stdout"])
+        tip = command(["git", "ls-remote", "origin", "refs/heads/main"], corpus).split()[0]
+        equal("History published to local remote", tip, written["commit"])
+        tracked = command(["git", "ls-tree", "-r", "--name-only", tip], corpus).splitlines()
+        check("Settlement history reaches remote", written["path"] in tracked, "published history path", tracked)
+        equal("All private legacy bookings settled", json.loads((corpus / "holds.json").read_text())["bookings"], [])
