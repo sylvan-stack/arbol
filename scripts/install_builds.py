@@ -145,6 +145,14 @@ def install_schema_reader(library: Path, python: Path) -> None:
             if not isinstance(name, str) or Path(name).name != name or name in ("", ".", ".."):
                 raise ValueError("Each migration input must be a file in the database directory.")
             shutil.copy2(source / name, staging / name)
+        requirements = staging / "requirements.txt"
+        with requirements.open("w", encoding="utf-8") as stream:
+            subprocess.run(["uv", "export", "--locked", "--no-dev", "--no-emit-project",
+                            "--format", "requirements-txt"],
+                           cwd=ROOT, stdin=subprocess.DEVNULL, stdout=stream, check=True, timeout=30)
+        subprocess.run(["uv", "pip", "install", "--python", str(python), "--target", str(staging),
+                        "--require-hashes", "--no-deps", "--only-binary", ":all:", "-r", str(requirements)],
+                       cwd=ROOT, stdin=subprocess.DEVNULL, check=True, timeout=120)
         run_group([str(python), "-I", "-m", "compileall", "-q", str(staging)])
         if destination.exists():
             destination.rename(previous)

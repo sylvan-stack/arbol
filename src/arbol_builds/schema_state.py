@@ -5,6 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import NamedTuple
+from urllib.parse import unquote, urlsplit
 
 from .launcher import positive
 
@@ -32,10 +33,20 @@ def read_schema() -> SchemaState:
     tool = Path(sys.argv[0]).resolve().parent / ".arbol-builds" / "schema" / "migrate_schema.py"
     try:
         settings = json.loads((home / ".arbol" / "database.json").read_text(encoding="utf-8"))
-        name = settings.get("database") if isinstance(settings, dict) else None
-        if not isinstance(name, str) or not name or name.startswith("-") or "\0" in name:
+        if not isinstance(settings, dict) or set(settings) != {"address", "database"}:
             return SchemaState("unavailable")
-        result = subprocess.run([sys.executable, "-EsB", str(tool), "--database", name, "status"],
+        name, address = settings["database"], settings["address"]
+        if not isinstance(name, str) or not isinstance(address, str) or not name:
+            return SchemaState("unavailable")
+        url = urlsplit(address)
+        host = unquote(url.hostname or "", errors="strict")
+        command = [sys.executable, "-EsB", str(tool), f"--database={name}"]
+        if host.startswith("/"):
+            if (url.scheme not in ("postgresql", "postgres") or url.password is not None
+                    or url.path not in ("", "/") or url.query or url.fragment or not url.username or not url.port):
+                return SchemaState("unavailable")
+            command.extend(("--socket", host, "--port", str(url.port), "--user", unquote(url.username)))
+        result = subprocess.run([*command, "status"],
                                 stdin=subprocess.DEVNULL, capture_output=True, timeout=SCHEMA_STATUS_SECONDS,
                                 check=False)
     except (OSError, ValueError, subprocess.SubprocessError):
@@ -47,6 +58,8 @@ def read_schema() -> SchemaState:
     if not isinstance(payload, dict):
         return SchemaState("invalid")
     status = payload.get("status")
+    if result.returncode and status == "invalid_input":
+        return SchemaState("unavailable")
     if result.returncode and isinstance(status, str) and status in SCHEMA_ERRORS:
         return SchemaState(status)
     revision, version = payload.get("revision"), payload.get("compatibilityVersion")

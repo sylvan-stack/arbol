@@ -36,6 +36,8 @@ from .mutation import make_dirs, with_mutation_lock
 from .pruning import retained_roots
 from .root_launcher import root_default_record, select_root
 from .roots import current_root, read_roots, roots_folder
+from .schema_state import SCHEMA_ERRORS, SchemaState, read_schema
+from .trunk_launcher import chosen
 
 PACKAGE = os.path.dirname(os.path.abspath(__file__))
 # The shared Trunk launcher embeds the registry reader, the schema reader and the selector.
@@ -328,10 +330,13 @@ def list_builds(registry: str, component: str | None = None, root: str | None = 
         if current is not None:
             selected_root = current["root"]
     listed: list[Record] = []
+    schema = read_schema() if any(trunk(name) for name in components) else None
     for name in components:
         records = read_records(registry, name)
         if name in ROOT_COMPONENTS:
             selected = root_default_record(registry, records, selected_root) if selected_root is not None else None
+        elif trunk(name):
+            selected = chosen(registry, records, schema.pair if schema is not None else None)
         else:
             selected = default_record(registry, records)
         listed.extend({**build_details(registry, record),
@@ -393,6 +398,11 @@ def show_build(registry: str, component: str, number: str | None = None, root: s
     elif component in ROOT_COMPONENTS:
         selected_root = select_root(root)["root"]
         found = root_default_record(registry, records, selected_root)
+    elif trunk(component):
+        schema = read_schema()
+        if schema.pair is None:
+            raise ValueError(SCHEMA_ERRORS[schema.status][1])
+        found = chosen(registry, records, schema.pair)
     else:
         found = default_record(registry, records)
     if found is None:
@@ -437,24 +447,20 @@ def missing_only(function: Any, path: str, error: BaseException) -> None:
 
 
 def prune_protections(registry: str, component: str, working: list[Record],
-                      retained: dict[str, Record | None] | None = None) -> set[str]:
+                      retained: dict[str, Record | None] | None = None, *,
+                      schema: SchemaState | None = None) -> set[str]:
     """Extra retained defaults, in addition to newest-n and Locked Builds (BLD-D22)."""
+    if trunk(component):
+        schema = schema if schema is not None else read_schema()
+        if schema.pair is None:
+            raise ValueError(f"Cannot prune {component}. {SCHEMA_ERRORS[schema.status][1]}")
+        selected = chosen(registry, working, schema.pair)
+        return {selected["build"]} if selected is not None else set()
     selected = default_record(registry, working)
     protected = {selected["build"]} if selected is not None else set()
     if component in ROOT_COMPONENTS:
         for root in (retained if retained is not None else retained_roots(roots_folder())):
             found = root_default_record(registry, working, root)
-            if found is not None:
-                protected.add(found["build"])
-    elif trunk(component):
-        roots = retained if retained is not None else retained_roots(roots_folder())
-        unresolved = [name for name, record in roots.items() if record is None]
-        if unresolved:
-            raise ValueError("Cannot prune " + component + ": retained Roots without readable valid root.json: "
-                             + ", ".join(unresolved) + ". Their Root Contract versions are unknown.")
-        versions = {record["rootContract"] for record in roots.values() if record is not None}
-        for version in versions:
-            found = default_record(registry, [record for record in working if version in record["rootContracts"]])
             if found is not None:
                 protected.add(found["build"])
     return protected

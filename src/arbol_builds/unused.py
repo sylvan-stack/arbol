@@ -13,11 +13,12 @@ from pathlib import Path
 from typing import Any
 
 from .config import Locations
-from .launcher import BUILD_PATTERN, Record, code_name, js_integer, milliseconds, read_records, refuse_constant
+from .launcher import BUILD_PATTERN, Record, code_name, js_integer, milliseconds, read_records, refuse_constant, trunk
 from .mutation import with_mutation_lock
 from .pruning import retained_roots
 from .root_launcher import root_default_record
 from .roots import roots_folder
+from .schema_state import read_schema
 from .service import build_details, components_in, prune_protections, remove_build_payload
 
 
@@ -60,6 +61,7 @@ def prune_unused(paths: Locations, *, now_ms: float | None = None) -> list[dict[
     if days is None:
         return [{"component":component,"pruned":[]} for component in names]
     usage = usage_snapshot(paths)
+    schema = read_schema() if any(trunk(name) for name in names) else None
     clock = time.time()*1000 if now_ms is None else now_ms
     if usage.unavailable:
         print("Cannot obtain complete manager listings for Roots: "+", ".join(usage.unavailable)+
@@ -67,7 +69,11 @@ def prune_unused(paths: Locations, *, now_ms: float | None = None) -> list[dict[
     results: list[dict[str, Any]] = []
     for component in names:
         row: dict[str, Any] = {"component":component,"pruned":[]}
-        dynamic = component.startswith("arbol-trunk/") or shared_runtime(component)
+        dynamic = trunk(component) or shared_runtime(component)
+        if trunk(component) and schema is not None and schema.pair is None:
+            row["schemaStatus"] = schema.status
+            results.append(row)
+            continue
         if dynamic and usage.unavailable:
             row["unavailableRoots"] = list(usage.unavailable)
         if shared_runtime(component) and usage.roots_with_exchanges:
@@ -79,7 +85,7 @@ def prune_unused(paths: Locations, *, now_ms: float | None = None) -> list[dict[
         def change(component: str = component, row: dict[str, Any] = row) -> None:
             records = read_records(paths.registry,component)
             working = [record for record in records if record["status"] == "working" and not record.get("prunedAt")]
-            protected = prune_protections(paths.registry,component,working,usage.roots)
+            protected = prune_protections(paths.registry, component, working, usage.roots, schema=schema)
             protected.update(usage.trunks.get(component,set()))
             for record in records:
                 if record["build"] in protected or not old_enough(paths.registry,record,clock,days):
