@@ -19,7 +19,6 @@ from .config import Locations, default_repository, description, load_json
 from .launcher import (
     BUILD_PATTERN,
     LONE_SURROGATE,
-    ROOT_COMPONENTS,
     TRUNKS,
     Record,
     backend_fits,
@@ -30,22 +29,17 @@ from .launcher import (
     open_use_guard,
     plain,
     read_records,
-    root_identifier,
     runnable,
     schema_compatibility,
     trunk,
 )
 from .mutation import make_dirs, with_mutation_lock
-from .pruning import retained_roots
-from .root_launcher import root_default_record, select_root
-from .roots import current_root, read_roots, roots_folder
 from .schema_state import SCHEMA_ERRORS, SchemaState, read_schema
 from .trunk_launcher import chosen
 
 PACKAGE = os.path.dirname(os.path.abspath(__file__))
 # The shared Trunk launcher embeds the registry reader, the schema reader and the selector.
 TRUNK_MODULES = ("launcher.py", "schema_state.py", "trunk_launcher.py")
-ROOT_MODULES = ("launcher.py", "roots.py", "root_launcher.py")
 LAUNCHER_MARK = "# arbol-builds launcher (BLD-0): written by arbol-builds, rewritten when it is installed again."
 # The first statement of the launcher and of the tool: from here on a Ctrl-C ends the program quietly, as it would
 # end the Build, and one that Python's start-up caught and printed is delivered again, so that it is not lost. A
@@ -138,6 +132,8 @@ def module_text(name: str) -> str:
 def launcher_source(registry: str, component: str, python: str) -> bytes:
     """A launcher: the text of launcher.py, then the call that serves this component and registry. The launcher
     arbol-trunk also carries its schema reader and its selection code."""
+    if component in ("arbol-root", "arbol-roots"):
+        raise ValueError("The legacy Root entry point has been retired.")
     first = shebang(python)
     if component == TRUNKS:
         body = "\n".join(module_text(name) for name in TRUNK_MODULES)
@@ -147,9 +143,7 @@ def launcher_source(registry: str, component: str, python: str) -> bytes:
         body += "\ninstalled_schema = read_schema()"
         call = (f"sys.exit(launch({os.path.abspath(registry)!r}, {component!r}, sys.argv[1:], "
                 "schema=installed_schema.pair, schema_error=SCHEMA_ERRORS.get(installed_schema.status)))")
-    elif component in ROOT_COMPONENTS:
-        body = "\n".join(module_text(name) for name in ROOT_MODULES)
-        call = f"sys.exit(launch_root({os.path.abspath(registry)!r}, {component!r}, sys.argv[1:]))"
+
     else:
         body = module_text("launcher.py")
         call = f"sys.exit(launch({os.path.abspath(registry)!r}, {component!r}, sys.argv[1:]))"
@@ -245,14 +239,9 @@ def command(text: str, repo: str, folder: str, number: str, log: int, stop: Stop
     return code == 0 and not stop.requested
 
 
-def build_component(component: str, paths: Locations, stop: Stop, root: str | None = None) -> Record:
-    # Only the historical manager used a Root-bound Build.
-    if component == "arbol-root" and root is None:
-        raise ValueError(f"A Build of {component} is made for one Root: name it with --root <identifier>.")
-    if component != "arbol-root" and root is not None:
-        raise ValueError(f"A Build of {component} belongs to no Root: --root applies to arbol-root.")
-    if root is not None and not root_identifier(root):
-        raise ValueError("A Root identifier is one lower-case word of letters and digits.")
+def build_component(component: str, paths: Locations, stop: Stop) -> Record:
+    if component in ("arbol-root", "arbol-roots"):
+        raise ValueError("The legacy Root runtime cannot be built by this release.")
     repo = os.path.abspath(paths.repo or default_repository(component))
     config, version, source = description(repo, component)
     if component == "arbol" and not schema_compatibility(config.get("schemaCompatibility")):
@@ -260,8 +249,6 @@ def build_component(component: str, paths: Locations, stop: Stop, root: str | No
     folder, build = reserve(paths.registry, component)
     record: Record = {"component": component, "build": build, "packageVersion": version, "status": "building",
                       "startedAt": now(), "source": source, "entry": config["entry"], "checks": []}
-    if root is not None:
-        record["root"] = root
     # Whole numbers, also when written 1.0, in the order of BuildRecord.
     if "contract" in config:
         record["contract"] = int(config["contract"])
@@ -327,18 +314,8 @@ def components_in(registry: str) -> list[str]:
     return sorted(names, key=lambda name: name.encode("utf-16-be", "surrogatepass"))
 
 
-def list_builds(registry: str, component: str | None = None, root: str | None = None) -> list[Record]:
+def list_builds(registry: str, component: str | None = None) -> list[Record]:
     components = [component] if component else components_in(registry)
-    selected_root: str | None = None
-    if root is not None:
-        if component is not None and component not in ROOT_COMPONENTS:
-            raise ValueError("--root applies to inventory of arbol and arbol-root, or to the whole registry.")
-        selected_root = select_root(root)["root"]
-    elif ("arbol-root" in components):
-        folder = roots_folder()
-        current = current_root(read_roots(folder), folder=folder)
-        if current is not None:
-            selected_root = current["root"]
     listed: list[Record] = []
     schema = read_schema() if any(name == "arbol" or trunk(name) for name in components) else None
     for name in components:
@@ -347,7 +324,7 @@ def list_builds(registry: str, component: str | None = None, root: str | None = 
             selected = default_record(registry, [record for record in records
                                                  if backend_fits(record, schema.pair if schema else None)])
         elif name == "arbol-root":
-            selected = root_default_record(registry, records, selected_root) if selected_root is not None else None
+            selected = None
         elif trunk(name):
             selected = chosen(registry, records, schema.pair if schema is not None else None)
         else:
@@ -395,22 +372,12 @@ def build_details(registry: str, record: Record) -> Record:
             "unusedSince": started or record.get("finishedAt") or record["startedAt"]}
 
 
-def show_build(registry: str, component: str, number: str | None = None, root: str | None = None) -> Record:
+def show_build(registry: str, component: str, number: str | None = None) -> Record:
     if number is not None and BUILD_PATTERN.fullmatch(number) is None:
         raise ValueError("A build number is lower-case hexadecimal, without leading zero.")
-    if root is not None and component not in ROOT_COMPONENTS:
-        raise ValueError("--root applies only to arbol and arbol-root Builds.")
-    if root is not None and not root_identifier(root):
-        raise ValueError("A Root identifier is one lower-case word of letters and digits.")
     records = read_records(registry, component)
-    selected_root: str | None = None
     if number is not None:
         found = next((record for record in records if record["build"] == number), None)
-        if found is not None and root is not None and root != found["root"]:
-            raise ValueError(f"Build {component}@{number} belongs to Root {found['root']}, but --root names {root}.")
-    elif component == "arbol-root":
-        selected_root = select_root(root)["root"]
-        found = root_default_record(registry, records, selected_root)
     elif component == "arbol" or trunk(component):
         schema = read_schema()
         if schema.pair is None:
@@ -418,10 +385,9 @@ def show_build(registry: str, component: str, number: str | None = None, root: s
         found = (default_record(registry, [record for record in records if backend_fits(record, schema.pair)])
                  if component == "arbol" else chosen(registry, records, schema.pair))
     else:
-        found = default_record(registry, records)
+        found = None if component == "arbol-root" else default_record(registry, records)
     if found is None:
-        suffix = f" for Root {selected_root}" if selected_root is not None else ""
-        raise ValueError(f"No {'default' if number is None else number} Build of {component}{suffix}.")
+        raise ValueError(f"No {'default' if number is None else number} Build of {component}.")
     return found
 
 
@@ -461,7 +427,7 @@ def missing_only(function: Any, path: str, error: BaseException) -> None:
 
 
 def prune_protections(registry: str, component: str, working: list[Record],
-                      retained: dict[str, Record | None] | None = None, *,
+                      *,
                       schema: SchemaState | None = None) -> set[str]:
     """Extra retained defaults, in addition to newest-n and Locked Builds (BLD-D22)."""
     if component == "arbol" or trunk(component):
@@ -471,14 +437,10 @@ def prune_protections(registry: str, component: str, working: list[Record],
         selected = (default_record(registry, [record for record in working if backend_fits(record, schema.pair)])
                     if component == "arbol" else chosen(registry, working, schema.pair))
         return {selected["build"]} if selected is not None else set()
+    if component in ("arbol-root", "arbol-roots"):
+        return {record["build"] for record in working}
     selected = default_record(registry, working)
-    protected = {selected["build"]} if selected is not None else set()
-    if component in ROOT_COMPONENTS:
-        for root in (retained if retained is not None else retained_roots(roots_folder())):
-            found = root_default_record(registry, working, root)
-            if found is not None:
-                protected.add(found["build"])
-    return protected
+    return {selected["build"]} if selected is not None else set()
 
 
 

@@ -81,7 +81,7 @@ def main(args: list[str]) -> int:
         if args == ["--help"]:
             output({"usage": USAGE})
             return 0
-        words, values = options(args, ["--registry-dir", "--bin-dir", "--repo", "--root", "--reason", "--keep", "--unused"],
+        words, values = options(args, ["--registry-dir", "--bin-dir", "--repo", "--reason", "--keep", "--unused"],
                                  {"--unused"})
         command = words[0] if words else None
         target = words[1] if len(words) > 1 else None
@@ -92,7 +92,6 @@ def main(args: list[str]) -> int:
             raise ValueError("--unused applies only to prune without a component or --keep.")
         for key in values:
             if ((key == "--repo" and command != "build")
-                    or (key == "--root" and command not in ("build", "list", "show"))
                     or (key == "--reason" and command != "withdraw")
                     or (key == "--keep" and command != "prune")):
                 raise ValueError(f"Option {key} does not apply to {command}.")
@@ -110,9 +109,9 @@ def main(args: list[str]) -> int:
         if rest or (number is not None and command not in ("show", "withdraw", "lock", "unlock")):
             raise ValueError("This command takes a component without a build number.")
         if command == "list":
-            output(list_builds(paths.registry, target, values.get("--root")))
+            output(list_builds(paths.registry, target))
         elif command == "show":
-            output(build_details(paths.registry, show_build(paths.registry, component, number, values.get("--root"))))
+            output(build_details(paths.registry, show_build(paths.registry, component, number)))
         elif command == "withdraw":
             reason = values.get("--reason")
             if not number or reason is None or not reason.strip(JS_SPACE):
@@ -137,7 +136,7 @@ def main(args: list[str]) -> int:
 
             previous = {name: signal.signal(name, request) for name in (signal.SIGINT, signal.SIGTERM)}
             try:
-                record = build_component(component, paths, stop, values.get("--root"))
+                record = build_component(component, paths, stop)
             finally:
                 for name, handler in previous.items():
                     signal.signal(name, handler)

@@ -26,7 +26,7 @@ BUILD_PATTERN = re.compile(r"[1-9a-f][0-9a-f]*")
 TRUNKS = "arbol-trunk"
 CODE_NAME = re.compile(r"[a-z][a-z0-9]{0,31}")
 COMMAND_WORDS = ("run", "settle", "list")
-# The components whose Builds are made for one Root, and the form of a Root identifier (ARC-1, RCT-0).
+# Historical Root-bound components, retained for old Build records and release inputs.
 ROOT_COMPONENTS = ("arbol", "arbol-root")
 ROOT_PATTERN = re.compile(r"[a-z0-9]+")
 STATUSES = ("building", "failed", "working", "withdrawn")

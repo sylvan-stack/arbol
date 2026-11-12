@@ -181,7 +181,7 @@ def usage_snapshot(paths: Locations, schema: SchemaState) -> Usage:
         return Usage({}, unavailable=True)
     try:
         command = [executable, "list"]
-        if Path(paths.bin).resolve() != Path.home() / ".local/bin":
+        if Path(paths.bin).resolve() != (Path.home() / ".local/bin").resolve():
             command += ["--bin-dir", os.path.abspath(paths.bin)]
         answer = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True,
                                 timeout=LIST_SECONDS, check=False)
