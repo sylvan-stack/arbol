@@ -5,7 +5,7 @@
   import Notice from '../patterns/Notice.svelte';
   import PageHeader from '../patterns/PageHeader.svelte';
   import {
-    formatSubscriptionTime, subscriptionKey, subscriptionVendor, type SubscriptionView, type UsageDestination,
+    formatSubscriptionCardTime, subscriptionKey, subscriptionVendor, type SubscriptionView, type UsageDestination,
   } from './seqoya-subscriptions';
 
   let {
@@ -70,7 +70,7 @@
 
 {#snippet expiration(value: string | 0 | undefined)}
   {#if value === 0}Never
-  {:else if value}<time datetime={value}>{formatSubscriptionTime(value)}</time>
+  {:else if value}<time datetime={value}>{formatSubscriptionCardTime(value)}</time>
   {:else}Unavailable{/if}
 {/snippet}
 
@@ -129,54 +129,34 @@
             <p class="small warning">{subscription.problem.message}</p>
           {/if}
 
-          <div class="stack metric-section">
-            <dl class="metrics">
-              <dt>Available limit resets</dt>
-              <dd>{resets?.count === undefined ? 'Unavailable' : integer.format(resets.count)}</dd>
-            </dl>
-            {#if resets?.observedAt}
-              <p class="small muted">Last read <time datetime={resets.observedAt}>{formatSubscriptionTime(resets.observedAt)}</time></p>
-            {/if}
-            {#if resets?.entries.length}
-              <ul class="reset-grants">
-                {#each resets.entries as reset}
-                  <li>{reset.label}{#if reset.expiresAt === 0} · Never expires{:else if reset.expiresAt} · {reset.expired ? 'Expired' : 'Expires'}
-                    {@render expiration(reset.expiresAt)}{/if}</li>
-                {/each}
-              </ul>
-            {/if}
-          </div>
-
           {#each metrics?.windows ?? [] as window}
             <section class="stack metric-section" aria-label={window.label}>
               <div class="row spread">
                 <h3>{window.label}</h3>
                 {#if window.terminal}<Badge label="Terminal" />{/if}
               </div>
-              {#if window.ended || window.source || window.observedAt}
+              {#if window.ended || window.source}
                 <p class="small muted">
-                  {#if window.ended}<span class="warning">Window ended · </span>{/if}
-                  {#if window.source}{window.source}{#if window.observedAt} · {/if}{/if}
-                  {#if window.observedAt}
-                    Last read <time datetime={window.observedAt}>{formatSubscriptionTime(window.observedAt)}</time>
-                  {/if}
+                  {#if window.ended}<span class="warning">{window.terminal ? 'Allowance expired' : 'Reset time passed'}</span>{/if}
+                  {#if window.source}{#if window.ended} · {/if}{window.source}{/if}
                 </p>
               {/if}
               <dl class="metrics">
                 <dt>Window length</dt><dd>{window.resetsAt === null ? 'No fixed window' : duration(window.windowMinutes)}</dd>
                 <dt>Resets</dt>
                 <dd>
-                  {#if window.resetsAt}<time datetime={window.resetsAt}>{formatSubscriptionTime(window.resetsAt)}</time>
+                  {#if window.resetsAt}<time datetime={window.resetsAt}>{formatSubscriptionCardTime(window.resetsAt)}</time>
+                  {:else if window.pendingStart}Starts with next use
                   {:else if window.resetsAt === null}No scheduled reset
                   {:else}Unavailable{/if}
                 </dd>
-                <dt>Time remaining</dt><dd>{window.resetsAt === null && window.remainingMinutes === undefined ? 'No scheduled end' : duration(window.remainingMinutes)}</dd>
-                <dt>Allowance expires</dt><dd>{@render expiration(window.expiresAt)}</dd>
+                <dt>Time remaining</dt><dd>{window.pendingStart ? 'Starts with next use' : window.resetsAt === null ? 'No scheduled end' : duration(window.remainingMinutes)}</dd>
+                <dt>Allowance expires</dt><dd>{#if !window.terminal && (window.resetsAt || window.pendingStart) && window.expiresAt === undefined}No separate expiry{:else}{@render expiration(window.expiresAt)}{/if}</dd>
                 <dt>Allowance used</dt><dd>{percentValue(window.usedPercent)}</dd>
                 <dt>Allowance remaining</dt><dd>{percentValue(window.remainingPercent)}</dd>
                 <dt>Output-token equivalents used</dt><dd>{estimateValue(window.outputTokensUsed)}</dd>
                 <dt>Output-token equivalents remaining</dt><dd>{estimateValue(window.outputTokensRemaining)}</dd>
-                <dt>Remaining equivalents per hour</dt><dd>{estimateValue(window.outputTokensPerHour)}</dd>
+                <dt>Remaining equivalents per hour</dt><dd>{window.ended ? 'Period closed' : window.pendingStart ? 'After first use' : estimateValue(window.outputTokensPerHour)}</dd>
               </dl>
               {#if window.model}
                 <p class="small muted" title={window.estimateBasis}>Token estimate · {window.model}</p>
@@ -186,7 +166,7 @@
             <p class="small muted">No saved allowance windows.</p>
           {/each}
 
-          {#each subscription.allowance?.issues ?? [] as issue}
+          {#each metrics?.issues ?? [] as issue}
             <p class="small warning">{issue}</p>
           {/each}
           {#if deepseek && subscription.lastUsage?.extra?.apiAvailable === false}
@@ -206,6 +186,22 @@
           {/if}
           {#if usageRequest?.error}<p class="small warning" role="status">{usageRequest.error}</p>{/if}
           {#if linkError}<p class="small warning" role="status">{linkError}</p>{/if}
+
+          {#if resets?.count !== undefined && resets.count > 0}
+            <div class="stack metric-section">
+              <dl class="metrics">
+                <dt>Available limit resets</dt><dd>{integer.format(resets.count)}</dd>
+              </dl>
+              {#if resets.entries.some((reset) => !reset.expired)}
+                <ul class="reset-grants">
+                  {#each resets.entries.filter((reset) => !reset.expired) as reset}
+                    <li>{reset.label}{#if reset.expiresAt === 0} · Never expires{:else if reset.expiresAt} · Expires
+                      {@render expiration(reset.expiresAt)}{/if}</li>
+                  {/each}
+                </ul>
+              {/if}
+            </div>
+          {/if}
         </li>
       {/each}
     </ul>

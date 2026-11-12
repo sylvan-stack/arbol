@@ -61,10 +61,12 @@ export interface SubscriptionWindow {
   source?: string;
   observedAt?: string;
   terminal?: boolean;
+  pendingStart?: boolean;
   ended?: boolean;
 }
 
 export interface SubscriptionMetrics {
+  issues?: string[];
   windows: SubscriptionWindow[];
   limitResets?: {
     count?: number;
@@ -144,4 +146,12 @@ const dateTime = new Intl.DateTimeFormat(undefined, {
 export function formatSubscriptionTime(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? 'Time unavailable' : dateTime.format(date);
+}
+
+const localClock = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+
+export function formatSubscriptionCardTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'Time unavailable';
+  return date.toDateString() === new Date().toDateString() ? localClock.format(date) : formatSubscriptionTime(value);
 }

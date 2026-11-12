@@ -1,5 +1,5 @@
 import {
-  formatSubscriptionTime, subscriptionKey, type AllowanceView, type SubscriptionListing,
+  formatSubscriptionCardTime, formatSubscriptionTime, subscriptionKey, type AllowanceView, type SubscriptionListing,
   type SubscriptionMetrics, type SubscriptionRecord, type SubscriptionWindow,
 } from '../../design-system/src/sections/seqoya-subscriptions';
 import type { VigorRollup } from '../../design-system/src/sections/seqoya-vigor';
@@ -16,8 +16,21 @@ interface ManualReading {
   observedAt: string;
 }
 
+type EstimateBasis = 'claudeLocal' | 'kimiLocal' | 'kimiCalls' | 'piChatGPT' | 'zaiCredits';
+
+interface WindowEstimate {
+  basis: EstimateBasis;
+  subscription: string;
+  checkedAt: string;
+  window: string;
+  observedAt: string;
+  amount: number;
+  scale?: number;
+}
+
 /** The optional bounded projection returned by the native app.readVigor channel. */
 export interface UsageEvidence {
+  windowEstimates?: WindowEstimate[];
   piChatGPT?: ManualReading & {
     plan: 'plus' | 'pro';
     allowed: boolean;
@@ -253,11 +266,63 @@ function resetInventory(account: SubscriptionRecord, now: number): SubscriptionM
   return { count: reconciled ? count - expired : count, entries, observedAt };
 }
 
-function subscriptionMetrics(driver: string, account: SubscriptionRecord, view: AllowanceView | undefined, now: number): SubscriptionMetrics {
+const references = {
+  claudeLocal: { driver: 'claude', family: 'anthropic', model: 'Claude workload' },
+  kimiLocal: { driver: 'pi', family: 'kimi-coding', model: 'Kimi Code K3.1 Pro' },
+  kimiCalls: { driver: 'pi', family: 'kimi-coding', model: 'Kimi Code K3.1 Pro' },
+  piChatGPT: { driver: 'pi', family: 'chatgpt', model: 'GPT-6.1 Sol' },
+  zaiCredits: { driver: 'pi', family: 'zai', model: 'GLM-5.3' },
+} satisfies Record<EstimateBasis, { driver: string; family: string; model: string }>;
+
+function windowCapacity(
+  driver: string, account: SubscriptionRecord, label: string, evidence: UsageEvidence | undefined, now: number,
+  resource?: string,
+): Capacity | undefined {
+  const checkedAt = 'checkedAt' in account && typeof account.checkedAt === 'string' ? Date.parse(account.checkedAt) : NaN;
+  const samples = evidence?.windowEstimates?.filter((sample) => {
+    const reference = references[sample.basis];
+    return reference && reference.driver === driver && reference.family === account.family && sample.subscription === account.id
+      && checkedAt === Date.parse(sample.checkedAt) && sample.window === label && Date.parse(sample.observedAt) <= now
+      && (sample.basis !== 'zaiCredits' || resource === 'credits');
+  });
+  if (samples?.length !== 1) return undefined;
+  const [{ basis, amount, scale, observedAt }] = samples;
+  const model = references[basis].model;
+  const number = (value: number) => integer.format(Math.round(value));
+  let total: number;
+  let calculation: string;
+  let source: string;
+  if (basis === 'zaiCredits') {
+    // Z.AI's Coding Plan formula uses a GLM-5.3 Standard output multiplier of 24.
+    // https://docs.z.ai/devpack/overview.md#usage-instruction
+    total = amount * 10_000 / 24;
+    calculation = `${number(amount)} credits × 10,000 ÷ 24.`;
+    source = 'Verified Coding Plan credit cap at the published GLM-5.3 Standard output rate.';
+  } else {
+    if (!scale) return undefined;
+    if (basis === 'kimiCalls') {
+      total = amount * scale;
+      calculation = `${number(amount)} output tokens per turn × ${number(scale)} calls.`;
+      source = 'Median local Kimi Code output. This estimate uses one local turn per reported call.';
+    } else {
+      total = amount / (scale / 100);
+      calculation = `${number(amount)} observed output equivalents ÷ ${scale}% of the window.`;
+      source = basis === 'piChatGPT'
+        ? 'Local Codex usage matched to the ChatGPT Plus window, using published Standard credit weights.'
+        : 'Local output from the observed workload, scaled by the provider’s reported used share. Other account usage can affect the estimate.';
+    }
+  }
+  return { model, total, source: `${source} Sampled ${formatSubscriptionCardTime(observedAt)}. ${calculation}`, calculation };
+}
+
+function subscriptionMetrics(
+  driver: string, account: SubscriptionRecord, view: AllowanceView | undefined, evidence: UsageEvidence | undefined, now: number,
+): SubscriptionMetrics {
   const report = account.lastUsage;
   const rawWindows = report?.windows ?? [];
   const calibrated = driver === 'codex' && account.family === 'chatgpt'
     ? rawWindows.find((window) => window.kind === 'weekly' && window.windowMinutes === 10_080) : undefined;
+  const zai = driver === 'pi' && account.family === 'zai';
   const kimi = driver === 'pi' && account.family === 'kimi-coding';
   const mimo = driver === 'mimo' && account.family === 'xiaomi';
   const windows = rawWindows.map((window) => {
@@ -267,23 +332,28 @@ function subscriptionMetrics(driver: string, account: SubscriptionRecord, view: 
     const terminal = window.resource === 'credits' && (
       kimi && window.label.startsWith('Monthly,') || mimo && window.label === 'Token Plan'
     );
+    const pendingStart = zai && window.resource === 'credits' && window.kind === 'session'
+      && window.windowMinutes === 300 && used === 0 && !window.resetsAt;
+    const capacity = window === calibrated ? view?.capacity
+      : windowCapacity(driver, account, window.label, evidence, now, window.resource);
     return asWindow({
       label: window.label, resetsAt: window.resetsAt, windowMinutes: window.windowMinutes,
-      expiresAt: terminal ? window.resetsAt : undefined, terminal,
+      expiresAt: terminal ? window.resetsAt : undefined, terminal, pendingStart,
       observedAt: report?.fetchedAt, usedPercent: used, remainingPercent: used === undefined ? undefined : 100 - used,
-    }, now, window === calibrated ? view?.capacity : undefined);
+    }, now, capacity);
   });
 
   const quota = view?.quota;
   if (quota) {
     for (const window of quota.windows) {
       const left = window.remainingPercent;
+      const capacity = mimo ? view?.capacity : windowCapacity(driver, account, window.label, evidence, now);
       const row = asWindow({
         label: window.label, resetsAt: window.resetsAt, windowMinutes: window.windowMinutes,
         expiresAt: mimo ? window.resetsAt : undefined, terminal: mimo,
         source: quota.source, observedAt: quota.observedAt,
         usedPercent: left === undefined ? undefined : 100 - left, remainingPercent: left,
-      }, now, mimo ? view?.capacity : undefined);
+      }, now, capacity);
       const matching = windows.findIndex((reported) => reported.label === row.label);
       if (matching < 0) windows.push(row);
       else windows[matching] = row;
@@ -299,7 +369,18 @@ function subscriptionMetrics(driver: string, account: SubscriptionRecord, view: 
     }, now));
   }
   windows.sort((left, right) => (endTime(left) - endTime(right)) || 0);
-  return { windows, limitResets: resetInventory(account, now) };
+  const issues = windows.length === 0 ? view?.issues ?? [] : [];
+  if (account.state === 'signed_in' && account.family !== 'deepseek') {
+    for (const window of windows) {
+      if (window.outputTokensRemaining === undefined) issues.push(`${window.label} needs a matching token estimate.`);
+    }
+  }
+  const piReading = evidence?.piChatGPT;
+  if (driver === 'pi' && account.family === 'chatgpt' && matches(piReading, account, now)) {
+    if (!piReading.allowed) issues.push('Pi’s access to the shared plan was disabled at the reading.');
+    else if (piReading.capPercent < 100) issues.push('Pi has a separate app cap. These figures describe the shared plan.');
+  }
+  return { windows, issues, limitResets: resetInventory(account, now) };
 }
 
 function endTime(window: SubscriptionWindow) {
@@ -317,7 +398,7 @@ export function withAllowances(
   return { drivers: listing.drivers.map((driver) => ({
     ...driver, subscriptions: driver.subscriptions?.map((account) => {
       const view = allowance(driver.driver, account, saved.get(subscriptionKey(driver.driver, account.id)), evidence, now);
-      return { ...account, allowance: view, metrics: subscriptionMetrics(driver.driver, account, view, now) };
+      return { ...account, allowance: view, metrics: subscriptionMetrics(driver.driver, account, view, evidence, now) };
     }),
   })) };
 }
