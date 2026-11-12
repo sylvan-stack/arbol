@@ -683,18 +683,28 @@
       "kind": "scenario",
       "tier": "mid",
       "status": "available",
-      "reason": "Admitted under SYL-399 (DRV-2.37): a wrong or inherited Arbol chat identity at tool launch lets a Forester booking name the wrong chat. Observes, through a real Driver launch of each stand-in, the request pair over stale inherited ARBOL_* values, the absence of an unrelated caller variable, an opaque chat without rootId, and refusal before launch. Distinct from retained cases: none observes the Arbol identity; archived C8/C40 stay archived.",
+      "reason": "Wrong or inherited chat identity grants booking ownership to another chat; an incorrect resume breaks continuity; merging legacy owners can release the wrong work. C44 observes actual launches of both production Drivers with their deterministic vendor stand-ins, the saved vendor conversation, the pinned Forester CLI and hooks across native sessions, exact historical keys and guarded legacy release/history publication to a local remote. This extends the SYL-399 launch observation; archived C8/C40 remain archived.",
       "review": "individually-reviewed-higher-bar",
-      "line": 327,
-      "file_sha256": "52fa211a021a5bcfc31d37e8b57b1347e170cc399ee19501222165c6bd39a7cf",
+      "line": 339,
+      "file_sha256": "3509a5eba8e269c4b461e956b5f686244b4abb8a67ad12f04bd507572971a87c",
       "support_file": "conformance/scenarios/runs.py",
-      "description": "C44: Arbol chat identity at tool launch.",
+      "description": "C44: Chat UUID, native continuity and Forester ownership.",
       "assertion_examples": [],
       "execution": "explicit-testing-task-only",
       "added_by": "SYL-399",
       "added_date": "2026-11-11",
-      "executed": true,
-      "execution_note": "Passed 11 November 2026 (SYL-399) against installed Claude Build 11 and Codex Build b, suite arbol@6b2f5ba, offline with stand-ins and a disposable test-c44 Subscription; selected by the owner's explicit mid-tier request."
+      "executed": false,
+      "execution_note": "ASD-14 extends the selected scope; current qualification receipts stay outside Git.",
+      "historical_qualification": {
+        "note": "Passed 11 November 2026 (SYL-399) against installed Claude Build 11 and Codex Build b, suite arbol@6b2f5ba, offline with stand-ins and a disposable test-c44 Subscription; selected by the owner's explicit mid-tier request.",
+        "source": "arbol@6b2f5ba",
+        "scope": "Original Root/chat pair contract only; does not qualify ARC-4."
+      },
+      "extended_by": "ASD-14",
+      "requirements": [
+        "ARC-4.7",
+        "ARC-4.8"
+      ]
     },
     {
       "repo": "arbol",

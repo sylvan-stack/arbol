@@ -301,6 +301,12 @@ UNRELATED = "SYL_C44_UNRELATED"
 
 async def identity_run(home: ScenarioHome, request: JSObject) -> tuple[JSObject, list[JSObject]]:
     """One run from a request on standard input, and the stand-in records it added."""
+    destination = os.environ.get("ASD14_EVIDENCE_DIR")
+    if destination:
+        target = Path(destination)
+        target.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with (target / "requests.jsonl").open("a") as handle:
+            handle.write(json.dumps(request) + "\n")
     before = len(await home.received())
     run = home.start(["run", "--request", "-"])
     try:
@@ -419,10 +425,11 @@ def array_of(value: Any) -> list[Any]:
     return list(value)
 
 
-c44 = Scenario("C44", "Arbol chat identity at tool launch",
-               "request identity over stale inherited values, no unrelated caller variable, opaque chat without "
-               "rootId, refusal before launch of a malformed rootId and an upper-case chat",
-               ["DRV-2.37", "CLD-2.26", "CDX-2.22"], run_c44)
+c44 = Scenario("C44", "Chat UUID, native continuity and Forester ownership",
+               "validated UUID over stale inherited identity, Root absence, standalone isolation and prelaunch refusals; "
+               "same saved vendor conversation and UUID-owned booking across native sessions; exact legacy history "
+               "and guarded settlement with local Git publication",
+               ["ARC-4.7", "ARC-4.8", "DRV-2.37", "CLD-2.26", "CDX-2.22"], run_c44)
 
 
 
