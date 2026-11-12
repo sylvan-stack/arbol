@@ -19,7 +19,7 @@ OPTIONAL = {"--refresh"}  # the options of `arbol vigor` whose value may be abse
 VERBS = ("backend", "vigor")
 ACTIONS = {"learn": 0, "profiles": 0, "approve": 1}  # the words after `vigor` and the values each takes (SGM-1.11)
 USAGE = (
-    "Usage: arbol backend [isolation options] | vigor [--refresh [<driver>/<subscription>]] [--text]"
+    "Usage: arbol backend [acquire] [isolation options] | vigor [--refresh [<driver>/<subscription>]] [--text]"
     " | vigor learn|profiles|approve <version> [--text]."
 )
 
@@ -65,16 +65,17 @@ def parse(args: list[str]) -> dict[str, str]:
             i += 1
     if not words or words[0] not in VERBS:
         raise Refused("invalid_input", USAGE)
-    if len(words) > 1 and (words[0] != "vigor" or words[1] not in ACTIONS or len(words) != 2 + ACTIONS[words[1]]):
+    if len(words) > 1 and not (words == ["backend", "acquire"] or (
+            words[0] == "vigor" and words[1] in ACTIONS and len(words) == 2 + ACTIONS[words[1]])):
         raise Refused("invalid_input", USAGE)
     if len(words) > 1 and "--refresh" in options:
         raise Refused("invalid_input", "--refresh belongs to the read arbol vigor.")
-    if words == ["backend"] and options.keys() & (FLAGS | OPTIONAL):
+    if words[0] == "backend" and options.keys() & (FLAGS | OPTIONAL):
         raise Refused("invalid_input", "--refresh and --text belong to arbol vigor.")
     if options.keys() & ISOLATION and not {"--runtime-dir", "--bin-dir", "--database"} <= options.keys():
         raise Refused("invalid_input", "Isolation requires --runtime-dir, --bin-dir and --database.")
     options["verb"] = words[0]
-    if len(words) > 1:  # `vigor learn`, `vigor profiles` or `vigor approve <version>`
+    if len(words) > 1:
         options["action"] = words[1]
         if len(words) > 2:
             options["version"] = words[2]

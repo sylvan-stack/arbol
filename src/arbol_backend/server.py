@@ -26,10 +26,9 @@ from .lifetime import Lifetime
 from .listings import Listings
 from .live import Live
 from .measurements import Measurements
-from .migration import Migration
-from .model import Identity, Refused, root_record, settings
+from .model import Identity, Refused, private_directory, settings
 from .notes import Notes
-from .process import Programs
+from .process import Programs, backend_ready
 from .recovery import Recovery
 from .roots import Roots
 from .settling import Settling
@@ -43,14 +42,12 @@ class Backend:
         self.settings = settings(identity.settings)
         self.programs = Programs(identity)
         self.database = Database(identity)
-        self.record = root_record(identity.folder, identity.root)
         self.registry = Registry()
         self.workspace = Workspace(identity, self.settings, self.registry)
         self.roots = Roots(identity, self.programs, self.database)
         self.roots.register(self.registry)
         self.ticker = Ticker(self.programs, Records(self.database))  # Subscriptions Vigor every three minutes (SGM-1.14)
-        self.chats = Chats(identity, self.database, self.programs, self.roots, self.registry,
-                           lineage=isinstance(self.record.get("grewFrom"), str))
+        self.chats = Chats(identity, self.database, self.programs, self.roots, self.registry)
         self.health = Health(self.database, self.chats.attention)
         self.measurements = Measurements(self.health, self.roots, self.registry)
         self.accounts = Accounts(self.programs, self.chats.catalogues, self.registry,
@@ -70,7 +67,6 @@ class Backend:
         self.discovery = Discovery(self.roots, self.listings, self.registry)
         self.recovery = Recovery(self.health, self.chats, self.registry, self.settling, self.notes, self.discovery, self.stuck)
         self.recovery.on_returned = self.measurements.returned
-        self.migration = Migration(identity, self.programs, self.chats, self.registry, self.record)
         self.windows: set[asyncio.StreamWriter] = set()
         self.tasks: set[asyncio.Task[None]] = set()
         self.stopped = asyncio.Event()
@@ -91,12 +87,6 @@ class Backend:
         finally:
             self.windows.discard(writer)
 
-    async def initial_catalogue(self) -> None:
-        try:
-            await self.discovery.get({})
-        except Refused:
-            pass
-
     async def initial_work(self) -> None:
         self.settling.start()
 
@@ -108,15 +98,10 @@ class Backend:
                 await self.ticker.wake()  # ticks once the interval has passed, no faster (SGM-D30)
             except Refused:
                 pass  # a Root without the Vigor tables, or a database away: the backend runs on without Vigor
-            if self.windows:
-                try:
-                    await self.roots.refresh()
-                    self.record = root_record(self.identity.folder, self.identity.root)
-                except Refused as error:
-                    self.roots.topic.fail(error)
 
     async def run(self) -> int:
         loop = asyncio.get_running_loop()
+        private_directory(self.identity.folder)
         lifetime = Lifetime(self.identity.folder)
         listening = lifetime.acquire()
         server: asyncio.Server | None = None
@@ -148,13 +133,7 @@ class Backend:
             server = await asyncio.start_unix_server(connected, sock=listening, cleanup_socket=False, limit=MAX_LINE - 1)
             print(
                 json.dumps(
-                    {
-                        "ready": True,
-                        "root": self.identity.root,
-                        "build": self.identity.build,
-                        "socket": str(lifetime.path),
-                        "pid": os.getpid(),
-                    },
+                    backend_ready(self.identity, os.getpid(), self.identity.build),
                     separators=(",", ":"),
                 ),
                 flush=True,
@@ -166,7 +145,6 @@ class Backend:
             self.live.start()
             self.notes.start()
             self.task(self.initial_work())
-            self.task(self.initial_catalogue())
             self.stuck.start()
             self.task(self.monitor())
             await self.stopped.wait()
@@ -198,7 +176,6 @@ class Backend:
             await self.notes.close()
             await self.live.close()
             await self.dispatch.close()
-            await self.migration.close()
             await self.accounts.close()
             await self.chats.close()
             await self.roots.close()

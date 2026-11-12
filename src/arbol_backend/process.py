@@ -7,11 +7,14 @@ import json
 import os
 import re
 import signal
+import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, BinaryIO
 from uuid import UUID
 
@@ -23,6 +26,113 @@ DRIVERS = {"claude", "codex", "pi"}
 ACCOUNT_COMMANDS = {"check", "usage", "models"}
 MAX_OUTPUT = 1024 * 1024
 GLOBAL_CATALOGUE = "roots.catalogue"
+
+
+START_SECONDS = 12.0
+READY_MAX = 4096
+
+
+def lock_pid(folder: Path) -> int | None:
+    try:
+        fd = os.open(folder / "backend.lock", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                    or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600):
+                return None
+            record = json.loads(os.read(fd, READY_MAX))
+        finally:
+            os.close(fd)
+        pid = record.get("pid") if isinstance(record, dict) else None
+        if type(pid) is not int or pid <= 0:
+            return None
+        os.kill(pid, 0)
+        return pid
+    except (OSError, ValueError, UnicodeError):
+        return None
+
+
+def backend_ready(identity: Identity, pid: int, build: str) -> dict[str, Any]:
+    return {"ready": True, "build": build, "socket": str(identity.folder / "backend.sock"), "pid": pid}
+
+
+async def running_backend(identity: Identity) -> dict[str, Any] | None:
+    path = identity.folder / "backend.sock"
+    pid = lock_pid(identity.folder)
+    if pid is None:
+        return None
+    try:
+        before = path.lstat()
+        if not stat.S_ISSOCK(before.st_mode) or before.st_uid != os.getuid() or stat.S_IMODE(before.st_mode) != 0o600:
+            raise Refused("invalid_input", "The backend endpoint is not an owner-only socket.")
+        async with asyncio.timeout(0.75):
+            reader, writer = await asyncio.open_unix_connection(path, limit=READY_MAX)
+            try:
+                hello = json.loads(await reader.readuntil(b"\n"))
+            finally:
+                writer.close()
+                await writer.wait_closed()
+        after = path.lstat()
+        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino) or lock_pid(identity.folder) != pid:
+            return None
+    except (OSError, TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):
+        return None
+    except (ValueError, UnicodeError) as error:
+        raise Refused("no_answer", "The backend did not send a valid greeting.") from error
+    if (not isinstance(hello, dict) or hello.get("type") != "hello" or hello.get("bridge") != 2
+            or not isinstance(hello.get("build"), str) or not re.fullmatch(r"0|[1-9a-f][0-9a-f]*", hello["build"])):
+        raise Refused("bridge_incompatible", "The backend at the installation endpoint does not speak Bridge 2.")
+    return backend_ready(identity, pid, hello["build"])
+
+
+async def acquire_backend(identity: Identity, arguments: list[str]) -> dict[str, Any]:
+    """Attach to the owner-only socket or race to start one backend under its lifetime lock."""
+    deadline = time.monotonic() + START_SECONDS
+    contender: subprocess.Popen[bytes] | None = None
+    keep = False
+    with tempfile.TemporaryFile(mode="w+b") as output:
+        try:
+            while time.monotonic() < deadline:
+                existing = await running_backend(identity)
+                if existing is not None:
+                    if contender is None or existing["pid"] != contender.pid:
+                        return existing
+                    line = os.pread(output.fileno(), READY_MAX, 0)
+                    if b"\n" in line:
+                        if json.loads(line.split(b"\n", 1)[0]) != existing:
+                            raise Refused("no_answer", "The backend did not confirm the private endpoint.")
+                        keep = True
+                        return existing
+                if contender is not None and contender.poll() is not None:
+                    line = os.pread(output.fileno(), READY_MAX, 0)
+                    try:
+                        reply = json.loads(line)
+                    except (ValueError, UnicodeError) as error:
+                        raise Refused("no_answer", "The backend did not return a valid ready line.") from error
+                    if not isinstance(reply, dict) or not isinstance(reply.get("error"), dict):
+                        raise Refused("no_answer", "The backend did not become ready.")
+                    code = reply["error"].get("code")
+                    if code != "already_running":
+                        raise Refused("invalid_input" if code == "invalid_input" else "no_answer",
+                                      "The backend refused to start.")
+                    contender = None
+                    await asyncio.sleep(0.20)
+                if contender is None:
+                    output.truncate(0)
+                    output.seek(0)
+                    contender = subprocess.Popen(
+                        [sys.executable, "-I", "-B", str(identity.package / "bin/arbol_entry.py"), *arguments],
+                        start_new_session=True, close_fds=True, stdin=subprocess.DEVNULL,
+                        stdout=output, stderr=subprocess.DEVNULL,
+                    )
+                await asyncio.sleep(0.05)
+            raise Refused("no_answer", "The backend did not become ready within its time limit.")
+        finally:
+            if contender is not None and not keep and contender.poll() is None:
+                try:
+                    contender.terminate()
+                except ProcessLookupError:
+                    pass
 
 
 @dataclass
@@ -82,7 +192,7 @@ class Programs:
 
     async def call(self, program: str, args: list[str], *, kind: str, key: str = "", root: str | None = None) -> Any:
         selected = self.identity.root if root is None else root
-        if (not isinstance(selected, str) or not ROOT_ID.fullmatch(selected)
+        if (not program.endswith("-driver") and (not isinstance(selected, str) or not ROOT_ID.fullmatch(selected))
                 or root is not None and program != "arbol-root"
                 or selected != self.identity.root and kind not in ("list", "stop", "settle")):
             raise Refused("invalid_input", "Unsupported explicit Root command.")
@@ -206,15 +316,6 @@ class Programs:
                 except subprocess.TimeoutExpired:
                     continue
         raise Refused("no_answer", "The listing process group could not be stopped.")
-
-    async def current_root(self) -> dict[str, Any] | None:
-        value = await self.call("arbol-roots", ["list"], kind="list", key=GLOBAL_CATALOGUE)
-        if not isinstance(value, list) or any(not isinstance(row, dict) for row in value):
-            raise Refused("no_answer", "The Root catalogue returned an invalid list.")
-        current = [row for row in value if row.get("current") is True]
-        if len(current) > 1:
-            raise Refused("no_answer", "The Root catalogue names several current Roots.")
-        return current[0] if current else None
 
     def close(self) -> None:
         for child in self.running.values():
