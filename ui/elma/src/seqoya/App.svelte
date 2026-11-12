@@ -8,6 +8,7 @@
   import { AppChannel } from '../app-channel';
   import { Bridge, Refusal } from '../bridge';
   import { readSeqoyaAppearance, saveSeqoyaAppearance } from '../preferences';
+  import { withModelLabels } from './subscription-model-labels';
 
   let trunk = $state<string>();
   let trunkSelector = $state<WorkspaceTrunkSelector>();
@@ -101,7 +102,7 @@
         if (!isCurrent(requestedOn)) return;
         if (!Array.isArray(listing?.drivers)) throw new Error('Invalid account list.');
         subscriptions = { ...subscriptions, loading: false, listing };
-        const withMiMo = await withActivity(listing);
+        const withMiMo = await withActivity(withModelLabels(listing));
         if (isCurrent(requestedOn)) subscriptions = { ...subscriptions, listing: withMiMo };
       } catch (error) {
         if (!isCurrent(requestedOn)) return;

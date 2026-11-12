@@ -119,6 +119,16 @@
             {#if subscription.label !== vendor}<p>{subscription.label}</p>{/if}
             <p class="small muted"><code>{driver}/{subscription.id}</code> · {authModes.get(subscription.auth) ?? subscription.auth}</p>
           </div>
+          {#if subscription.modelLabels}
+            <dl class="model-labels">
+              {#each subscription.modelLabels as label, index}
+                <div>
+                  <dt>{label.model ?? 'Default model'}{#if index === 0 && label.model}<span class="small muted"> · Default</span>{/if}</dt>
+                  <dd class="small muted">{label.performance} performance · {label.cost}</dd>
+                </div>
+              {/each}
+            </dl>
+          {/if}
           {#if subscription.problem}
             <p class="small warning">{subscription.problem.message}</p>
           {/if}
@@ -206,6 +216,12 @@
     overflow-wrap: anywhere;
   }
   .identity, .usage-window { gap: 4px; }
+  .model-labels {
+    display: grid;
+    gap: 8px;
+    margin: 0;
+  }
+  .model-labels dd { margin: 0; }
   .usage {
     gap: 12px;
     padding-top: 12px;

@@ -1,10 +1,22 @@
-/** Read-only fields from the public accounts.list reply used by Seqoya Lab. */
+interface ModelLabel {
+  model?: string;
+  performance: 'Top' | 'High' | 'Medium' | 'Low';
+  cost: 'Expensive' | 'Moderate' | 'Cheap';
+}
+
+export type SubscriptionModelLabels = readonly [
+  defaultModel: ModelLabel,
+  ...additionalModels: (ModelLabel & { model: string })[],
+];
+
+/** Account data displayed by Seqoya Lab, including optional renderer annotations. */
 export interface SubscriptionRecord {
   id: string;
   label: string;
   family: string;
   auth: string;
   state: string;
+  modelLabels?: SubscriptionModelLabels;
   problem?: { message: string };
   activity?: SubscriptionActivity;
   activityError?: string;
