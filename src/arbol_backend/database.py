@@ -153,63 +153,68 @@ async def password(role: str, *, program: str = "/usr/bin/security", seconds: fl
             await child.wait()
 
 
-async def credentials(identity: Identity) -> dict[str, str]:
+def private_socket(identity: Identity, host: str) -> str:
+    if not Path(host).is_absolute() or "," in host:
+        raise ValueError("A qualification connection needs an absolute private socket path.")
+    directory = Path(host).resolve(strict=True)
+    if directory == (identity.home / "Library/Application Support/Arbol/database/socket").resolve():
+        raise ValueError("The installed database socket is not an isolated target.")
+    private_directory(directory)
+    return str(directory)
+
+
+def database_fields(name: str, role: str, host: str, port: int) -> dict[str, str]:
+    if (not name.strip() or name.lower() in {"postgres", "template0", "template1"}
+            or "\0" in name or len(name.encode("utf-8")) > 63 or not role.strip() or "\0" in role
+            or not 1 <= port <= 65535):
+        raise ValueError("Invalid database connection fields.")
+    return {"host": host, "port": str(port), "user": role, "dbname": name}
+
+
+def configured_target(identity: Identity) -> dict[str, str]:
     try:
-        if identity.database is not None:
-            info = conninfo_to_dict(identity.database)
-            if (
-                not {"host", "user", "dbname"} <= info.keys()
-                or not info["dbname"] or not info["user"]
-                or not Path(str(info["host"])).is_absolute() or "," in str(info["host"])
-                or set(info) - {"host", "port", "user", "dbname"}
-            ):
-                raise ValueError("Explicit database must name only a private host/port/user/database.")
-            if any(not isinstance(item, str) for item in info.values()):
-                raise ValueError("Database fields must be strings.")
-            socket = Path(str(info["host"])).resolve(strict=True)
-            if socket == (identity.home / "Library/Application Support/Arbol/database/socket").resolve():
-                raise ValueError("The installed database socket is not an isolated target.")
-            if not 1 <= int(str(info.get("port", "5432"))) <= 65535:
-                raise ValueError("An isolated database needs a valid port.")
-            private_directory(socket)
-            info["host"] = str(socket)
-            return {
-                **{key: str(value) for key, value in info.items()},
-                "port": str(info.get("port", "5432")),
-                "password": "",
-            }
         value = object_file(identity.home / ".arbol/database.json")
         if (set(value) != {"address", "database"} or not isinstance(value["address"], str)
-                or not isinstance(value["database"], str) or not value["database"].strip()
-                or value["database"].lower() in {"postgres", "template0", "template1"}
-                or "\0" in value["database"] or len(value["database"].encode("utf-8")) > 63):
+                or not isinstance(value["database"], str)):
             raise ValueError("Invalid database configuration.")
         url = urlsplit(value["address"])
-        if (
-            url.scheme not in ("postgres", "postgresql")
-            or not url.username
-            or not url.hostname
-            or url.password is not None
-            or url.path not in ("", "/")
-            or not url.port
-            or url.query
-            or url.fragment
-        ):
+        if (url.scheme not in ("postgres", "postgresql") or not url.username or not url.hostname
+                or url.password is not None or url.path not in ("", "/") or not url.port
+                or url.query or url.fragment):
             raise ValueError("Invalid server address.")
-        host = ipaddress.ip_address(url.hostname)
-        role = unquote(url.username, errors="strict")
-        if not host.is_loopback or not role.strip() or "\0" in role:
-            raise ValueError("The installed PostgreSQL address must be local.")
-        result = {
-            "host": str(host),
-            "port": str(url.port),
-            "user": role,
-            "dbname": value["database"],
-        }
-    except (OSError, ValueError, psycopg.Error, UnicodeError) as error:
+        host = unquote(url.hostname, errors="strict")
+        if host.startswith("/"):
+            host = private_socket(identity, host)
+        else:
+            ip = ipaddress.ip_address(host)
+            if identity.fixture or not ip.is_loopback:
+                raise ValueError("Installed connections use loopback; isolated overrides use a private socket.")
+            host = str(ip)
+        return database_fields(value["database"], unquote(url.username, errors="strict"), host, url.port)
+    except (OSError, ValueError, Refused, RuntimeError) as error:
         raise Unavailable("Cannot read the installation database configuration.") from error
+
+
+def explicit_target(identity: Identity) -> dict[str, str] | None:
+    if identity.database is None:
+        return None
     try:
-        result["password"] = await password(role)
+        info = conninfo_to_dict(identity.database)
+        if (not {"host", "user", "dbname"} <= info.keys()
+                or set(info) - {"host", "port", "user", "dbname"}):
+            raise ValueError("Explicit connections name only a private host, port, user and database.")
+        socket = private_socket(identity, str(info["host"]))
+        return database_fields(str(info["dbname"]), str(info["user"]), socket, int(str(info.get("port", "5432"))))
+    except (OSError, ValueError, Refused, RuntimeError, psycopg.Error) as error:
+        raise Unavailable("Cannot read the isolated database connection.") from error
+
+
+async def credentials(identity: Identity) -> dict[str, str]:
+    result = explicit_target(identity) or configured_target(identity)
+    if result["host"].startswith("/"):
+        return {**result, "password": ""}
+    try:
+        result["password"] = await password(result["user"])
     except Refused as error:
         cause = ("The Keychain did not answer for the database's password." if error.code == "timeout"
                  else "The database Keychain lookup failed.")
@@ -273,7 +278,7 @@ class Database:
 
     async def read_schema(self, session: Session) -> Schema:
         manifest = (self.identity.bin_dir / ".arbol-builds/schema/migrations.toml"
-                    if self.identity.build != "0" and self.identity.database is None
+                    if self.identity.build != "0" and not self.identity.fixture
                     else self.identity.package / "database/migrations.toml")
         try:
             info = manifest.stat()

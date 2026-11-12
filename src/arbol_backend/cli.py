@@ -20,11 +20,11 @@ def main(args: list[str], package: Path) -> int:
                 os.environ.pop(key, None)
         parsed = parse(args)
         selected = identity(package, parsed)
-        if selected.database is not None:
+        if selected.fixture:
             private_directory(selected.folder)
         if parsed["verb"] == "vigor":  # the read of Subscriptions Vigor; the command line works while no backend runs
             return asyncio.run(vigor(selected, parsed))
-        if selected.database is None:
+        if not selected.fixture:
             selected.folder.mkdir(mode=0o700, parents=True, exist_ok=True)
         private_directory(selected.folder)
         if parsed.get("action") == "acquire":

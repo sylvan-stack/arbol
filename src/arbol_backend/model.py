@@ -72,8 +72,8 @@ def parse(args: list[str]) -> dict[str, str]:
         raise Refused("invalid_input", "--refresh belongs to the read arbol vigor.")
     if words[0] == "backend" and options.keys() & (FLAGS | OPTIONAL):
         raise Refused("invalid_input", "--refresh and --text belong to arbol vigor.")
-    if options.keys() & ISOLATION and not {"--runtime-dir", "--bin-dir", "--database"} <= options.keys():
-        raise Refused("invalid_input", "Isolation requires --runtime-dir, --bin-dir and --database.")
+    if options.keys() & ISOLATION and not {"--runtime-dir", "--bin-dir"} <= options.keys():
+        raise Refused("invalid_input", "Isolation requires --runtime-dir and --bin-dir with a private database socket.")
     options["verb"] = words[0]
     if len(words) > 1:
         options["action"] = words[1]
@@ -92,6 +92,7 @@ class Identity:
     home: Path
     package: Path
     compatibility: tuple[tuple[int, int], ...]
+    fixture: bool = False
 
     @property
     def root(self) -> str:
@@ -180,7 +181,7 @@ def identity(package: Path, options: dict[str, str], *, home: Path | None = None
         number, folder, path("--bin-dir", home / ".local/bin"),
         path("--settings-dir", home / ".arbol" if folder == installed else folder / "settings"),
         options.get("--database"), home, package,
-        compatibility,
+        compatibility, bool(options.keys() & ISOLATION),
     )
 
 

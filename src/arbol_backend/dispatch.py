@@ -17,14 +17,16 @@ from .chats import Chats
 from .database import protected_thread
 from .drafts import MAX_REVISION, Drafts, content, folder
 from .migration import message
-from .model import Identity, Refused, Settings
+from .model import BUILD_ID, Identity, Refused, Settings
 from .process import Programs
 from .requests import Request, Requests
 from .validation import integer
 
 RETRY_SECONDS = 15.0
 TOTAL_SECONDS = 120.0
-ROOT_CODES = {"unknown_root", "unknown_trunk", "no_fit", "contract_mismatch", "trunk_unavailable"}
+RUNTIME_CODES = {"unknown_trunk", "no_fit", "schema_invalid", "schema_incompatible", "schema_uninitialized",
+                 "database_unavailable", "maintenance", "trunk_unavailable"}
+UNCERTAIN = {"no_answer", "in_progress"}
 
 
 def selected_trunk(params: Params) -> Params:
@@ -49,6 +51,9 @@ class Entry:
     request: Request | None = None
     marked: Params | None = None
     dispatched: bool = False
+    uncertain: bool = False
+    reply_known: bool = False
+    receipt: Params | None = None
 
 
 class Dispatch:
@@ -104,7 +109,7 @@ class Dispatch:
         return child is not None and child.process.poll() is None
 
     def cleanup(self, exchange: str, entry: Entry) -> None:
-        if entry.request is not None and not self.active(exchange):
+        if entry.reply_known and entry.request is not None and not self.active(exchange):
             try:
                 entry.request.remove()
             except OSError:
@@ -122,13 +127,16 @@ class Dispatch:
         while True:
             for exchange, entry in list(self.entries.items()):
                 if entry.task is not None and entry.task.done():
-                    if entry.request is not None and not self.active(exchange):
+                    if entry.reply_known and entry.request is not None and not self.active(exchange):
                         try:
                             async with self.chats.database.permit():
                                 self.cleanup(exchange, entry)
                         except Refused:
                             pass
-                    if len(self.entries) > 1024 and entry.request is None and not self.active(exchange):
+                    if len(self.entries) > 1024 and not self.active(exchange):
+                        if entry.request is not None:
+                            os.close(entry.request.folder)  # Leave uncertain requests for an exact retry.
+                            entry.request = None
                         self.entries.pop(exchange, None)
             await asyncio.sleep(0.1)
 
@@ -150,6 +158,8 @@ class Dispatch:
             self.entries[exchange] = entry
         elif fingerprint != entry.fingerprint:
             raise Error("invalid_input")
+        if entry.receipt is not None:
+            return {**entry.receipt, "duplicate": True}
         if entry.task is None or entry.task.done():
             entry.task = asyncio.create_task(self.run(params, entry))
         result = await asyncio.shield(entry.task)
@@ -167,7 +177,9 @@ class Dispatch:
                     or not isinstance(error.get("message"), str)):
                 raise Error("no_answer")
             code = error["code"]
-            source = error.get("source", "root-manager" if code in ROOT_CODES else "trunk")
+            source = error.get("source", "runtime" if code in RUNTIME_CODES else "trunk")
+            if code == "schema_invalid":
+                code = "schema_incompatible"
             if not isinstance(source, str) or source not in SOURCES:
                 raise Error("no_answer")
             secret = (self.chats.database.parameters or {}).get("password", "")
@@ -178,13 +190,18 @@ class Dispatch:
             if (value.get("accepted") is not True or type(value.get("duplicate")) is not bool
                     or uuid_id(value.get("exchange")) != params["exchange"]
                     or uuid_id(value.get("chat")) != params["chat"]
-                    or ("root" in value and value["root"] != self.identity.root)):
+                    or "root" in value):
+                raise Error("no_answer")
+            trunk, build = value.get("trunk"), value.get("build")
+            if (not isinstance(trunk, str) or not re.fullmatch(r"[a-z][a-z0-9]{0,31}", trunk)
+                    or not isinstance(build, str) or (build != "0" and not BUILD_ID.fullmatch(build))
+                    or not value["duplicate"] and trunk != params.get("trunk", "trivial")):
                 raise Error("no_answer")
             number = integer(value.get("number"), 1, 2147483647)
         except Refused as error:
             raise Error("no_answer") from error
         return {"accepted": True, "duplicate": value["duplicate"], "exchange": params["exchange"],
-                "chat": params["chat"], "number": number}
+                "chat": params["chat"], "number": number, "trunk": trunk, "build": build}
 
     async def run(self, params: Params, entry: Entry) -> Params | Error:
         try:
@@ -211,6 +228,11 @@ class Dispatch:
                     await asyncio.sleep(min(0.01, max(0, deadline - time.monotonic())))
                     continue
                 self.cleanup(exchange, entry)
+                if entry.request is not None:
+                    # Revalidate the same pathname before retry, without removing uncertain recovery input.
+                    os.close(entry.request.folder)
+                    entry.request = None
+                entry.reply_known = False
                 try:
                     entry.request = self.files.write(exchange, request)
                 except Refused:
@@ -227,18 +249,23 @@ class Dispatch:
                 entry.dispatched = True
                 try:
                     async with asyncio.timeout(max(0, deadline - time.monotonic())):
-                        reply = await self.programs.call("arbol-root", args, kind="start", key=exchange)
+                        reply = await self.programs.call("arbol-exchanges", args, kind="start", key=exchange)
                     result = self.result(reply, params)
+                    entry.receipt, entry.reply_known = result, True
                 except TimeoutError:
+                    entry.uncertain = True
                     return Error("no_answer")
                 except Refused as error:
-                    if error.code not in ("no_answer", "in_progress"):
-                        try:
-                            await self.drafts.finish(params, entry.marked, accepted=False)
-                        except Refused:
-                            pass  # The saved mark remains recoverable when the DB is unavailable.
-                        entry.dispatched, entry.marked = False, None
+                    if error.code not in UNCERTAIN:
+                        if not entry.uncertain:
+                            entry.reply_known = True
+                            try:
+                                await self.drafts.finish(params, entry.marked, accepted=False)
+                            except Refused:
+                                pass  # The saved mark remains recoverable when the DB is unavailable.
+                            entry.dispatched, entry.marked = False, None
                         return error if isinstance(error, Error) else Error(error.code)
+                    entry.uncertain = True
                     next_attempt = time.monotonic() + self.retry
                     continue
                 finally:

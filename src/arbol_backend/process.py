@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import os
 import re
@@ -19,6 +20,7 @@ from typing import Any, BinaryIO
 from uuid import UUID
 
 from .bridge import BRIDGE_VERSION, constant, finite, pairs
+from .database import configured_target, explicit_target
 from .model import ROOT_ID, Identity, Refused
 
 LIMITS = {"start": 25.0, "stop": 90.0, "settle": 120.0, "list": 10.0, "account": 10.0, "migrate-check": 90.0, "reimport": 90.0}
@@ -39,6 +41,12 @@ def lock_pid(folder: Path) -> int | None:
             info = os.fstat(fd)
             if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
                     or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600):
+                return None
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                pass  # Only an actively held backend lifetime lock can name the PID.
+            else:
                 return None
             record = json.loads(os.read(fd, READY_MAX))
         finally:
@@ -79,7 +87,7 @@ async def running_backend(identity: Identity) -> dict[str, Any] | None:
         return None
     except (ValueError, UnicodeError) as error:
         raise Refused("no_answer", "The backend did not send a valid greeting.") from error
-    if (not isinstance(hello, dict) or hello.get("type") != "hello" or hello.get("bridge") != BRIDGE_VERSION
+    if (not isinstance(hello, dict) or hello.get("type") != "hello" or type(hello.get("bridge")) is not int or hello["bridge"] != BRIDGE_VERSION
             or not isinstance(hello.get("build"), str) or not re.fullmatch(r"0|[1-9a-f][0-9a-f]*", hello["build"])):
         raise Refused("bridge_incompatible", "The backend at the installation endpoint does not speak Bridge 2.")
     return backend_ready(identity, pid, hello["build"])
@@ -192,11 +200,11 @@ class Programs:
 
     async def call(self, program: str, args: list[str], *, kind: str, key: str = "", root: str | None = None) -> Any:
         selected = self.identity.root if root is None else root
-        if (not program.endswith("-driver") and (not isinstance(selected, str) or not ROOT_ID.fullmatch(selected))
+        if (program in ("arbol-root", "arbol-roots") and (not isinstance(selected, str) or not ROOT_ID.fullmatch(selected))
                 or root is not None and program != "arbol-root"
                 or selected != self.identity.root and kind not in ("list", "stop", "settle")):
             raise Refused("invalid_input", "Unsupported explicit Root command.")
-        allowed = {"arbol-root", "arbol-roots", *("arbol-" + x + "-driver" for x in self.drivers)}
+        allowed = {"arbol-exchanges", "arbol-root", "arbol-roots", *("arbol-" + x + "-driver" for x in self.drivers)}
         if program not in allowed or kind not in LIMITS:
             raise Refused("invalid_input", "Unsupported backend child command.")
         if program.endswith("-driver"):
@@ -236,11 +244,22 @@ class Programs:
         identity = self.command_key(kind, key or self.identity.root, selected)
         if identity in self.running:
             raise Refused("in_progress", "This command is still running.")
-        arguments = [str(self.identity.bin_dir / program)]
+        if program == "arbol-exchanges":
+            arguments = [str(self.identity.package / "bin/arbol-exchanges")]
+            if self.identity.fixture:
+                configured = configured_target(self.identity)
+                explicit = explicit_target(self.identity)
+                if explicit is not None and explicit != configured:
+                    raise Refused("invalid_input", "The isolated backend and Exchange runtime must use the same database.")
+                arguments += ["--runtime-dir", str(self.identity.folder), "--bin-dir", str(self.identity.bin_dir)]
+        else:
+            arguments = [str(self.identity.bin_dir / program)]
         if program == "arbol-root":
             arguments += ["--root", selected]
         arguments += args
-        env = {key: value for key, value in os.environ.items() if not key.startswith("PG")}
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith("PG") and key not in
+               {"ARBOL_ROOT", "ARBOL_CHAT", "ARBOL_EXCHANGE_RUNTIME_DIR", "ARBOL_EXCHANGE_BIN_DIR"}}
         env["HOME"] = str(self.identity.home)
         env["PATH"] = str(self.identity.bin_dir) + os.pathsep + env.get("PATH", "/usr/bin:/bin")
         output = tempfile.TemporaryFile(mode="w+b")
