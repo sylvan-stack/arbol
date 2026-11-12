@@ -175,7 +175,9 @@ class Chats:
         self.chat_view.invalidate({"chat": chat} if chat is not None else None)
 
     def failed_refresh(self, view: View, params: Params, error: Refused) -> None:
-        preserve = self.database.away or error.code == "timeout"
+        preserve = self.database.away or error.code in {
+            "timeout", "maintenance", "schema_incompatible", "schema_uninitialized", "database_unavailable"
+        }
         for sub in list(view.topic.listeners):
             if sub.params == params and (not preserve or not sub.ready):
                 sub.connection.end(sub, error)

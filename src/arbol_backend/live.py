@@ -291,7 +291,7 @@ class Live:
     def request_saved(self, chat: str, exchange: str) -> None:
         key = (chat, exchange)
         task = self.saved_tasks.get(key)
-        if (not self.chats.database.away and key not in self.saved_cache
+        if (self.chats.database.readable() and key not in self.saved_cache
                 and (task is None or task.done()) and time.monotonic() >= self.saved_at.get(key, 0)):
             self.saved_at[key] = time.monotonic() + 0.25
             self.saved_tasks[key] = self.task(self.observe_saved(chat, exchange))
@@ -424,7 +424,7 @@ class Live:
             chats = {sub.params["chat"] for sub in listeners}
             for chat in chats:
                 task = self.row_tasks.get(chat)
-                if (not self.chats.database.away and (task is None or task.done())
+                if (self.chats.database.readable() and (task is None or task.done())
                         and time.monotonic() >= self.row_at.get(chat, 0)):
                     ids = {id for id, record in self.records.items() if record.chat == chat}
                     ids |= {id for id, target in self.stopping.items() if target == chat}

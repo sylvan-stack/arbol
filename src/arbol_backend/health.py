@@ -70,6 +70,13 @@ class Health:
             self.recoveries.add(task)
             task.add_done_callback(self.recoveries.discard)
 
+    def maintenance_changed(self) -> None:
+        self.epoch += 1
+        if self.on_away:
+            self.on_away()
+        if self.database.readable():
+            self.resume()
+
     async def recover(self, epoch: int) -> None:
         try:
             if self.on_return and epoch == self.epoch and not self.database.away:

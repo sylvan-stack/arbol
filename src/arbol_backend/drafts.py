@@ -223,19 +223,25 @@ class Drafts:
             self.changed(key)
         return {"removed": True} if body == "" else {"revision": int(rows[0][0])}
 
-    async def accepted(self, exchange: str, chat: str) -> bool:
-        rows = await self.database.execute("SELECT chat_id FROM exchanges WHERE id=%s", [exchange])
-        if rows and str(rows[0][0]) != chat:
+    async def receipt(self, exchange: str, chat: str) -> Params | None:
+        rows = await self.database.execute(
+            "SELECT chat_id::text,number,trunk,build FROM exchanges WHERE id=%s", [exchange])
+        if not rows:
+            return None
+        saved_chat, number, trunk, build = rows[0]
+        if saved_chat != chat:
             raise Error("invalid_input")
-        return bool(rows)
+        return {"accepted": True, "duplicate": True, "exchange": exchange, "chat": chat,
+                "number": number, "trunk": trunk, "build": build}
 
-    async def mark(self, params: Params, *, repeated: bool = False) -> Params | None:
+    async def mark(self, params: Params, *, repeated: bool = False,
+                   small_call_route: dict[str, str] | None = None) -> Params | None:
         selected = params.get("draft")
         if selected is None:
             return None
         key = {"folder": selected["folder"]} if "folder" in selected else {"chat": params["chat"]}
         # A known acceptance must remain replayable after the original Draft is gone/newer.
-        if repeated or await self.accepted(params["exchange"], params["chat"]):
+        if repeated or await self.receipt(params["exchange"], params["chat"]):
             return None
         await self.chats.own_layout()
         request = {name: params[name] for name in ("chat", "route", "workingFolder")}
@@ -248,17 +254,21 @@ class Drafts:
                 raise Error("invalid_input")
         self.invalidate(key)
         try:
+            captured = {**request, **({"smallCallRoute": small_call_route} if small_call_route is not None else {})}
             rows = await self.database.execute(
-                "UPDATE drafts SET sent_as=%s,sent_request=%s "
-                f"WHERE {column(key)}=%s AND revision=%s AND text=%s "
-                "AND (sent_as IS NULL OR (sent_as=%s AND sent_request=%s)) RETURNING revision",
-                [params["exchange"], Jsonb(request), value(key), selected["revision"], params["message"],
-                 params["exchange"], Jsonb(request)])
+                "WITH prior AS (SELECT id,sent_as,sent_request FROM drafts "
+                f"WHERE {column(key)}=%s AND revision=%s AND text=%s FOR UPDATE) "
+                "UPDATE drafts d SET sent_as=%s,sent_request=CASE WHEN prior.sent_as IS NULL THEN %s "
+                "ELSE prior.sent_request END FROM prior WHERE d.id=prior.id AND "
+                "(prior.sent_as IS NULL OR (prior.sent_as=%s AND prior.sent_request-'smallCallRoute'=%s)) "
+                "RETURNING d.sent_request,prior.sent_as IS NOT NULL",
+                [value(key), selected["revision"], params["message"], params["exchange"],
+                 Jsonb(captured), params["exchange"], Jsonb(request)])
             if not rows:
                 raise Conflict(await self.current(key))
         finally:
             self.changed(key)
-        return {**key, "revision": selected["revision"], "request": request}
+        return {**key, "revision": selected["revision"], "request": rows[0][0], "previous": rows[0][1]}
 
     async def finish(self, params: Params, marked: Params | None, *, accepted: bool) -> None:
         if accepted:

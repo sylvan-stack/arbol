@@ -41,7 +41,7 @@ class Backend:
         self.identity = identity
         self.settings = settings(identity.settings)
         self.programs = Programs(identity)
-        self.database = Database(identity)
+        self.database = Database(identity, application=True)
         self.registry = Registry()
         self.workspace = Workspace(identity, self.settings, self.registry)
         self.installation = Installation(identity, self.database, self.registry)
@@ -82,29 +82,50 @@ class Backend:
     async def connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self.windows.add(writer)
         try:
-            await Connection(reader, writer, self.registry).run(self.installation.hello)
+            await Connection(reader, writer, self.registry).run(self.hello)
         finally:
             self.windows.discard(writer)
+
+    async def hello(self) -> dict[str, Any]:
+        if self.health.epoch == 0:
+            await self.health.probe()
+        return await self.installation.hello()
 
     async def initial_work(self) -> None:
         self.settling.start()
 
+    async def watch_maintenance(self) -> None:
+        before = self.installation.maintenance, self.database.maintenance_generation
+        state = self.database.observe_maintenance()
+        if before == (state, self.database.maintenance_generation):
+            return
+        self.installation.maintenance = state
+        self.installation.publish()
+        try:
+            if state == "normal":
+                await self.database.renew()
+                await self.health.probe()
+                self.dispatch.reopen()
+        finally:
+            self.health.maintenance_changed()
+
     async def monitor(self) -> None:
         while True:
-            await asyncio.sleep(4)
-            self.installation.publish()
             self.programs.reap()
             try:
+                await self.watch_maintenance()
                 if self.database.admission is not None:
                     await self.ticker.wake()  # ticks once the interval has passed, no faster (SGM-D30)
-            except Refused:
-                pass  # a Root without the Vigor tables, or a database away: the backend runs on without Vigor
+            except (Refused, OSError):
+                pass  # Health remains available while the installation cannot record Vigor.
+            await asyncio.sleep(4)
 
     async def run(self) -> int:
         loop = asyncio.get_running_loop()
         private_directory(self.identity.folder)
         lifetime = Lifetime(self.identity.folder)
         listening = lifetime.acquire()
+        self.installation.maintenance = self.database.observe_maintenance()
         server: asyncio.Server | None = None
         stdin_registered = False
         try:

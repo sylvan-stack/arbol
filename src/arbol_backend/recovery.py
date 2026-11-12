@@ -39,8 +39,7 @@ class Recovery:
             view.invalidate()  # An older in-flight SQL read cannot publish across an outage.
 
     def valid(self, epoch: int) -> bool:
-        return (not self.closed and not self.health.database.away
-                and self.health.database.schema.state == "ready" and self.health.epoch == epoch)
+        return not self.closed and self.health.database.readable() and self.health.epoch == epoch
 
     def settled(self) -> None:
         if not self.closed:

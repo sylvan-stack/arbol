@@ -145,6 +145,10 @@ class Dispatch:
             self.startup = asyncio.create_task(self.clean_startup())
             self.maintenance = asyncio.create_task(self.maintain())
 
+    def reopen(self) -> None:
+        if self.startup is not None and self.startup.done():
+            self.startup = asyncio.create_task(self.clean_startup())
+
     async def send(self, params: Params) -> Params:
         self.start()
         assert self.startup is not None
@@ -213,14 +217,28 @@ class Dispatch:
     async def dispatch(self, params: Params, entry: Entry) -> Params | Error:
         exchange = params["exchange"]
         try:
-            await self.drafts.accepted(exchange, params["chat"])
+            prior = await self.drafts.receipt(exchange, params["chat"])
+            if prior is not None:
+                result = self.result(prior, params)
+                entry.receipt, entry.reply_known = result, True
+                try:
+                    await self.drafts.finish(params, entry.marked, accepted=True)
+                except Refused:
+                    pass  # The durable acceptance remains authoritative.
+                return result
             if entry.marked is None:
-                entry.marked = await self.drafts.mark(params, repeated=entry.dispatched)
-            request = {name: params[name] for name in ("chat", "route", "workingFolder")}
+                entry.marked = await self.drafts.mark(params, repeated=entry.dispatched,
+                                                      small_call_route=self.settings.small_call_route)
+                if entry.marked is not None and entry.marked["previous"]:
+                    entry.uncertain = True  # An earlier backend might already have launched this UUID.
+            if entry.marked is None:
+                request = {name: params[name] for name in ("chat", "route", "workingFolder")}
+                if self.settings.small_call_route is not None:
+                    request["smallCallRoute"] = self.settings.small_call_route
+            else:
+                request = {key: value for key, value in entry.marked["request"].items() if key != "trunk"}
             if "message" in params:
                 request["message"] = params["message"]
-            if self.settings.small_call_route is not None:
-                request["smallCallRoute"] = self.settings.small_call_route
             deadline = time.monotonic() + self.total
             next_attempt = time.monotonic()
             while time.monotonic() < deadline:
@@ -236,7 +254,7 @@ class Dispatch:
                 try:
                     entry.request = self.files.write(exchange, request)
                 except Refused:
-                    if not entry.dispatched:
+                    if not entry.dispatched and not entry.uncertain:
                         await self.drafts.finish(params, entry.marked, accepted=False)
                         entry.marked = None
                     raise

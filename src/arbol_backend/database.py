@@ -10,7 +10,7 @@ import signal
 import tempfile
 import tomllib
 from collections.abc import AsyncIterator, Callable, Sequence
-from contextlib import AbstractContextManager, asynccontextmanager
+from contextlib import AbstractContextManager, ExitStack, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -84,7 +84,7 @@ WriteMode = Literal["normal", "controlled"]
 class Admission(Protocol):
     """The installation runtime implements both the observation and authoritative permit."""
 
-    def status(self) -> str: ...
+    def status(self) -> tuple[str, int | str | None]: ...
 
     def permit(self, mode: WriteMode) -> AbstractContextManager[None]: ...
 
@@ -249,10 +249,14 @@ class Session:
 
 
 class Database:
-    def __init__(self, identity: Identity, *, seconds: float = SECONDS, admission: Admission | None = None) -> None:
+    def __init__(self, identity: Identity, *, seconds: float = SECONDS,
+                 admission: Admission | None = None, application: bool = False) -> None:
         self.identity = identity
         self.seconds = seconds
         self.admission = admission
+        self.application = application
+        self.observed_maintenance = "unknown"
+        self.maintenance_generation: int | str | None = None
         self.parameters: dict[str, str] | None = None
         self.connections: set[AsyncConnection[tuple[Any, ...]]] = set()
         self.passfile: Path | None = None
@@ -263,11 +267,28 @@ class Database:
         self.on_failure: Callable[[str], None] | None = None
         self.on_connected: Callable[[], None] | None = None
 
+    def observe_maintenance(self) -> str:
+        try:
+            state, generation = self.admission.status() if self.admission is not None else ("unknown", None)
+        except (OSError, TypeError, ValueError, Refused):
+            state, generation = "unknown", None
+        self.observed_maintenance = state if state in ("normal", "draining", "exclusive") else "unknown"
+        self.maintenance_generation = generation if self.observed_maintenance != "unknown" else None
+        return self.observed_maintenance
+
+    def readable(self) -> bool:
+        return (self.schema.state == "ready" and not self.away
+                and (not self.application or self.observed_maintenance in ("normal", "draining")))
+
     @asynccontextmanager
     async def permit(self, mode: WriteMode = "normal") -> AsyncIterator[None]:
         if self.admission is None:
             raise Refused("maintenance", "The installation writer admission state is unknown.")
-        with self.admission.permit(mode):
+        with ExitStack() as stack:
+            try:
+                stack.enter_context(self.admission.permit(mode))
+            except (OSError, ValueError) as error:
+                raise Refused("maintenance", "The installation writer admission state is unknown.") from error
             yield
 
     async def renew(self) -> None:
@@ -330,6 +351,16 @@ class Database:
 
     @asynccontextmanager
     async def session(self, *, snapshot: bool = False, probe: bool = False) -> AsyncIterator[Session]:
+        if self.application and not probe:
+            # A controlled read lease allows saved reads during draining and excludes them at migration.
+            async with self.permit("controlled"), self.connection(snapshot=snapshot) as session:
+                yield session
+        else:
+            async with self.connection(snapshot=snapshot, probe=probe) as session:
+                yield session
+
+    @asynccontextmanager
+    async def connection(self, *, snapshot: bool = False, probe: bool = False) -> AsyncIterator[Session]:
         connection: AsyncConnection[tuple[Any, ...]] | None = None
         try:
             if self.away and not probe:
