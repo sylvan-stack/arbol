@@ -251,7 +251,7 @@ def capture_build(
             save_sources(Path(inventory["designCheckout"]), design, output / "design-source.tar")
     elif component == "arbol-app":
         # This legacy packager signs the App and embeds a separate renderer receipt instead of package-manifest.json.
-        app = folder / "Arbol.app"
+        app = folder / entry.parts[0]
         verified = subprocess.run(["/usr/bin/codesign", "--verify", "--strict", str(app)],
                                   capture_output=True, check=False, timeout=60)
         if verified.returncode:
