@@ -9,11 +9,11 @@ function target(value:Fields):OpenTarget|null{
 }
 export class Opening {
  pending=$state<OpenTarget|null>(null);busy=$state(false);problem=$state('');storageProblem=$state('');
- private root='';private epoch=0;private wanted=true;private enabled=false;private closed=false;private running?:Promise<boolean>;private unlisten:()=>void;
+ private contextId='';private epoch=0;private wanted=true;private enabled=false;private closed=false;private running?:Promise<boolean>;private unlisten:()=>void;
  constructor(private app:AppChannel,private gate:(done:Promise<void>)=>Promise<void>,private open:(target:OpenTarget)=>Promise<boolean>,private hold:(done:Promise<void>)=>void){this.unlisten=app.onopen(()=>{this.wanted=true;if(this.enabled)void this.start();});}
- private key(root=this.root){return 'elma.open.v1:'+root;}
- hello(root:string){if(root!==this.root){this.epoch++;this.root=root;this.pending=null;this.problem='';this.storageProblem='';try{const raw=sessionStorage.getItem(this.key());if(raw)this.pending=target(JSON.parse(raw));}catch{this.storageProblem='The open request cannot be retained across a page reload.';}}this.enabled=false;this.wanted=true;}
- private retain(root:string,value:OpenTarget|null){try{if(value)sessionStorage.setItem(this.key(root),JSON.stringify(value));else sessionStorage.removeItem(this.key(root));if(root===this.root)this.storageProblem='';}catch{if(root===this.root)this.storageProblem='The open request cannot be retained across a page reload.';}}
+ private key(contextId=this.contextId){return 'elma.open.v1:'+contextId;}
+ hello(contextId:string){if(contextId!==this.contextId){this.epoch++;this.contextId=contextId;this.pending=null;this.problem='';this.storageProblem='';try{const raw=sessionStorage.getItem(this.key());if(raw)this.pending=target(JSON.parse(raw));}catch{this.storageProblem='The open request cannot be retained across a page reload.';}}this.enabled=false;this.wanted=true;}
+ private retain(contextId:string,value:OpenTarget|null){try{if(value)sessionStorage.setItem(this.key(contextId),JSON.stringify(value));else sessionStorage.removeItem(this.key(contextId));if(contextId===this.contextId)this.storageProblem='';}catch{if(contextId===this.contextId)this.storageProblem='The open request cannot be retained across a page reload.';}}
  async start():Promise<boolean>{
   if(this.closed)return false;this.enabled=true;const epoch=this.epoch;
   while(this.running){const running=this.running,result=await running;if(this.closed||epoch!==this.epoch)return false;if(this.running===running)this.running=undefined;if(!this.wanted&&!this.pending)return result;}
@@ -21,22 +21,22 @@ export class Opening {
   const running=this.process(epoch);this.running=running;try{return await running;}finally{if(this.running===running)this.running=undefined;}
  }
  private async process(epoch:number){
-  const root=this.root;let opened=false,finish!:()=>void;const done=new Promise<void>(resolve=>finish=resolve);this.hold(done);this.busy=true;this.problem='';
+  const contextId=this.contextId;let opened=false,finish!:()=>void;const done=new Promise<void>(resolve=>finish=resolve);this.hold(done);this.busy=true;this.problem='';
   try{
    while(!this.closed&&epoch===this.epoch&&(this.pending||this.wanted)){
     await this.gate(done);if(this.closed||epoch!==this.epoch)return opened;
-    if(!this.pending){this.wanted=false;const value=target(await this.app.call('app.takeOpen'));if(value)this.retain(root,value);if(this.closed||epoch!==this.epoch)return opened;if(!value)continue;this.pending=value;}
+    if(!this.pending){this.wanted=false;const value=target(await this.app.call('app.takeOpen'));if(value)this.retain(contextId,value);if(this.closed||epoch!==this.epoch)return opened;if(!value)continue;this.pending=value;}
     // Text or the visible composition can change while the host answers.
     await this.gate(done);if(this.closed||epoch!==this.epoch)return opened;
     const captured=this.pending;if(!captured)continue;if(!await this.open(captured))throw new Error('The requested chat is not available. Retry opening it.');
-    if(this.closed||epoch!==this.epoch)return opened;if(this.pending===captured){this.pending=null;this.retain(root,null);}opened=true;
+    if(this.closed||epoch!==this.epoch)return opened;if(this.pending===captured){this.pending=null;this.retain(contextId,null);}opened=true;
    }
   }catch(error){if(!this.closed&&epoch===this.epoch)this.problem=error instanceof Refusal?describe(error.detail):error instanceof Error?error.message:'The open request could not be completed.';}
   finally{finish();if(epoch===this.epoch)this.busy=false;}
   return opened;
  }
- dismiss(){if(this.busy)return;this.pending=null;this.retain(this.root,null);this.problem='';if(this.wanted)void this.start();}
- retainResult(root:string,value:OpenTarget,message=''){this.retain(root,value);if(root===this.root){this.pending=value;this.problem=message;}}
+ dismiss(){if(this.busy)return;this.pending=null;this.retain(this.contextId,null);this.problem='';if(this.wanted)void this.start();}
+ retainResult(contextId:string,value:OpenTarget,message=''){this.retain(contextId,value);if(contextId===this.contextId){this.pending=value;this.problem=message;}}
  beforeReload(){if(this.pending&&this.storageProblem)throw new Error(this.storageProblem);}
  close(){this.closed=true;this.epoch++;this.unlisten();}
 }

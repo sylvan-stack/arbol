@@ -11,9 +11,9 @@ function readAppearance(data?: {theme?: unknown;uiScale?: unknown} | null): Appe
  };
 }
 
-export function readPreferences(root:string):Preferences {
+export function readPreferences(contextId:string):Preferences {
  const defaults:Preferences={repositoryChats:{},recentRepositories:[],recentChats:[],...readAppearance(),readingWidth:720,contentScale:1};
- try{const text=localStorage.getItem('arbol-elma:'+root);if(!text||text.length>131072)return defaults;const data=JSON.parse(text);if(!data||typeof data!=='object')return defaults;
+ try{const text=localStorage.getItem('arbol-elma:installation');if(!text||text.length>131072)return defaults;const data=JSON.parse(text);if(!data||typeof data!=='object')return defaults;
   if(uuid(data.lastChat))defaults.lastChat=data.lastChat;
   if(data.repositoryChats&&typeof data.repositoryChats==='object')for(const [key,value] of Object.entries(data.repositoryChats).slice(0,100))if(uuid(value))defaults.repositoryChats[key]=value;
   if(Array.isArray(data.recentRepositories))defaults.recentRepositories=data.recentRepositories.filter((v:unknown)=>typeof v==='string').slice(0,16);
@@ -23,19 +23,19 @@ export function readPreferences(root:string):Preferences {
   if(typeof data.contentScale==='number'&&Number.isFinite(data.contentScale))defaults.contentScale=Math.max(defaults.uiScale,Math.min(32/13.5,data.contentScale));
  }catch{/* A disabled/malformed convenience store cannot own the chat. */}return defaults;
 }
-export function savePreferences(root:string,value:Preferences){try{localStorage.setItem('arbol-elma:'+root,JSON.stringify(value));}catch{/* The live view remains usable with storage disabled. */}}
+export function savePreferences(contextId:string,value:Preferences){try{localStorage.setItem('arbol-elma:installation',JSON.stringify(value));}catch{/* The live view remains usable with storage disabled. */}}
 
-const seqoyaKey = (root: string) => 'arbol-seqoya:' + root;
+const seqoyaKey = (_contextId: string) => 'arbol-seqoya:installation';
 
-export function readSeqoyaAppearance(root?: string): Appearance {
+export function readSeqoyaAppearance(contextId?: string): Appearance {
  try {
-  const text = root && localStorage.getItem(seqoyaKey(root));
+  const text = contextId && localStorage.getItem(seqoyaKey(contextId));
   if (text && text.length <= 1024) return readAppearance(JSON.parse(text));
  } catch { /* Appearance is a local convenience. */ }
  return readAppearance();
 }
 
-export function saveSeqoyaAppearance(root: string, {theme, uiScale}: Appearance) {
- try { localStorage.setItem(seqoyaKey(root), JSON.stringify({theme, uiScale})); }
+export function saveSeqoyaAppearance(contextId: string, {theme, uiScale}: Appearance) {
+ try { localStorage.setItem(seqoyaKey(contextId), JSON.stringify({theme, uiScale})); }
  catch { /* Keep the live choice if storage is unavailable. */ }
 }

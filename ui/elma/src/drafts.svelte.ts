@@ -1,4 +1,4 @@
-/** One revision-fenced editor per Root/chat or Root/folder; backend Drafts are canonical. */
+/** One revision-fenced editor per installation/chat or installation/folder; backend Drafts are canonical. */
 import { Refusal, type Bridge, type Fields } from './bridge';
 import { parseWire, stringifyWire, sameRevision, validRevision, type Revision } from './wire-json';
 import { Pastes } from './pastes.svelte';
@@ -114,13 +114,13 @@ export class DraftEditor {
 }
 
 export class Drafts {
- private editors=new Map<string,DraftEditor>();private root='';private sends=new Set<Promise<unknown>>();current=$state<DraftEditor>();
- constructor(private bridge:Bridge,private onCanonical?:(root:string,editor:DraftEditor)=>void){}
- rootChanged(root:string){if(this.root&&root!==this.root){for(const editor of this.editors.values())editor.close();this.editors.clear();this.sends.clear();this.current=undefined;}this.root=root;}
- owner(root:string,scope:DraftScope){if(root!==this.root)throw new Error('The Draft belongs to a different Root.');const key=root+':'+JSON.stringify(scope);const editor=this.editors.get(key)??new DraftEditor(this.bridge,scope,'elma.unsaved.v1:'+key,value=>this.onCanonical?.(root,value));this.editors.set(key,editor);return editor;}
- select(root:string,scope:DraftScope){
-  this.rootChanged(root);
-  const next=this.owner(root,scope);
+ private editors=new Map<string,DraftEditor>();private contextId='';private sends=new Set<Promise<unknown>>();current=$state<DraftEditor>();
+ constructor(private bridge:Bridge,private onCanonical?:(contextId:string,editor:DraftEditor)=>void){}
+ contextChanged(contextId:string){if(this.contextId&&contextId!==this.contextId){for(const editor of this.editors.values())editor.close();this.editors.clear();this.sends.clear();this.current=undefined;}this.contextId=contextId;}
+ owner(contextId:string,scope:DraftScope){if(contextId!==this.contextId)throw new Error('The Draft belongs to a different installation.');const key=contextId+':'+JSON.stringify(scope);const editor=this.editors.get(key)??new DraftEditor(this.bridge,scope,'elma.unsaved.v1:'+key,value=>this.onCanonical?.(contextId,value));this.editors.set(key,editor);return editor;}
+ select(contextId:string,scope:DraftScope){
+  this.contextChanged(contextId);
+  const next=this.owner(contextId,scope);
   const previous=this.current;this.current=next;
   if(next!==previous)void previous?.flush().then(()=>this.prune());this.prune();
   return next;

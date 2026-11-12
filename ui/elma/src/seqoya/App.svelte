@@ -5,7 +5,6 @@
     canRefreshSubscriptionUsage, subscriptionKey, type SubscriptionActivity, type SubscriptionListing, type SubscriptionView, type UsageDestination,
   } from '../../design-system/src/sections/seqoya-subscriptions';
   import type { VigorRollup, VigorView } from '../../design-system/src/sections/seqoya-vigor';
-  import type { WorkspaceTrunkSelector } from '../../design-system/src/types';
   import { AppChannel } from '../app-channel';
   import { Bridge, Refusal } from '../bridge';
   import { readSeqoyaAppearance, saveSeqoyaAppearance } from '../preferences';
@@ -13,10 +12,8 @@
   import { withModelLabels } from './subscription-model-labels';
   import { rankVigor, retainAccounts, retainVigor } from './vigor-estimates';
 
-  let trunk = $state<string>();
-  let trunkSelector = $state<WorkspaceTrunkSelector>();
-  let connectionStatus = $state('Connecting to Root…');
-  let rootId = $state<string>();
+  let connectionStatus = $state('Connecting to Arbol…');
+  let ready = $state(false);
   let appearance = $state(readSeqoyaAppearance());
   let subscriptions = $state<SubscriptionView>({ connected: false });
   let vigor = $state<VigorView>({});
@@ -71,26 +68,17 @@
     let listRequest: Promise<void> | undefined;
     const isCurrent = (requestedOn: number) => active && requestedOn === connection;
     const bridge = new Bridge({
-      onhello: (root) => {
+      onhello: () => {
         connection++;
         listRequest = undefined;
-        subscriptions = {
-          connected: true,
-          listing: rootId === root.root ? subscriptions.listing : undefined,
-        };
-        if (rootId !== root.root) {
+        subscriptions = { connected: true, listing: subscriptions.listing };
+        vigor = { ...vigor, loading: false };
+        if (!ready) {
           attemptedBoundaries.clear();
-          vigorAccounts = undefined;
-          vigor = {};
-          evidence = undefined;
-          evidenceError = undefined;
-          rootId = root.root;
-          appearance = readSeqoyaAppearance(rootId);
+          ready = true;
+          appearance = readSeqoyaAppearance('installation');
         }
         if (activeTab === 'Subscriptions' || activeTab === 'Vigor') refreshSubscriptions();
-        void app.currentTrunk().then((current) => {
-          if (active && trunk === undefined) trunk = current;
-        }).catch(() => { /* The selector reports its own errors. */ });
       },
       onstate: (state) => {
         connectionStatus = state === 'Connected' ? '' : state;
@@ -118,8 +106,8 @@
             return {
               ...subscription,
               activityError: error instanceof Refusal && error.detail.code === 'unknown_method'
-                ? 'This Root’s backend needs an update to show account activity.'
-                : 'Could not read account activity for this Root.',
+                ? 'The backend needs an update to show account activity.'
+                : 'Could not read account activity for this installation.',
             };
           }
         }));
@@ -149,7 +137,7 @@
           loading: false,
           error: error instanceof Refusal
             ? error.detail.code === 'unknown_method'
-              ? 'This Root’s backend needs an update to list subscriptions.'
+              ? 'The backend needs an update to list subscriptions.'
               : error.message
             : 'The backend did not return a readable account list.',
         };
@@ -170,12 +158,12 @@
     readSubscriptions = reloadList;
 
     readVigor = async () => {
-      if (!active || vigor.loading || !rootId) return;
-      const requestedRoot = rootId;
+      if (!active || vigor.loading || !subscriptions.connected) return;
+      const requestedOn = connection;
       vigor = { ...vigor, loading: true, error: undefined };
       try {
         const reply = await app.call('app.readVigor');
-        if (!active || rootId !== requestedRoot) return;
+        if (!isCurrent(requestedOn)) return;
         if (typeof reply.moment !== 'string' || !Array.isArray(reply.subscriptions)
           || !reply.failures || typeof reply.failures !== 'object' || Array.isArray(reply.failures)
           || (reply.headline !== null && (!reply.headline || typeof reply.headline !== 'object'))) {
@@ -187,7 +175,7 @@
         vigor = { rollup: retainVigor(reply as unknown as VigorRollup, vigor.rollup) };
         refreshPassedWindows();
       } catch (error) {
-        if (!active || rootId !== requestedRoot) return;
+        if (!isCurrent(requestedOn)) return;
         vigor = {
           ...vigor,
           loading: false,
@@ -255,6 +243,9 @@
     openUsagePage = async (destination, driver, subscription) => {
       const key = subscriptionKey(driver, subscription);
       const requestedOn = connection;
+      const account = subscriptions.listing?.drivers.find((entry) => entry.driver === driver)
+        ?.subscriptions?.find((row) => row.id === subscription);
+      if (!account) return;
       subscriptions = {
         ...subscriptions, usageLinkErrors: { ...subscriptions.usageLinkErrors, [key]: undefined },
       };
@@ -262,7 +253,9 @@
         if (destination === 'chatgpt') await app.call('app.openSubscriptionUsage', { driver, subscription });
         else await app.call('app.openLink', { url: 'https://platform.xiaomimimo.com/console/balance' });
       } catch (error) {
-        if (isCurrent(requestedOn)) subscriptions = {
+        const current = subscriptions.listing?.drivers.find((entry) => entry.driver === driver)
+          ?.subscriptions?.find((row) => row.id === subscription);
+        if (isCurrent(requestedOn) && current?.createdAt === account?.createdAt && current?.family === account?.family) subscriptions = {
           ...subscriptions,
           usageLinkErrors: {
             ...subscriptions.usageLinkErrors,
@@ -285,9 +278,9 @@
   });
 </script>
 
-<SeqoyaLab fitted {trunk} {trunkSelector} {connectionStatus}
+<SeqoyaLab fitted {connectionStatus}
   subscriptions={subscriptionView} vigor={vigorView} onTabChange={changeTab}
   onRefreshSubscriptions={refreshSubscriptions} onRefreshVigor={refreshSubscriptions}
   onRefreshUsage={refreshUsage} onOpenUsage={openUsage}
-  appearanceReady={rootId !== undefined} bind:theme={appearance.theme} bind:uiScale={appearance.uiScale}
-  onAppearanceChange={() => { if (rootId !== undefined) saveSeqoyaAppearance(rootId, appearance); }} />
+  appearanceReady={ready} bind:theme={appearance.theme} bind:uiScale={appearance.uiScale}
+  onAppearanceChange={() => { if (ready) saveSeqoyaAppearance('installation', appearance); }} />

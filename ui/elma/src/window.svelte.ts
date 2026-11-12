@@ -1,4 +1,4 @@
-import { Bridge, Refusal, describe, type BridgeError, type Fields, type RootInfo } from './bridge';
+import { Bridge, Refusal, describe, type BridgeError, type Fields, type InstallationInfo } from './bridge';
 import { AppChannel } from './app-channel';
 import { Drafts,type DraftEditor } from './drafts.svelte';
 import { Sending,type SendIntent,type SendOperation,type Accepted } from './sending.svelte';
@@ -13,17 +13,18 @@ import {signInCommand} from '../design-system/src/sections/elma-response';
 import { readPreferences, savePreferences, type Preferences } from './preferences';
 import type { ElmaExchange, ElmaRoute } from '../design-system/src/sections/elma-types';
 import type { ResponseBlock,ToolView,ToolDetails,QuestionView,Answer } from '../design-system/src/sections/elma-response';
-export interface ChatInfo {chat:string;title:string|null;firstMessage?:string;createdAt?:string;migration?:{fromRoot:string;fromChat:string;stale:boolean};exchangeCount:number;usage:{inputTokens:number;outputTokens:number}}
+export interface ChatInfo {chat:string;title:string|null;firstMessage?:string;createdAt?:string;exchangeCount:number;usage:{inputTokens:number;outputTokens:number}}
 export interface Repository {name:string;folder:string;route:ElmaRoute}
-interface RenameEditor {root:string;chat:string;generation:number;value:string;busy:boolean;problem:string}
-interface ArchiveIntent {root:string;chat:string;generation:number;folder:string;phase:'confirm'|'preparing'|'stopping'|'marking'}
+interface RenameEditor {contextId:string;chat:string;generation:number;value:string;busy:boolean;problem:string}
+interface ArchiveIntent {contextId:string;chat:string;generation:number;folder:string;phase:'confirm'|'preparing'|'stopping'|'marking'}
 interface PendingMessage {intent:SendIntent;editor:DraftEditor;generation:number;exchange:string}
 interface ChatSnapshot {kind:string;chat:ChatInfo;exchanges:ElmaExchange[];more:boolean;settings:{route?:ElmaRoute;workingFolder?:string};marks:{ongoing:boolean;archivedAt?:string};draft:unknown}
 export class ElmaWindow {
- private accountsVisible=()=>{if(document.visibilityState==='visible'&&this.root.root)void this.routing.refresh(this.root.root);};
+ private accountsVisible=()=>{if(document.visibilityState==='visible'&&this.contextId)void this.routing.refresh(this.contextId);};
  private live=new Map<string,LiveExchange>();private revision=$state(0);snapshotRevision=$state(0);openTools=$state<Record<string,boolean>>({});readonly readingPositions=new Map<string,{top:number;following:boolean}>();restoring=$state(false);
  now=$state(Date.now());private clock=setInterval(()=>{this.now=Date.now();},1000);
- root=$state<RootInfo>({root:'',name:'…',status:'working',current:false});
+ readonly contextId='installation';
+ installation=$state<InstallationInfo>();
  connection=$state('Connecting…');problem=$state('');info=$state<ChatInfo|null>(null);exchanges=$state<ElmaExchange[]>([]);
  selected=$state<string|null>(null);more=$state(false);pageBusy=$state(false);pageProblem=$state('');historyOpen=$state(false);settings=$state<ChatSnapshot['settings']>({});ongoing=$state(false);archived=$state(false);
  repositories=$state<Repository[]>([]);folder=$state('');defaultRoute=$state<ElmaRoute>({});private workspaceRoute:ElmaRoute={};routing:Routing;private settingsQueues=new Map<string,Promise<unknown>>();
@@ -33,17 +34,24 @@ export class ElmaWindow {
  rename=$state<RenameEditor|null>(null);actionNotice=$state('');actionProblem=$state('');mutations:Mutations;private titleObservation=0;private marksObservation=0;
  quickOpen=$state(false);archive=$state<ArchiveIntent|null>(null);private stateWaiters=new Set<()=>void>();
  latestOpen=$state(false);latestProblem=$state('');latestBusy=$state(false);chats:Chats;opening:Opening;attention:Attention;private chatProblem='';
- reimportBusy=$state(false);private reimportContext='';rootNames=$state<{root:string;name:string}[]>([]);rootNamesProblem=$state('');private namesRead?:{root:string;promise:Promise<void>};
  composerOpen=$state(false);sendWait=$state('');stopping=$state<string[]>([]);sending:Sending;stopConfirmation=$state<PendingMessage|null>(null);private stopQueue?:PendingMessage&{finish:()=>void};private previousSelection=new Map<string,string|null>();private replacements=new Map<string,ElmaExchange>();private stopCalls=new Map<string,Promise<void>>();private answerSerial=0;private answerStates=$state<Record<string,{token:number;pending:boolean;problem:string;after:number}>>({});
- repositoryNotice=$state('');repositoryChange=$state<{root:string;chat:string;folder:string;generation:number}|null>(null);
+ repositoryNotice=$state('');repositoryChange=$state<{contextId:string;chat:string;folder:string;generation:number}|null>(null);
  private pageTicket=0;private generation=0;private settingsObservation=0;private chatSub?:{close:()=>void;retry:()=>void};private bootstrapGeneration=0;private closed=false;private cancelOpening?:()=>void;
- constructor(){this.bridge=new Bridge({build:__ARBOL_BUILD__,onstate:s=>{this.connection=s;if(s==='Reconnecting…'||s==='Connecting…'||s.includes('Bridge version')){this.sending?.offline();this.mutations?.offline();}},beforeReload:async()=>{await this.drafts.beforeReload();this.opening.beforeReload();},onhello:(root)=>{if(this.root.root&&this.root.root!==root.root){this.clear();this.trunk=undefined;this.rootNames=[];this.rootNamesProblem='';this.reimportBusy=false;this.folder='';this.stopping=[];this.stopCalls.clear();}this.drafts?.rootChanged(root.root);this.root=root;void this.readTrunk(root.root);this.sending?.hello(root.root);this.mutations?.hello(root.root);this.chats?.hello(root.root);this.opening?.hello(root.root);this.attention?.hello(root.root);this.preferences=readPreferences(root.root);void this.bootstrap();void this.loadAccounts();void this.loadRootNames();const rootId=root.root;setTimeout(()=>{if(this.root.root===rootId)for(const id of this.stopping)void this.stopExchange(id,true);},0);}});
+ constructor(){this.bridge=new Bridge({build:__ARBOL_BUILD__,onstate:s=>{this.connection=s;if(s==='Reconnecting…'||s==='Connecting…'||s.includes('Bridge version')){this.sending?.offline();this.mutations?.offline();}},beforeReload:async()=>{await this.drafts.beforeReload();this.opening.beforeReload();},onhello:(installation)=>{
+   this.installation=installation;
+   this.drafts?.contextChanged(this.contextId);
+   void this.readTrunk(this.contextId);
+   this.sending?.hello(this.contextId);this.mutations?.hello(this.contextId);this.chats?.hello(this.contextId);
+   this.opening?.hello(this.contextId);this.attention?.hello(this.contextId);
+   this.preferences=readPreferences(this.contextId);void this.bootstrap();void this.loadAccounts();
+   setTimeout(()=>{if(!this.closed)for(const id of this.stopping)void this.stopExchange(id,true);},0);
+  }});
   this.mutations=new Mutations(this.bridge,done=>this.drafts.holdSend(done));
   this.chats=new Chats(this.bridge);this.attention=new Attention(this.bridge);
-  this.drafts=new Drafts(this.bridge,(root,editor)=>this.sending?.marked(root,editor,this.drafts.current===editor));this.sending=new Sending(this.bridge,(root,scope)=>this.drafts.owner(root,scope),done=>this.drafts.holdSend(done),{provisional:op=>this.provisional(op),accepted:(op,result)=>this.accepted(op,result),refused:(op,error)=>this.refused(op,error)});this.routing=new Routing(this.bridge,(chat,route)=>this.saveSettings(chat,{route}));
-  this.opening=new Opening(this.app,async done=>{const root=this.root.root,editor=this.drafts.current;if(!editor)throw new Error('Wait for the workspace and Draft to be read.');await editor.waitReady();await this.drafts.settleCurrent(done);if(root!==this.root.root)throw new Error('The Root changed before opening the request.');},async target=>{if(target.chat){const opened=await this.openChat(target.chat);if(opened){this.latestOpen=false;this.historyOpen=false;this.quickOpen=false;}return opened;}this.newChat(target.folder!);return true;},done=>this.drafts.holdSend(done));
+  this.drafts=new Drafts(this.bridge,(contextId,editor)=>this.sending?.marked(contextId,editor,this.drafts.current===editor));this.sending=new Sending(this.bridge,(contextId,scope)=>this.drafts.owner(contextId,scope),done=>this.drafts.holdSend(done),{provisional:op=>this.provisional(op),accepted:(op,result)=>this.accepted(op,result),refused:(op,error)=>this.refused(op,error)});this.routing=new Routing(this.bridge,(chat,route)=>this.saveSettings(chat,{route}));
+  this.opening=new Opening(this.app,async done=>{const contextId=this.contextId,editor=this.drafts.current;if(!editor)throw new Error('Wait for the workspace and Draft to be read.');await editor.waitReady();await this.drafts.settleCurrent(done);if(contextId!==this.contextId)throw new Error('The window context changed before opening the request.');},async target=>{if(target.chat){const opened=await this.openChat(target.chat);if(opened){this.latestOpen=false;this.historyOpen=false;this.quickOpen=false;}return opened;}this.newChat(target.folder!);return true;},done=>this.drafts.holdSend(done));
   document.addEventListener('visibilitychange',this.accountsVisible);window.addEventListener('focus',this.accountsVisible);
-  this.bridge.subscribe('root',{},event=>{if(event.root)this.root=event.root as unknown as RootInfo;},e=>this.failure(e));
+  this.bridge.subscribe('installation',{},event=>{this.installation=event.installation as unknown as InstallationInfo;if(this.installation.database==='ready'&&this.installation.maintenance==='normal')void this.bootstrap();},e=>this.failure(e));
  }
  get exchange(){if(this.restoring)return undefined;return this.exchanges.find(e=>e.exchange===this.selected)??this.exchanges.at(-1);}
  get title(){return this.info?.title||Array.from((this.info?.firstMessage??'').split('\n')[0]).slice(0,80).join('')||'New Chat';}
@@ -54,39 +62,21 @@ export class ElmaWindow {
  get repository(){return this.repositories.find(r=>r.folder===(this.settings.workingFolder??this.exchange?.workingFolder??this.folder))?.name??(this.settings.workingFolder??this.exchange?.workingFolder??this.folder).split('/').filter(Boolean).at(-1)??'—';}
  get turn(){return this.info?this.info.exchangeCount-this.exchanges.filter(e=>e.number>(this.exchange?.number??Infinity)).length:0;}
  get working(){this.revision;return this.exchanges.some(e=>['open','accepting','running','stopping','ending','unsaved','gone'].includes(e.state));}
- savePreferences(){savePreferences(this.root.root,this.preferences);}
+ savePreferences(){savePreferences(this.contextId,this.preferences);}
  private forgetChat(chat:string){if(this.preferences.lastChat===chat)delete this.preferences.lastChat;for(const [repo,id]of Object.entries(this.preferences.repositoryChats))if(id===chat)delete this.preferences.repositoryChats[repo];this.preferences.recentChats=this.preferences.recentChats.filter(id=>id!==chat);this.savePreferences();}
  private rememberChat(){if(!this.info?.createdAt)return;if(this.archived){this.forgetChat(this.info.chat);return;}const chat=this.info.chat,repo=this.repositories.find(repo=>repo.folder===this.folder);this.preferences.lastChat=chat;if(repo)this.preferences.repositoryChats[repo.name]=chat;this.preferences.recentChats=[chat,...this.preferences.recentChats.filter(id=>id!==chat)].slice(0,100);this.savePreferences();}
  private failure(error?:BridgeError){if(error)this.problem=describe(error);}
  get metadataBusy(){return !!this.info&&this.mutations.forChat(this.info.chat).length>0;}
- sourceRootName(root:string){return root===this.root.root?this.root.name:this.rootNames.find(row=>row.root===root)?.name??root;}
- get staleMessage(){return this.info?.migration?.stale?'New messages in '+this.sourceRootName(this.info.migration.fromRoot):'';}
- get importBlocked(){return this.reimportBusy||this.opening.busy||!!this.opening.pending||!!this.archive||this.metadataBusy;}
- get latestRows(){return this.chats.ordered(this.info?.chat,this.preferences.recentChats).map(row=>({id:row.chat,label:chatTitle(row),detail:chatDetail(row,this.repositories,this.now)+(row.migration?.stale?' · New messages in '+this.sourceRootName(row.migration.fromRoot):''),...(row.migration?.stale?{action:{label:'Bring over again',disabled:this.importBlocked}}:{})}));}
- openLatest(){this.latestProblem='';this.latestOpen=true;void this.loadRootNames();}
- loadRootNames(){const root=this.root.root;if(this.namesRead?.root===root)return this.namesRead.promise;const promise=(async()=>{try{const value=await this.bridge.call<{roots:{root:RootInfo}[]}>('roots.list');if(root!==this.root.root||this.closed)return;if(!Array.isArray(value.roots))throw new Error('The Root names could not be read.');this.rootNames=value.roots.flatMap(row=>row.root&&typeof row.root.root==='string'&&typeof row.root.name==='string'?[{root:row.root.root,name:row.root.name}]:[]);this.rootNamesProblem='';}catch(error){if(root===this.root.root&&!this.closed)this.rootNamesProblem=error instanceof Refusal?describe(error.detail):'The source Root names could not be read.';}})();this.namesRead={root,promise};void promise.finally(()=>{if(this.namesRead?.promise===promise)this.namesRead=undefined;});return promise;}
- async chooseLatest(chat:string){if(this.latestBusy||!this.chats.rows.some(row=>row.chat===chat&&!row.archived))return;const root=this.root.root,generation=this.generation;this.latestBusy=true;this.latestProblem='';try{await this.drafts.settleCurrent();if(this.closed||root!==this.root.root||generation!==this.generation)return;if(!await this.openChat(chat))throw new Error('This chat is not available.');this.latestOpen=false;this.problem='';}catch(error){if(root===this.root.root&&this.latestOpen)this.latestProblem=error instanceof Refusal?describe(error.detail):error instanceof Error?error.message:'The chat could not be opened.';}finally{this.latestBusy=false;}}
- openQuick(){if(!this.info){this.actionNotice='Start a chat before using chat actions';return;}this.quickOpen=true;void this.loadRootNames();}
- quickAction(id:string){this.quickOpen=false;if(id==='rename')this.startRename();else if(id==='archive')this.startArchive();else if(id==='copy')void this.copySession();else if(id==='reimport'&&this.info)void this.bringOver(this.info.chat);}
- async bringOver(chat:string){
-  if(this.importBlocked)return;const root=this.root.root,generation=this.generation,migration=this.info?.chat===chat?this.info.migration:this.chats.rows.find(row=>row.chat===chat)?.migration;
-  if(!migration?.stale)return;this.reimportContext=this.root.root+':'+(this.info?.chat??this.folder);this.reimportBusy=true;this.actionNotice='';this.actionProblem='';this.latestProblem='';let submitted=false,finish!:()=>void;const done=new Promise<void>(resolve=>finish=resolve);this.drafts.holdSend(done);
-  try{
-   await this.drafts.settleCurrent(done);if(this.closed||root!==this.root.root||generation!==this.generation)return;
-   const current=this.info?.chat===chat?this.info.migration:this.chats.rows.find(row=>row.chat===chat)?.migration;if(!current?.stale||current.fromRoot!==migration.fromRoot||current.fromChat!==migration.fromChat)throw new Error('This copy changed. Check the chat list before bringing it over again.');
-   submitted=true;const value=await this.bridge.call<Fields>('chat.reimport',{chat});
-   if(!value||typeof value.chat!=='string'||!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value.chat)||value.previousChat!==chat||!['replaced','copied'].includes(String(value.action))||(value.action==='replaced')!==(value.chat===chat)||value.fromRoot!==migration.fromRoot||value.fromChat!==migration.fromChat)throw new Refusal({code:'no_answer',message:'The import receipt could not be verified.'});
-   if(root===this.root.root&&generation===this.generation){this.latestOpen=false;this.quickOpen=false;this.historyOpen=false;}
-   this.opening.retainResult(root,{chat:value.chat},generation===this.generation?'':'The import finished. Open the returned chat when ready.');finish();if(root!==this.root.root||generation!==this.generation)return;
-   await this.opening.start();if(root===this.root.root&&this.info?.chat===value.chat)this.actionNotice=value.action==='copied'?'Opened a new copy. The continued copy is kept.':'Chat updated from '+this.sourceRootName(migration.fromRoot);
-  }catch(error){if(root!==this.root.root||this.closed||generation!==this.generation)return;const uncertain=submitted&&error instanceof Refusal&&['disconnected','no_answer'].includes(error.detail.code);const message=uncertain?'The import may have finished. Check the chat list before trying again.':error instanceof Refusal?describe(error.detail):error instanceof Error?error.message:'The chat could not be brought over.';if(this.latestOpen)this.latestProblem=message;else this.actionProblem=message;if(uncertain)this.chats.retry();}
-  finally{finish();if(root===this.root.root){this.reimportBusy=false;this.reimportContext='';}}
- }
- async copySession(){const chat=this.info?.chat,root=this.root.root,generation=this.generation;if(!chat){this.actionNotice='Start a chat before copying its session ID';return;}try{await navigator.clipboard.writeText(chat);if(root===this.root.root&&generation===this.generation)this.actionNotice='Session ID copied';}catch{if(root===this.root.root&&generation===this.generation)this.actionProblem='The session ID could not be copied.';}}
- startArchive(){if(!this.info){this.actionNotice='Start a chat before archiving';return;}if(this.archive||this.metadataBusy)return;this.actionNotice='';this.actionProblem='';this.archive={root:this.root.root,chat:this.info.chat,generation:this.generation,folder:this.settings.workingFolder??this.exchange?.workingFolder??this.folder,phase:'confirm'};}
+ get latestRows(){return this.chats.ordered(this.info?.chat,this.preferences.recentChats).map(row=>({id:row.chat,label:chatTitle(row),detail:chatDetail(row,this.repositories,this.now)}));}
+ openLatest(){this.latestProblem='';this.latestOpen=true;}
+ async chooseLatest(chat:string){if(this.latestBusy||!this.chats.rows.some(row=>row.chat===chat&&!row.archived))return;const contextId=this.contextId,generation=this.generation;this.latestBusy=true;this.latestProblem='';try{await this.drafts.settleCurrent();if(this.closed||contextId!==this.contextId||generation!==this.generation)return;if(!await this.openChat(chat))throw new Error('This chat is not available.');this.latestOpen=false;this.problem='';}catch(error){if(contextId===this.contextId&&this.latestOpen)this.latestProblem=error instanceof Refusal?describe(error.detail):error instanceof Error?error.message:'The chat could not be opened.';}finally{this.latestBusy=false;}}
+ openQuick(){if(!this.info){this.actionNotice='Start a chat before using chat actions';return;}this.quickOpen=true;}
+ quickAction(id:string){this.quickOpen=false;if(id==='rename')this.startRename();else if(id==='archive')this.startArchive();else if(id==='copy')void this.copySession();}
+ async copySession(){const chat=this.info?.chat,contextId=this.contextId,generation=this.generation;if(!chat){this.actionNotice='Start a chat before copying its session ID';return;}try{await navigator.clipboard.writeText(chat);if(contextId===this.contextId&&generation===this.generation)this.actionNotice='Session ID copied';}catch{if(contextId===this.contextId&&generation===this.generation)this.actionProblem='The session ID could not be copied.';}}
+ startArchive(){if(!this.info){this.actionNotice='Start a chat before archiving';return;}if(this.archive||this.metadataBusy)return;this.actionNotice='';this.actionProblem='';this.archive={contextId:this.contextId,chat:this.info.chat,generation:this.generation,folder:this.settings.workingFolder??this.exchange?.workingFolder??this.folder,phase:'confirm'};}
  cancelArchive(){if(this.archive?.phase==='marking')return;this.archive=null;this.notifyState();}
  private notifyState(){for(const check of [...this.stateWaiters])check();}
- private archiveCurrent(intent:ArchiveIntent){return !this.closed&&this.archive===intent&&intent.root===this.root.root&&intent.chat===this.info?.chat&&intent.generation===this.generation;}
+ private archiveCurrent(intent:ArchiveIntent){return !this.closed&&this.archive===intent&&intent.contextId===this.contextId&&intent.chat===this.info?.chat&&intent.generation===this.generation;}
  private savedEnd(intent:ArchiveIntent,exchange:string){return new Promise<boolean>(resolve=>{const check=()=>{const row=this.exchanges.find(row=>row.exchange===exchange);if(!this.archiveCurrent(intent)||row&&['completed','failed','cancelled','interrupted'].includes(row.state)){this.stateWaiters.delete(check);resolve(this.archiveCurrent(intent));}};this.stateWaiters.add(check);check();});}
  async confirmArchive(){
   const intent=this.archive;if(!intent||intent.phase!=='confirm'||!this.archiveCurrent(intent))return;intent.phase='preparing';
@@ -99,7 +89,7 @@ export class ElmaWindow {
    if(!this.archiveCurrent(intent))return;if(this.working)throw new Error('Another response started. Confirm Archive again after it finishes.');
    await editor.flush();if(!this.archiveCurrent(intent))return;if(editor.dirty||editor.conflict||editor.recovery!==null)throw new Error('Save or resolve the Draft before archiving.');
    intent.phase='marking';await this.mutations.start('chat.mark',{chat:intent.chat,archived:true}).result;
-   if(intent.root!==this.root.root)return;
+   if(intent.contextId!==this.contextId)return;
    this.forgetChat(intent.chat);
    if(this.archiveCurrent(intent)){this.archive=null;this.newChat(intent.folder);this.actionNotice='Chat archived';}
   }catch(error){if(this.archiveCurrent(intent))this.actionProblem=error instanceof Refusal?describe(error.detail):error instanceof Error?error.message:'The chat could not be archived.';}
@@ -108,41 +98,41 @@ export class ElmaWindow {
  startRename(){
   if(!this.info?.exchangeCount||!this.info.createdAt){this.actionNotice='Start a chat before renaming';return;}
   if(this.metadataBusy||this.archive)return;
-  this.rename={root:this.root.root,chat:this.info.chat,generation:this.generation,value:this.info.title??'',busy:false,problem:''};
+  this.rename={contextId:this.contextId,chat:this.info.chat,generation:this.generation,value:this.info.title??'',busy:false,problem:''};
   this.actionNotice='';
  }
  cancelRename(){if(!this.rename?.busy)this.rename=null;}
  async saveRename(){
-  const edit=this.rename;if(!edit||edit.busy||edit.root!==this.root.root||edit.chat!==this.info?.chat||edit.generation!==this.generation)return;
+  const edit=this.rename;if(!edit||edit.busy||edit.contextId!==this.contextId||edit.chat!==this.info?.chat||edit.generation!==this.generation)return;
   const title=edit.value.trim()||null;
   if(title!==null&&(Array.from(title).length>240||title.includes('\0'))){edit.problem='Use at most 240 characters, without NUL.';return;}
   edit.busy=true;edit.problem='';const observed=this.titleObservation;
   try{
    const result=await this.mutations.start('chat.rename',{chat:edit.chat,title}).result;
-   if(edit.root!==this.root.root||edit.chat!==this.info?.chat||edit.generation!==this.generation)return;
+   if(edit.contextId!==this.contextId||edit.chat!==this.info?.chat||edit.generation!==this.generation)return;
    if(observed===this.titleObservation)this.info.title=result.title as string|null;
    if(this.rename===edit)this.rename=null;
   }catch(error){if(this.rename===edit)edit.problem=error instanceof Refusal?describe(error.detail):error instanceof Error?error.message:'The title could not be saved.';}
   finally{edit.busy=false;}
  }
  async toggleOngoing(){
-  const chat=this.info?.chat,root=this.root.root,generation=this.generation;if(!chat||this.metadataBusy||this.archive||this.composerBusy)return;
+  const chat=this.info?.chat,contextId=this.contextId,generation=this.generation;if(!chat||this.metadataBusy||this.archive||this.composerBusy)return;
   const observed=this.marksObservation;this.actionNotice='';this.actionProblem='';
   try{
    const result=await this.mutations.start('chat.mark',{chat,ongoing:!this.ongoing}).result;
-   if(root!==this.root.root||chat!==this.info?.chat||generation!==this.generation)return;
+   if(contextId!==this.contextId||chat!==this.info?.chat||generation!==this.generation)return;
    if(observed===this.marksObservation)this.ongoing=result.ongoing===true;
    this.actionNotice=this.ongoing?'Marked ongoing':'Cleared ongoing';
-  }catch(error){if(root===this.root.root&&chat===this.info?.chat&&generation===this.generation)this.actionProblem=error instanceof Refusal?describe(error.detail):error instanceof Error?error.message:'The ongoing mark could not be saved.';}
+  }catch(error){if(contextId===this.contextId&&chat===this.info?.chat&&generation===this.generation)this.actionProblem=error instanceof Refusal?describe(error.detail):error instanceof Error?error.message:'The ongoing mark could not be saved.';}
  }
 
- private async loadAccounts(){await this.routing.refresh(this.root.root);}
- private selectRoute(){if(this.root.root&&(this.info||this.folder))this.routing.select(this.root.root+':'+(this.info?.chat??this.folder),this.info?.chat,this.info?(this.settings.route??this.exchange?.route):undefined,[this.repositories.find(r=>r.folder===this.folder)?.route??{},this.workspaceRoute]);}
+ private async loadAccounts(){await this.routing.refresh(this.contextId);}
+ private selectRoute(){if(this.contextId&&(this.info||this.folder))this.routing.select(this.contextId+':'+(this.info?.chat??this.folder),this.info?.chat,this.info?(this.settings.route??this.exchange?.route):undefined,[this.repositories.find(r=>r.folder===this.folder)?.route??{},this.workspaceRoute]);}
  private async saveSettings(chat:string,change:{route?:ElmaRoute;workingFolder?:string},valid?:()=>boolean){
-  const root=this.root.root,key=root+':'+chat,previous=this.settingsQueues.get(key)??Promise.resolve();
+  const contextId=this.contextId,key=contextId+':'+chat,previous=this.settingsQueues.get(key)??Promise.resolve();
   let observed=-1;
-  const operation=previous.catch(()=>undefined).then(()=>{if(root!==this.root.root)throw new Refusal({code:'disconnected',message:'The Root changed before its settings could be saved.'});if(valid&&!valid())throw new Refusal({code:'changed',message:'The chat changed or is working. Choose the repository again after its turn finishes.'});observed=this.settingsObservation;return this.bridge.call('chat.settings',{chat,...change});});this.settingsQueues.set(key,operation);
-  try{await operation;if(this.root.root===root&&this.info?.chat===chat&&observed===this.settingsObservation)this.settings={...this.settings,...change};}
+  const operation=previous.catch(()=>undefined).then(()=>{if(contextId!==this.contextId)throw new Refusal({code:'disconnected',message:'The window context changed before its settings could be saved.'});if(valid&&!valid())throw new Refusal({code:'changed',message:'The chat changed or is working. Choose the repository again after its turn finishes.'});observed=this.settingsObservation;return this.bridge.call('chat.settings',{chat,...change});});this.settingsQueues.set(key,operation);
+  try{await operation;if(this.contextId===contextId&&this.info?.chat===chat&&observed===this.settingsObservation)this.settings={...this.settings,...change};}
   finally{if(this.settingsQueues.get(key)===operation)this.settingsQueues.delete(key);}
  }
  private async bootstrap(){
@@ -210,22 +200,22 @@ export class ElmaWindow {
  async loadTool(tool:ToolView):Promise<ToolDetails>{const exchange=this.exchange?.exchange;if(!exchange||tool.position===undefined)throw new Error('not_found: The tool call is unavailable.');try{return await this.bridge.call<ToolDetails>('toolCall.get',{exchange,position:tool.position});}catch(e){throw new Error(e instanceof Refusal?describe(e.detail):'The tool details could not be read.');}}
  async openLink(url:string){try{return await this.app.call('app.openLink',{url});}catch(e){throw new Error(e instanceof Refusal?describe(e.detail):'The link could not be opened.');}}
  get prompt(){const item=this.exchange?.items.find(item=>item.kind==='message'&&item.role==='user');return item?.kind==='message'?item.text:'';}
- private answerKey(exchange:string,id:string){return JSON.stringify([this.root.root,exchange,id]);}
+ private answerKey(exchange:string,id:string){return JSON.stringify([this.contextId,exchange,id]);}
  private settleAnswerReceipts(row:ElmaExchange){for(const q of this.live.get(row.exchange)?.questions??[]){const key=this.answerKey(row.exchange,q.id),state=this.answerStates[key];if(state&&(!q.open||Math.max(q.answerPosition??0,q.refusalPosition??0)>state.after))delete this.answerStates[key];}}
  async answer(question:QuestionView,answer:Answer){const row=this.exchange;if(!row||!question.open||!question.askId||this.complete)return;const key=this.answerKey(row.exchange,question.id);if(this.answerStates[key]?.pending)return;const token=++this.answerSerial;this.answerStates[key]={token,pending:true,problem:'',after:Math.max(question.answerPosition??0,question.refusalPosition??0)};const original=this.live.get(row.exchange)?.questions.find(q=>q.id===question.id);if(original)original.problem=undefined;
   try{await this.bridge.call('exchange.answer',{exchange:row.exchange,askId:question.askId,answer});}
   catch(e){if(this.answerStates[key]?.token===token)this.answerStates[key]={...this.answerStates[key],pending:false,problem:e instanceof Refusal?describe(e.detail):'The answer could not be sent.'};}
  }
- get composerBusy(){return this.reimportBusy&&this.reimportContext===this.root.root+':'+(this.info?.chat??this.folder)||!!this.archive&&this.archive.phase!=='confirm'||!!this.drafts.current?.pendingSend||!!(this.info&&this.sending.forChat(this.info.chat));}
+ get composerBusy(){return !!this.archive&&this.archive.phase!=='confirm'||!!this.drafts.current?.pendingSend||!!(this.info&&this.sending.forChat(this.info.chat));}
  get composerStatus(){return(this.info?this.sending.forChat(this.info.chat)?.status:undefined)||this.sendWait||this.drafts.current?.pastes.status||this.drafts.current?.status||'';}
  async recoverFailure(continueFrom=false){
-  const row=this.exchange,editor=this.drafts.current,chat=this.info?.chat,root=this.root.root,generation=this.generation;
+  const row=this.exchange,editor=this.drafts.current,chat=this.info?.chat,contextId=this.contextId,generation=this.generation;
   if(!row||!chat||!editor?.ready||!this.failureActions||this.failureBusy)return;
   editor.pendingSend=true;editor.sendProblem='';this.sendWait='Preparing failure recovery…';let transferred=false,finish!:()=>void;const preparing=new Promise<void>(resolve=>finish=resolve);this.drafts.holdSend(preparing);
   try{await this.routing.settle();if(this.routing.problem.startsWith('Route not saved:'))throw new Error(this.routing.problem);if(this.routing.busy||!this.routing.available)throw new Error('Choose a signed-in Subscription and model before sending.');await editor.flush();
-   if(this.closed||root!==this.root.root||generation!==this.generation||chat!==this.info?.chat||editor!==this.drafts.current||row.exchange!==this.exchange?.exchange||!this.failureActions||this.working)throw new Error('The failed response changed before recovery could start.');
+   if(this.closed||contextId!==this.contextId||generation!==this.generation||chat!==this.info?.chat||editor!==this.drafts.current||row.exchange!==this.exchange?.exchange||!this.failureActions||this.working)throw new Error('The failed response changed before recovery could start.');
    if(editor.dirty||editor.conflict||editor.recovery!==null)throw new Error('Save or resolve the Draft before continuing.');
-   const exchange=crypto.randomUUID(),common={version:1 as const,root,scope:{chat},chat,exchange,existing:true};
+   const exchange=crypto.randomUUID(),common={version:1 as const,contextId,scope:{chat},chat,exchange,existing:true};
    const intent:SendIntent=continueFrom?{...common,method:'chat.send',purpose:'continue',params:{chat,exchange,message:'proceed',route:{...this.route},workingFolder:this.settings.workingFolder??this.folder},number:(this.info?.exchangeCount??0)+1}:{...common,method:'exchange.sendAgain',params:{exchange:row.exchange,newExchange:exchange,route:{...this.route}},prompt:this.prompt,retryFolder:row.workingFolder,number:row.number};
    await this.dispatchWithTrunk(intent,editor,generation);transferred=true;
   }catch(e){editor.sendProblem='Not sent: '+(e instanceof Refusal?describe(e.detail):e instanceof Error?e.message:'Recovery could not start.');this.composerOpen=true;}
@@ -234,43 +224,43 @@ export class ElmaWindow {
  requestSend(){const editor=this.drafts.current;if(!editor?.ready||editor.pendingSend||this.composerBusy||!editor.text.trim())return;const generation=this.generation;editor.sendProblem='';editor.pastes.requestSend(()=>void this.prepareSend(editor,generation));}
  private async prepareSend(editor:DraftEditor,generation:number){
   if(this.closed||generation!==this.generation||editor!==this.drafts.current){editor.sendProblem='Not sent: the composition changed while pasted text was saved.';return;}
-  const root=this.root.root;editor.pendingSend=true;this.sendWait='Saving Draft before sending…';let transferred=false;
+  const contextId=this.contextId;editor.pendingSend=true;this.sendWait='Saving Draft before sending…';let transferred=false;
   try{await this.routing.settle();if(this.routing.problem.startsWith('Route not saved:'))throw new Error(this.routing.problem);if(this.routing.busy||!this.routing.available)throw new Error('Choose a signed-in Subscription and model before sending.');await editor.flush();
-   if(this.closed||root!==this.root.root||generation!==this.generation||editor!==this.drafts.current)throw new Error('The composition changed before the message was sent.');
+   if(this.closed||contextId!==this.contextId||generation!==this.generation||editor!==this.drafts.current)throw new Error('The composition changed before the message was sent.');
    if(!editor.ready||editor.dirty||editor.conflict||editor.recovery!==null||editor.revision===null)throw new Error('Save or resolve the Draft before sending.');
    const chat=this.info?.chat??crypto.randomUUID(),exchange=crypto.randomUUID(),workingFolder=this.settings.workingFolder??this.exchange?.workingFolder??this.folder;
-   const intent:SendIntent={version:1,root,scope:editor.scope,chat,exchange,method:'chat.send',params:{chat,exchange,message:editor.text,route:{...this.route},workingFolder,draft:{revision:editor.revision,...('folder' in editor.scope?{folder:editor.scope.folder}:{})}},number:(this.info?.exchangeCount??0)+1,existing:!!this.info};
+   const intent:SendIntent={version:1,contextId,scope:editor.scope,chat,exchange,method:'chat.send',params:{chat,exchange,message:editor.text,route:{...this.route},workingFolder,draft:{revision:editor.revision,...('folder' in editor.scope?{folder:editor.scope.folder}:{})}},number:(this.info?.exchangeCount??0)+1,existing:!!this.info};
    const working=this.exchanges.find(row=>!['completed','failed','cancelled','interrupted'].includes(row.state));
    if(working){this.stopConfirmation={intent,editor,generation,exchange:working.exchange};this.sendWait='';transferred=true;return;}
    await this.dispatchWithTrunk(intent,editor,generation);this.sendWait='';transferred=true;
   }catch(e){const message=e instanceof Error?e.message:'The message could not be sent.';editor.sendProblem=message.startsWith('Not sent:')?message:'Not sent: '+message;this.composerOpen=true;}
   finally{if(!transferred){editor.pendingSend=false;this.sendWait='';}}
  }
- private async readTrunk(root:string){
-  try{const trunk=await this.app.currentTrunk();if(!this.closed&&root===this.root.root&&this.trunk===undefined)this.trunk=trunk;}
+ private async readTrunk(contextId:string){
+  try{const trunk=await this.app.currentTrunk();if(!this.closed&&contextId===this.contextId&&this.trunk===undefined)this.trunk=trunk;}
   catch{/* The selector can still read the live catalogue and display an error. */}
  }
  private async dispatchWithTrunk(intent:SendIntent,editor:DraftEditor,generation:number){
   const trunk=await this.app.currentTrunk();
-  if(this.closed||intent.root!==this.root.root||generation!==this.generation||editor!==this.drafts.current)throw new Error('The composition changed before the message was sent.');
-  if(trunk!=='trivial'&&!this.bridge.supportsTrunkSelection)throw new Error('This Root’s backend needs an update to use the selected Trunk.');
+  if(this.closed||intent.contextId!==this.contextId||generation!==this.generation||editor!==this.drafts.current)throw new Error('The composition changed before the message was sent.');
+  if(trunk!=='trivial'&&!this.bridge.supportsTrunkSelection)throw new Error('The backend needs an update to use the selected Trunk.');
   this.sending.start({...intent,params:{...intent.params,...(trunk==='trivial'?{}:{trunk})}});
  }
  private provisionalRow(op:SendOperation,number=op.intent.number):ElmaExchange{return{exchange:op.intent.exchange,number,state:'accepting',route:op.intent.params.route as ElmaRoute,workingFolder:op.intent.retryFolder??(typeof op.intent.params.workingFolder==='string'?op.intent.params.workingFolder:this.folder),acceptedAt:'',items:[{position:0,kind:'message',role:'user',text:op.message}],runs:[]};}
  private provisional(op:SendOperation){
-  if(op.intent.root!==this.root.root)return;const same=this.info?.chat===op.intent.chat;
+  if(op.intent.contextId!==this.contextId)return;const same=this.info?.chat===op.intent.chat;
   this.previousSelection.set(op.intent.exchange,this.previousSelection.get(op.intent.exchange)??this.selected);
   if(!same){this.live.clear();this.info={chat:op.intent.chat,title:null,firstMessage:op.intent.existing?'':op.message,exchangeCount:op.intent.number,usage:{inputTokens:0,outputTokens:0}};this.exchanges=[];this.settings={route:op.intent.params.route as ElmaRoute,workingFolder:typeof op.intent.params.workingFolder==='string'?op.intent.params.workingFolder:undefined};}
   const present=this.exchanges.some(row=>row.exchange===op.intent.exchange);if(!present){const old=this.exchanges.find(row=>row.exchange===op.intent.params.exchange);if(op.intent.method==='exchange.sendAgain'&&old){this.replacements.set(op.intent.exchange,old);this.exchanges=this.exchanges.map(row=>row===old?this.provisionalRow(op):row);}else this.exchanges=[...this.exchanges,this.provisionalRow(op)];}if(!same||!present)this.selected=op.intent.exchange;
-  if(this.info)this.info.exchangeCount=Math.max(this.info.exchangeCount,op.intent.number);this.folder=this.settings.workingFolder??this.folder;this.drafts.select(this.root.root,op.intent.scope);this.sending.select(this.root.root,this.drafts.current);this.selectRoute();this.composerOpen=false;
+  if(this.info)this.info.exchangeCount=Math.max(this.info.exchangeCount,op.intent.number);this.folder=this.settings.workingFolder??this.folder;this.drafts.select(this.contextId,op.intent.scope);this.sending.select(this.contextId,this.drafts.current);this.selectRoute();this.composerOpen=false;
  }
  private async accepted(op:SendOperation,result:Accepted){
-  if(this.root.root!==op.intent.root)return;const visible=this.info?.chat===op.intent.chat;
-  if(visible){const row=this.exchanges.find(row=>row.exchange===op.intent.exchange);if(row)row.number=result.number;let opened=false;try{opened=await this.openChat(op.intent.chat,true);if(!opened)this.problem='The message was sent, but the chat is not available yet.';}catch(e){this.problem='The message was sent, but the chat could not be restored: '+(e instanceof Refusal?describe(e.detail):'read failed');}if(!opened&&this.root.root===op.intent.root&&this.info?.chat===op.intent.chat){this.drafts.select(this.root.root,{chat:op.intent.chat});this.sending.select(this.root.root,this.drafts.current);}}
+  if(this.contextId!==op.intent.contextId)return;const visible=this.info?.chat===op.intent.chat;
+  if(visible){const row=this.exchanges.find(row=>row.exchange===op.intent.exchange);if(row)row.number=result.number;let opened=false;try{opened=await this.openChat(op.intent.chat,true);if(!opened)this.problem='The message was sent, but the chat is not available yet.';}catch(e){this.problem='The message was sent, but the chat could not be restored: '+(e instanceof Refusal?describe(e.detail):'read failed');}if(!opened&&this.contextId===op.intent.contextId&&this.info?.chat===op.intent.chat){this.drafts.select(this.contextId,{chat:op.intent.chat});this.sending.select(this.contextId,this.drafts.current);}}
   this.previousSelection.delete(op.intent.exchange);this.replacements.delete(op.intent.exchange);
  }
  private async refused(op:SendOperation,error:BridgeError){
-  if(this.root.root!==op.intent.root)return;
+  if(this.contextId!==op.intent.contextId)return;
   if(error.code==='draft_conflict'&&Object.hasOwn(error,'draft')){try{op.editor.receiveDraft(error.draft);}catch{/* The retained message still needs its canonical subscription. */}}
   if(op.intent.method==='chat.send'&&op.intent.purpose!=='continue')op.editor.restoreMessage(op.message,(op.intent.params.draft as {revision:Revision}).revision);
   op.editor.sendProblem=error.code==='chat_busy'?'Another message of this chat is running':'Not sent: '+describe(error);
@@ -280,7 +270,7 @@ export class ElmaWindow {
   }this.previousSelection.delete(op.intent.exchange);this.replacements.delete(op.intent.exchange);
  }
  cancelStop(){const pending=this.stopConfirmation;this.stopConfirmation=null;if(pending)pending.editor.pendingSend=false;this.sendWait='';this.composerOpen=true;}
- async confirmStopSend(){const pending=this.stopConfirmation;this.stopConfirmation=null;if(!pending)return;if(pending.generation!==this.generation||pending.intent.root!==this.root.root||pending.intent.chat!==this.info?.chat){pending.editor.pendingSend=false;return;}
+ async confirmStopSend(){const pending=this.stopConfirmation;this.stopConfirmation=null;if(!pending)return;if(pending.generation!==this.generation||pending.intent.contextId!==this.contextId||pending.intent.chat!==this.info?.chat){pending.editor.pendingSend=false;return;}
   let finish!:()=>void;const done=new Promise<void>(resolve=>finish=resolve);this.stopQueue={...pending,finish};this.drafts.holdSend(done);this.sendWait='Waiting for the current response to be saved…';this.composerOpen=false;this.afterChatState();if(this.stopQueue)await this.stopExchange(pending.exchange);
  }
  private cancelQueued(){const pending=this.stopConfirmation;this.stopConfirmation=null;if(pending){pending.editor.pendingSend=false;pending.editor.sendProblem='The queued message is kept in its Draft.';}if(this.stopQueue){this.stopQueue.editor.pendingSend=false;this.stopQueue.editor.sendProblem='The queued message is kept in its Draft.';this.stopQueue.finish();this.stopQueue=undefined;}this.sendWait='';}
@@ -295,9 +285,9 @@ export class ElmaWindow {
  }
  stopCurrent(){const row=[...this.exchanges].reverse().find(value=>!['completed','failed','cancelled','interrupted'].includes(value.state));if(row)void this.stopExchange(row.exchange);}
  async stopExchange(exchange:string,retry=false):Promise<void>{
-  const root=this.root.root,previous=this.stopCalls.get(exchange);if(previous){await previous;if(retry&&root===this.root.root&&this.stopping.includes(exchange)){if(this.stopCalls.get(exchange)===previous)this.stopCalls.delete(exchange);await this.stopExchange(exchange,true);}return;}
+  const contextId=this.contextId,previous=this.stopCalls.get(exchange);if(previous){await previous;if(retry&&contextId===this.contextId&&this.stopping.includes(exchange)){if(this.stopCalls.get(exchange)===previous)this.stopCalls.delete(exchange);await this.stopExchange(exchange,true);}return;}
   if(this.stopping.includes(exchange)&&!retry)return;if(!this.stopping.includes(exchange))this.stopping=[...this.stopping,exchange];
-  const operation=(async()=>{try{await this.bridge.call('exchange.stop',{exchange});if(root===this.root.root)this.afterChatState();}catch(e){if(root!==this.root.root)return;if(e instanceof Refusal&&['disconnected','no_answer'].includes(e.detail.code))return;this.stopping=this.stopping.filter(id=>id!==exchange);this.problem='Could not stop: '+(e instanceof Refusal?describe(e.detail):'The request failed.');if(this.stopQueue?.exchange===exchange)this.cancelQueued();}})();this.stopCalls.set(exchange,operation);try{await operation;}finally{if(this.stopCalls.get(exchange)===operation)this.stopCalls.delete(exchange);}
+  const operation=(async()=>{try{await this.bridge.call('exchange.stop',{exchange});if(contextId===this.contextId)this.afterChatState();}catch(e){if(contextId!==this.contextId)return;if(e instanceof Refusal&&['disconnected','no_answer'].includes(e.detail.code))return;this.stopping=this.stopping.filter(id=>id!==exchange);this.problem='Could not stop: '+(e instanceof Refusal?describe(e.detail):'The request failed.');if(this.stopQueue?.exchange===exchange)this.cancelQueued();}})();this.stopCalls.set(exchange,operation);try{await operation;}finally{if(this.stopCalls.get(exchange)===operation)this.stopCalls.delete(exchange);}
  }
 
  private rememberRepository(folder:string){const repo=this.repositories.find(r=>r.folder===folder);if(!repo)return;this.preferences.recentRepositories=[repo.name,...this.preferences.recentRepositories.filter(name=>name!==repo.name)].slice(0,16);const recent=this.preferences.recentRepositories;this.repositories=[...this.repositories.slice(0,1),...this.repositories.slice(1).sort((a,b)=>{const ai=recent.indexOf(a.name),bi=recent.indexOf(b.name);return(ai<0?Infinity:ai)-(bi<0?Infinity:bi);})];this.savePreferences();}
@@ -310,17 +300,17 @@ export class ElmaWindow {
   if(!this.info){this.newChat(folder);return;}
   if(this.working){this.problem='Wait for the current turn to finish before changing Repo';return;}
   if(folder===(this.settings.workingFolder??this.exchange?.workingFolder??this.folder))return;
-  this.repositoryChange={root:this.root.root,chat:this.info.chat,folder,generation:this.generation};
+  this.repositoryChange={contextId:this.contextId,chat:this.info.chat,folder,generation:this.generation};
   if(!this.info.exchangeCount)void this.confirmRepository();
  }
  async confirmRepository(){
   const intent=this.repositoryChange;this.repositoryChange=null;if(!intent)return;
-  const current=()=>intent.root===this.root.root&&intent.chat===this.info?.chat&&intent.generation===this.generation;
+  const current=()=>intent.contextId===this.contextId&&intent.chat===this.info?.chat&&intent.generation===this.generation;
   if(!current())return;if(this.working){this.problem='Wait for the current turn to finish before changing Repo';return;}
   try{await this.saveSettings(intent.chat,{workingFolder:intent.folder},()=>current()&&!this.working);if(!current())return;this.folder=this.settings.workingFolder??intent.folder;this.rememberRepository(this.folder);this.selectRoute();this.repositoryNotice='Repo changed to '+this.repository;this.problem='';}
   catch(e){if(current())this.problem=e instanceof Refusal?describe(e.detail):'The repository could not be changed.';}
  }
- async pickOther(asNew=false){const generation=this.generation,root=this.root.root;try{const result=await this.app.call('app.pickFolder',{start:this.settings.workingFolder??this.folder});if(this.closed||generation!==this.generation||root!==this.root.root||typeof result.folder!=='string')return;if(asNew)this.newChat(result.folder);else this.chooseRepository(result.folder);}catch(e){if(generation===this.generation)this.problem=e instanceof Refusal?describe(e.detail):'The folder could not be picked.';}}
+ async pickOther(asNew=false){const generation=this.generation,contextId=this.contextId;try{const result=await this.app.call('app.pickFolder',{start:this.settings.workingFolder??this.folder});if(this.closed||generation!==this.generation||contextId!==this.contextId||typeof result.folder!=='string')return;if(asNew)this.newChat(result.folder);else this.chooseRepository(result.folder);}catch(e){if(generation===this.generation)this.problem=e instanceof Refusal?describe(e.detail):'The folder could not be picked.';}}
  get history(){return this.exchanges.map((exchange,i)=>{const item=exchange.items.find(item=>item.kind==='message'&&item.role==='user');return{id:exchange.exchange,number:(this.info?.exchangeCount??0)-(this.exchanges.length-1-i),message:item?.kind==='message'?item.text:''};});}
  selectExchange(id:string){if(this.exchanges.some(e=>e.exchange===id)){this.selected=id;this.historyOpen=false;}}
  async older(){if(this.pageBusy)return;const chosen=this.exchange?.exchange;if(!chosen)return;let index=this.exchanges.findIndex(e=>e.exchange===chosen);if(index===0&&this.more){await this.page();if(this.selected!==chosen)return;index=this.exchanges.findIndex(e=>e.exchange===chosen);}if(index>0)this.selected=this.exchanges[index-1].exchange;}
@@ -336,7 +326,7 @@ export class ElmaWindow {
   finally{if(ticket===this.pageTicket)this.pageBusy=false;}
  }
  private clear(){this.latestProblem='';this.latestOpen=false;this.quickOpen=false;this.archive=null;this.notifyState();this.rename=null;this.actionNotice='';this.actionProblem='';this.answerStates={};this.cancelQueued();this.repositoryChange=null;this.repositoryNotice='';this.restoring=false;this.live.clear();this.revision++;this.pageTicket++;this.pageBusy=false;this.pageProblem='';this.historyOpen=false;this.cancelOpening?.();this.chatSub?.close();this.chatSub=undefined;this.generation++;this.info=null;this.exchanges=[];this.selected=null;this.settings={};this.ongoing=false;this.archived=false;}
- private selectDraft(canonical=false){if(this.root.root&&(this.info||this.folder)){const pending=this.info?this.sending.forChat(this.info.chat):undefined;this.drafts.select(this.root.root,pending&&!canonical?pending.intent.scope:this.info?{chat:this.info.chat}:{folder:this.folder});this.sending.select(this.root.root,this.drafts.current);}}
+ private selectDraft(canonical=false){if(this.contextId&&(this.info||this.folder)){const pending=this.info?this.sending.forChat(this.info.chat):undefined;this.drafts.select(this.contextId,pending&&!canonical?pending.intent.scope:this.info?{chat:this.info.chat}:{folder:this.folder});this.sending.select(this.contextId,this.drafts.current);}}
 
  close(){document.removeEventListener('visibilitychange',this.accountsVisible);window.removeEventListener('focus',this.accountsVisible);clearInterval(this.clock);this.cancelOpening?.();this.closed=true;this.notifyState();this.bootstrapGeneration++;this.chatSub?.close();this.cancelQueued();this.sending.close();this.opening.close();this.attention.close();this.mutations.close();this.chats.close();this.drafts.close();this.routing.close();this.bridge.close();this.app.close();}
 }

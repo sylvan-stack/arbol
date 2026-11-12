@@ -7,10 +7,10 @@ const key=(route:ElmaRoute)=>route.driver&&route.subscription?route.driver+':'+r
 const effort=(model:Model|undefined)=>model?.defaultEffort??(model?.efforts?.includes('high')?'high':undefined);
 export class Routing {
  rows=$state<RouteRow[]>([]);accountProblems=$state<string[]>([]);accountBusy=$state(false);models=$state<Model[]>([]);busy=$state(false);saving=$state(false);problem=$state('');modelProblem=$state(false);
- private accountRefresh?:{root:string;promise:Promise<void>};
+ private accountRefresh?:{contextId:string;promise:Promise<void>};
  private accountFresh=false;
  private actual=$state<ElmaRoute>({});private chosen=$state<ElmaRoute|null>(null);
- private context='';private root='';private chat?:string;private defaults:ElmaRoute[]=[];private accountGeneration=0;private generation=0;private choice=0;private loaded=false;private closed=false;
+ private context='';private contextId='';private chat?:string;private defaults:ElmaRoute[]=[];private accountGeneration=0;private generation=0;private choice=0;private loaded=false;private closed=false;
  private catalogKey='';private catalogs=new Map<string,Promise<Model[]>>();private pending?:Promise<void>;
  constructor(private bridge:Bridge,private commit:(chat:string,route:ElmaRoute)=>Promise<unknown>){}
  get value(){return this.chosen??this.actual;}
@@ -28,9 +28,9 @@ export class Routing {
   if(!row||row.unavailable){this.models=[];this.busy=false;this.catalogKey='';this.problem=row?.unavailable?`${row.driver} · ${row.subscription}: ${row.unavailable}`:'No signed-in Subscription is available.';return;}
   if(current!==this.catalogKey)void this.loadModels();
  }
- refresh(root=this.root):Promise<void>{if(this.accountRefresh?.root===root)return this.accountRefresh.promise;const promise=this.readAccounts(root);this.accountRefresh={root,promise};void promise.finally(()=>{if(this.accountRefresh?.promise===promise)this.accountRefresh=undefined;});return promise;}
- private async readAccounts(root:string){
-  if(root!==this.root){this.root=root;this.loaded=false;this.rows=[];this.context='';this.generation++;this.chosen=null;this.actual={};this.models=[];this.busy=false;this.saving=false;}
+ refresh(contextId=this.contextId):Promise<void>{if(this.accountRefresh?.contextId===contextId)return this.accountRefresh.promise;const promise=this.readAccounts(contextId);this.accountRefresh={contextId,promise};void promise.finally(()=>{if(this.accountRefresh?.promise===promise)this.accountRefresh=undefined;});return promise;}
+ private async readAccounts(contextId:string){
+  if(contextId!==this.contextId){this.contextId=contextId;this.loaded=false;this.rows=[];this.context='';this.generation++;this.chosen=null;this.actual={};this.models=[];this.busy=false;this.saving=false;}
   const generation=++this.accountGeneration;this.catalogs.clear();this.catalogKey='';this.accountBusy=true;this.accountFresh=false;
   try{const data=await this.bridge.call<{drivers:{driver:string;subscriptions?:{id:string;state:string}[];error?:BridgeError}[]}>('accounts.list');
    if(this.closed||generation!==this.accountGeneration)return;
@@ -55,7 +55,7 @@ export class Routing {
   finally{if(generation===this.generation)this.busy=false;}
  }
  async choose(driver:string,subscription:string){
-  const choice=++this.choice,context=this.context,root=this.root;await this.refresh(root);if(this.closed||choice!==this.choice||context!==this.context||root!==this.root||!this.accountFresh)return;
+  const choice=++this.choice,context=this.context,contextId=this.contextId;await this.refresh(contextId);if(this.closed||choice!==this.choice||context!==this.context||contextId!==this.contextId||!this.accountFresh)return;
   const row=this.rows.find(r=>r.driver===driver&&r.subscription===subscription);if(!row||row.unavailable)return;
   this.chosen={driver,subscription};await this.loadModels();
   if(choice===this.choice&&context===this.context&&this.available)await this.save();

@@ -1,7 +1,33 @@
 /** BKD-1: one connection, independent calls and replaceable subscriptions. No content logs. */
 import {parseWire,stringifyWire} from './wire-json';
 export type Fields = Record<string, unknown>;
-export interface RootInfo {root:string;name:string;status:'preparing'|'working'|'failed';current:boolean;failed?:{at:string;reason:string}}
+export interface InstallationInfo {
+ database:'ready'|'unavailable'|'incompatible'|'uninitialized';
+ schema:{revision:number;compatibilityVersion:number}|null;
+ maintenance:'normal'|'draining'|'exclusive'|'unknown';
+}
+function installation(value:unknown):InstallationInfo|null {
+ if(!value||typeof value!=='object'||Array.isArray(value))return null;
+ const state=value as Fields;
+ if(!['ready','unavailable','incompatible','uninitialized'].includes(String(state.database))||!['normal','draining','exclusive','unknown'].includes(String(state.maintenance)))return null;
+ if(state.schema!==null){
+  if(!state.schema||typeof state.schema!=='object'||Array.isArray(state.schema))return null;
+  const pair=state.schema as Fields;
+  if(!Number.isSafeInteger(pair.revision)||Number(pair.revision)<1||!Number.isSafeInteger(pair.compatibilityVersion)||Number(pair.compatibilityVersion)<1)return null;
+ }
+ if(state.database==='ready'&&state.schema===null)return null;
+ return state as unknown as InstallationInfo;
+}
+export function installationStatus(state:InstallationInfo):string {
+ const notices:string[]=[];
+ if(state.database==='unavailable')notices.push('Database unavailable.');
+ if(state.database==='incompatible')notices.push('Database schema is incompatible with this backend.');
+ if(state.database==='uninitialized')notices.push('Database schema is not initialized.');
+ if(state.maintenance==='exclusive')notices.push('Maintenance: database upgrade in progress.');
+ if(state.maintenance==='draining')notices.push('Maintenance: accepted work is finishing.');
+ if(state.maintenance==='unknown')notices.push('Maintenance state is unavailable. Writes are blocked.');
+ return notices.join(' ')||'Connected';
+}
 export interface BridgeError {code:string;message:string;source?:string;[key:string]:unknown}
 export function describe(detail:BridgeError):string{return detail.code+': '+(detail.code==='unknown_method'?'This needs a newer Build. ':'')+detail.message;}
 export class Refusal extends Error { constructor(public detail:BridgeError){super(detail.message);this.name=detail.code;} }
@@ -9,14 +35,14 @@ interface Pending {resolve:(value:unknown)=>void;reject:(error:Refusal)=>void;ti
 interface Subscription {id:string;topic:string;params:Fields;seq:number;active:boolean;failure?:string;receive:(event:Fields)=>void;ended:(error?:BridgeError)=>void}
 export interface BridgeOptions {
  // Only legacy renderers packaged by a backend specify its Build.
- build?:string; onstate?:(state:string)=>void; onhello?:(root:RootInfo,build:string)=>void;
+ build?:string; onstate?:(state:string)=>void; onhello?:(installation:InstallationInfo,build:string)=>void;
  beforeReload?:()=>Promise<void>; reload?:(url:string)=>void;
  /** Test seam for the exact production deadline, not a different protocol. */
  deadline?:(method:string)=>number;
 }
 const limit=16*1024*1024;
 const error=(code:string,message:string)=>new Refusal({code,message});
-export function deadline(method:string):number {return ['chat.send','exchange.sendAgain'].includes(method)?150000:['exchange.stop','chat.reimport'].includes(method)?120000:30000;}
+export function deadline(method:string):number {return ['chat.send','exchange.sendAgain'].includes(method)?150000:method==='exchange.stop'?120000:30000;}
 export class Bridge {
  private serial=0;private online=false;private stopped=false;private versionOk=true;private trunkSelection=false;
  get supportsTrunkSelection(){return this.trunkSelection;}
@@ -45,9 +71,10 @@ export class Bridge {
   if(native)native.postMessage(text);else if(this.socket?.readyState===WebSocket.OPEN)this.socket.send(text);else throw error('disconnected','The backend is disconnected.');
  }
  call<T=unknown>(method:string,params:Fields={}):Promise<T>{
-  if(!this.online||!this.versionOk)return Promise.reject(error('disconnected','The backend is disconnected.'));
+  if(!this.versionOk)return Promise.reject(error('bridge_incompatible','This window cannot work with this Bridge version.'));
+  if(!this.online)return Promise.reject(error('disconnected','The backend is disconnected.'));
   if((method==='chat.send'||method==='exchange.sendAgain')&&params.trunk!==undefined&&params.trunk!=='trivial'&&!this.trunkSelection){
-   return Promise.reject(error('trunk_selection_unavailable','This Root’s backend needs an update to use the selected Trunk.'));
+   return Promise.reject(error('trunk_selection_unavailable','The backend needs an update to use the selected Trunk.'));
   }
   const id=this.id();return new Promise<T>((resolve,reject)=>{
    const timer=setTimeout(()=>{this.pending.delete(id);reject(error('no_answer','The backend did not answer in time.'));},this.options.deadline?.(method)??deadline(method));
@@ -77,9 +104,12 @@ export class Bridge {
   let m:Fields;try{const value:unknown=parseWire(text);if(!value||typeof value!=='object'||Array.isArray(value))return;m=value as Fields;}catch{return;}
   if(m.type==='lost'){this.lost();return;}
   if(m.type==='hello'){
-   this.lost(false);if(m.bridge!==1){this.versionOk=false;this.state('This window cannot work with this Bridge version.');return;}
-   if(!m.root||typeof m.root!=='object'||typeof m.build!=='string')return;
-   this.versionOk=true;this.online=true;this.trunkSelection=m.trunkSelection===true;this.backendBuild=m.build;this.state('Connected');this.options.onhello?.(m.root as unknown as RootInfo,m.build);
+   this.lost(false);
+   if(m.bridge!==2){this.versionOk=false;this.state('This window cannot work with this Bridge version.');return;}
+   const info=installation(m.installation);
+   if(!info||typeof m.build!=='string'){this.versionOk=false;this.state('The backend sent an invalid installation greeting.');return;}
+   this.versionOk=true;this.online=true;this.trunkSelection=m.trunkSelection===true;this.backendBuild=m.build;
+   this.state(installationStatus(info));this.options.onhello?.(info,m.build);
    for(const sub of this.topics)if(!sub.active)this.start(sub);
    void this.reloadFor(m.build);return;
   }
@@ -92,7 +122,16 @@ export class Bridge {
   if(m.type==='ended'){sub.active=false;sub.failure=(m.error as BridgeError|undefined)?.code;sub.ended(m.error as BridgeError|undefined);return;}
   if(m.type!=='event'||!Number.isSafeInteger(m.seq)||!m.event||typeof m.event!=='object')return;
   if(m.seq!==sub.seq+1){this.start(sub);return;}sub.seq=m.seq as number;
-  const event=m.event as Fields;sub.receive(event);
+  const event=m.event as Fields;
+  if(sub.topic==='installation'){
+   const info=installation(event.installation);
+   if(!info){this.state('The backend sent invalid installation state.');return;}
+   this.state(installationStatus(info));
+   if(info.database==='ready'&&['normal','draining'].includes(info.maintenance)){
+    for(const failed of this.topics)if(!failed.active&&['database_unavailable','schema_incompatible','schema_uninitialized','maintenance'].includes(failed.failure??''))this.start(failed);
+   }
+  }
+  sub.receive(event);
   if(sub.topic==='attention'&&(event.kind==='closed'&&event.id==='database_unreachable'||event.kind==='snapshot'&&Array.isArray(event.items)&&!event.items.some(item=>item&&typeof item==='object'&&(item as Fields).id==='database_unreachable')))for(const failed of this.topics)if(!failed.active&&failed.failure==='database_unavailable')this.start(failed);
  }
  private async reloadFor(build:string){

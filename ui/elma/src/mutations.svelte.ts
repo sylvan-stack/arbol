@@ -13,37 +13,37 @@ export class MetadataOperation {
  resolve!:(value:Fields)=>void;
  reject!:(error:Refusal)=>void;
  finish!:()=>void;
- constructor(readonly root:string,readonly method:MetadataMethod,readonly params:Fields){
+ constructor(readonly contextId:string,readonly method:MetadataMethod,readonly params:Fields){
   this.result=new Promise((resolve,reject)=>{this.resolve=resolve;this.reject=reject;});
   this.done=new Promise(resolve=>this.finish=resolve);
  }
 }
 
 export class Mutations {
- private root='';
+ private contextId='';
  private online=false;
  private closed=false;
  private helloSerial=0;
  private operations=new Map<string,MetadataOperation>();
  private revision=$state(0);
  constructor(private bridge:Bridge,private hold:(done:Promise<void>)=>void){}
- private key(root:string,method:MetadataMethod,chat:unknown){return JSON.stringify([root,method,chat]);}
- forChat(chat:string){this.revision;return [...this.operations.values()].filter(op=>op.root===this.root&&op.params.chat===chat);}
+ private key(contextId:string,method:MetadataMethod,chat:unknown){return JSON.stringify([contextId,method,chat]);}
+ forChat(chat:string){this.revision;return [...this.operations.values()].filter(op=>op.contextId===this.contextId&&op.params.chat===chat);}
  start(method:MetadataMethod,params:Fields){
-  if(this.closed||!this.root)throw new Error('The chat is not connected to a Root.');
-  const key=this.key(this.root,method,params.chat),existing=this.operations.get(key);
+  if(this.closed||!this.contextId)throw new Error('The chat is not connected to the installation.');
+  const key=this.key(this.contextId,method,params.chat),existing=this.operations.get(key);
   if(existing){if(JSON.stringify(existing.params)!==JSON.stringify(params))throw new Error('Wait for the previous action to finish.');return existing;}
-  const op=new MetadataOperation(this.root,method,{...params});
+  const op=new MetadataOperation(this.contextId,method,{...params});
   this.operations.set(key,op);this.revision++;this.hold(op.done);void this.run(op);return op;
  }
- hello(root:string){
-  if(this.root&&root!==this.root)for(const op of [...this.operations.values()])this.complete(op,new Refusal({code:'context_changed',message:'The Root changed before the action’s outcome was known.'}));
-  this.root=root;this.online=true;this.helloSerial++;
+ hello(contextId:string){
+  if(this.contextId&&contextId!==this.contextId)for(const op of [...this.operations.values()])this.complete(op,new Refusal({code:'context_changed',message:'The installation context changed before the action’s outcome was known.'}));
+  this.contextId=contextId;this.online=true;this.helloSerial++;
   void Promise.resolve().then(()=>{for(const op of this.operations.values())void this.run(op);});
  }
  offline(){this.online=false;}
  private async run(op:MetadataOperation){
-  if(this.closed||!this.online||!op.pending||op.running||op.root!==this.root)return;
+  if(this.closed||!this.online||!op.pending||op.running||op.contextId!==this.contextId)return;
   clearTimeout(op.timer);op.running=true;op.status=op.attempts?'Waiting for the action receipt…':'Saving…';op.attempts++;
   const hello=this.helloSerial;
   try{
@@ -66,7 +66,7 @@ export class Mutations {
  }
  private complete(op:MetadataOperation,error?:Refusal,value:Fields={}){
   if(!op.pending)return;clearTimeout(op.timer);op.pending=false;
-  this.operations.delete(this.key(op.root,op.method,op.params.chat));this.revision++;
+  this.operations.delete(this.key(op.contextId,op.method,op.params.chat));this.revision++;
   if(error)op.reject(error);else op.resolve(value);op.finish();
  }
  close(){this.closed=true;for(const op of [...this.operations.values()])this.complete(op,new Refusal({code:'disconnected',message:'The window closed before the action finished.'}));}

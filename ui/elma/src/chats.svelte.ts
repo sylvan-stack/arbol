@@ -1,14 +1,14 @@
 /** Bounded canonical summaries. Local preferences contain UUID ordering only. */
 import {describe,type Bridge,type Fields} from './bridge';
 import type {ElmaRoute} from '../design-system/src/sections/elma-types';
-export interface ChatSummary {chat:string;title:string|null;firstMessage?:string;activityAt?:string;last?:{exchange:string;number:number;state:string};hasDraft:boolean;workingFolder?:string;route?:ElmaRoute;ongoing:boolean;migration?:{fromRoot:string;fromChat:string;stale:boolean};archived?:true}
+export interface ChatSummary {chat:string;title:string|null;firstMessage?:string;activityAt?:string;last?:{exchange:string;number:number;state:string};hasDraft:boolean;workingFolder?:string;route?:ElmaRoute;ongoing:boolean;archived?:true}
 export const chatTitle=(row:Pick<ChatSummary,'title'|'firstMessage'>)=>row.title||Array.from((row.firstMessage??'').split('\n')[0]).slice(0,80).join('')||'Untitled chat';
 const activity=(row:ChatSummary)=>Number.isFinite(Date.parse(row.activityAt??''))?Date.parse(row.activityAt!):0;
 const newest=(a:ChatSummary,b:ChatSummary)=>activity(b)-activity(a)||b.chat.localeCompare(a.chat);
 export class Chats {
- rows=$state<ChatSummary[]>([]);ready=$state(false);problem=$state('');private root='';private closed=false;private refreshing=false;private sub:{close:()=>void;retry:()=>void};
+ rows=$state<ChatSummary[]>([]);ready=$state(false);problem=$state('');private contextId='';private closed=false;private refreshing=false;private sub:{close:()=>void;retry:()=>void};
  constructor(bridge:Bridge){this.sub=bridge.subscribe('chats',{},event=>this.receive(event),error=>{this.ready=false;this.problem=error?describe(error):'The latest chats could not be read.';});}
- hello(root:string){if(this.root!==root){this.rows=[];this.ready=false;this.problem='';}this.root=root;}
+ hello(contextId:string){if(this.contextId!==contextId){this.rows=[];this.ready=false;this.problem='';}this.contextId=contextId;}
  private receive(event:Fields){
   if(!['snapshot','changed'].includes(String(event.kind))||!Array.isArray(event.chats)){this.problem='The backend sent an invalid chat list.';return;}
   const rows=event.chats as ChatSummary[];
