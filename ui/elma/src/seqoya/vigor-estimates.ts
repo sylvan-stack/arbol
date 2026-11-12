@@ -20,10 +20,10 @@ const inactiveStates = new Map([
 
 type Estimate = NonNullable<VigorEntry['estimate']>;
 
-function deepSeekEstimate(account: SubscriptionRecord, entry: VigorEntry): Estimate | undefined {
+export function deepSeekBalance(account: SubscriptionRecord) {
   const usage = account.lastUsage;
   if (account.family !== 'deepseek' || account.auth !== 'key' && account.auth !== 'api_key'
-    || entry.result?.nextChange || usage?.windows.some((window) => window.resetsAt)) return undefined;
+    || usage?.windows.some((window) => window.resetsAt)) return undefined;
 
   let largest: { amount: string; currency: 'USD' | 'CNY'; tokens: number; rate: number } | undefined;
   for (const { currency, amount } of usage?.extra?.balances ?? []) {
@@ -33,9 +33,14 @@ function deepSeekEstimate(account: SubscriptionRecord, entry: VigorEntry): Estim
     const tokens = Math.max(0, balance) / rate * tokensPerRate;
     if (!largest || tokens > largest.tokens) largest = { amount, currency, tokens, rate };
   }
-  if (!largest) return undefined;
+  return largest;
+}
 
-  const { amount, currency, tokens, rate } = largest;
+function deepSeekEstimate(account: SubscriptionRecord, entry: VigorEntry): Estimate | undefined {
+  if (entry.result?.nextChange) return undefined;
+  const balance = deepSeekBalance(account);
+  if (!balance) return undefined;
+  const { amount, currency, tokens, rate } = balance;
   return {
     score: capacityCeiling * tokens / (tokens + tokensPerRate),
     exhausted: tokens === 0,

@@ -1,7 +1,9 @@
 import {
-  formatSubscriptionTime, subscriptionKey, type AllowanceView, type SubscriptionListing, type SubscriptionRecord,
+  formatSubscriptionTime, subscriptionKey, type AllowanceView, type SubscriptionListing,
+  type SubscriptionMetrics, type SubscriptionRecord, type SubscriptionWindow,
 } from '../../design-system/src/sections/seqoya-subscriptions';
 import type { VigorRollup } from '../../design-system/src/sections/seqoya-vigor';
+import { deepSeekBalance } from './vigor-estimates';
 
 interface QuotaReading {
   remainingPercent: number;
@@ -59,8 +61,8 @@ function matches<T extends ManualReading>(reading: T | undefined, account: Subsc
     && Date.parse(reading.observedAt) <= now;
 }
 
-function windowReading(label: string, resetsAt: string | undefined, now: number, remainingPercent?: number) {
-  return { label, remainingPercent, resetsAt, elapsed: !!resetsAt && Date.parse(resetsAt) <= now };
+function windowReading(label: string, resetsAt: string | undefined, now: number, remainingPercent: number, windowMinutes?: number) {
+  return { label, remainingPercent, resetsAt, windowMinutes, elapsed: !!resetsAt && Date.parse(resetsAt) <= now };
 }
 
 function validCredits(value?: Credits): value is Credits {
@@ -78,15 +80,17 @@ function mimoQuota(account: SubscriptionRecord, saved: Result | undefined, readi
     quota = {
       source: 'Xiaomi Token Plan', plan: report.plan, observedAt: report.fetchedAt,
       credits: validCredits(report.extra?.planCredits) ? report.extra.planCredits : undefined,
-      windows: [windowReading(directWindow.label, directWindow.resetsAt, now, 100 - directWindow.usedPercent)],
+      windows: [windowReading(directWindow.label, directWindow.resetsAt, now, 100 - directWindow.usedPercent, directWindow.windowMinutes)],
     };
   } else if (manual) {
+    const duration = radarWindow?.resetsAt && Date.parse(radarWindow.resetsAt) === Date.parse(manual.resetsAt)
+      ? radarWindow.windowMinutes ?? undefined : undefined;
     const credits = { total: manual.totalCredits, remaining: manual.remainingCredits };
     if (validCredits(credits)) {
       quota = {
         source: 'Saved Xiaomi Token Plan reading', plan: manual.plan && planNames[manual.plan],
         observedAt: manual.observedAt, credits,
-        windows: [windowReading('Token Plan', manual.resetsAt, now, 100 * Number(credits.remaining) / Number(credits.total))],
+        windows: [windowReading('Token Plan', manual.resetsAt, now, 100 * Number(credits.remaining) / Number(credits.total), duration)],
       };
     }
   }
@@ -94,7 +98,7 @@ function mimoQuota(account: SubscriptionRecord, saved: Result | undefined, readi
     && Date.parse(radarWindow.resetsAt) > now)) {
     quota = {
       source: 'Saved Vigor quota reading',
-      windows: [windowReading(radarWindow.label, radarWindow.resetsAt ?? undefined, now, 100 - radarWindow.usedPercent)],
+      windows: [windowReading(radarWindow.label, radarWindow.resetsAt ?? undefined, now, 100 - radarWindow.usedPercent, radarWindow.windowMinutes ?? undefined)],
       note: saved?.stale ? 'The saved Vigor report is stale.' : undefined,
     };
   }
@@ -119,8 +123,8 @@ function chatGPTQuota(account: SubscriptionRecord, reading: UsageEvidence['piCha
     return { issues: ['Pi quota has no saved dashboard reading. Open ChatGPT Usage and check Connected App Limits for this sign-in.'] };
   }
   const windows = [
-    ...(reading.fiveHour ? [windowReading('Shared five-hour quota', reading.fiveHour.resetsAt, now, reading.fiveHour.remainingPercent)] : []),
-    ...(reading.weekly ? [windowReading('Shared weekly quota', reading.weekly.resetsAt, now, reading.weekly.remainingPercent)] : []),
+    ...(reading.fiveHour ? [windowReading('Shared five-hour quota', reading.fiveHour.resetsAt, now, reading.fiveHour.remainingPercent, 300)] : []),
+    ...(reading.weekly ? [windowReading('Shared weekly quota', reading.weekly.resetsAt, now, reading.weekly.remainingPercent, 10_080)] : []),
   ];
   const issues = ['Absolute token capacity unavailable. ChatGPT Usage reports percentages for the shared plan.'];
   if (!reading.allowed) issues.push('Pi’s access to the shared plan was disabled at the reading.');
@@ -192,15 +196,128 @@ function allowance(
   return { issues };
 }
 
+type Capacity = NonNullable<AllowanceView['capacity']>;
+
+function asWindow(
+  reading: Omit<SubscriptionWindow, 'remainingMinutes' | 'ended' | 'outputTokensPerHour'>,
+  now: number,
+  capacity?: Capacity,
+): SubscriptionWindow {
+  const end = endTime(reading);
+  const remainingMinutes = Number.isFinite(end) ? Math.max(0, (end - now) / 60_000) : undefined;
+  const used = reading.usedPercent;
+  const left = reading.remainingPercent;
+  const outputTokensUsed = capacity && used !== undefined ? capacity.total * used / 100 : reading.outputTokensUsed;
+  const outputTokensRemaining = capacity && left !== undefined ? capacity.total * left / 100 : reading.outputTokensRemaining;
+  return {
+    ...reading, remainingMinutes, ended: remainingMinutes === 0, outputTokensUsed, outputTokensRemaining,
+    model: capacity?.model ?? reading.model, estimateBasis: capacity?.source ?? reading.estimateBasis,
+    outputTokensPerHour: outputTokensRemaining !== undefined && remainingMinutes !== undefined && remainingMinutes > 0
+      ? outputTokensRemaining / remainingMinutes * 60 : undefined,
+  };
+}
+
+function resetExpiry(value: unknown): string | undefined {
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0 && value <= 8_640_000_000_000) {
+    return new Date(value * 1000).toISOString();
+  }
+  return undefined;
+}
+
+function resetInventory(account: SubscriptionRecord, now: number): SubscriptionMetrics['limitResets'] {
+  const report = account.lastUsage;
+  const raw = report?.extra?.rateLimitResetCredits;
+  if (!report || !raw || typeof raw !== 'object') return undefined;
+  const observedAt = report.fetchedAt;
+  const count = 'availableCount' in raw && typeof raw.availableCount === 'number'
+    && Number.isSafeInteger(raw.availableCount) && raw.availableCount >= 0 ? raw.availableCount : undefined;
+  const entries: NonNullable<SubscriptionMetrics['limitResets']>['entries'] = [];
+  const ids = new Set<string>();
+  if ('credits' in raw && Array.isArray(raw.credits)) {
+    for (const grant of raw.credits) {
+      if (!grant || typeof grant !== 'object' || grant.status !== 'available') continue;
+      if (typeof grant.id === 'string' && grant.id) {
+        if (ids.has(grant.id)) continue;
+        ids.add(grant.id);
+      }
+      const expiresAt = resetExpiry(grant.expiresAt);
+      entries.push({
+        label: typeof grant.title === 'string' && grant.title.trim() ? grant.title : 'Limit reset',
+        expiresAt,
+        expired: !!expiresAt && Date.parse(expiresAt) <= now,
+      });
+    }
+  }
+  const reconciled = count !== undefined && entries.length === count && ids.size === count;
+  const expired = entries.filter((entry) => entry.expired).length;
+  return { count: reconciled ? count - expired : count, entries, observedAt };
+}
+
+function subscriptionMetrics(driver: string, account: SubscriptionRecord, view: AllowanceView | undefined, now: number): SubscriptionMetrics {
+  const report = account.lastUsage;
+  const rawWindows = report?.windows ?? [];
+  const calibrated = driver === 'codex' && account.family === 'chatgpt'
+    ? rawWindows.find((window) => window.kind === 'weekly' && window.windowMinutes === 10_080) : undefined;
+  const kimi = driver === 'pi' && account.family === 'kimi-coding';
+  const mimo = driver === 'mimo' && account.family === 'xiaomi';
+  const windows = rawWindows.map((window) => {
+    const used = window.usedPercent;
+    // The monthly membership credits expire at the reported refresh boundary.
+    // https://www.kimi.com/en/help/membership/membership-update-rules
+    const terminal = window.resource === 'credits' && (
+      kimi && window.label.startsWith('Monthly,') || mimo && window.label === 'Token Plan'
+    );
+    return asWindow({
+      label: window.label, resetsAt: window.resetsAt, windowMinutes: window.windowMinutes,
+      expiresAt: terminal ? window.resetsAt : undefined, terminal,
+      observedAt: report?.fetchedAt, usedPercent: used, remainingPercent: used === undefined ? undefined : 100 - used,
+    }, now, window === calibrated ? view?.capacity : undefined);
+  });
+
+  const quota = view?.quota;
+  if (quota) {
+    for (const window of quota.windows) {
+      const left = window.remainingPercent;
+      const row = asWindow({
+        label: window.label, resetsAt: window.resetsAt, windowMinutes: window.windowMinutes,
+        expiresAt: mimo ? window.resetsAt : undefined, terminal: mimo,
+        source: quota.source, observedAt: quota.observedAt,
+        usedPercent: left === undefined ? undefined : 100 - left, remainingPercent: left,
+      }, now, mimo ? view?.capacity : undefined);
+      const matching = windows.findIndex((reported) => reported.label === row.label);
+      if (matching < 0) windows.push(row);
+      else windows[matching] = row;
+    }
+  }
+
+  const balance = deepSeekBalance(account);
+  if (balance && report) {
+    windows.push(asWindow({
+      label: 'API balance', resetsAt: null, observedAt: report.fetchedAt,
+      outputTokensRemaining: balance.tokens, model: 'DeepSeek Flash',
+      estimateBasis: `${balance.amount} ${balance.currency} at ${balance.rate} ${balance.currency} per million output tokens.`,
+    }, now));
+  }
+  windows.sort((left, right) => (endTime(left) - endTime(right)) || 0);
+  return { windows, limitResets: resetInventory(account, now) };
+}
+
+function endTime(window: SubscriptionWindow) {
+  return Math.min(
+    window.resetsAt ? Date.parse(window.resetsAt) : Infinity,
+    window.expiresAt ? Date.parse(window.expiresAt) : Infinity,
+  );
+}
+
 export function withAllowances(
   listing: SubscriptionListing | undefined, rollup: VigorRollup | undefined, evidence: UsageEvidence | undefined, now: number,
 ): SubscriptionListing | undefined {
   if (!listing) return undefined;
   const saved = new Map(rollup?.subscriptions.map((entry) => [subscriptionKey(entry.driver, entry.subscription), entry.result]));
   return { drivers: listing.drivers.map((driver) => ({
-    ...driver, subscriptions: driver.subscriptions?.map((account) => ({
-      ...account, allowance: allowance(driver.driver, account,
-        saved.get(subscriptionKey(driver.driver, account.id)), evidence, now),
-    })),
+    ...driver, subscriptions: driver.subscriptions?.map((account) => {
+      const view = allowance(driver.driver, account, saved.get(subscriptionKey(driver.driver, account.id)), evidence, now);
+      return { ...account, allowance: view, metrics: subscriptionMetrics(driver.driver, account, view, now) };
+    }),
   })) };
 }

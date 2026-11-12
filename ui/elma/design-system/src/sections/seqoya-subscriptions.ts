@@ -19,6 +19,7 @@ export interface SubscriptionRecord {
   createdAt?: string;
   updatedAt?: string;
   allowance?: AllowanceView;
+  metrics?: SubscriptionMetrics;
   modelLabels?: SubscriptionModelLabels;
   problem?: { message: string };
   activity?: SubscriptionActivity;
@@ -39,7 +40,36 @@ export interface SubscriptionRecord {
       balances?: { currency: 'USD' | 'CNY'; amount: string }[];
       apiAvailable?: boolean;
       planCredits?: { total: string; remaining: string };
+      rateLimitResetCredits?: unknown;
     };
+  };
+}
+
+export interface SubscriptionWindow {
+  label: string;
+  windowMinutes?: number;
+  resetsAt?: string | null;
+  expiresAt?: string | 0;
+  remainingMinutes?: number;
+  usedPercent?: number;
+  remainingPercent?: number;
+  outputTokensUsed?: number;
+  outputTokensRemaining?: number;
+  outputTokensPerHour?: number;
+  model?: string;
+  estimateBasis?: string;
+  source?: string;
+  observedAt?: string;
+  terminal?: boolean;
+  ended?: boolean;
+}
+
+export interface SubscriptionMetrics {
+  windows: SubscriptionWindow[];
+  limitResets?: {
+    count?: number;
+    observedAt?: string;
+    entries: { label: string; expiresAt?: string | 0; expired?: boolean }[];
   };
 }
 
@@ -52,7 +82,7 @@ export interface AllowanceView {
     observedAt?: string;
     note?: string;
     credits?: { total: string; remaining: string };
-    windows: { label: string; remainingPercent?: number; resetsAt?: string; elapsed?: boolean }[];
+    windows: { label: string; remainingPercent?: number; resetsAt?: string; windowMinutes?: number; elapsed?: boolean }[];
   };
   capacity?: {
     model: string;
