@@ -3,11 +3,11 @@
   import PageHeader from '../patterns/PageHeader.svelte';
   import SubscriptionList from '../sections/SubscriptionList.svelte';
   import VigorPanel from '../sections/VigorPanel.svelte';
-  import type { SubscriptionView } from '../sections/seqoya-subscriptions';
+  import type { SubscriptionView, UsageDestination } from '../sections/seqoya-subscriptions';
   import type { VigorView } from '../sections/seqoya-vigor';
 
   let {
-    subscriptions, vigor, onRefreshSubscriptions, onRefreshVigor, onTabChange, onRefreshUsage, onOpenMiMo,
+    subscriptions, vigor, onRefreshSubscriptions, onRefreshVigor, onTabChange, onRefreshUsage, onOpenUsage,
   }: {
     subscriptions?: SubscriptionView;
     vigor?: VigorView;
@@ -15,7 +15,7 @@
     onRefreshVigor?: () => void;
     onTabChange?: (tab: string) => void;
     onRefreshUsage?: (driver: string, subscription: string) => void;
-    onOpenMiMo?: () => void;
+    onOpenUsage?: (destination: UsageDestination) => void;
   } = $props();
 </script>
 
@@ -26,7 +26,7 @@
     {#snippet panel(tab)}
       {#if tab === 'Subscriptions'}
         <SubscriptionList embedded view={subscriptions} onRefresh={onRefreshSubscriptions}
-          {onRefreshUsage} {onOpenMiMo} />
+          {onRefreshUsage} {onOpenUsage} />
       {:else if tab === 'Vigor'}
         <VigorPanel view={vigor} onRefresh={onRefreshVigor} />
       {:else}

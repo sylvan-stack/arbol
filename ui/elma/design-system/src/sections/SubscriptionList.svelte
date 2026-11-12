@@ -5,20 +5,23 @@
   import Meter from '../components/Meter.svelte';
   import Notice from '../patterns/Notice.svelte';
   import PageHeader from '../patterns/PageHeader.svelte';
-  import { formatSubscriptionTime, subscriptionKey, subscriptionVendor, type SubscriptionView } from './seqoya-subscriptions';
+  import AllowanceMetrics from './AllowanceMetrics.svelte';
+  import {
+    formatSubscriptionTime, subscriptionKey, subscriptionVendor, type SubscriptionView, type UsageDestination,
+  } from './seqoya-subscriptions';
 
   let {
     view = { connected: false },
     embedded = false,
     onRefresh,
     onRefreshUsage,
-    onOpenMiMo,
+    onOpenUsage,
   }: {
     view?: SubscriptionView;
     embedded?: boolean;
     onRefresh?: () => void;
     onRefreshUsage?: (driver: string, subscription: string) => void;
-    onOpenMiMo?: () => void;
+    onOpenUsage?: (destination: UsageDestination) => void;
   } = $props();
 
   const states = new Map<string, { label: string; tone: string }>([
@@ -77,6 +80,9 @@
       message={(view.listing ? 'Refresh failed. Showing the last account list. ' : 'Could not load subscriptions. ') + view.error} />
   {/if}
 
+  {#if view.evidenceError}
+    <Notice tone="warning" message={view.evidenceError} />
+  {/if}
   {#each failures as failure (failure.driver)}
     <Notice tone="warning" message={`Could not read the ${failure.driver} driver. ${failure.error?.message ?? ''}`} />
   {/each}
@@ -89,7 +95,10 @@
         {@const deepseek = subscription.family === 'deepseek'}
         {@const zai = subscription.family === 'zai'}
         {@const mimo = subscription.family === 'xiaomi' && driver === 'mimo'}
-        {@const refreshable = (deepseek || zai) && subscription.state === 'signed_in' && onRefreshUsage}
+        {@const piChatGPT = subscription.family === 'chatgpt' && driver === 'pi'}
+        {@const destination = mimo ? 'mimo' : piChatGPT ? 'chatgpt' : undefined}
+        {@const linkError = destination && view.usageLinkErrors?.[destination]}
+        {@const refreshable = (deepseek || zai || mimo) && subscription.state === 'signed_in' && onRefreshUsage}
         {@const usageRequest = view.usageRequests?.[subscriptionKey(driver, subscription.id)]}
         {@const balances = deepseek && Array.isArray(usage?.extra?.balances) ? usage.extra.balances : []}
         {@const insufficient = deepseek && usage?.extra?.apiAvailable === false}
@@ -115,7 +124,7 @@
           {#if subscription.problem}
             <p class="small warning">{subscription.problem.message}</p>
           {/if}
-          {#if usage}
+          {#if usage && !(mimo && subscription.allowance?.quota)}
             <div class="stack usage">
               <p class="small muted">Usage recorded <time datetime={usage.fetchedAt}>{formatSubscriptionTime(usage.fetchedAt)}</time>{#if usage.plan} · {usage.plan}{/if}</p>
               {#each balances as balance (balance.currency)}
@@ -137,10 +146,13 @@
                 {#if !balances.length && !insufficient}<p class="small muted">No usage limits reported.</p>{/if}
               {/each}
             </div>
-          {:else if !mimo}
+          {:else if !destination}
             <p class="small muted">
               {refreshable ? (deepseek ? 'Refresh usage to check your API balance.' : 'Refresh usage to check your Coding Plan quota.') : 'No saved usage.'}
             </p>
+          {/if}
+          {#if subscription.allowance}
+            <div class="stack usage"><AllowanceMetrics view={subscription.allowance} /></div>
           {/if}
           {#if refreshable}
             <div>
@@ -149,7 +161,7 @@
             </div>
           {/if}
           {#if usageRequest?.error}<p class="small warning" role="status">{usageRequest.error}</p>{/if}
-          {#if mimo}
+          {#if destination}
             <div class="stack usage">
               <p class="small muted">Arbol activity in this Root · Last 30 days</p>
               {#if subscription.activity}
@@ -166,10 +178,11 @@
               {:else}
                 <p class="small muted">{view.connected ? 'Reading Root activity…' : 'Root activity unavailable while disconnected.'}</p>
               {/if}
-              {#if onOpenMiMo}
-                <div><Button label="Open MiMo console" tone="ghost" onclick={onOpenMiMo} /></div>
+              {#if onOpenUsage}
+                <div><Button label={mimo ? 'Open MiMo console' : 'Open ChatGPT Usage'}
+                  tone="ghost" onclick={() => onOpenUsage?.(destination)} /></div>
               {/if}
-              {#if view.consoleError}<p class="small warning" role="status">{view.consoleError}</p>{/if}
+              {#if linkError}<p class="small warning" role="status">{linkError}</p>{/if}
             </div>
           {/if}
         </li>

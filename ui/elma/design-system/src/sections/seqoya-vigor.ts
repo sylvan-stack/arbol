@@ -1,4 +1,4 @@
-import type { SubscriptionActivity } from './seqoya-subscriptions';
+import type { AllowanceView, SubscriptionActivity } from './seqoya-subscriptions';
 
 /** Displayed fields from the saved Radar rollup. */
 export interface VigorRollup {
@@ -41,6 +41,7 @@ export interface VigorRollup {
 
 export type VigorEntry = VigorRollup['subscriptions'][number] & {
   unavailable?: string;
+  allowance?: AllowanceView;
   activity?: SubscriptionActivity;
   activityError?: string;
   estimate?: {

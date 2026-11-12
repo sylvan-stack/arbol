@@ -80,7 +80,7 @@ export function rankVigor(rollup?: VigorRollup, listing?: SubscriptionListing): 
   }
   return [...entries].map(([key, entry]) => {
     const account = accounts.get(key);
-    return scoreEntry({ ...entry, activity: account?.activity, activityError: account?.activityError }, account);
+    return scoreEntry({ ...entry, activity: account?.activity, activityError: account?.activityError, allowance: account?.allowance }, account);
   })
     .sort((left, right) => (displayedVigor(right) ?? -1) - (displayedVigor(left) ?? -1));
 }

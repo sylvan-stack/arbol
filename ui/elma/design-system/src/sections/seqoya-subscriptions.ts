@@ -16,6 +16,9 @@ export interface SubscriptionRecord {
   family: string;
   auth: string;
   state: string;
+  createdAt?: string;
+  updatedAt?: string;
+  allowance?: AllowanceView;
   modelLabels?: SubscriptionModelLabels;
   problem?: { message: string };
   activity?: SubscriptionActivity;
@@ -25,6 +28,8 @@ export interface SubscriptionRecord {
     plan?: string;
     windows: {
       label: string;
+      kind?: 'session' | 'weekly' | 'other';
+      windowMinutes?: number;
       resource?: 'tokens' | 'credits' | 'calls';
       usedPercent?: number;
       resetsAt?: string;
@@ -33,8 +38,30 @@ export interface SubscriptionRecord {
     extra?: {
       balances?: { currency: 'USD' | 'CNY'; amount: string }[];
       apiAvailable?: boolean;
+      tokenPlanCredits?: { total: string; remaining: string };
     };
   };
+}
+
+export type UsageDestination = 'chatgpt' | 'mimo';
+
+export interface AllowanceView {
+  quota?: {
+    source: string;
+    plan?: string;
+    observedAt?: string;
+    note?: string;
+    credits?: { total: string; remaining: string };
+    windows: { label: string; remainingPercent?: number; resetsAt?: string; elapsed?: boolean }[];
+  };
+  capacity?: {
+    model: string;
+    total: number;
+    remaining?: number;
+    source: string;
+    calculation: string;
+  };
+  issues?: string[];
 }
 
 export interface SubscriptionActivity {
@@ -58,7 +85,8 @@ export interface SubscriptionView {
   listing?: SubscriptionListing;
   error?: string;
   usageRequests?: Record<string, { pending?: boolean; error?: string }>;
-  consoleError?: string;
+  usageLinkErrors?: Partial<Record<UsageDestination, string>>;
+  evidenceError?: string;
 }
 
 export function subscriptionKey(driver: string, subscription: string): string {

@@ -1,5 +1,6 @@
 <script lang="ts">
   import Badge from '../components/Badge.svelte';
+  import AllowanceMetrics from './AllowanceMetrics.svelte';
   import Button from '../components/Button.svelte';
   import Notice from '../patterns/Notice.svelte';
   import { formatSubscriptionTime, subscriptionKey, subscriptionVendor } from './seqoya-subscriptions';
@@ -128,6 +129,7 @@
                   {/if}
                 {/if}
               {/if}
+              {#if entry.allowance}<AllowanceMetrics view={entry.allowance} />{/if}
               {#if activity || activityError}
                 <p class="small muted">Arbol activity in this Root · Last 30 days</p>
                 {#if activity}

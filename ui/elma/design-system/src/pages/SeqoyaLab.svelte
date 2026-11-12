@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import WorkspaceShell from '../patterns/WorkspaceShell.svelte';
-  import type { SubscriptionView } from '../sections/seqoya-subscriptions';
+  import type { SubscriptionView, UsageDestination } from '../sections/seqoya-subscriptions';
   import type { VigorView } from '../sections/seqoya-vigor';
   import type { WorkspaceTrunkSelector } from '../types';
   import IntelligenceProviders from './IntelligenceProviders.svelte';
@@ -10,7 +10,7 @@
     trunk, trunkSelector, headerWindowControls, connectionStatus = '', fitted = false,
     theme = $bindable(''), uiScale = $bindable(0), appearanceReady = true, onAppearanceChange,
     subscriptions, vigor, onRefreshSubscriptions, onRefreshVigor, onTabChange,
-    onRefreshUsage, onOpenMiMo,
+    onRefreshUsage, onOpenUsage,
   }: {
     trunk?: string;
     trunkSelector?: WorkspaceTrunkSelector;
@@ -27,7 +27,7 @@
     onRefreshVigor?: () => void;
     onTabChange?: (tab: string) => void;
     onRefreshUsage?: (driver: string, subscription: string) => void;
-    onOpenMiMo?: () => void;
+    onOpenUsage?: (destination: UsageDestination) => void;
   } = $props();
 </script>
 
@@ -39,7 +39,7 @@
   status={connectionStatus ? connection : null} navigationFooter={false} {fitted}>
   <div class="page-content seqoya-page">
     <IntelligenceProviders {subscriptions} {vigor} {onRefreshSubscriptions} {onRefreshVigor}
-      {onTabChange} {onRefreshUsage} {onOpenMiMo} />
+      {onTabChange} {onRefreshUsage} {onOpenUsage} />
   </div>
 </WorkspaceShell>
 

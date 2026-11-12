@@ -2,13 +2,14 @@
   import { onMount } from 'svelte';
   import SeqoyaLab from '../../design-system/src/pages/SeqoyaLab.svelte';
   import {
-    subscriptionKey, type SubscriptionActivity, type SubscriptionListing, type SubscriptionView,
+    subscriptionKey, type SubscriptionActivity, type SubscriptionListing, type SubscriptionView, type UsageDestination,
   } from '../../design-system/src/sections/seqoya-subscriptions';
   import type { VigorRollup, VigorView } from '../../design-system/src/sections/seqoya-vigor';
   import type { WorkspaceTrunkSelector } from '../../design-system/src/types';
   import { AppChannel } from '../app-channel';
   import { Bridge, Refusal } from '../bridge';
   import { readSeqoyaAppearance, saveSeqoyaAppearance } from '../preferences';
+  import { withAllowances, type UsageEvidence } from './allowance-evidence';
   import { withModelLabels } from './subscription-model-labels';
   import { rankVigor, retainAccounts, retainVigor } from './vigor-estimates';
 
@@ -20,11 +21,19 @@
   let subscriptions = $state<SubscriptionView>({ connected: false });
   let vigor = $state<VigorView>({});
   let vigorAccounts = $state<SubscriptionListing>();
+  let evidence = $state<UsageEvidence>();
+  let evidenceError = $state<string>();
+  let now = $state(Date.now());
+  const subscriptionView = $derived<SubscriptionView>({
+    ...subscriptions, listing: withAllowances(subscriptions.listing, vigor.rollup, evidence, now),
+    evidenceError: evidenceError ?? vigor.error,
+  });
   const vigorView = $derived<VigorView>({
     ...vigor,
-    entries: rankVigor(vigor.rollup, vigorAccounts),
+    entries: rankVigor(vigor.rollup, withAllowances(vigorAccounts, vigor.rollup, evidence, now)),
     accountIssues: [
       ...(subscriptions.error ? [subscriptions.error] : []),
+      ...(evidenceError ? [evidenceError] : []),
       ...(subscriptions.listing?.drivers.flatMap(({ driver, error }) =>
         error ? [driver + ' accounts · ' + error.message] : []) ?? []),
     ],
@@ -33,14 +42,10 @@
   let readSubscriptions: (() => Promise<void>) | undefined;
   let readVigor: (() => Promise<void>) | undefined;
   let readUsage: ((driver: string, subscription: string) => Promise<void>) | undefined;
-  let openConsole: (() => Promise<void>) | undefined;
+  let openUsagePage: ((destination: UsageDestination) => Promise<void>) | undefined;
 
   function refreshSubscriptions() {
     void readSubscriptions?.();
-  }
-
-  function refreshVigor() {
-    refreshSubscriptions();
     void readVigor?.();
   }
 
@@ -48,18 +53,18 @@
     void readUsage?.(driver, subscription);
   }
 
-  function openMiMo() {
-    void openConsole?.();
+  function openUsage(destination: UsageDestination) {
+    void openUsagePage?.(destination);
   }
 
   function changeTab(tab: string) {
     activeTab = tab;
-    if (tab === 'Subscriptions') refreshSubscriptions();
-    else if (tab === 'Vigor') refreshVigor();
+    if (tab === 'Subscriptions' || tab === 'Vigor') refreshSubscriptions();
   }
 
   onMount(() => {
     const app = new AppChannel();
+    const expiryClock = setInterval(() => { now = Date.now(); }, 30_000);
     let active = true;
     let connection = 0;
     let listRequest: Promise<void> | undefined;
@@ -74,6 +79,9 @@
         };
         if (rootId !== root.root) {
           vigorAccounts = undefined;
+          vigor = {};
+          evidence = undefined;
+          evidenceError = undefined;
           rootId = root.root;
           appearance = readSeqoyaAppearance(rootId);
         }
@@ -159,19 +167,23 @@
     readSubscriptions = reloadList;
 
     readVigor = async () => {
-      if (!active || vigor.loading) return;
+      if (!active || vigor.loading || !rootId) return;
+      const requestedRoot = rootId;
       vigor = { ...vigor, loading: true, error: undefined };
       try {
         const reply = await app.call('app.readVigor');
-        if (!active) return;
+        if (!active || rootId !== requestedRoot) return;
         if (typeof reply.moment !== 'string' || !Array.isArray(reply.subscriptions)
           || !reply.failures || typeof reply.failures !== 'object' || Array.isArray(reply.failures)
           || (reply.headline !== null && (!reply.headline || typeof reply.headline !== 'object'))) {
           throw new Error('Invalid Vigor rollup.');
         }
+        evidence = reply.usageEvidence as UsageEvidence | undefined;
+        evidenceError = typeof reply.usageEvidenceError === 'string' ? reply.usageEvidenceError : undefined;
+        now = Date.now();
         vigor = { rollup: retainVigor(reply as unknown as VigorRollup, vigor.rollup) };
       } catch (error) {
-        if (!active) return;
+        if (!active || rootId !== requestedRoot) return;
         vigor = {
           ...vigor,
           loading: false,
@@ -189,7 +201,8 @@
         ?.subscriptions?.find((row) => row.id === subscription);
       const key = subscriptionKey(driver, subscription);
       if (!active || !subscriptions.connected || subscriptions.usageRequests?.[key]?.pending
-        || account?.state !== 'signed_in' || !['zai', 'deepseek'].includes(account.family)) return;
+        || account?.state !== 'signed_in'
+        || !((driver === 'mimo' && account.family === 'xiaomi') || ['zai', 'deepseek'].includes(account.family))) return;
       const requestedOn = connection;
       subscriptions = {
         ...subscriptions, usageRequests: { ...subscriptions.usageRequests, [key]: { pending: true } },
@@ -215,14 +228,21 @@
       subscriptions = { ...subscriptions, usageRequests: requests };
     };
 
-    openConsole = async () => {
-      subscriptions = { ...subscriptions, consoleError: undefined };
+    openUsagePage = async (destination) => {
+      subscriptions = {
+        ...subscriptions, usageLinkErrors: { ...subscriptions.usageLinkErrors, [destination]: undefined },
+      };
+      const url = destination === 'mimo'
+        ? 'https://platform.xiaomimimo.com/console/balance' : 'https://chatgpt.com/settings/usage';
       try {
-        await app.call('app.openLink', { url: 'https://platform.xiaomimimo.com/console/balance' });
+        await app.call('app.openLink', { url });
       } catch (error) {
         if (active) subscriptions = {
           ...subscriptions,
-          consoleError: error instanceof Refusal ? error.message : 'Could not open the MiMo console.',
+          usageLinkErrors: {
+            ...subscriptions.usageLinkErrors,
+            [destination]: error instanceof Refusal ? error.message : 'Could not open vendor usage.',
+          },
         };
       }
     };
@@ -232,7 +252,8 @@
       readSubscriptions = undefined;
       readVigor = undefined;
       readUsage = undefined;
-      openConsole = undefined;
+      openUsagePage = undefined;
+      clearInterval(expiryClock);
       bridge.close();
       app.close();
     };
@@ -240,8 +261,8 @@
 </script>
 
 <SeqoyaLab fitted {trunk} {trunkSelector} {connectionStatus}
-  {subscriptions} vigor={vigorView} onTabChange={changeTab}
-  onRefreshSubscriptions={refreshSubscriptions} onRefreshVigor={refreshVigor}
-  onRefreshUsage={refreshUsage} onOpenMiMo={openMiMo}
+  subscriptions={subscriptionView} vigor={vigorView} onTabChange={changeTab}
+  onRefreshSubscriptions={refreshSubscriptions} onRefreshVigor={refreshSubscriptions}
+  onRefreshUsage={refreshUsage} onOpenUsage={openUsage}
   appearanceReady={rootId !== undefined} bind:theme={appearance.theme} bind:uiScale={appearance.uiScale}
   onAppearanceChange={() => { if (rootId !== undefined) saveSeqoyaAppearance(rootId, appearance); }} />
