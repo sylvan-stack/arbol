@@ -144,8 +144,11 @@ class Answers:
             actual = os.stat("control", dir_fd=current.descriptor, follow_symlinks=False)
             if (expected.st_dev, expected.st_ino) != (actual.st_dev, actual.st_ino) or not private(actual):
                 raise Error("no_answer")
-            if self.folders.read(folder.exchange).end is not None:
+            record = self.folders.read(folder.exchange)
+            if record.end is not None:
                 raise Error("ended")
+            if record.accepted is None:
+                raise Error("no_answer")
         finally:
             current.close()
 

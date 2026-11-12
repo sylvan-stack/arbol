@@ -100,6 +100,8 @@ class Controls:
                 code = error.get("code")
                 if not isinstance(code, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code):
                     raise Error("no_answer")
+                if code == "schema_invalid":
+                    code = "schema_incompatible"
                 secret = (self.live.chats.database.parameters or {}).get("password", "")
                 result["settling"] = {"error": Forwarded(code, "runtime", message(error.get("message"),
                     secrets=(secret,), fallback="The runtime could not confirm settlement.")).wire()}

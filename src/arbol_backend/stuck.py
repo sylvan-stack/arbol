@@ -117,7 +117,7 @@ class Stuck:
             async with self.notes.database.permit("controlled"):
                 result = await self.controls.force(exchange, chat, check)
                 self.handled[exchange] = (expected.identity, expected.heartbeat)
-                if result["ended"] == "interrupted":
+                if result["forced"] is True and result["ended"] == "interrupted":
                     await self.save_note(exchange, chat, at, admitted=True)
         except Refused:
             pass  # No invented end or note; a later successful look can supply a new reason.
