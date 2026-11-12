@@ -23,6 +23,7 @@ export interface VigorRollup {
       windows: {
         label: string;
         loss: number | null;
+        weight?: number | null;
         contribution: number | null;
         predicted: boolean;
         reason: string | null;
@@ -32,8 +33,24 @@ export interface VigorRollup {
   failures: Record<string, string>;
 }
 
+export type VigorEntry = VigorRollup['subscriptions'][number] & {
+  unavailable?: string;
+  estimate?: {
+    score: number;
+    reason: string;
+    exhausted?: boolean;
+    budget?: { tokens: number; currency: string; rate: number; referenceTokens: number; ceiling: number };
+  };
+};
+
+export function displayedVigor(entry: VigorEntry): number | null {
+  return entry.unavailable ? null : entry.estimate?.score ?? entry.result?.vigor ?? null;
+}
+
 export interface VigorView {
   rollup?: VigorRollup;
+  entries?: VigorEntry[];
+  accountIssues?: string[];
   loading?: boolean;
   error?: string;
 }

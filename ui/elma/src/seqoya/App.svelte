@@ -10,6 +10,7 @@
   import { Bridge, Refusal } from '../bridge';
   import { readSeqoyaAppearance, saveSeqoyaAppearance } from '../preferences';
   import { withModelLabels } from './subscription-model-labels';
+  import { rankVigor, retainAccounts, retainVigor } from './vigor-estimates';
 
   let trunk = $state<string>();
   let trunkSelector = $state<WorkspaceTrunkSelector>();
@@ -18,7 +19,17 @@
   let appearance = $state(readSeqoyaAppearance());
   let subscriptions = $state<SubscriptionView>({ connected: false });
   let vigor = $state<VigorView>({});
-  let subscriptionsOpen = true;
+  let vigorAccounts = $state<SubscriptionListing>();
+  const vigorView = $derived<VigorView>({
+    ...vigor,
+    entries: rankVigor(vigor.rollup, vigorAccounts),
+    accountIssues: [
+      ...(subscriptions.error ? [subscriptions.error] : []),
+      ...(subscriptions.listing?.drivers.flatMap(({ driver, error }) =>
+        error ? [driver + ' accounts · ' + error.message] : []) ?? []),
+    ],
+  });
+  let activeTab = 'Subscriptions';
   let readSubscriptions: (() => Promise<void>) | undefined;
   let readVigor: (() => Promise<void>) | undefined;
   let readUsage: ((driver: string, subscription: string) => Promise<void>) | undefined;
@@ -29,6 +40,7 @@
   }
 
   function refreshVigor() {
+    refreshSubscriptions();
     void readVigor?.();
   }
 
@@ -41,9 +53,9 @@
   }
 
   function changeTab(tab: string) {
-    subscriptionsOpen = tab === 'Subscriptions';
-    if (subscriptionsOpen) refreshSubscriptions();
-    if (tab === 'Vigor') refreshVigor();
+    activeTab = tab;
+    if (tab === 'Subscriptions') refreshSubscriptions();
+    else if (tab === 'Vigor') refreshVigor();
   }
 
   onMount(() => {
@@ -61,10 +73,11 @@
           listing: rootId === root.root ? subscriptions.listing : undefined,
         };
         if (rootId !== root.root) {
+          vigorAccounts = undefined;
           rootId = root.root;
           appearance = readSeqoyaAppearance(rootId);
         }
-        if (subscriptionsOpen) refreshSubscriptions();
+        if (activeTab === 'Subscriptions' || activeTab === 'Vigor') refreshSubscriptions();
         void app.currentTrunk().then((current) => {
           if (active && trunk === undefined) trunk = current;
         }).catch(() => { /* The selector reports its own errors. */ });
@@ -109,6 +122,7 @@
         const listing = await bridge.call<SubscriptionListing>('accounts.list');
         if (!isCurrent(requestedOn)) return;
         if (!Array.isArray(listing?.drivers)) throw new Error('Invalid account list.');
+        vigorAccounts = retainAccounts(listing, vigorAccounts);
         subscriptions = { ...subscriptions, loading: false, listing };
         const withMiMo = await withActivity(withModelLabels(listing));
         if (isCurrent(requestedOn)) subscriptions = { ...subscriptions, listing: withMiMo };
@@ -150,7 +164,7 @@
           || (reply.headline !== null && (!reply.headline || typeof reply.headline !== 'object'))) {
           throw new Error('Invalid Vigor rollup.');
         }
-        vigor = { rollup: reply as unknown as VigorRollup };
+        vigor = { rollup: retainVigor(reply as unknown as VigorRollup, vigor.rollup) };
       } catch (error) {
         if (!active) return;
         vigor = {
@@ -221,7 +235,7 @@
 </script>
 
 <SeqoyaLab fitted {trunk} {trunkSelector} {connectionStatus}
-  {subscriptions} {vigor} onTabChange={changeTab}
+  {subscriptions} vigor={vigorView} onTabChange={changeTab}
   onRefreshSubscriptions={refreshSubscriptions} onRefreshVigor={refreshVigor}
   onRefreshUsage={refreshUsage} onOpenMiMo={openMiMo}
   appearanceReady={rootId !== undefined} bind:theme={appearance.theme} bind:uiScale={appearance.uiScale}
