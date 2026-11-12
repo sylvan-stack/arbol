@@ -23,6 +23,7 @@ import signal
 import subprocess
 import sys
 import tarfile
+import tomllib
 import uuid
 from pathlib import Path
 from types import FrameType
@@ -130,6 +131,31 @@ def install_package(library: Path, python: Path, name: str) -> None:
         shutil.rmtree(staging, ignore_errors=True)
 
 
+def install_schema_reader(library: Path, python: Path) -> None:
+    """Stage the canonical status reader and the migration prefix for this release."""
+    source = ROOT / "database"
+    manifest = tomllib.loads((source / "migrations.toml").read_text(encoding="utf-8"))
+    staging = library / f".schema-{uuid.uuid4()}"
+    destination = library / "schema"
+    previous = library / f".schema-previous-{uuid.uuid4()}"
+    staging.mkdir(mode=0o700)
+    try:
+        for name in ("migrate_schema.py", "database_server.py", "migrations.toml",
+                     *(migration["file"] for migration in manifest["migrations"])):
+            if not isinstance(name, str) or Path(name).name != name or name in ("", ".", ".."):
+                raise ValueError("Each migration input must be a file in the database directory.")
+            shutil.copy2(source / name, staging / name)
+        run_group([str(python), "-I", "-m", "compileall", "-q", str(staging)])
+        if destination.exists():
+            destination.rename(previous)
+        staging.rename(destination)
+        shutil.rmtree(previous, ignore_errors=True)
+    finally:
+        if not destination.exists() and previous.exists():
+            previous.rename(destination)
+        shutil.rmtree(staging, ignore_errors=True)
+
+
 def served(path: Path) -> tuple[str, str] | None:
     """The registry and component of a launcher written by this tool or by the earlier Node.js tool."""
     try:
@@ -198,6 +224,7 @@ def install(args: list[str]) -> dict[str, object]:
                                                             or not alive(int(temporary["pid"]))):
                 leftover.unlink(missing_ok=True)
         python = runtime(library)
+        install_schema_reader(library, python)
         for name in PACKAGES:
             install_package(library, python, name)
         program = folder / "arbol-builds"
