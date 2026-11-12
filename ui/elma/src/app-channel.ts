@@ -3,7 +3,7 @@ import { Refusal, type Fields } from './bridge';
 import type { WorkspaceTrunkSelector } from '../design-system/src/types';
 
 type TrunkMethod = 'app.currentTrunk' | 'app.listTrunks' | 'app.selectTrunk';
-type AppMethod = 'app.pickFolder' | 'app.openLink' | 'app.takeOpen' | 'app.readVigor' | TrunkMethod;
+type AppMethod = 'app.pickFolder' | 'app.openLink' | 'app.openSubscriptionUsage' | 'app.takeOpen' | 'app.readVigor' | TrunkMethod;
 
 export function isTrunkCode(value: unknown): value is string {
  return typeof value === 'string' && /^[a-z][a-z0-9]{0,31}$/.test(value)
@@ -63,6 +63,7 @@ export class AppChannel {
   // The relay's browser host answers locally. No app envelope reaches the Bridge.
   if(method==='app.openLink'){window.open(String(params.url),'_blank','noopener,noreferrer');return Promise.resolve({});}
   if(method==='app.pickFolder'){const value=window.prompt('Folder',typeof params.start==='string'?params.start:'');return Promise.resolve({folder:value?.trim()||null});}
+  if(method==='app.openSubscriptionUsage')return Promise.reject(new Refusal({code:'unknown_method',message:'Subscription browser profiles require the native App.'}));
   if(method==='app.readVigor')return Promise.reject(new Refusal({code:'unknown_method',message:'Vigor requires the native App.'}));
   if(method==='app.currentTrunk'||method==='app.listTrunks'||method==='app.selectTrunk')return Promise.reject(new Refusal({code:'unknown_method',message:'Trunk selection requires the native App.'}));
   if(this.openTaken)return Promise.resolve({});this.openTaken=true;

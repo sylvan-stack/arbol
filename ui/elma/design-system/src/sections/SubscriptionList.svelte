@@ -1,11 +1,11 @@
 <script lang="ts">
-  import Badge from '../components/Badge.svelte';
   import Button from '../components/Button.svelte';
   import EmptyState from '../components/EmptyState.svelte';
   import Notice from '../patterns/Notice.svelte';
   import PageHeader from '../patterns/PageHeader.svelte';
   import {
-    formatSubscriptionCardTime, subscriptionKey, subscriptionVendor, type SubscriptionView, type UsageDestination,
+    canRefreshSubscriptionUsage, formatSubscriptionCardTime, subscriptionKey, subscriptionVendor,
+    type OpenSubscriptionUsage, type SubscriptionView, type SubscriptionWindow,
   } from './seqoya-subscriptions';
 
   let {
@@ -19,15 +19,9 @@
     embedded?: boolean;
     onRefresh?: () => void;
     onRefreshUsage?: (driver: string, subscription: string) => void;
-    onOpenUsage?: (destination: UsageDestination) => void;
+    onOpenUsage?: OpenSubscriptionUsage;
   } = $props();
 
-  const states = new Map<string, { label: string; tone: string }>([
-    ['signed_in', { label: 'Signed in', tone: 'success' }],
-    ['signed_out', { label: 'Signed out', tone: 'neutral' }],
-    ['signing_in', { label: 'Signing in', tone: 'working' }],
-    ['needs_attention', { label: 'Needs attention', tone: 'warning' }],
-  ]);
   const integer = new Intl.NumberFormat();
   const percent = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
   const estimated = new Intl.NumberFormat(undefined, { maximumSignificantDigits: 3 });
@@ -48,8 +42,16 @@
     return value === undefined ? 'Unavailable' : percent.format(value) + '%';
   }
 
-  function estimateValue(value?: number) {
-    return value === undefined ? 'Unavailable' : '≈ ' + estimated.format(value);
+  function estimateValue(value: number | undefined, missing: string, suffix = '') {
+    if (value === undefined) return missing;
+    const rounded = Number(value.toPrecision(3));
+    const amount = rounded >= 1e6 ? estimated.format(rounded / 1e6) + 'M'
+      : rounded >= 1e3 ? estimated.format(rounded / 1e3) + 'k' : estimated.format(rounded);
+    return '≈ ' + amount + suffix;
+  }
+
+  function estimateTitle(window: SubscriptionWindow) {
+    return [window.model, window.estimateBasis].filter(Boolean).join(' · ') || undefined;
   }
 
   const failures = $derived(view.listing?.drivers.filter((entry) => entry.error) ?? []);
@@ -106,22 +108,18 @@
   {#if rows.length}
     <ul class="accounts" aria-label="Subscription accounts">
       {#each rows as { driver, subscription, vendor } (subscriptionKey(driver, subscription.id))}
-        {@const status = states.get(subscription.state)}
+        {@const key = subscriptionKey(driver, subscription.id)}
         {@const metrics = subscription.metrics}
         {@const resets = metrics?.limitResets}
         {@const deepseek = subscription.family === 'deepseek'}
-        {@const zai = subscription.family === 'zai'}
         {@const mimo = subscription.family === 'xiaomi' && driver === 'mimo'}
-        {@const piChatGPT = subscription.family === 'chatgpt' && driver === 'pi'}
-        {@const destination = mimo ? 'mimo' : piChatGPT ? 'chatgpt' : undefined}
-        {@const linkError = destination && view.usageLinkErrors?.[destination]}
-        {@const refreshable = (deepseek || zai || mimo) && subscription.state === 'signed_in' && onRefreshUsage}
-        {@const usageRequest = view.usageRequests?.[subscriptionKey(driver, subscription.id)]}
+        {@const chatgpt = subscription.family === 'chatgpt' && (driver === 'pi' || driver === 'codex')}
+        {@const destination = mimo ? 'mimo' : chatgpt ? 'chatgpt' : undefined}
+        {@const linkError = destination && view.usageLinkErrors?.[key]}
+        {@const refreshable = canRefreshSubscriptionUsage(driver, subscription) && onRefreshUsage}
+        {@const usageRequest = view.usageRequests?.[key]}
         <li class="panel stack account">
-          <div class="row spread">
-            <h2>{vendor}</h2>
-            <Badge label={status?.label ?? 'Sign-in state unknown'} tone={status?.tone} />
-          </div>
+          <h2>{vendor}</h2>
           {#if subscription.label !== vendor}
             <p class="small muted">{subscription.label}</p>
           {/if}
@@ -131,35 +129,36 @@
 
           {#each metrics?.windows ?? [] as window}
             <section class="stack metric-section" aria-label={window.label}>
-              <div class="row spread">
-                <h3>{window.label}</h3>
-                {#if window.terminal}<Badge label="Terminal" />{/if}
-              </div>
-              {#if window.ended || window.source}
-                <p class="small muted">
-                  {#if window.ended}<span class="warning">{window.terminal ? 'Allowance expired' : 'Reset time passed'}</span>{/if}
-                  {#if window.source}{#if window.ended} · {/if}{window.source}{/if}
-                </p>
-              {/if}
-              <dl class="metrics">
-                <dt>Window length</dt><dd>{window.resetsAt === null ? 'No fixed window' : duration(window.windowMinutes)}</dd>
-                <dt>Resets</dt>
-                <dd>
-                  {#if window.resetsAt}<time datetime={window.resetsAt}>{formatSubscriptionCardTime(window.resetsAt)}</time>
-                  {:else if window.pendingStart}Starts with next use
-                  {:else if window.resetsAt === null}No scheduled reset
-                  {:else}Unavailable{/if}
-                </dd>
-                <dt>Time remaining</dt><dd>{window.pendingStart ? 'Starts with next use' : window.resetsAt === null ? 'No scheduled end' : duration(window.remainingMinutes)}</dd>
-                <dt>Allowance expires</dt><dd>{#if !window.terminal && (window.resetsAt || window.pendingStart) && window.expiresAt === undefined}No separate expiry{:else}{@render expiration(window.expiresAt)}{/if}</dd>
-                <dt>Allowance used</dt><dd>{percentValue(window.usedPercent)}</dd>
-                <dt>Allowance remaining</dt><dd>{percentValue(window.remainingPercent)}</dd>
-                <dt>Output-token equivalents used</dt><dd>{estimateValue(window.outputTokensUsed)}</dd>
-                <dt>Output-token equivalents remaining</dt><dd>{estimateValue(window.outputTokensRemaining)}</dd>
-                <dt>Remaining equivalents per hour</dt><dd>{window.ended ? 'Period closed' : window.pendingStart ? 'After first use' : estimateValue(window.outputTokensPerHour)}</dd>
-              </dl>
-              {#if window.model}
-                <p class="small muted" title={window.estimateBasis}>Token estimate · {window.model}</p>
+              <h3>{window.label}</h3>
+              {#if window.next === 'awaitingRenewal'}
+                <p class="small muted">Awaiting the next allowance reading.</p>
+              {:else}
+                {@const missingEstimate = deepseek ? 'Unavailable' : 'Needs estimate'}
+                {@const missingReading = deepseek ? 'Unavailable' : 'Awaiting reading'}
+                {#if window.next === 'projected'}
+                  <p class="small muted">Estimated next allowance</p>
+                {/if}
+                <dl class="metrics">
+                  <dt>Window length</dt><dd>{window.resetsAt === null ? 'No fixed window' : window.windowMinutes === undefined ? missingReading : duration(window.windowMinutes)}</dd>
+                  <dt>Resets</dt>
+                  <dd>
+                    {#if window.resetsAt}<time datetime={window.resetsAt}>{formatSubscriptionCardTime(window.resetsAt)}</time>
+                    {:else if window.pendingStart}Starts with next use
+                    {:else if window.resetsAt === null}No scheduled reset
+                    {:else}{missingReading}{/if}
+                  </dd>
+                  {#if !window.pendingStart}
+                    <dt>Time remaining</dt><dd>{window.resetsAt === null ? 'No scheduled end' : window.remainingMinutes === undefined ? missingReading : duration(window.remainingMinutes)}</dd>
+                  {/if}
+                  <dt>Allowance expires</dt><dd>{#if !window.terminal && (window.resetsAt || window.pendingStart) && window.expiresAt === undefined}No separate expiry{:else if !deepseek && window.expiresAt === undefined}{missingReading}{:else}{@render expiration(window.expiresAt)}{/if}</dd>
+                  <dt>Allowance used</dt><dd>{window.usedPercent === undefined ? missingReading : percentValue(window.usedPercent)}</dd>
+                  <dt>Allowance remaining</dt><dd>{window.remainingPercent === undefined ? missingReading : percentValue(window.remainingPercent)}</dd>
+                  <dt>Output-token equivalents used</dt><dd title={estimateTitle(window)}>{estimateValue(window.outputTokensUsed, missingEstimate)}</dd>
+                  <dt>Output-token equivalents remaining</dt><dd title={estimateTitle(window)}>{estimateValue(window.outputTokensRemaining, missingEstimate)}</dd>
+                  {#if !window.pendingStart}
+                    <dt>Remaining equivalents per hour</dt><dd title={estimateTitle(window)}>{estimateValue(window.outputTokensPerHour, window.outputTokensRemaining === undefined ? missingEstimate : missingReading, '/hour')}</dd>
+                  {/if}
+                </dl>
               {/if}
             </section>
           {:else}
@@ -180,7 +179,7 @@
               {/if}
               {#if destination && onOpenUsage}
                 <Button label={mimo ? 'Open MiMo console' : 'Open ChatGPT Usage'} tone="ghost"
-                  onclick={() => onOpenUsage?.(destination)} />
+                  disabled={chatgpt && !view.connected} onclick={() => onOpenUsage?.(destination, driver, subscription.id)} />
               {/if}
             </div>
           {/if}

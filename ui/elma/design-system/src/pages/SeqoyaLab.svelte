@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import WorkspaceShell from '../patterns/WorkspaceShell.svelte';
-  import type { SubscriptionView, UsageDestination } from '../sections/seqoya-subscriptions';
+  import type { SubscriptionView, OpenSubscriptionUsage } from '../sections/seqoya-subscriptions';
   import type { VigorView } from '../sections/seqoya-vigor';
   import type { WorkspaceTrunkSelector } from '../types';
   import IntelligenceProviders from './IntelligenceProviders.svelte';
@@ -27,7 +27,7 @@
     onRefreshVigor?: () => void;
     onTabChange?: (tab: string) => void;
     onRefreshUsage?: (driver: string, subscription: string) => void;
-    onOpenUsage?: (destination: UsageDestination) => void;
+    onOpenUsage?: OpenSubscriptionUsage;
   } = $props();
 </script>
 

@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import SeqoyaLab from '../../design-system/src/pages/SeqoyaLab.svelte';
   import {
-    subscriptionKey, type SubscriptionActivity, type SubscriptionListing, type SubscriptionView, type UsageDestination,
+    canRefreshSubscriptionUsage, subscriptionKey, type SubscriptionActivity, type SubscriptionListing, type SubscriptionView, type UsageDestination,
   } from '../../design-system/src/sections/seqoya-subscriptions';
   import type { VigorRollup, VigorView } from '../../design-system/src/sections/seqoya-vigor';
   import type { WorkspaceTrunkSelector } from '../../design-system/src/types';
@@ -42,7 +42,7 @@
   let readSubscriptions: (() => Promise<void>) | undefined;
   let readVigor: (() => Promise<void>) | undefined;
   let readUsage: ((driver: string, subscription: string) => Promise<void>) | undefined;
-  let openUsagePage: ((destination: UsageDestination) => Promise<void>) | undefined;
+  let openUsagePage: ((destination: UsageDestination, driver: string, subscription: string) => Promise<void>) | undefined;
 
   function refreshSubscriptions() {
     void readSubscriptions?.();
@@ -53,8 +53,8 @@
     void readUsage?.(driver, subscription);
   }
 
-  function openUsage(destination: UsageDestination) {
-    void openUsagePage?.(destination);
+  function openUsage(destination: UsageDestination, driver: string, subscription: string) {
+    void openUsagePage?.(destination, driver, subscription);
   }
 
   function changeTab(tab: string) {
@@ -64,7 +64,8 @@
 
   onMount(() => {
     const app = new AppChannel();
-    const expiryClock = setInterval(() => { now = Date.now(); }, 30_000);
+    const attemptedBoundaries = new Map<string, Set<number>>();
+    const expiryClock = setInterval(() => { now = Date.now(); refreshPassedWindows(); }, 30_000);
     let active = true;
     let connection = 0;
     let listRequest: Promise<void> | undefined;
@@ -78,6 +79,7 @@
           listing: rootId === root.root ? subscriptions.listing : undefined,
         };
         if (rootId !== root.root) {
+          attemptedBoundaries.clear();
           vigorAccounts = undefined;
           vigor = {};
           evidence = undefined;
@@ -138,6 +140,7 @@
         if (isCurrent(requestedOn)) {
           vigorAccounts = retainAccounts(withLocalActivity, vigorAccounts);
           subscriptions = { ...subscriptions, listing: withLocalActivity };
+          queueMicrotask(refreshPassedWindows);
         }
       } catch (error) {
         if (!isCurrent(requestedOn)) return;
@@ -182,6 +185,7 @@
         evidenceError = typeof reply.usageEvidenceError === 'string' ? reply.usageEvidenceError : undefined;
         now = Date.now();
         vigor = { rollup: retainVigor(reply as unknown as VigorRollup, vigor.rollup) };
+        refreshPassedWindows();
       } catch (error) {
         if (!active || rootId !== requestedRoot) return;
         vigor = {
@@ -196,13 +200,31 @@
       }
     };
 
+    function refreshPassedWindows() {
+      if (!active || !subscriptions.connected || activeTab !== 'Subscriptions' || !readUsage) return;
+      for (const { driver, subscriptions: accounts } of subscriptionView.listing?.drivers ?? []) {
+        for (const account of accounts ?? []) {
+          if (!canRefreshSubscriptionUsage(driver, account)) continue;
+          const key = subscriptionKey(driver, account.id);
+          if (subscriptions.usageRequests?.[key]?.pending) continue;
+          const boundaries = account.metrics?.passedBoundaries;
+          if (!boundaries?.length) continue;
+          const binding = JSON.stringify([key, account.createdAt, account.family]);
+          const attempted = attemptedBoundaries.get(binding) ?? new Set<number>();
+          if (!boundaries.some((boundary) => !attempted.has(boundary))) continue;
+          for (const boundary of boundaries) attempted.add(boundary);
+          attemptedBoundaries.set(binding, attempted);
+          void readUsage(driver, account.id);
+        }
+      }
+    }
+
     readUsage = async (driver, subscription) => {
       const account = subscriptions.listing?.drivers.find((entry) => entry.driver === driver)
         ?.subscriptions?.find((row) => row.id === subscription);
       const key = subscriptionKey(driver, subscription);
       if (!active || !subscriptions.connected || subscriptions.usageRequests?.[key]?.pending
-        || account?.state !== 'signed_in'
-        || !((driver === 'mimo' && account.family === 'xiaomi') || ['zai', 'deepseek'].includes(account.family))) return;
+        || !account || !canRefreshSubscriptionUsage(driver, account)) return;
       const requestedOn = connection;
       subscriptions = {
         ...subscriptions, usageRequests: { ...subscriptions.usageRequests, [key]: { pending: true } },
@@ -222,31 +244,34 @@
       if (!isCurrent(requestedOn)) return;
       await reloadList();
       if (!isCurrent(requestedOn)) return;
+      const current = subscriptions.listing?.drivers.find((entry) => entry.driver === driver)
+        ?.subscriptions?.find((row) => row.id === subscription);
       const requests = { ...subscriptions.usageRequests };
-      if (problem) requests[key] = { error: problem };
+      if (problem && current?.family === account.family && current?.createdAt === account.createdAt) requests[key] = { error: problem };
       else delete requests[key];
       subscriptions = { ...subscriptions, usageRequests: requests };
     };
 
-    openUsagePage = async (destination) => {
+    openUsagePage = async (destination, driver, subscription) => {
+      const key = subscriptionKey(driver, subscription);
+      const requestedOn = connection;
       subscriptions = {
-        ...subscriptions, usageLinkErrors: { ...subscriptions.usageLinkErrors, [destination]: undefined },
+        ...subscriptions, usageLinkErrors: { ...subscriptions.usageLinkErrors, [key]: undefined },
       };
-      const url = destination === 'mimo'
-        ? 'https://platform.xiaomimimo.com/console/balance' : 'https://chatgpt.com/settings/usage';
       try {
-        await app.call('app.openLink', { url });
+        if (destination === 'chatgpt') await app.call('app.openSubscriptionUsage', { driver, subscription });
+        else await app.call('app.openLink', { url: 'https://platform.xiaomimimo.com/console/balance' });
       } catch (error) {
-        if (active) subscriptions = {
+        if (isCurrent(requestedOn)) subscriptions = {
           ...subscriptions,
           usageLinkErrors: {
             ...subscriptions.usageLinkErrors,
-            [destination]: error instanceof Refusal ? error.message : 'Could not open vendor usage.',
+            [key]: error instanceof Refusal ? error.message : 'Could not open vendor usage.',
           },
         };
       }
     };
-    trunkSelector = app.trunkSelector((code) => { if (active) trunk = code; });
+
     return () => {
       active = false;
       readSubscriptions = undefined;

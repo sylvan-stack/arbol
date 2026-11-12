@@ -14,6 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ENTRIES = [
     "src/pages/SeqoyaLab.svelte",
+    "src/assets/SeqoyaLab.png",
     "src/sections/ElmaFrame.svelte",
     "src/sections/Response.svelte",
     "src/sections/ResponseReader.svelte",

@@ -62,12 +62,13 @@ export interface SubscriptionWindow {
   observedAt?: string;
   terminal?: boolean;
   pendingStart?: boolean;
-  ended?: boolean;
+  next?: 'projected' | 'awaitingRenewal';
 }
 
 export interface SubscriptionMetrics {
   issues?: string[];
   windows: SubscriptionWindow[];
+  passedBoundaries?: number[];
   limitResets?: {
     count?: number;
     observedAt?: string;
@@ -76,6 +77,15 @@ export interface SubscriptionMetrics {
 }
 
 export type UsageDestination = 'chatgpt' | 'mimo';
+export type OpenSubscriptionUsage = (destination: UsageDestination, driver: string, subscription: string) => void;
+
+export function canRefreshSubscriptionUsage(driver: string, account: SubscriptionRecord): boolean {
+  return account.state === 'signed_in' && (
+    (driver === 'codex' && account.family === 'chatgpt')
+    || (driver === 'mimo' && account.family === 'xiaomi')
+    || (driver === 'pi' && ['kimi-coding', 'zai', 'deepseek'].includes(account.family))
+  );
+}
 
 export interface AllowanceView {
   quota?: {
@@ -117,7 +127,7 @@ export interface SubscriptionView {
   listing?: SubscriptionListing;
   error?: string;
   usageRequests?: Record<string, { pending?: boolean; error?: string }>;
-  usageLinkErrors?: Partial<Record<UsageDestination, string>>;
+  usageLinkErrors?: Record<string, string | undefined>;
   evidenceError?: string;
 }
 

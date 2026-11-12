@@ -95,7 +95,9 @@ function mimoQuota(account: SubscriptionRecord, saved: Result | undefined, readi
       credits: validCredits(report.extra?.planCredits) ? report.extra.planCredits : undefined,
       windows: [windowReading(directWindow.label, directWindow.resetsAt, now, 100 - directWindow.usedPercent, directWindow.windowMinutes)],
     };
-  } else if (manual) {
+  }
+  if (manual && (!quota || quota.windows[0].elapsed
+    && Date.parse(manual.resetsAt) > Date.parse(quota.windows[0].resetsAt ?? ''))) {
     const duration = radarWindow?.resetsAt && Date.parse(radarWindow.resetsAt) === Date.parse(manual.resetsAt)
       ? radarWindow.windowMinutes ?? undefined : undefined;
     const credits = { total: manual.totalCredits, remaining: manual.remainingCredits };
@@ -211,23 +213,52 @@ function allowance(
 
 type Capacity = NonNullable<AllowanceView['capacity']>;
 
+type WindowReading = Omit<SubscriptionWindow, 'remainingMinutes' | 'outputTokensPerHour'>;
+type Rollover = 'startsOnUse' | 'weekly' | 'wait';
+
 function asWindow(
-  reading: Omit<SubscriptionWindow, 'remainingMinutes' | 'ended' | 'outputTokensPerHour'>,
+  reading: WindowReading,
   now: number,
   capacity?: Capacity,
+  rollover: Rollover = 'wait',
 ): SubscriptionWindow {
-  const end = endTime(reading);
-  const remainingMinutes = Number.isFinite(end) ? Math.max(0, (end - now) / 60_000) : undefined;
+  let end = endTime(reading);
+  if (end <= now) {
+    const { label, windowMinutes, terminal } = reading;
+    if (terminal || rollover === 'wait') return { label, windowMinutes, terminal, next: 'awaitingRenewal' };
+    const period = (windowMinutes ?? 0) * 60_000;
+    if (rollover === 'weekly' && period > 0) {
+      end += period * (1 + Math.floor((now - end) / period));
+    }
+    reading = {
+      label, windowMinutes, next: 'projected',
+      pendingStart: rollover === 'startsOnUse',
+      resetsAt: rollover === 'weekly' ? new Date(end).toISOString() : undefined,
+      usedPercent: 0, remainingPercent: 100,
+    };
+    end = endTime(reading);
+  }
+  const remainingMinutes = Number.isFinite(end) ? (end - now) / 60_000 : undefined;
   const used = reading.usedPercent;
   const left = reading.remainingPercent;
   const outputTokensUsed = capacity && used !== undefined ? capacity.total * used / 100 : reading.outputTokensUsed;
   const outputTokensRemaining = capacity && left !== undefined ? capacity.total * left / 100 : reading.outputTokensRemaining;
   return {
-    ...reading, remainingMinutes, ended: remainingMinutes === 0, outputTokensUsed, outputTokensRemaining,
+    ...reading, remainingMinutes, outputTokensUsed, outputTokensRemaining,
     model: capacity?.model ?? reading.model, estimateBasis: capacity?.source ?? reading.estimateBasis,
     outputTokensPerHour: outputTokensRemaining !== undefined && remainingMinutes !== undefined && remainingMinutes > 0
       ? outputTokensRemaining / remainingMinutes * 60 : undefined,
   };
+}
+
+function rolloverFor(driver: string, family: string, minutes?: number): Rollover {
+  const chatgpt = (driver === 'codex' || driver === 'pi') && family === 'chatgpt';
+  const claude = driver === 'claude' && family === 'anthropic';
+  const zai = driver === 'pi' && family === 'zai';
+  const kimi = driver === 'pi' && family === 'kimi-coding';
+  if (minutes === 300 && (chatgpt || claude || zai || kimi)) return 'startsOnUse';
+  if (minutes === 10_080 && (chatgpt || claude || zai)) return 'weekly';
+  return 'wait';
 }
 
 function resetExpiry(value: unknown): string | undefined {
@@ -322,9 +353,14 @@ function subscriptionMetrics(
   const rawWindows = report?.windows ?? [];
   const calibrated = driver === 'codex' && account.family === 'chatgpt'
     ? rawWindows.find((window) => window.kind === 'weekly' && window.windowMinutes === 10_080) : undefined;
-  const zai = driver === 'pi' && account.family === 'zai';
   const kimi = driver === 'pi' && account.family === 'kimi-coding';
   const mimo = driver === 'mimo' && account.family === 'xiaomi';
+  const passedBoundaries = new Set<number>();
+  function project(reading: WindowReading, capacity?: Capacity) {
+    const end = endTime(reading);
+    if (end <= now) passedBoundaries.add(end);
+    return asWindow(reading, now, capacity, rolloverFor(driver, account.family, reading.windowMinutes));
+  }
   const windows = rawWindows.map((window) => {
     const used = window.usedPercent;
     // The monthly membership credits expire at the reported refresh boundary.
@@ -332,15 +368,15 @@ function subscriptionMetrics(
     const terminal = window.resource === 'credits' && (
       kimi && window.label.startsWith('Monthly,') || mimo && window.label === 'Token Plan'
     );
-    const pendingStart = zai && window.resource === 'credits' && window.kind === 'session'
-      && window.windowMinutes === 300 && used === 0 && !window.resetsAt;
+    const pendingStart = rolloverFor(driver, account.family, window.windowMinutes) === 'startsOnUse'
+      && used === 0 && !window.resetsAt;
     const capacity = window === calibrated ? view?.capacity
       : windowCapacity(driver, account, window.label, evidence, now, window.resource);
-    return asWindow({
+    return project({
       label: window.label, resetsAt: window.resetsAt, windowMinutes: window.windowMinutes,
       expiresAt: terminal ? window.resetsAt : undefined, terminal, pendingStart,
       observedAt: report?.fetchedAt, usedPercent: used, remainingPercent: used === undefined ? undefined : 100 - used,
-    }, now, capacity);
+    }, capacity);
   });
 
   const quota = view?.quota;
@@ -348,12 +384,12 @@ function subscriptionMetrics(
     for (const window of quota.windows) {
       const left = window.remainingPercent;
       const capacity = mimo ? view?.capacity : windowCapacity(driver, account, window.label, evidence, now);
-      const row = asWindow({
+      const row = project({
         label: window.label, resetsAt: window.resetsAt, windowMinutes: window.windowMinutes,
         expiresAt: mimo ? window.resetsAt : undefined, terminal: mimo,
         source: quota.source, observedAt: quota.observedAt,
         usedPercent: left === undefined ? undefined : 100 - left, remainingPercent: left,
-      }, now, capacity);
+      }, capacity);
       const matching = windows.findIndex((reported) => reported.label === row.label);
       if (matching < 0) windows.push(row);
       else windows[matching] = row;
@@ -372,7 +408,7 @@ function subscriptionMetrics(
   const issues = windows.length === 0 ? view?.issues ?? [] : [];
   if (account.state === 'signed_in' && account.family !== 'deepseek') {
     for (const window of windows) {
-      if (window.outputTokensRemaining === undefined) issues.push(`${window.label} needs a matching token estimate.`);
+      if (window.next !== 'awaitingRenewal' && window.outputTokensRemaining === undefined) issues.push(`${window.label} needs a matching token estimate.`);
     }
   }
   const piReading = evidence?.piChatGPT;
@@ -380,13 +416,13 @@ function subscriptionMetrics(
     if (!piReading.allowed) issues.push('Pi’s access to the shared plan was disabled at the reading.');
     else if (piReading.capPercent < 100) issues.push('Pi has a separate app cap. These figures describe the shared plan.');
   }
-  return { windows, issues, limitResets: resetInventory(account, now) };
+  return { windows, issues, passedBoundaries: [...passedBoundaries], limitResets: resetInventory(account, now) };
 }
 
 function endTime(window: SubscriptionWindow) {
   return Math.min(
-    window.resetsAt ? Date.parse(window.resetsAt) : Infinity,
-    window.expiresAt ? Date.parse(window.expiresAt) : Infinity,
+    (window.resetsAt && Date.parse(window.resetsAt)) || Infinity,
+    (window.expiresAt && Date.parse(window.expiresAt)) || Infinity,
   );
 }
 
