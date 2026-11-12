@@ -1,4 +1,4 @@
-"""Command identity, Root metadata and optional route defaults (BKD-0)."""
+"""Installation identity, private paths and optional route defaults (BKD-0)."""
 
 from __future__ import annotations
 
@@ -12,13 +12,14 @@ from typing import Any
 
 ROOT_ID = re.compile(r"[a-z0-9]+\Z", re.ASCII)
 BUILD_ID = re.compile(r"[1-9a-f][0-9a-f]*\Z", re.ASCII)
-OPTIONS = {"--root", "--root-dir", "--bin-dir", "--settings-dir", "--database"}
+ISOLATION = {"--runtime-dir", "--bin-dir", "--settings-dir", "--database"}
+OPTIONS = ISOLATION
 FLAGS = {"--text"}  # the options of `arbol vigor` without a value (SGM-D28)
 OPTIONAL = {"--refresh"}  # the options of `arbol vigor` whose value may be absent
 VERBS = ("backend", "vigor")
 ACTIONS = {"learn": 0, "profiles": 0, "approve": 1}  # the words after `vigor` and the values each takes (SGM-1.11)
 USAGE = (
-    "Usage: arbol [--root <root>] backend [isolation options] | vigor [--refresh [<driver>/<subscription>]] [--text]"
+    "Usage: arbol backend [isolation options] | vigor [--refresh [<driver>/<subscription>]] [--text]"
     " | vigor learn|profiles|approve <version> [--text]."
 )
 
@@ -70,8 +71,8 @@ def parse(args: list[str]) -> dict[str, str]:
         raise Refused("invalid_input", "--refresh belongs to the read arbol vigor.")
     if words == ["backend"] and options.keys() & (FLAGS | OPTIONAL):
         raise Refused("invalid_input", "--refresh and --text belong to arbol vigor.")
-    if "--root-dir" in options and not {"--bin-dir", "--database"} <= options.keys():
-        raise Refused("invalid_input", "--root-dir requires --bin-dir and --database.")
+    if options.keys() & ISOLATION and not {"--runtime-dir", "--bin-dir", "--database"} <= options.keys():
+        raise Refused("invalid_input", "Isolation requires --runtime-dir, --bin-dir and --database.")
     options["verb"] = words[0]
     if len(words) > 1:  # `vigor learn`, `vigor profiles` or `vigor approve <version>`
         options["action"] = words[1]
@@ -82,13 +83,19 @@ def parse(args: list[str]) -> dict[str, str]:
 
 @dataclass(frozen=True)
 class Identity:
-    root: str
     build: str
     folder: Path
     bin_dir: Path
     settings: Path
     database: str | None
     home: Path
+    package: Path
+    compatibility: tuple[tuple[int, int], ...]
+
+    @property
+    def root(self) -> str:
+        # Removed with the remaining legacy projections; never select a Root.
+        return ""
 
 
 def root_record(folder: Path, selected: str) -> dict[str, Any]:
@@ -108,52 +115,71 @@ def root_record(folder: Path, selected: str) -> dict[str, Any]:
         raise Refused("unknown_root", "The selected Root has no readable valid root.json.") from error
 
 
+def schema_compatibility(value: object) -> tuple[tuple[int, int], ...]:
+    if not isinstance(value, list) or not value:
+        raise ValueError("Missing schema compatibility.")
+    versions: dict[int, int] = {}
+    for entry in value:
+        if not isinstance(entry, dict) or set(entry) != {"compatibilityVersion", "minRevision"}:
+            raise ValueError("Invalid schema compatibility entry.")
+        version, revision = entry["compatibilityVersion"], entry["minRevision"]
+        if type(version) is not int or type(revision) is not int or version < 1 or revision < 1 or version in versions:
+            raise ValueError("Invalid schema compatibility pair.")
+        versions[version] = revision
+    return tuple(versions.items())
+
+
+def private_directory(folder: Path) -> None:
+    try:
+        info = folder.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
+            raise ValueError("Expected an owner-only directory.")
+    except (OSError, ValueError) as error:
+        raise Refused("invalid_input", "The installation runtime directory is not private.") from error
+
+
 def identity(package: Path, options: dict[str, str], *, home: Path | None = None) -> Identity:
     home = home or Path.home()
-    selected = options.get("--root")
-    if selected is not None and not ROOT_ID.fullmatch(selected):
-        raise Refused("invalid_input", "A Root identifier contains only lower-case letters and digits.")
     number = "0"
     try:
         if os.path.lexists(package / "build.json"):
             record = object_file(package / "build.json")
-            version = object_file(package / "package.json").get("version")
-            root = record.get("root")
+            manifest = object_file(package / "package.json")
+            version = manifest.get("version")
+            compatibility = schema_compatibility(record.get("schemaCompatibility"))
             if (
                 record.get("component") != "arbol"
                 or record.get("entry") != "bin/arbol"
-                or not isinstance(root, str)
-                or not ROOT_ID.fullmatch(root)
+                or "root" in record
                 or not isinstance(record.get("build"), str)
                 or not BUILD_ID.fullmatch(record["build"])
                 or not isinstance(version, str)
                 or record.get("packageVersion") != version
+                or dict(schema_compatibility(manifest.get("schemaCompatibility"))) != dict(compatibility)
             ):
                 raise ValueError("Invalid Build identity.")
-            if selected is not None and selected != root:
-                raise ValueError("Explicit Root differs from the Build.")
-            selected, number = root, record["build"]
-        elif selected is None:
-            raise ValueError("--root is required outside a Build.")
+            number = record["build"]
+        else:
+            description = object_file(package / "arbol-build.json")
+            compatibility = schema_compatibility(description.get("schemaCompatibility"))
     except (OSError, ValueError, UnicodeError) as error:
-        raise Refused("invalid_input", "Cannot read a matching program/Root Build identity.") from error
-    assert selected is not None
+        raise Refused("invalid_input", "Cannot read the backend Build and its schema compatibility.") from error
 
     def path(key: str, default: Path) -> Path:
         return Path(os.path.abspath(os.path.expanduser(options.get(key, str(default)))))
 
-    folder = path("--root-dir", home / "Library/Application Support/Arbol/roots" / selected)
-    root_record(folder, selected)
+    installed = home / "Library/Application Support/Arbol/runtime"
+    folder = path("--runtime-dir", installed)
+    if "--runtime-dir" in options:
+        if folder.resolve() == installed.resolve():
+            raise Refused("invalid_input", "An isolated backend cannot use the installed runtime directory.")
     if len(os.fsencode(folder / "backend.sock")) > 103:
         raise Refused("invalid_input", "The backend socket path exceeds 103 bytes.")
     return Identity(
-        selected,
-        number,
-        folder,
-        path("--bin-dir", home / ".local/bin"),
-        path("--settings-dir", home / ".arbol/roots" / selected),
-        options.get("--database"),
-        home,
+        number, folder, path("--bin-dir", home / ".local/bin"),
+        path("--settings-dir", home / ".arbol" if folder == installed else folder / "settings"),
+        options.get("--database"), home, package,
+        compatibility,
     )
 
 

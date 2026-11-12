@@ -8,7 +8,7 @@ from pathlib import Path
 
 from arbol_radar.cli import run as vigor
 
-from .model import Refused, identity, parse
+from .model import Refused, identity, parse, private_directory
 from .server import Backend
 
 
@@ -16,9 +16,11 @@ def main(args: list[str], package: Path) -> int:
     try:
         for key in list(os.environ):
             if key.startswith("PG"):
-                del os.environ[key]
+                os.environ.pop(key, None)
         parsed = parse(args)
         selected = identity(package, parsed)
+        if selected.database is not None:
+            private_directory(selected.folder)
         if parsed["verb"] == "vigor":  # the read of Subscriptions Vigor; the command line works while no backend runs
             return asyncio.run(vigor(selected, parsed))
         return asyncio.run(Backend(selected).run())
