@@ -1,0 +1,12 @@
+# Append immutable migrations; never edit a published entry or SQL file.
+# predecessor = 0 denotes the empty database. An additive migration preserves
+# compatibility_version; a breaking migration advances it by one.
+format = 1
+
+[[migrations]]
+revision = 1
+predecessor = 0
+id = "arbol-baseline"
+file = "001-baseline.sql"
+sha256 = "a7d558ccc0aeaf444d7601d0602d9392266428a2a7d46f8d576171f1c97d1fcf"
+compatibility_version = 1
