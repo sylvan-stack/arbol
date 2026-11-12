@@ -290,11 +290,16 @@ def _ready(row: LedgerRow) -> dict[str, str | int]:
     return {"status": "ready", "revision": row[0], "compatibilityVersion": row[3]}
 
 
+def _read_committed(connection: Database, manifest: Manifest) -> tuple[LedgerRow, ...]:
+    with connection.transaction():
+        connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        return read_prefix(connection, manifest)
+
+
 def lookup(target: Target, manifest: Manifest) -> dict[str, str | int]:
     """Look up the installed pair without changing data, schema or admission."""
-    with target.connect() as connection, connection.transaction():
-        connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-        rows = read_prefix(connection, manifest)
+    with target.connect() as connection:
+        rows = _read_committed(connection, manifest)
     return _ready(rows[-1]) if rows else {"status": "uninitialized"}
 
 
@@ -338,12 +343,49 @@ def initialize(target: Target, manifest: Manifest, *, authorized: bool) -> dict[
             _record(connection, baseline)
             if read_prefix(connection, manifest) != (baseline.ledger_row(),):
                 raise Refusal("invalid", "Cannot verify the baseline ledger.")
-        with connection.transaction():
-            connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-            rows = read_prefix(connection, manifest)
-            if rows != (baseline.ledger_row(),):
-                raise Refusal("invalid", "Cannot read back the committed baseline ledger.")
-            return _ready(rows[-1])
+        rows = _read_committed(connection, manifest)
+        if rows != (baseline.ledger_row(),):
+            raise Refusal("invalid", "Cannot read back the committed baseline ledger.")
+        return _ready(rows[-1])
+
+
+def _check_target(manifest: Manifest, prefix: tuple[LedgerRow, ...], target_revision: int) -> None:
+    if type(target_revision) is not int or not 1 <= target_revision <= len(manifest.migrations):
+        raise Refusal("invalid_input", "The target revision is not declared in this release.")
+    if not prefix:
+        raise Refusal("uninitialized", "Initialize the empty database before upgrading it.")
+    if target_revision < prefix[-1][0]:
+        raise Refusal("invalid_input", "A schema upgrade cannot target an earlier revision.")
+
+
+def _apply_prefix(
+    connection: Database, manifest: Manifest, prefix: tuple[LedgerRow, ...], target_revision: int
+) -> dict[str, str | int]:
+    """Apply SQL under the caller's migration lock and exclusive admission."""
+    _check_target(manifest, prefix, target_revision)
+    for migration in manifest.migrations[len(prefix):target_revision]:
+        expected = (*prefix, migration.ledger_row())
+        try:
+            with connection.transaction():
+                connection.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE")
+                if migration.predecessor != prefix[-1][0] or read_prefix(connection, manifest) != prefix:
+                    raise Refusal("invalid", "The migration predecessor could not be verified.")
+                _execute_sql(connection, migration)
+                if read_prefix(connection, manifest) != prefix:
+                    raise Refusal("invalid", "Migration SQL modified the installed ledger.")
+                _record(connection, migration)
+                if read_prefix(connection, manifest) != expected:
+                    raise Refusal("invalid", "The migration ledger entry could not be verified.")
+            prefix = _read_committed(connection, manifest)
+        except psycopg.Error as error:
+            code = f" (SQLSTATE {error.sqlstate})" if error.sqlstate else ""
+            raise Refusal(
+                "migration_failed",
+                f"Could not confirm revision {migration.revision}{code}. Verify the committed ledger before retrying.",
+            ) from None
+        if prefix != expected:
+            raise Refusal("invalid", "The committed migration ledger does not match the requested revision.")
+    return _ready(prefix[-1])
 
 
 def main() -> int:
