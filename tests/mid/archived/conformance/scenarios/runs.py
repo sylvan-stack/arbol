@@ -4,6 +4,7 @@ helpers other scenarios use: `events`, `stream`, `signed`, `check_run_without_co
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import re
 import uuid
@@ -333,9 +334,20 @@ async def run_c44(home: ScenarioHome) -> None:
     base = {"subscriptionId": identifier, "history": [], "tools": "none",
             "workingDirectory": home.home, "input": {"role": "user", "text": "answer"}}
 
+    # The real Claude CLI resolves an unset config directory under its native HOME.
+    # Its stand-in expects an explicit directory; normalize only after the child probe.
+    launcher = Path(home.tool_path)
+    launcher.write_text(launcher.read_text().replace(
+        "exec ", 'if [ -z "${CLAUDE_CONFIG_DIR:-}" ]; then export CLAUDE_CONFIG_DIR="$HOME/.claude"; fi\nexec ', 1))
+    home.id = "C14"
+    await home.part("plain")
     chat = str(uuid.uuid4())
     reply, records = await identity_run(home, JSObject(base, arbolChat=True, chatSessionId=chat))
-    stream(reply)
+    first = stream(reply)
+    map_path = (Path(os.environ["ASD14_DRIVER_STATE"]) / "subscriptions" / identifier / "chats"
+                / (hashlib.sha256(chat.encode()).hexdigest() + ".json"))
+    initial = object_("Saved conversation", parse(map_path.read_text()))
+    equal("First continuity", first[0]["continuity"], "fresh")
     carrying = 0
     for record in records:
         names = array_of(record["environment"])
@@ -346,6 +358,21 @@ async def run_c44(home: ScenarioHome) -> None:
             equal("ARBOL_CHAT at launch", checks["arbolChat"], chat)
             carrying += 1
     check("The run's tool launch carries the identity", carrying > 0, "at least one launch with the UUID", records)
+
+    history = [{"type": "message", "role": "user", "text": "answer"},
+               *({"type": "message", "role": "assistant", "text": event["text"]}
+                 for event in first if event["type"] == "text")]
+    reply, second_records = await identity_run(home, JSObject(base, arbolChat=True, chatSessionId=chat,
+                                                             history=history))
+    second = stream(reply)
+    equal("Second continuity", second[0]["continuity"], "resumed")
+    resumed = object_("Resumed conversation", parse(map_path.read_text()))
+    equal("Same saved vendor conversation", resumed["conversation"], initial["conversation"])
+    carrying_second = [record for record in second_records if "ARBOL_CHAT" in array_of(record["environment"])]
+    check("Second launch carries chat", bool(carrying_second), "a marked launch", second_records)
+    for record in carrying_second:
+        equal("Second launch UUID", record["checks"]["arbolChat"], chat)
+        check("Second launch has no Root", "ARBOL_ROOT" not in record["environment"], "no Root", record)
 
     for opaque in ("opaque chat " + uuid.uuid4().hex, str(uuid.uuid4())):
         reply, records = await identity_run(home, JSObject(base, chatSessionId=opaque))
