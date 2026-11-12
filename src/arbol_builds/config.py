@@ -14,7 +14,7 @@ from .launcher import (
     js_integer,
     positive,
     refuse_constant,
-    root_contracts,
+    schema_compatibility,
     trunk,
 )
 
@@ -87,11 +87,12 @@ def description(repo: str, component: str) -> tuple[dict[str, Any], str, dict[st
     if component.endswith("-driver") and ("contract" not in config or "dataFormat" not in config or any(
             not any(check.get("kind") == kind for check in config["checks"]) for kind in KINDS)):
         raise ValueError("A Driver requires contract, dataFormat and unit, contract and live checks.")
-    if trunk(component) and ("contract" in config or not root_contracts(config.get("rootContracts"))):
-        raise ValueError("A Trunk requires rootContracts, the distinct positive whole numbers of the Root Contract "
-                         "versions it implements, and lists them in place of contract.")
-    if not trunk(component) and "rootContracts" in config:
-        raise ValueError("Only a Trunk lists rootContracts.")
+    if "rootContracts" in config or (trunk(component) and "contract" in config):
+        raise ValueError("A Trunk declares schemaCompatibility in place of rootContracts or contract.")
+    if (trunk(component) or "schemaCompatibility" in config) and not schema_compatibility(
+            config.get("schemaCompatibility")):
+        raise ValueError("schemaCompatibility must contain a positive integer minRevision for each distinct "
+                         "positive integer compatibilityVersion.")
     package = load_json(os.path.join(repo, "package.json"))
     version = package.get("version") if isinstance(package, dict) else None
     if not isinstance(version, str) or blank(version):

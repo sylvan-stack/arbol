@@ -129,6 +129,22 @@ def root_contracts(value: object) -> bool:
             and len({int(item) for item in value}) == len(value))
 
 
+def schema_compatibility(value: object) -> bool:
+    """A nonempty declaration with one minimum revision per supported compatibility version."""
+    if not isinstance(value, list) or not value:
+        return False
+    versions: set[int] = set()
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"compatibilityVersion", "minRevision"}:
+            return False
+        version, minimum = item["compatibilityVersion"], item["minRevision"]
+        if (type(version) is not int or not positive(version) or version in versions
+                or type(minimum) is not int or not positive(minimum)):
+            return False
+        versions.add(version)
+    return True
+
+
 def valid_record(value: object, component: str, build: str) -> bool:
     if (not isinstance(value, dict) or value.get("component") != component or value.get("build") != build
             or BUILD_PATTERN.fullmatch(build) is None or not text(value.get("packageVersion"))
@@ -145,10 +161,14 @@ def valid_record(value: object, component: str, build: str) -> bool:
         return False
     if any(key in value and not positive(value[key]) for key in ("contract", "dataFormat")):
         return False
-    # A Build of arbol or arbol-root names its Root, and a Trunk's Build the Root Contract versions it implements.
+    declares_schema = "schemaCompatibility" in value
+    if declares_schema and not schema_compatibility(value["schemaCompatibility"]):
+        return False
+    # Legacy records stay readable so their Build numbers and history are preserved.
     if ("root" in value or component in ROOT_COMPONENTS) and not root_identifier(value.get("root")):
         return False
-    if ("rootContracts" in value or trunk(component)) and not root_contracts(value.get("rootContracts")):
+    needs_root_contracts = "rootContracts" in value or (trunk(component) and not declares_schema)
+    if needs_root_contracts and not root_contracts(value.get("rootContracts")):
         return False
     if any(key in value and not date(value[key]) for key in ("finishedAt", "prunedAt", "lockedAt")):
         return False

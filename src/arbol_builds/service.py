@@ -255,8 +255,8 @@ def build_component(component: str, paths: Locations, stop: Stop, root: str | No
     # Whole numbers, also when written 1.0, in the order of BuildRecord.
     if "contract" in config:
         record["contract"] = int(config["contract"])
-    if "rootContracts" in config:
-        record["rootContracts"] = [int(number) for number in config["rootContracts"]]
+    if "schemaCompatibility" in config:
+        record["schemaCompatibility"] = config["schemaCompatibility"]
     if "dataFormat" in config:
         record["dataFormat"] = int(config["dataFormat"])
     save_record(folder, record)
