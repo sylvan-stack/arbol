@@ -6,5 +6,11 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/sylvan-stack/arbol.git"
-  }
+  },
+  "schemaCompatibility": [
+    {
+      "compatibilityVersion": 1,
+      "minRevision": 1
+    }
+  ]
 }
