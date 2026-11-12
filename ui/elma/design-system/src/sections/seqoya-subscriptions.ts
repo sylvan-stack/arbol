@@ -64,3 +64,26 @@ export interface SubscriptionView {
 export function subscriptionKey(driver: string, subscription: string): string {
   return JSON.stringify([driver, subscription]);
 }
+
+const vendors = new Map([
+  ['anthropic', 'Claude Code'],
+  ['chatgpt', 'ChatGPT'],
+  ['kimi-coding', 'Kimi Code'],
+  ['zai', 'z.ai'],
+  ['deepseek', 'DeepSeek'],
+  ['xiaomi', 'MiMo'],
+]);
+
+export function subscriptionVendor(driver: string, family: string): string {
+  return driver === 'codex' && family === 'chatgpt' ? 'Codex' : (vendors.get(family) ?? family);
+}
+
+const dateTime = new Intl.DateTimeFormat(undefined, {
+  year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+  timeZoneName: 'short',
+});
+
+export function formatSubscriptionTime(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? 'Time unavailable' : dateTime.format(date);
+}

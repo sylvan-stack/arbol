@@ -5,7 +5,7 @@
   import Meter from '../components/Meter.svelte';
   import Notice from '../patterns/Notice.svelte';
   import PageHeader from '../patterns/PageHeader.svelte';
-  import { subscriptionKey, type SubscriptionView } from './seqoya-subscriptions';
+  import { formatSubscriptionTime, subscriptionKey, subscriptionVendor, type SubscriptionView } from './seqoya-subscriptions';
 
   let {
     view = { connected: false },
@@ -21,14 +21,6 @@
     onOpenMiMo?: () => void;
   } = $props();
 
-  const vendors = new Map([
-    ['anthropic', 'Claude Code'],
-    ['chatgpt', 'ChatGPT'],
-    ['kimi-coding', 'Kimi Code'],
-    ['zai', 'z.ai'],
-    ['deepseek', 'DeepSeek'],
-    ['xiaomi', 'MiMo'],
-  ]);
   const states = new Map<string, { label: string; tone: string }>([
     ['signed_in', { label: 'Signed in', tone: 'success' }],
     ['signed_out', { label: 'Signed out', tone: 'neutral' }],
@@ -42,14 +34,6 @@
     ['api_key', 'API key'],
     ['token', 'Token'],
   ]);
-  const dateTime = new Intl.DateTimeFormat(undefined, {
-    year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
-    timeZoneName: 'short',
-  });
-  function formatTime(value: string) {
-    const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? 'Time unavailable' : dateTime.format(date);
-  }
   const integer = new Intl.NumberFormat();
   function tokens(value?: string) {
     return typeof value === 'string' && /^[0-9]+$/.test(value) ? integer.format(BigInt(value)) : 'Unavailable';
@@ -60,8 +44,7 @@
     (subscriptions ?? []).map((subscription) => ({
       driver,
       subscription,
-      vendor: driver === 'codex' && subscription.family === 'chatgpt'
-        ? 'Codex' : (vendors.get(subscription.family) ?? subscription.family),
+      vendor: subscriptionVendor(driver, subscription.family),
     })),
   ).sort((left, right) =>
     left.vendor.localeCompare(right.vendor) ||
@@ -134,7 +117,7 @@
           {/if}
           {#if usage}
             <div class="stack usage">
-              <p class="small muted">Usage recorded <time datetime={usage.fetchedAt}>{formatTime(usage.fetchedAt)}</time>{#if usage.plan} · {usage.plan}{/if}</p>
+              <p class="small muted">Usage recorded <time datetime={usage.fetchedAt}>{formatSubscriptionTime(usage.fetchedAt)}</time>{#if usage.plan} · {usage.plan}{/if}</p>
               {#each balances as balance (balance.currency)}
                 <p>API balance <strong>{balance.amount} {balance.currency}</strong></p>
               {/each}
@@ -146,7 +129,7 @@
                     <p class="small muted">
                       {#if window.limitReached}<span class="warning">Limit reached</span>{/if}
                       {#if window.limitReached && window.resetsAt} · {/if}
-                      {#if window.resetsAt}Resets <time datetime={window.resetsAt}>{formatTime(window.resetsAt)}</time>{/if}
+                      {#if window.resetsAt}Resets <time datetime={window.resetsAt}>{formatSubscriptionTime(window.resetsAt)}</time>{/if}
                     </p>
                   {/if}
                 </div>
@@ -175,7 +158,7 @@
                 {#if activity.runCount}
                   <p class="small">Input tokens: {tokens(activity.inputTokens)} · Output tokens: {tokens(activity.outputTokens)}</p>
                   {#if activity.lastRunAt}
-                    <p class="small muted">Last run <time datetime={activity.lastRunAt}>{formatTime(activity.lastRunAt)}</time></p>
+                    <p class="small muted">Last run <time datetime={activity.lastRunAt}>{formatSubscriptionTime(activity.lastRunAt)}</time></p>
                   {/if}
                 {/if}
               {:else if subscription.activityError}

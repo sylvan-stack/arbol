@@ -2,13 +2,14 @@
   import type { Snippet } from 'svelte';
   import WorkspaceShell from '../patterns/WorkspaceShell.svelte';
   import type { SubscriptionView } from '../sections/seqoya-subscriptions';
+  import type { VigorView } from '../sections/seqoya-vigor';
   import type { WorkspaceTrunkSelector } from '../types';
   import IntelligenceProviders from './IntelligenceProviders.svelte';
 
   let {
     trunk, trunkSelector, headerWindowControls, connectionStatus = '', fitted = false,
     theme = $bindable(''), uiScale = $bindable(0), appearanceReady = true, onAppearanceChange,
-    subscriptions, onRefreshSubscriptions, onTabChange,
+    subscriptions, vigor, onRefreshSubscriptions, onRefreshVigor, onTabChange,
     onRefreshUsage, onOpenMiMo,
   }: {
     trunk?: string;
@@ -21,7 +22,9 @@
     appearanceReady?: boolean;
     onAppearanceChange?: () => void;
     subscriptions?: SubscriptionView;
+    vigor?: VigorView;
     onRefreshSubscriptions?: () => void;
+    onRefreshVigor?: () => void;
     onTabChange?: (tab: string) => void;
     onRefreshUsage?: (driver: string, subscription: string) => void;
     onOpenMiMo?: () => void;
@@ -35,7 +38,8 @@
   headerAppearance={appearanceReady ? 'enabled' : 'disabled'} bind:theme bind:uiScale {onAppearanceChange}
   status={connectionStatus ? connection : null} navigationFooter={false} {fitted}>
   <div class="page-content seqoya-page">
-    <IntelligenceProviders {subscriptions} {onRefreshSubscriptions} {onTabChange} {onRefreshUsage} {onOpenMiMo} />
+    <IntelligenceProviders {subscriptions} {vigor} {onRefreshSubscriptions} {onRefreshVigor}
+      {onTabChange} {onRefreshUsage} {onOpenMiMo} />
   </div>
 </WorkspaceShell>
 

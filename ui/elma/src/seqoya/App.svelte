@@ -4,6 +4,7 @@
   import {
     subscriptionKey, type SubscriptionActivity, type SubscriptionListing, type SubscriptionView,
   } from '../../design-system/src/sections/seqoya-subscriptions';
+  import type { VigorRollup, VigorView } from '../../design-system/src/sections/seqoya-vigor';
   import type { WorkspaceTrunkSelector } from '../../design-system/src/types';
   import { AppChannel } from '../app-channel';
   import { Bridge, Refusal } from '../bridge';
@@ -16,13 +17,19 @@
   let rootId = $state<string>();
   let appearance = $state(readSeqoyaAppearance());
   let subscriptions = $state<SubscriptionView>({ connected: false });
+  let vigor = $state<VigorView>({});
   let subscriptionsOpen = true;
   let readSubscriptions: (() => Promise<void>) | undefined;
+  let readVigor: (() => Promise<void>) | undefined;
   let readUsage: ((driver: string, subscription: string) => Promise<void>) | undefined;
   let openConsole: (() => Promise<void>) | undefined;
 
   function refreshSubscriptions() {
     void readSubscriptions?.();
+  }
+
+  function refreshVigor() {
+    void readVigor?.();
   }
 
   function refreshUsage(driver: string, subscription: string) {
@@ -36,6 +43,7 @@
   function changeTab(tab: string) {
     subscriptionsOpen = tab === 'Subscriptions';
     if (subscriptionsOpen) refreshSubscriptions();
+    if (tab === 'Vigor') refreshVigor();
   }
 
   onMount(() => {
@@ -131,6 +139,32 @@
     }
     readSubscriptions = reloadList;
 
+    readVigor = async () => {
+      if (!active || vigor.loading) return;
+      vigor = { ...vigor, loading: true, error: undefined };
+      try {
+        const reply = await app.call('app.readVigor');
+        if (!active) return;
+        if (typeof reply.moment !== 'string' || !Array.isArray(reply.subscriptions)
+          || !reply.failures || typeof reply.failures !== 'object' || Array.isArray(reply.failures)
+          || (reply.headline !== null && (!reply.headline || typeof reply.headline !== 'object'))) {
+          throw new Error('Invalid Vigor rollup.');
+        }
+        vigor = { rollup: reply as unknown as VigorRollup };
+      } catch (error) {
+        if (!active) return;
+        vigor = {
+          ...vigor,
+          loading: false,
+          error: error instanceof Refusal
+            ? error.detail.code === 'unknown_method'
+              ? 'Open Seqoya Lab in the updated Arbol App to read Vigor.'
+              : error.message
+            : 'The App did not return a readable Vigor rollup.',
+        };
+      }
+    };
+
     readUsage = async (driver, subscription) => {
       const account = subscriptions.listing?.drivers.find((entry) => entry.driver === driver)
         ?.subscriptions?.find((row) => row.id === subscription);
@@ -177,6 +211,7 @@
     return () => {
       active = false;
       readSubscriptions = undefined;
+      readVigor = undefined;
       readUsage = undefined;
       openConsole = undefined;
       bridge.close();
@@ -186,7 +221,8 @@
 </script>
 
 <SeqoyaLab fitted {trunk} {trunkSelector} {connectionStatus}
-  {subscriptions} onTabChange={changeTab} onRefreshSubscriptions={refreshSubscriptions}
+  {subscriptions} {vigor} onTabChange={changeTab}
+  onRefreshSubscriptions={refreshSubscriptions} onRefreshVigor={refreshVigor}
   onRefreshUsage={refreshUsage} onOpenMiMo={openMiMo}
   appearanceReady={rootId !== undefined} bind:theme={appearance.theme} bind:uiScale={appearance.uiScale}
   onAppearanceChange={() => { if (rootId !== undefined) saveSeqoyaAppearance(rootId, appearance); }} />
