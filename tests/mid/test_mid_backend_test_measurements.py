@@ -8,9 +8,7 @@ from backend.test_measurements import (
     Health,
     LocalDisk,
     Measurements,
-    Programs,
     Registry,
-    asyncio,
     replace,
     shlex,
     sys,
@@ -21,25 +19,17 @@ from backend.test_measurements import (
 class Storage(_support.Storage):
 
 # TEST-TIER-BEGIN tests/backend/test_measurements.py::Storage.test_size_permission_failure_is_partial_without_escalation_or_an_outage
-    async def test_size_permission_failure_is_partial_without_escalation_or_an_outage(self) -> None:
-        """measurement.permission-partial; measurement.no-escalation; measurement.data-directory-permission"""
-        await self.db.execute("CREATE DATABASE private_denied")
-        await self.db.execute("CREATE DATABASE private_allowed")
-        await self.db.execute("REVOKE CONNECT ON DATABASE private_denied FROM PUBLIC")
+    async def test_limited_measurement_role_keeps_database_size_when_disk_metadata_is_unavailable(self) -> None:
+        """A real limited role retains independent database facts after disk metadata refusal."""
         await self.db.execute("CREATE ROLE measurement_user LOGIN")
-        self.catalogue(("denied", "private_denied"), ("allowed", "private_allowed"))
         selected = replace(self.backend.identity, database=self.cluster.address.replace("bkd@", "measurement_user@"))
         database = Database(selected)
         health = Health(database, Attention())
-        measure = Measurements(health, self.backend.roots, Registry())
+        measure = Measurements(health, Registry())
         try:
             report = await measure.measure({})
-            rows = {row["root"]: row for row in report["roots"]}
             self.assertTrue(report["server"]["ok"])
-            self.assertIn("problem", rows["denied"])
-            self.assertNotIn("bytes", rows["denied"])
-            self.assertGreater(rows["allowed"]["bytes"], 0)
-            self.assertGreater(rows[self.backend.identity.root]["bytes"], 0)
+            self.assertGreater(report["database"]["bytes"], 0)
             self.assertIn("diskProblem", report)
             self.assertNotIn("freeBytes", report)
             self.assertFalse(database.away)
@@ -72,18 +62,7 @@ class Storage(_support.Storage):
 # TEST-TIER-END tests/backend/test_measurements.py::Storage.test_utility_split_output_is_complete_and_overflow_is_bounded
 
 # TEST-TIER-BEGIN tests/backend/test_measurements.py::Storage.test_a_root_named_catalogue_cannot_collide_with_the_global_catalogue_command
-    async def test_a_root_named_catalogue_cannot_collide_with_the_global_catalogue_command(self) -> None:
-        """measurement.catalogue-namespace; measurement.valid-root-name"""
-        self.frame.behavior["arbol-roots"] = {"sleep": 0.1, "output": [{"root": "catalogue", "current": True}]}
-        self.frame.behavior["arbol-root"] = {"sleep": 0.1, "output": {"root": "catalogue", "exchanges": [], "unreadable": []}}
-        self.frame.configure()
-        programs = Programs(replace(self.backend.identity, root="catalogue"))
-        try:
-            current, listed = await asyncio.gather(programs.current_root(), programs.call("arbol-root", ["list"], kind="list"))
-            self.assertEqual(current, {"root": "catalogue", "current": True})
-            self.assertEqual(listed["root"], "catalogue")
-        finally:
-            programs.close()
+    # The former Root-specific observation is preserved below.
 # TEST-TIER-END tests/backend/test_measurements.py::Storage.test_a_root_named_catalogue_cannot_collide_with_the_global_catalogue_command
 
 # LOW TIER — DO NOT ENABLE OR RECREATE
@@ -258,3 +237,19 @@ class Storage(_support.Storage):
 #             os.kill(children[0].pid, 0)
 # LOW-TIER-SOURCE-END
 # LOW-TIER-END
+
+# ARC-4 HISTORICAL OBSERVATION
+# Reason: ARC-4.1 and ARC-4.7 retire the Root catalogue namespace.
+# Source: arbol@fd2072700aa5ff7a9a5b3b88a859cf32ef58e751
+#     async def test_a_root_named_catalogue_cannot_collide_with_the_global_catalogue_command(self) -> None:
+#         """measurement.catalogue-namespace; measurement.valid-root-name"""
+#         self.frame.behavior["arbol-roots"] = {"sleep": 0.1, "output": [{"root": "catalogue", "current": True}]}
+#         self.frame.behavior["arbol-root"] = {"sleep": 0.1, "output": {"root": "catalogue", "exchanges": [], "unreadable": []}}
+#         self.frame.configure()
+#         programs = Programs(replace(self.backend.identity, root="catalogue"))
+#         try:
+#             current, listed = await asyncio.gather(programs.current_root(), programs.call("arbol-root", ["list"], kind="list"))
+#             self.assertEqual(current, {"root": "catalogue", "current": True})
+#             self.assertEqual(listed["root"], "catalogue")
+#         finally:
+#             programs.close()

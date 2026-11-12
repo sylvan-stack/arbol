@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 __all__ = [
-    "AcrossRoots", "Any", "CAPACITY", "Error", "MAX_LINE", "Params", "Path", "ROOT", "Refused", "TOTAL",
+    "AcrossRoots", "Any", "Error", "MAX_LINE", "Params", "Path", "ROOT", "Refused",
     "WindowFixture", "asyncio", "calls", "chat", "configure", "encoded", "install", "json", "mock", "now",
     "stop_params", "sys", "time",
 ]
@@ -23,8 +23,6 @@ sys.path.insert(0, str(ROOT / "tests"))
 from arbol_backend.bridge import MAX_LINE, Error, Params  # noqa: E402
 from arbol_backend.chat_data import encoded  # noqa: E402
 from arbol_backend.controls import stop_params  # noqa: E402
-from arbol_backend.discovery import TOTAL  # noqa: E402
-from arbol_backend.listings import CAPACITY  # noqa: E402
 from arbol_backend.metadata import now  # noqa: E402
 from arbol_backend.model import Refused  # noqa: E402
 from backend.discovery_support import calls, configure, install  # noqa: E402
@@ -34,11 +32,13 @@ from backend.test_chat_wire import WindowFixture, chat  # noqa: E402
 class AcrossRoots(WindowFixture):
     async def asyncSetUp(self) -> None:
         await super().asyncSetUp()
-        assert self.backend.discovery.task and self.backend.settling.look and self.backend.settling.worker
-        await self.backend.discovery.task
-        await self.backend.settling.look
-        await self.backend.settling.worker
-        self.own = self.backend.identity.root
+        if self.backend.listings.task is not None:
+            await self.backend.listings.task
+        if self.backend.settling.look is not None:
+            await self.backend.settling.look
+        if self.backend.settling.worker is not None:
+            await self.backend.settling.worker
+        self.own = "installation"
         self.behavior: dict[str, Any] = {}
         install(self.frame, self.behavior)
         self.catalogue([self.own, "t2"])

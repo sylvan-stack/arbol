@@ -126,26 +126,33 @@ class WindowFixture(BridgeWindows):
     """Historical fixture retained for the separate mid-tier sources."""
 
     async def asyncSetUp(self) -> None:
+        self.fixture = await asyncio.to_thread(SingleInstallation)
+        self.addAsyncCleanup(asyncio.to_thread, self.fixture.close)
+        await asyncio.to_thread(self.fixture.open_admission)
         self.frame = Frame()
         self.addCleanup(self.frame.close)
-        self.cluster = await asyncio.to_thread(Cluster)
-        self.addAsyncCleanup(asyncio.to_thread, self.cluster.close)
-        self.frame.record["status"] = "working"
-        self.frame.save_root()
-        self.frame.behavior = {"arbol-roots": {"output": [{**self.frame.record, "current": True}]}}
+        for program in self.frame.bin.iterdir():
+            if program.is_file() and program.name != "behavior.json":
+                (self.fixture.bin / program.name).write_bytes(program.read_bytes())
+                (self.fixture.bin / program.name).chmod(0o700)
+        self.frame.base = self.fixture.cluster.base
+        self.frame.home = self.fixture.home
+        self.frame.root = self.fixture.runtime
+        self.frame.bin = self.fixture.bin
+        self.frame.settings = self.fixture.settings
+        self.cluster = self.fixture.cluster
+        self.frame.behavior = {"arbol-exchanges": {"output": {"exchanges": [], "unreadable": []}}}
         for driver in ("claude", "codex", "pi"):
             self.frame.behavior["arbol-" + driver + "-driver"] = {"output": [{"id": "private"}]}
         self.frame.configure()
-        selected = identity(ROOT, parse(self.frame.options(self.cluster.address)), home=self.frame.home)
+        selected = identity(ROOT, parse(["backend", *self.fixture.options()]), home=self.fixture.home)
         self.db = Database(selected)
         self.addAsyncCleanup(self.db.close)
-        await self.db.execute((ROOT / "tests/backend/own-layout.sql").read_text())
         await self.db.execute(
             "INSERT INTO chats SELECT lpad(to_hex(n),32,'0')::uuid,'chat '||n,"
             "'2026-10-27T00:00:00Z'::timestamptz+n*interval '1 microsecond' FROM generate_series(1,201) n"
         )
         await self.start_wire(selected)
-
 
 class Windows(WindowFixture):
     pass  # Shared fixtures; case bodies live in top/ and mid/.

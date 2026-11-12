@@ -75,7 +75,7 @@ class Outside(_support.Outside):
         start = asyncio.create_task(accepting())
         self.backend.dispatch.entries[self.trunk.exchange] = Entry("private", chat=chat(1), task=start)
         await self.look(90)
-        key = (self.own, self.trunk.exchange)
+        key = self.trunk.exchange
         async with asyncio.timeout(2):
             while key not in self.backend.controls.force_tasks:
                 await asyncio.sleep(0.005)

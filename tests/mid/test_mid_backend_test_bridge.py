@@ -4,7 +4,6 @@ from __future__ import annotations
 import backend.test_bridge as _support
 from backend.test_bridge import (
     MAX_LINE,
-    Error,
     Frame,
     Params,
     Refused,
@@ -15,6 +14,7 @@ from backend.test_bridge import (
     mock,
     socket,
 )
+from backend.test_chat_wire import WindowFixture
 
 
 class Wire(_support.Wire):
@@ -135,35 +135,37 @@ class Wire(_support.Wire):
 # TEST-TIER-END tests/backend/test_bridge.py::Wire.test_oversize_results_end_safely_and_disconnect_detaches
 
 
-class RootWire(_support.RootWire):
+class RootWire(WindowFixture):
 
 
 # TEST-TIER-BEGIN tests/backend/test_bridge.py::RootWire.test_cancelled_catalogue_does_not_log_a_late_failure
-    async def test_cancelled_catalogue_does_not_log_a_late_failure(self) -> None:
-        """bridge.catalogue-cancel-privacy"""
-        await self.backend.roots.catalogue()
+    async def test_cancelled_installation_subscription_does_not_log_a_late_failure(self) -> None:
+        """A disconnected installation subscriber consumes a late private failure safely."""
         entered, release = asyncio.Event(), asyncio.Event()
-        async def failing() -> list[Params]:
+        async def failing(params: Params) -> Snapshot:
             entered.set()
-            await release.wait()
-            raise Refused("no_answer", "credential=private-secret")
+            try:
+                await release.wait()
+            finally:
+                raise Refused("no_answer", "credential=private-secret")
         loop = asyncio.get_running_loop()
         logged: list[Params] = []
         old_handler = loop.get_exception_handler()
         loop.set_exception_handler(lambda loop, context: logged.append(context))
+        reader, writer = await self.open()
         try:
-            with mock.patch.object(self.backend.roots, "catalogue_read", side_effect=failing):
-                caller = asyncio.create_task(self.backend.roots.catalogue())
-                await entered.wait()
-                caller.cancel()
-                await asyncio.gather(caller, return_exceptions=True)
+            with mock.patch.object(self.backend.installation.topic, "snapshot", side_effect=failing):
+                await self.send(writer, {"type": "subscribe", "id": "cancelled", "topic": "installation"})
+                await asyncio.wait_for(entered.wait(), 2)
+                writer.close()
+                await writer.wait_closed()
                 release.set()
-                assert self.backend.roots.inflight
-                outcome = await self.backend.roots.inflight
-                self.assertIsInstance(outcome, Error)
-                self.assertNotIn("private-secret", str(outcome))
+                async with asyncio.timeout(2):
+                    while self.backend.installation.topic.listeners:
+                        await asyncio.sleep(0.01)
                 await asyncio.sleep(0)
                 self.assertEqual(logged, [])
+                self.assertNotIn(b"private-secret", await reader.read())
         finally:
             loop.set_exception_handler(old_handler)
 # TEST-TIER-END tests/backend/test_bridge.py::RootWire.test_cancelled_catalogue_does_not_log_a_late_failure

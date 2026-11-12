@@ -112,10 +112,7 @@ class Delegation(unittest.IsolatedAsyncioTestCase):
         raise AssertionError("Private backend did not become ready.")
 
     async def settle_check(self, backend: Backend) -> None:
-        async with asyncio.timeout(3):
-            while backend.migration.check_task is None:
-                await asyncio.sleep(0.01)
-            await backend.migration.check_task
+        raise AssertionError("Cross-Root reimport is historical under ARC-4.1 and ARC-4.7.")
 
     def calls(self, mode: str | None = None) -> list[Params]:
         rows = [row for row in self.frame.calls() if row["program"] == "arbol-roots" and row["args"][:1] == ["migrate"]]

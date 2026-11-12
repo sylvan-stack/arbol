@@ -30,12 +30,12 @@ from backend.test_chat_wire import WindowFixture, chat  # noqa: E402
 
 class Stopping(WindowFixture):
     def configure(self, exchange: str, *, ended: str = "cancelled", sleep: float = 0, **extra: Any) -> None:
-        self.frame.behavior["arbol-root"] = {"sleep": sleep,
-            "output": {"root": self.backend.identity.root, "exchange": exchange, "ended": ended, "forced": False}, **extra}
+        self.frame.behavior["arbol-exchanges"] = {"sleep": sleep,
+            "output": {"exchange": exchange, "ended": ended, "forced": False}, **extra}
         self.frame.configure()
 
     def calls(self, kind: str = "stop") -> list[Params]:
-        return [row for row in self.frame.calls() if row["program"] == "arbol-root" and row["args"][2] == kind]
+        return [row for row in self.frame.calls() if row["program"] == "arbol-exchanges" and row["args"][0] == kind]
 
     async def wait_call(self, kind: str = "stop", count: int = 1) -> list[Params]:
         async with asyncio.timeout(2):

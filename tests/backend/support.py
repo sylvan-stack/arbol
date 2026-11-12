@@ -69,7 +69,7 @@ class Frame:
         self.save_root()
         self.behavior: dict[str, Any] = {}
         self.configure()
-        for name in ("arbol-root", "arbol-roots", "arbol-claude-driver", "arbol-codex-driver", "arbol-pi-driver"):
+        for name in ("arbol-root", "arbol-roots", "arbol-exchanges", "arbol-claude-driver", "arbol-codex-driver", "arbol-pi-driver"):
             path = self.bin / name
             path.write_text(
                 "#!/bin/sh\nexec " + shlex.quote(sys.executable) + " -I -c " + shlex.quote(STANDIN) + ' "$0" "$@"\n'
@@ -89,10 +89,8 @@ class Frame:
 
     def options(self, database: str | None = None) -> list[str]:
         return [
-            "--root",
-            TEST_ROOT,
             "backend",
-            "--root-dir",
+            "--runtime-dir",
             str(self.root),
             "--bin-dir",
             str(self.bin),

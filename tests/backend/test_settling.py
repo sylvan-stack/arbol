@@ -24,9 +24,10 @@ class Settles(WindowFixture):
         assert self.backend.settling.worker and self.backend.settling.look
         await self.backend.settling.worker
         await self.backend.settling.look
-        if self.backend.discovery.task is not None:
-            await self.backend.discovery.task
-        await asyncio.gather(*self.backend.listings.tasks.values())
+        if self.backend.listings.task is not None:
+            await self.backend.listings.task
+        if self.backend.listings.task is not None:
+            await self.backend.listings.task
         self.initial = self.calls()
         code = STANDIN.replace("config=json.loads((base/'behavior.json').read_text()).get(name,{})",
             "config=json.loads((base/'behavior.json').read_text()).get(name,{})\nconfig=config.get('commands',{}).get(sys.argv[3],config)")
@@ -35,7 +36,7 @@ class Settles(WindowFixture):
 
     def configure(self, *, settle_sleep: float = 0, list_sleep: float = 0, rows: list[Params] | None = None,
                   root: str | None = None, status: int = 0) -> None:
-        own = self.backend.identity.root
+        own = "installation"
         self.frame.behavior["arbol-root"] = {"commands": {
             "settle": {"sleep": settle_sleep, "status": status, "output": {"root": own, "results": []}},
             "list": {"sleep": list_sleep, "output": {"root": root or own, "exchanges": rows or [], "unreadable": []}}}}
@@ -55,7 +56,7 @@ class Settles(WindowFixture):
         await asyncio.wait_for(self.backend.settling.worker, 3)
 
     def row(self, state: str) -> Params:
-        return {"root": self.backend.identity.root, "exchange": chat(850), "chat": chat(1), "state": state,
+        return {"root": "installation", "exchange": chat(850), "chat": chat(1), "state": state,
             "trunk": "trivial", "build": "0", "process": {"pid": 100, "startedAt": now(), "alive": False},
             "signsOfLife": {"heartbeat": 1, "waitingFor": "database", "since": now()}}
 

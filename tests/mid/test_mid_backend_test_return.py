@@ -75,7 +75,7 @@ class Returned(_support.Returned):
         await online(self.cluster)
         await self.backend.health.probe()
         await trunk.save(self.db, state="interrupted", remove=False)
-        self.backend.recovery.settled(self.backend.identity.root)
+        self.backend.recovery.settled()
         assert self.backend.notes.worker
         await self.backend.notes.worker
         r, w = await self.open()

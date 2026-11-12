@@ -6,8 +6,6 @@ from backend.test_discovery import (
     asyncio,
     calls,
     chat,
-    mock,
-    stop_params,
 )
 
 
@@ -15,49 +13,41 @@ class AcrossRoots(_support.AcrossRoots):
 
 
 # TEST-TIER-BEGIN tests/backend/test_discovery.py::AcrossRoots.test_two_roots_with_same_uuid_have_separate_shared_stops_and_no_foreign_chat_reads
-    async def test_two_roots_with_same_uuid_have_separate_shared_stops_and_no_foreign_chat_reads(self) -> None:
-        """discovery.stop-root-identity; discovery.same-uuid; discovery.foreign-no-chat-read"""
-        exchange = chat(912)
-        self.behavior = {self.own: {"stop": {"sleep": 0.15}}, "t2": {"stop": {"sleep": 0.15}}}
-        self.configure()
-        with mock.patch.object(self.backend.controls, "notice", wraps=self.backend.controls.notice) as notice:
-            tasks = [asyncio.create_task(self.backend.controls.stop(await stop_params({"exchange": exchange, **extra})))
-                for extra in ({}, {}, {"root": "t2"}, {"root": "t2"})]
-            await self.count(2, kind="stop")
-            self.assertIn(("stop", exchange), self.backend.programs.running)
-            self.assertIn(("stop", "t2:"+exchange), self.backend.programs.running)
-            replies = await asyncio.gather(*tasks)
-            self.assertEqual(replies, [{"ended": "cancelled"}]*4)
-            self.assertEqual(notice.call_count, 2)  # Only the own-Root run looks for a chat, before/after start.
-        self.assertEqual(len(calls(self.frame, kind="stop", root=self.own)), 1)
-        self.assertEqual(len(calls(self.frame, kind="stop", root="t2")), 1)
-        self.assertFalse(self.backend.live.stopping)
+    # The former Root-specific observation is preserved below.
 # TEST-TIER-END tests/backend/test_discovery.py::AcrossRoots.test_two_roots_with_same_uuid_have_separate_shared_stops_and_no_foreign_chat_reads
 
 
 # TEST-TIER-BEGIN tests/backend/test_discovery.py::AcrossRoots.test_retained_foreign_settle_does_not_hold_own_root_and_repeats_are_serial
-    async def test_retained_foreign_settle_does_not_hold_own_root_and_repeats_are_serial(self) -> None:
-        """discovery.retained-root-mutation; discovery.independent-roots"""
-        self.behavior = {"t2": {"settle": {"sleep": 0.3}}}
+    async def test_retained_settler_keeps_its_exchange_and_repeated_requests_are_serial(self) -> None:
+        """One timed-out child retains its Exchange while a different pending UUID can settle."""
+        first, second = chat(921), chat(922)
+        self.behavior = {self.own: {"settle": {"exchanges": {first: {"sleep": 0.3}, second: {}}}}}
         self.configure()
         self.backend.programs.limits["settle"] = 0.05
-        self.backend.settling.request("t2")
-        await self.count(1, kind="settle", root="t2")
-        assert self.backend.settling.queues["t2"].task
-        await self.backend.settling.queues["t2"].task
-        self.assertIn(("settle", "t2:t2"), self.backend.programs.running)
-        self.backend.settling.request(self.own)
-        assert self.backend.settling.worker
+        self.backend.settling.eligible = {first}
+        self.backend.settling.request()
+        assert self.backend.settling.worker is not None
         await self.backend.settling.worker
-        self.assertEqual(len(calls(self.frame, kind="settle", root=self.own)), 1)
-        self.behavior["t2"]["settle"] = {}
-        self.configure()
+        self.assertIn(("settle", first), self.backend.programs.running)
+        self.backend.settling.eligible = {first, second}
+        self.backend.settling.request()
+        assert self.backend.settling.worker is not None
+        await self.backend.settling.worker
+        self.assertEqual(len([row for row in calls(self.frame, kind="settle") if row["args"][1] == first]), 1)
+        self.assertEqual(len([row for row in calls(self.frame, kind="settle") if row["args"][1] == second]), 1)
+        async with asyncio.timeout(2):
+            while not any(row["args"][1] == first for row in calls(self.frame, kind="settle", phase="finish")):
+                await asyncio.sleep(0.01)
+        self.backend.programs.reap()
         self.backend.programs.limits["settle"] = 0.5
-        self.backend.settling.request("t2")
-        assert self.backend.settling.queues["t2"].task
-        await self.backend.settling.queues["t2"].task
-        starts = calls(self.frame, kind="settle", root="t2")
-        ended = calls(self.frame, kind="settle", root="t2", phase="finish")
+        self.behavior[self.own]["settle"]["exchanges"][first] = {}
+        self.configure()
+        self.backend.settling.eligible = {first}
+        self.backend.settling.request()
+        assert self.backend.settling.worker is not None
+        await self.backend.settling.worker
+        starts = [row for row in calls(self.frame, kind="settle") if row["args"][1] == first]
+        ended = [row for row in calls(self.frame, kind="settle", phase="finish") if row["args"][1] == first]
         self.assertEqual(len(starts), 2)
         self.assertLessEqual(ended[0]["at"], starts[1]["at"])
 # TEST-TIER-END tests/backend/test_discovery.py::AcrossRoots.test_retained_foreign_settle_does_not_hold_own_root_and_repeats_are_serial
@@ -246,3 +236,52 @@ class AcrossRoots(_support.AcrossRoots):
 #         self.assertEqual(entries[-1]["root"]["root"], "last")
 # LOW-TIER-SOURCE-END
 # LOW-TIER-END
+
+# ARC-4 HISTORICAL OBSERVATION
+# Reason: ARC-4.1 and ARC-4.7 retire separate Root namespaces for the same Exchange UUID.
+# Source: arbol@fd2072700aa5ff7a9a5b3b88a859cf32ef58e751
+#     async def test_two_roots_with_same_uuid_have_separate_shared_stops_and_no_foreign_chat_reads(self) -> None:
+#         """discovery.stop-root-identity; discovery.same-uuid; discovery.foreign-no-chat-read"""
+#         exchange = chat(912)
+#         self.behavior = {self.own: {"stop": {"sleep": 0.15}}, "t2": {"stop": {"sleep": 0.15}}}
+#         self.configure()
+#         with mock.patch.object(self.backend.controls, "notice", wraps=self.backend.controls.notice) as notice:
+#             tasks = [asyncio.create_task(self.backend.controls.stop(await stop_params({"exchange": exchange, **extra})))
+#                 for extra in ({}, {}, {"root": "t2"}, {"root": "t2"})]
+#             await self.count(2, kind="stop")
+#             self.assertIn(("stop", exchange), self.backend.programs.running)
+#             self.assertIn(("stop", "t2:"+exchange), self.backend.programs.running)
+#             replies = await asyncio.gather(*tasks)
+#             self.assertEqual(replies, [{"ended": "cancelled"}]*4)
+#             self.assertEqual(notice.call_count, 2)  # Only the own-Root run looks for a chat, before/after start.
+#         self.assertEqual(len(calls(self.frame, kind="stop", root=self.own)), 1)
+#         self.assertEqual(len(calls(self.frame, kind="stop", root="t2")), 1)
+#         self.assertFalse(self.backend.live.stopping)
+
+# ARC-4 HISTORICAL OBSERVATION
+# Reason: Root separation retired. Current two-Exchange serialization case above preserves retained-child ownership.
+# Source: arbol@fd2072700aa5ff7a9a5b3b88a859cf32ef58e751
+#     async def test_retained_foreign_settle_does_not_hold_own_root_and_repeats_are_serial(self) -> None:
+#         """discovery.retained-root-mutation; discovery.independent-roots"""
+#         self.behavior = {"t2": {"settle": {"sleep": 0.3}}}
+#         self.configure()
+#         self.backend.programs.limits["settle"] = 0.05
+#         self.backend.settling.request("t2")
+#         await self.count(1, kind="settle", root="t2")
+#         assert self.backend.settling.queues["t2"].task
+#         await self.backend.settling.queues["t2"].task
+#         self.assertIn(("settle", "t2:t2"), self.backend.programs.running)
+#         self.backend.settling.request(self.own)
+#         assert self.backend.settling.worker
+#         await self.backend.settling.worker
+#         self.assertEqual(len(calls(self.frame, kind="settle", root=self.own)), 1)
+#         self.behavior["t2"]["settle"] = {}
+#         self.configure()
+#         self.backend.programs.limits["settle"] = 0.5
+#         self.backend.settling.request("t2")
+#         assert self.backend.settling.queues["t2"].task
+#         await self.backend.settling.queues["t2"].task
+#         starts = calls(self.frame, kind="settle", root="t2")
+#         ended = calls(self.frame, kind="settle", root="t2", phase="finish")
+#         self.assertEqual(len(starts), 2)
+#         self.assertLessEqual(ended[0]["at"], starts[1]["at"])

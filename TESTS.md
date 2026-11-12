@@ -8,7 +8,7 @@ Reviewed revision: `f66335c7e203794dc84e40fe3106e85f8cae2dd6` under SYL-327 (29 
 
 ## Selection and limits
 
-6 top-tier inventory entries and 152 mid-tier entries are available: 151 after the higher-bar review and C44, admitted by SYL-399 and passed on 11 November 2026 against both installed Drivers. 505 low-tier entries were removed under SYL-327. Definitions, scenarios, programs and entry points overlap; this is not a runtime suite count. ASD-8 moved three Exchange lifecycle regressions from the historical Root runtime to the installation runtime. Retained mid-tier sources remain uncommented.
+6 top-tier inventory entries and 150 mid-tier entries are available. SYL-399 admitted C44 after the higher-bar review. ASD-8 preserves two formerly retained Root-only observations as historical comments under ARC-4.1 and ARC-4.7, with current lifecycle serialization, installation cancellation and partial measurement evidence retained in the mid tier. 505 low-tier entries were removed under SYL-327. Definitions, scenarios, programs and entry points overlap; this is not a runtime suite count. ASD-8 moved three Exchange lifecycle regressions from the historical Root runtime to the installation runtime. Retained mid-tier sources remain uncommented.
 
 ## Active top tier
 
@@ -64,3 +64,5 @@ and revisions, so obvious or redundant checks are not generated again. All
 archived lines are comments, including imports and registrations. They add no
 runnable coverage. Re-admission needs distinct new evidence and owner-requested
 test work; a testing request alone does not make low-tier cases useful.
+
+ASD-8 reuses the canonical `SingleInstallation` setup for retained backend fixture consumers. The shared support modules preserve former duplicate case bodies as comments. Current selectors and historical supersession records are in `test-tiers.json`; this static adaptation supplies no new mid-tier qualification.

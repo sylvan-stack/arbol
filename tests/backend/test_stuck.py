@@ -41,17 +41,16 @@ class Outside(WindowFixture):
     async def asyncSetUp(self) -> None:
         await super().asyncSetUp()
         await self.backend.stuck.close()
-        if self.backend.discovery.task:
-            await self.backend.discovery.task
-        await asyncio.gather(*self.backend.listings.tasks.values())
+        if self.backend.listings.task is not None:
+            await self.backend.listings.task
         self.clock = Clock()
-        self.backend.stuck = Stuck(self.backend.identity, self.backend.listings, self.backend.controls,
+        self.backend.stuck = Stuck(self.backend.listings, self.backend.controls,
             self.backend.notes, self.backend.chats.attention, clock=self.clock, poll=0.005)
         self.backend.listings.on_failed = self.backend.stuck.failed
-        self.own = self.backend.identity.root
+        self.own = "installation"
         self.trunk = await Trunk.make(self.frame, chat(1))
         await self.trunk.accept(self.db)
-        self.row: Params = {"root": self.own, "exchange": self.trunk.exchange, "chat": chat(1),
+        self.row: Params = {"exchangeFormat": 1, "exchange": self.trunk.exchange, "chat": chat(1),
             "trunk": "trivial", "build": "0", "state": "running", "process": {**self.trunk.value["process"], "alive": True},
             "signsOfLife": {"heartbeat": 41, "waitingFor": "driver", "since": now()}}
         self.behavior: dict[str, Any] = {self.own: {"force": {"output": self.reply("interrupted")}}}
@@ -59,10 +58,10 @@ class Outside(WindowFixture):
         self.configure()
 
     def reply(self, ended: str) -> Params:
-        return {"root": self.own, "exchange": self.trunk.exchange, "ended": ended, "forced": True}
+        return {"exchange": self.trunk.exchange, "ended": ended, "forced": True}
 
     def configure(self) -> None:
-        self.behavior[self.own]["list"] = {"output": {"root": self.own, "exchanges": [self.row], "unreadable": []}}
+        self.behavior[self.own]["list"] = {"output": {"exchanges": [self.row], "unreadable": []}}
         configure(self.frame, self.behavior)
 
     async def look(self, at: float, *, heartbeat: int | None = None) -> None:

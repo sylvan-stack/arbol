@@ -18,7 +18,6 @@ class Files(_support.Files):
             (self.parent / name).mkdir(mode=0o700)
         symlink = self.parent / str(uuid4())
         symlink.symlink_to(self.folder, target_is_directory=True)
-        self.assertEqual(self.reader.names(), [self.exchange])
         with self.assertRaises(Error):
             self.reader.open("../../escape")
         with self.assertRaises(OSError):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -14,7 +15,7 @@ from uuid import uuid4
 from psycopg.types.json import Jsonb
 
 from arbol_backend.database import Database
-from arbol_backend.exchange_files import processes
+from arbol_backend.exchange_process import started_at
 from arbol_backend.metadata import iso
 from backend.support import Frame
 
@@ -34,7 +35,7 @@ class Trunk:
         self.folder = parent / ("." + exchange + ".new" if staged else exchange)
         self.folder.mkdir(mode=0o700)
         self.n = 0
-        self.value: dict[str, Any] = {"rootContract": 1, "root": frame.record["root"], "exchange": exchange,
+        self.value: dict[str, Any] = {"exchangeFormat": 1, "exchange": exchange,
             "chat": chat, "trunk": "trivial", "build": "0", "route": ROUTE, "workingFolder": str(frame.base),
             "process": {"pid": child.pid, "startedAt": iso(started)},
             "signsOfLife": {"heartbeat": 1, "waitingFor": "driver", "since": now()}}
@@ -48,8 +49,7 @@ class Trunk:
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True, close_fds=True)
         frame.children.append(child)
-        starts = await processes({child.pid})
-        started = starts[child.pid]
+        started = await asyncio.to_thread(started_at, child.pid)
         assert started is not None
         return cls(frame, chat, exchange or str(uuid4()), child, started, staged=staged)
 

@@ -34,11 +34,11 @@ from backend.test_chat_wire import WindowFixture, chat  # noqa: E402
 class Returned(WindowFixture):
     async def asyncSetUp(self) -> None:
         await super().asyncSetUp()
-        assert self.backend.health.monitor and self.backend.discovery.task
+        assert self.backend.health.monitor and self.backend.listings.task
         self.backend.health.monitor.cancel()
         await asyncio.gather(self.backend.health.monitor, return_exceptions=True)
         self.backend.health.monitor = None
-        await self.backend.discovery.task
+        await self.backend.listings.task
         if self.backend.settling.worker:
             await self.backend.settling.worker
         if self.backend.notes.worker:

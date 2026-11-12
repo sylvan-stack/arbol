@@ -97,7 +97,7 @@ class AsyncFoundation(_support.AsyncFoundation):
         for kind in ("start", "stop", "settle"):
             with self.assertRaises(Refused):
                 await p.call("arbol-root", [kind], kind=kind, key=kind)
-            child = p.running[(kind, self.selected.root if kind == "settle" else kind)].process
+            child = p.running[(kind, kind)].process
             mutations.append(child)
             self.assertIsNone(child.poll())
             with self.assertRaises(Refused) as repeated:

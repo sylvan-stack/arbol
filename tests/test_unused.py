@@ -77,9 +77,10 @@ print(json.dumps(json.loads((home/'replies.json').read_text())[root]))
         from unittest import mock
 
         from arbol_builds.config import Locations
+        from arbol_builds.schema_state import read_schema
         from arbol_builds.unused import usage_snapshot
         with mock.patch.dict(os.environ,f.env()):
-            return usage_snapshot(Locations(f.registry,f.bin))
+            return usage_snapshot(Locations(f.registry,f.bin), read_schema())
 
 
 class AgedRemoval(unittest.TestCase):

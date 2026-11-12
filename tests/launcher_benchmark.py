@@ -119,12 +119,12 @@ def main() -> int:
         os.environ.clear()
         os.environ.update(env)
         try:
-            for component, source, owner in (("sample", repo, None), ("sample", repo, None),
+            for component, source, _owner in (("sample", repo, None), ("sample", repo, None),
                                               ("arbol-trunk/trivial", trunk_repo, None),
                                               ("arbol-trunk/trivial", trunk_repo, None),
                                               ("arbol-root", root_repo, "sapling"),
                                               ("arbol-root", root_repo, "sapling")):
-                if build_component(component, Locations(registry, folder, source), Stop(), owner)["status"] != "working":
+                if build_component(component, Locations(registry, folder, source), Stop())["status"] != "working":
                     raise RuntimeError(f"The sample {component} did not build.")
         finally:
             os.environ.clear()
