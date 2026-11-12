@@ -97,7 +97,8 @@ class Backend:
             self.installation.publish()
             self.programs.reap()
             try:
-                await self.ticker.wake()  # ticks once the interval has passed, no faster (SGM-D30)
+                if self.database.admission is not None:
+                    await self.ticker.wake()  # ticks once the interval has passed, no faster (SGM-D30)
             except Refused:
                 pass  # a Root without the Vigor tables, or a database away: the backend runs on without Vigor
 

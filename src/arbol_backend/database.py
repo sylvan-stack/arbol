@@ -10,10 +10,10 @@ import signal
 import tempfile
 import tomllib
 from collections.abc import AsyncIterator, Callable, Sequence
-from contextlib import asynccontextmanager
+from contextlib import AbstractContextManager, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, Protocol
 from urllib.parse import unquote, urlsplit
 
 import psycopg
@@ -76,6 +76,35 @@ def release_history(path: Path) -> tuple[SchemaRow, ...]:
         return tuple(rows)
     except (OSError, ValueError, UnicodeError, KeyError, TypeError) as error:
         raise Refused("schema_incompatible", "The Build's migration manifest is unreadable.") from error
+
+
+WriteMode = Literal["normal", "controlled"]
+
+
+class Admission(Protocol):
+    """The installation runtime implements both the observation and authoritative permit."""
+
+    def status(self) -> str: ...
+
+    def permit(self, mode: WriteMode) -> AbstractContextManager[None]: ...
+
+
+async def protected_thread[T](work: Callable[[], T]) -> T:
+    """Cancellation must not let an admitted file write outlive its permit."""
+    future = asyncio.get_running_loop().run_in_executor(None, work)
+    try:
+        return await asyncio.shield(future)
+    except asyncio.CancelledError:
+        while not future.done():
+            try:
+                await asyncio.shield(future)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not future.cancelled():
+            future.exception()
+        raise
 
 
 class Unavailable(Refused):
@@ -215,9 +244,10 @@ class Session:
 
 
 class Database:
-    def __init__(self, identity: Identity, *, seconds: float = SECONDS) -> None:
+    def __init__(self, identity: Identity, *, seconds: float = SECONDS, admission: Admission | None = None) -> None:
         self.identity = identity
         self.seconds = seconds
+        self.admission = admission
         self.parameters: dict[str, str] | None = None
         self.connections: set[AsyncConnection[tuple[Any, ...]]] = set()
         self.passfile: Path | None = None
@@ -227,6 +257,13 @@ class Database:
         self.history: tuple[tuple[int, int, int], tuple[SchemaRow, ...]] | None = None
         self.on_failure: Callable[[str], None] | None = None
         self.on_connected: Callable[[], None] | None = None
+
+    @asynccontextmanager
+    async def permit(self, mode: WriteMode = "normal") -> AsyncIterator[None]:
+        if self.admission is None:
+            raise Refused("maintenance", "The installation writer admission state is unknown.")
+        with self.admission.permit(mode):
+            yield
 
     async def renew(self) -> None:
         async with self.credentials_lock:

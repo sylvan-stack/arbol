@@ -101,6 +101,15 @@ class Drafts:
             return draft(rows[0] if rows else None)
 
     async def reconcile(self, params: Params | None = None) -> bool:
+        try:
+            async with self.database.permit():
+                return await self.reconcile_admitted(params)
+        except Refused as error:
+            if error.code == "maintenance":
+                return False
+            raise
+
+    async def reconcile_admitted(self, params: Params | None = None) -> bool:
         # Observe candidates in one READ ONLY moment; the later write rechecks every identity.
         async with self.chats.reader.session() as (session, layout):
             if not layout.own:
@@ -151,8 +160,7 @@ class Drafts:
             rows = await session.execute("SELECT id FROM exchanges WHERE id=%s AND chat_id=%s", [exchange, chat])
         if not rows:
             return False
-        await self.reconcile(params)
-        return True
+        return await self.reconcile(params)
 
     async def load(self, params: Params) -> Params:
         for _ in range(3):
@@ -179,6 +187,10 @@ class Drafts:
         raise Error("timeout")
 
     async def save(self, params: Params) -> Params:
+        async with self.database.permit():
+            return await self.save_admitted(params)
+
+    async def save_admitted(self, params: Params) -> Params:
         key = await scope(params)
         await self.chats.own_layout()
         base, body = params["baseRevision"], params["text"]
@@ -253,8 +265,8 @@ class Drafts:
             # Recovery also handles rows marked by an earlier backend, with its original revision.
             selected = params.get("draft", {})
             key = ({"folder": selected["folder"]} if "folder" in selected else {"chat": params["chat"]})
-            await self.reconcile(key)
-            await self.chats.mark({"chat": params["chat"], "ongoing": True})
+            await self.reconcile_admitted(key)
+            await self.chats.update_marks({"chat": params["chat"], "ongoing": True})
         elif marked is not None:
             key = await scope(marked)
             self.invalidate(key)

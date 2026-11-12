@@ -14,6 +14,7 @@ from typing import Any
 
 from .bridge import SOURCES, Error, Params, Registry, uuid_id
 from .chats import Chats
+from .database import protected_thread
 from .drafts import MAX_REVISION, Drafts, content, folder
 from .migration import message
 from .model import Identity, Refused, Settings
@@ -112,7 +113,8 @@ class Dispatch:
 
     async def clean_startup(self) -> None:
         try:
-            await asyncio.to_thread(self.files.clean)
+            async with self.chats.database.permit():
+                await protected_thread(self.files.clean)
         except (OSError, Refused):
             pass  # Ready remains available; a send reports inaccessible storage safely.
 
@@ -120,7 +122,12 @@ class Dispatch:
         while True:
             for exchange, entry in list(self.entries.items()):
                 if entry.task is not None and entry.task.done():
-                    self.cleanup(exchange, entry)
+                    if entry.request is not None and not self.active(exchange):
+                        try:
+                            async with self.chats.database.permit():
+                                self.cleanup(exchange, entry)
+                        except Refused:
+                            pass
                     if len(self.entries) > 1024 and entry.request is None and not self.active(exchange):
                         self.entries.pop(exchange, None)
             await asyncio.sleep(0.1)
@@ -180,6 +187,13 @@ class Dispatch:
                 "chat": params["chat"], "number": number}
 
     async def run(self, params: Params, entry: Entry) -> Params | Error:
+        try:
+            async with self.chats.database.permit():
+                return await self.dispatch(params, entry)
+        except Refused as error:
+            return error if isinstance(error, Error) else Error(error.code)
+
+    async def dispatch(self, params: Params, entry: Entry) -> Params | Error:
         exchange = params["exchange"]
         try:
             await self.drafts.accepted(exchange, params["chat"])
@@ -250,10 +264,9 @@ class Dispatch:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        for exchange, entry in self.entries.items():
-            self.cleanup(exchange, entry)
+        for entry in self.entries.values():
             if entry.request is not None:
-                # Keep the pathname for its detached manager, but do not leak our descriptor.
+                # Preserve unresolved requests and release our descriptor without a write.
                 os.close(entry.request.folder)
                 entry.request = None
         self.entries.clear()

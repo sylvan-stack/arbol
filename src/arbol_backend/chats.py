@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Coroutine
 from datetime import datetime
+from functools import partial
 from typing import Any
 
 from psycopg.types.json import Jsonb
 
 from .bridge import MAX_LINE, Error, Params, Registry, Snapshot, uuid_id
 from .chat_data import Reader, encoded
-from .database import Database
+from .database import Database, protected_thread
 from .metadata import Attention, iso
 from .model import Identity, Refused
 from .process import Programs
@@ -198,6 +199,10 @@ class Chats:
             raise Error("layout_incomplete")
 
     async def rename(self, params: Params) -> Params:
+        async with self.database.permit():
+            return await self.rename_admitted(params)
+
+    async def rename_admitted(self, params: Params) -> Params:
         self.invalidate(params["chat"])
         try:
             rows = await self.database.execute("UPDATE chats SET title=%s WHERE id=%s RETURNING title",
@@ -210,6 +215,10 @@ class Chats:
         return {"title": rows[0][0]}
 
     async def settings(self, params: Params) -> Params:
+        async with self.database.permit():
+            return await self.settings_admitted(params)
+
+    async def settings_admitted(self, params: Params) -> Params:
         await self.own_layout()
         has_route, has_folder = "route" in params, "workingFolder" in params
         self.invalidate(params["chat"])
@@ -232,6 +241,10 @@ class Chats:
         return {}
 
     async def mark(self, params: Params) -> Params:
+        async with self.database.permit():
+            return await self.update_marks(params)
+
+    async def update_marks(self, params: Params) -> Params:
         await self.own_layout()
         self.invalidate(params["chat"])
         try:
@@ -255,8 +268,9 @@ class Chats:
         return result
 
     async def paste(self, params: Params) -> Params:
-        path = await asyncio.to_thread(save_paste, self.identity, params["text"])
-        return {"path": path}
+        async with self.database.permit():
+            path = await protected_thread(partial(save_paste, self.identity, params["text"]))
+            return {"path": path}
 
     async def observe(self, view: View, params: Params) -> None:
         try:
