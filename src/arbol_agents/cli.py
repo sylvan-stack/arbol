@@ -14,7 +14,7 @@ USAGE = "Usage: arbol-agents hook <claude-code|codex|kimi-code> | install | unin
 
 def hook(args: list[str]) -> int:
     try:
-        if "ARBOL_ROOT" not in os.environ and len(args) == 2 and args[0] == "hook" and args[1] in TOOLS:
+        if "ARBOL_CHAT" not in os.environ and len(args) == 2 and args[0] == "hook" and args[1] in TOOLS:
             event = json.loads(sys.stdin.read())
             if isinstance(event, dict):
                 handle(args[1], event)

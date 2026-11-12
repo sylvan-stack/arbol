@@ -130,7 +130,7 @@ def subagent(record: AgentRecord, event: dict[str, object], name: str, tool: str
 
 
 def handle(tool: str, value: dict[str, object], location: Path | None = None) -> None:
-    if tool not in TOOLS or "ARBOL_ROOT" in os.environ:
+    if tool not in TOOLS or "ARBOL_CHAT" in os.environ:
         return
     event = object_value(value)
     name = text_value(event, "hook_event_name")
