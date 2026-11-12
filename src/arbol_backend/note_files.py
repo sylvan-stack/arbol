@@ -15,6 +15,7 @@ from .metadata import iso
 from .model import Identity
 
 MAX_NOTE = 4096
+NOTE_VERSION = 1
 
 
 def fingerprint(info: os.stat_result) -> tuple[int, int, int, int]:
@@ -42,28 +43,29 @@ class NoteFiles:
         self.identity = identity
 
     def directory(self, *, create: bool = False) -> int:
-        root = os.open(self.identity.folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        runtime = os.open(self.identity.folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
             if create:
                 try:
-                    os.mkdir("notes", mode=0o700, dir_fd=root)
-                    os.fsync(root)
+                    os.mkdir("notes", mode=0o700, dir_fd=runtime)
+                    os.fsync(runtime)
                 except FileExistsError:
                     pass
-            fd = os.open("notes", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root)
+            fd = os.open("notes", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=runtime)
             info = os.fstat(fd)
             if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
                 os.close(fd)
                 raise Error("no_answer")
             return fd
         finally:
-            os.close(root)
+            os.close(runtime)
 
     def validate(self, value: object, exchange: str) -> Params:
-        if (not isinstance(value, dict) or value.get("root") != self.identity.root
+        if (not isinstance(value, dict) or "root" in value
+                or type(value.get("version")) is not int or value["version"] != NOTE_VERSION
                 or uuid_id(value.get("exchange")) != exchange or value.get("kind") != "ended_stuck"):
             raise Error("no_answer")
-        return {"root": self.identity.root, "exchange": exchange, "chat": uuid_id(value.get("chat")),
+        return {"version": NOTE_VERSION, "exchange": exchange, "chat": uuid_id(value.get("chat")),
                 "kind": "ended_stuck", "at": iso(timestamp(value.get("at")))}
 
     def heal(self, parent: int, exchange: str, expected: os.stat_result) -> None:
@@ -118,7 +120,7 @@ class NoteFiles:
         except FileNotFoundError:
             pass
         else:
-            if any(previous.value[key] != value[key] for key in ("root", "exchange", "chat", "kind")):
+            if any(previous.value[key] != value[key] for key in ("version", "exchange", "chat", "kind")):
                 raise Error("no_answer")
             return previous  # The first timestamp of this same immutable Exchange wins.
         raw = (json.dumps(value, ensure_ascii=False, separators=(",", ":"))+"\n").encode()
@@ -153,7 +155,7 @@ class NoteFiles:
             finally:
                 os.close(parent)
         result = self.read(exchange)
-        if any(result.value[key] != value[key] for key in ("root", "exchange", "chat", "kind")):
+        if any(result.value[key] != value[key] for key in ("version", "exchange", "chat", "kind")):
             raise Error("no_answer")
         return result
 

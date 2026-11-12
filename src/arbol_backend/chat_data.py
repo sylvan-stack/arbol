@@ -92,7 +92,7 @@ class Reader:
             local = ("EXISTS(SELECT 1 FROM drafts d WHERE d.chat_id=c.id),coalesce(cm.ongoing,false),cm.archived_at"
                      if layout.own else "false,false,NULL::timestamptz")
             rows = await session.execute(
-                "SELECT c.id,c.title,c.created_at,e.id,e.number,e.state,e.error,e.route,e.working_folder,"
+                "SELECT c.id,c.title,c.created_at,e.id,e.number,e.state,e.error,e.trunk,e.build,e.route,e.working_folder,"
                 "e.accepted_at,e.ended_at,coalesce((SELECT left(m.text,200) FROM exchanges first "
                 "JOIN messages m ON m.exchange_id=first.id AND m.position=0 "
                 "WHERE first.chat_id=c.id AND first.replaced_by IS NULL ORDER BY first.number LIMIT 1),''),"
@@ -103,13 +103,13 @@ class Reader:
             )
             summaries: list[Params] = []
             for row in rows:
-                (chat, title, created, exchange, number, state, error, saved_route, folder, accepted, ended,
+                (chat, title, created, exchange, number, state, error, trunk, build, saved_route, folder, accepted, ended,
                  first, has_draft, ongoing, archived) = row
                 activity: datetime = max(accepted, ended) if ended else accepted or created
                 value: Params = {"chat": str(chat), "title": title, "firstMessage": first,
                                  "activityAt": iso(activity), "hasDraft": has_draft, "ongoing": ongoing}
                 if exchange is not None:
-                    value["last"] = {"exchange": str(exchange), "number": number,
+                    value["last"] = {"exchange": str(exchange), "number": number, "trunk": trunk, "build": build,
                                      "state": "accepting" if state == "open" else state}
                     if error is not None:
                         value["last"]["error"] = metadata(error)
@@ -124,7 +124,7 @@ class Reader:
     async def exchanges(self, session: Session, layout: Layout, chat: str,
                         *, before: int | None = None, limit: int = 12) -> tuple[list[Params], bool]:
         rows = await session.execute(
-            "SELECT id,number,state,error,route,working_folder,accepted_at,ended_at FROM exchanges "
+            "SELECT id,number,state,error,trunk,build,route,working_folder,accepted_at,ended_at FROM exchanges "
             "WHERE chat_id=%s AND replaced_by IS NULL AND (%s::integer IS NULL OR number<%s) "
             "ORDER BY number DESC LIMIT %s", [chat, before, before, limit + 1],
         )
@@ -156,8 +156,9 @@ class Reader:
         ) if layout.own else []
         by_id: dict[str, Params] = {}
         result: list[Params] = []
-        for id, number, state, error, saved_route, folder, accepted, ended in selected:
-            exchange: Params = {"exchange": str(id), "number": number, "state": state, "route": route(saved_route),
+        for id, number, state, error, trunk, build, saved_route, folder, accepted, ended in selected:
+            exchange: Params = {"exchange": str(id), "number": number, "state": state, "trunk": trunk, "build": build,
+                                "route": route(saved_route),
                                 "workingFolder": folder, "acceptedAt": iso(accepted), "items": [], "runs": []}
             if error is not None:
                 exchange["error"] = metadata(error)

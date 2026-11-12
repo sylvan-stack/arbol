@@ -1,4 +1,4 @@
-"""Recover write-ahead stuck notes into the Root's existing table idempotently."""
+"""Recover write-ahead stuck notes into the installation database idempotently."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from .database import Database
 from .live import Live
 from .metadata import iso, now
 from .model import Identity, Refused
-from .note_files import Note, NoteFiles
+from .note_files import NOTE_VERSION, Note, NoteFiles
 
 NOTE_SECONDS = 5.0
 
@@ -25,7 +25,7 @@ class Notes:
         self.closed = False
 
     async def record(self, exchange: str, chat: str, *, at: str | None = None) -> Params:
-        note = await asyncio.to_thread(self.files.put, {"root": self.files.identity.root,
+        note = await asyncio.to_thread(self.files.put, {"version": NOTE_VERSION,
             "exchange": exchange, "chat": chat, "kind": "ended_stuck", "at": at if at is not None else now()})
         self.request()
         return note.wire
