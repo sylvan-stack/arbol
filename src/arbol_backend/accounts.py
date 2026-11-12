@@ -28,7 +28,7 @@ ACTIVITY = """
                     AND r.usage->>'outputTokens' ~ '^[0-9]{1,20}$'
                     THEN (r.usage->>'outputTokens')::numeric END)::text,
            max(r.ended_at)
-    FROM runs r JOIN exchanges e ON e.id = r.exchange_id
+    FROM public.runs r JOIN public.exchanges e ON e.id = r.exchange_id
     WHERE r.kind = 'agent'
       AND r.ended_at BETWEEN statement_timestamp() - interval '30 days' AND statement_timestamp()
       AND e.route->>'driver' = %s
@@ -106,6 +106,7 @@ class Accounts:
         return result
 
     async def list(self, params: Params) -> Params:
+        """Read the Drivers' saved catalogue without a vendor call or a database connection."""
         if self.closed:
             raise Error("ended", source="driver")
         drivers = self.scan()
@@ -154,7 +155,7 @@ class Accounts:
         return {"driver": driver, "subscription": subscription}
 
     async def activity(self, params: Params) -> Params:
-        """Aggregate this Root's recorded agent runs without contacting a Driver or vendor."""
+        """Aggregate the installation's saved agent runs without contacting a Driver or vendor."""
         if self.closed or self.database is None:
             raise Error("ended")
         try:
@@ -197,6 +198,7 @@ class Accounts:
             self.actions.pop(key, None)
 
     async def action(self, operation: str, params: Params) -> Params:
+        """Run an explicit Driver action. Any cache change stays with that Driver."""
         if operation not in ("check", "usage", "models"):
             raise Error("invalid_input")
         try:
