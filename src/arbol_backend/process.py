@@ -50,7 +50,7 @@ def lock_pid(folder: Path) -> int | None:
         finally:
             os.close(fd)
         pid = record.get("pid") if isinstance(record, dict) else None
-        if type(pid) is not int or pid <= 0:
+        if type(pid) is not int or not 1 <= pid <= 2147483647:
             return None
         os.kill(pid, 0)
         return pid
@@ -105,7 +105,7 @@ async def acquire_backend(identity: Identity, arguments: list[str]) -> dict[str,
                         return existing
                     line = os.pread(output.fileno(), READY_MAX, 0)
                     if b"\n" in line:
-                        if json.loads(line.split(b"\n", 1)[0]) != existing:
+                        if existing["build"] != identity.build or json.loads(line.split(b"\n", 1)[0]) != existing:
                             raise Refused("no_answer", "The backend did not confirm the private endpoint.")
                         keep = True
                         return existing
@@ -123,7 +123,7 @@ async def acquire_backend(identity: Identity, arguments: list[str]) -> dict[str,
                                       "The backend refused to start.")
                     contender = None
                     await asyncio.sleep(0.20)
-                if contender is None:
+                if contender is None and lock_pid(identity.folder) is None:
                     output.truncate(0)
                     output.seek(0)
                     contender = subprocess.Popen(

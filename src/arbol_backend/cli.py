@@ -8,6 +8,7 @@ from pathlib import Path
 
 from arbol_radar.cli import run as vigor
 
+from .database import explicit_target
 from .model import ISOLATION, Refused, identity, parse, private_directory
 from .process import acquire_backend
 from .server import Backend
@@ -22,6 +23,8 @@ def main(args: list[str], package: Path) -> int:
         selected = identity(package, parsed)
         if selected.fixture:
             private_directory(selected.folder)
+            if selected.database is not None:
+                explicit_target(selected)  # Refuse credential-bearing or nonprivate overrides before spawning.
         if parsed["verb"] == "vigor":  # the read of Subscriptions Vigor; the command line works while no backend runs
             return asyncio.run(vigor(selected, parsed))
         if not selected.fixture:
