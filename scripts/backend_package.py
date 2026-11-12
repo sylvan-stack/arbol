@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import subprocess
 import sys
 import tomllib
@@ -22,6 +21,22 @@ MUTABLE = {"build.json", "build.log", "last-start", "package-manifest.json"}
 def digest(path: Path) -> str:
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def baseline_sha256(folder: Path) -> str:
+    database = folder / "database"
+    entries = tomllib.loads((database / "migrations.toml").read_text())["migrations"]
+    if not isinstance(entries, list) or not entries or not isinstance(entries[0], dict):
+        raise ValueError("The migration manifest does not declare the canonical baseline.")
+    baseline = entries[0]
+    if (baseline.get("id") != "arbol-baseline" or baseline.get("revision") != 1
+            or baseline.get("predecessor") != 0 or baseline.get("compatibility_version") != 1
+            or baseline.get("file") != "001-baseline.sql"):
+        raise ValueError("The migration manifest does not declare the canonical baseline.")
+    actual = digest(database / "001-baseline.sql")
+    if actual != baseline.get("sha256"):
+        raise ValueError("The canonical baseline does not match its migration digest.")
+    return actual
 
 
 def files(folder: Path) -> dict[str, str]:
@@ -127,10 +142,9 @@ def verify(folder: Path) -> None:
         python["version"] != object_file(folder / "scripts/python-distribution.json")["version"]
         or python["executable"] != "runtime/python/bin/python3.14"
         or python["sha256"] != digest(folder / python["executable"])
-        or not re.fullmatch("[0-9a-f]{64}", manifest["contractLayoutSha256"])
-        or manifest["contractLayoutSha256"] != digest(folder / "tests/backend/layout.sql")
+        or manifest.get("baselineSha256") != baseline_sha256(folder)
     ):
-        raise ValueError("The packaged Python or contract test input changed.")
+        raise ValueError("The packaged Python or canonical baseline changed.")
     sys.path.insert(0, str(folder))
     from tools.elma_bundle import verify as verify_renderer
     renderer = verify_renderer(folder / "ui/elma", record["build"])

@@ -13,7 +13,16 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from backend_package import ROOT, destination, digest, metadata, source, verify, write_manifest  # noqa: E402
+from backend_package import (  # noqa: E402
+    ROOT,
+    baseline_sha256,
+    destination,
+    digest,
+    metadata,
+    source,
+    verify,
+    write_manifest,
+)
 from build_support import archive, pin, target  # noqa: E402
 
 sys.path.insert(0, str(ROOT))
@@ -107,20 +116,7 @@ def package(root: Path = ROOT) -> Path:
         if not isinstance(name, str) or Path(name).name != name or name in ("", ".", ".."):
             raise ValueError("Each migration input must be a file in the database directory.")
         shutil.copy2(database / name, folder / "database" / name)
-    contract = Path.home() / "repos/sylvan-stack/arbol-root/contract/1/layout.sql"
-    if not contract.is_file():
-        # A private test HOME changes no source input: locate the same stack's merged checkout.
-        contract = next(
-            (
-                parent / "arbol-root/contract/1/layout.sql"
-                for parent in root.resolve().parents
-                if (parent / "arbol-root/contract/1/layout.sql").is_file()
-            ),
-            contract,
-        )
-    if not contract.is_file():
-        raise ValueError("The merged readonly Root Contract layout is required as test input.")
-    shutil.copy2(contract, folder / "tests/backend/layout.sql")
+    baseline = baseline_sha256(folder)
     requirements = subprocess.check_output(
         ["uv", "export", "--frozen", "--no-dev", "--no-emit-project", "--format", "requirements-txt"],
         cwd=root,
@@ -168,7 +164,7 @@ def package(root: Path = ROOT) -> Path:
                 "executable": "runtime/python/bin/python3.14",
                 "sha256": digest(interpreter),
             },
-            "contractLayoutSha256": digest(contract),
+            "baselineSha256": baseline,
             "renderer": {"path": "ui/elma", "build": record["build"], "bundleSha256": digest(folder / "ui/elma/bundle.json"),
                          "designSystem": renderer["designSystem"]},
         },

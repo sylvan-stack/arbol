@@ -1,4 +1,4 @@
-"""Own every file, launcher and PostgreSQL process; never touch a retained Root."""
+"""Own every file, launcher and PostgreSQL process used by the backend checks."""
 
 from __future__ import annotations
 
@@ -11,8 +11,10 @@ import subprocess
 import sys
 import tempfile
 import time
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[2]
 BUILD = json.loads((ROOT / "build.json").read_text()) if (ROOT / "build.json").exists() else {}
@@ -136,18 +138,23 @@ def cluster_environment() -> dict[str, str]:
     to set `LC_ALL`; sessions of the Claude desktop app carry no locale. The cluster is made with `--no-locale`, so any
     set locale serves, and one the session has is kept.
     """
-    environment = dict(os.environ)
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("PG")}
     if "LC_ALL" not in environment and "LANG" not in environment:
         environment["LC_ALL"] = "C.UTF-8"
     return environment
 
 
 class Cluster:
-    def __init__(self) -> None:
+    database = "arbol_test"
+    role = "bkd"
+    port = 5432
+
+    def __init__(self, *, baseline: Path | None = None) -> None:
         if not (PG / "initdb").is_file():
             raise RuntimeError("The private PostgreSQL checks require installed PostgreSQL 17 tools.")
         self.temp = tempfile.TemporaryDirectory(prefix="ab-pg-", dir="/tmp")
-        self.base = Path(self.temp.name)
+        self.base = Path(self.temp.name).resolve()
+        self.env = {**cluster_environment(), "HOME": str(self.base)}
         self.socket = self.base / "socket"
         self.socket.mkdir(mode=0o700)
         self.data = self.base / "data"
@@ -161,13 +168,14 @@ class Cluster:
                 stdout=self.stream,
                 stderr=subprocess.STDOUT,
                 timeout=20,
+                env=self.env,
             )
             self.child = subprocess.Popen(
                 [str(PG / "postgres"), "-D", str(self.data), "-k", str(self.socket), "-h", "", "-p", "5432", "-F"],
                 stdin=subprocess.DEVNULL,
                 stdout=self.stream,
                 stderr=subprocess.STDOUT,
-                env=cluster_environment(),
+                env=self.env,
                 start_new_session=True,
             )
             for _ in range(200):
@@ -176,6 +184,7 @@ class Cluster:
                         [str(PG / "pg_isready"), "-h", str(self.socket), "-p", "5432", "-U", "bkd"],
                         capture_output=True,
                         timeout=2,
+                        env=self.env,
                     ).returncode
                     == 0
                 ):
@@ -190,40 +199,48 @@ class Cluster:
                 capture_output=True,
                 check=True,
                 timeout=5,
+                env=self.env,
             )
-            fixture = ROOT / "tests/backend/layout.sql"
-            if not fixture.is_file():
-                fixture = Path.home() / "repos/sylvan-stack/readonly/arbol-root/contract/1/layout.sql"
-            self.layout = fixture.read_bytes()
-            subprocess.run(
-                [
-                    str(PG / "psql"),
-                    "-X",
-                    "-v",
-                    "ON_ERROR_STOP=1",
-                    "-h",
-                    str(self.socket),
-                    "-p",
-                    "5432",
-                    "-U",
-                    "bkd",
-                    "-d",
-                    "arbol_test",
-                ],
-                input=self.layout,
-                capture_output=True,
-                check=True,
-                timeout=10,
-            )
+            if baseline is not None:
+                self.initialize(baseline)
+            else:
+                # Historical source-only fixtures may still request the Root layout.
+                fixture = ROOT / "tests/backend/layout.sql"
+                if not fixture.is_file():
+                    fixture = ROOT.parent / "arbol-root/contract/1/layout.sql"
+                self.layout = fixture.read_bytes()
+                self.sql(self.layout)
         except BaseException:
             self.close()
             raise
 
     @property
     def address(self) -> str:
-        from urllib.parse import quote
+        return f"{self.server_address}/{self.database}"
 
-        return "postgresql://bkd@" + quote(str(self.socket), safe="") + "/arbol_test"
+    @property
+    def server_address(self) -> str:
+        return f"postgresql://{self.role}@{quote(str(self.socket), safe='')}:{self.port}"
+
+    def sql(self, statement: bytes) -> bytes:
+        return subprocess.run([str(PG / "psql"), "-X", "-At", "-v", "ON_ERROR_STOP=1", "-h", str(self.socket),
+                               "-p", str(self.port), "-U", self.role, "-d", self.database],
+                              input=statement, capture_output=True, check=True, timeout=10, env=self.env).stdout
+
+    def initialize(self, package: Path) -> None:
+        migration = package / "database/migrate_schema.py"
+        # The packaged interpreter has its dependency directory outside sys.path.
+        bootstrap = ("import runpy, sys; from pathlib import Path; "
+                     "path = Path(sys.argv.pop(1)); sys.path[:0] = "
+                     "[str(path.parent), str(path.parents[1] / 'runtime/site-packages')]; "
+                     "runpy.run_path(str(path), run_name='__main__')")
+        arguments = [sys.executable, "-I", "-B", "-c", bootstrap, str(migration), "--socket", str(self.socket),
+                     "--port", str(self.port), "--user", self.role, "--database", self.database]
+        for action in (["initialize", "--authorize-empty"], ["status"]):
+            result = subprocess.run([*arguments, *action], capture_output=True, timeout=20, env=self.env)
+            if result.returncode or json.loads(result.stdout) != {"status": "ready", **BASELINE}:
+                raise RuntimeError(f"Private canonical schema did not report readiness after {action[0]}: "
+                                   f"{result.stdout.decode(errors='replace').strip()}")
 
     def close(self) -> None:
         if self.child is not None:
@@ -235,7 +252,65 @@ class Cluster:
                     stderr=subprocess.STDOUT,
                     timeout=7,
                     check=False,
+                    env=self.env,
                 )
             self.child.wait(timeout=5)
         self.stream.close()
         self.temp.cleanup()
+
+
+BASELINE = {"revision": 1, "compatibilityVersion": 1}
+
+
+class SingleInstallation:
+    """Canonical database and one private home/runtime/bin for the backend and its children."""
+
+    def __init__(self, package: Path = ROOT) -> None:
+        self.package = package.resolve()
+        self.cluster = Cluster(baseline=self.package)
+        try:
+            base = self.cluster.base
+            self.home, self.runtime, self.bin, self.work = (base / name for name in ("home", "run", "bin", "work"))
+            self.settings = self.home / ".arbol"
+            for folder in (self.home, self.runtime, self.bin, self.work, self.settings):
+                folder.mkdir(mode=0o700)
+            (self.settings / "database.json").write_text(json.dumps({"address": self.cluster.server_address,
+                                                                   "database": self.cluster.database}))
+            self.env = {**self.cluster.env, "HOME": str(self.home),
+                        "PATH": str(self.bin) + os.pathsep + os.environ.get("PATH", os.defpath)}
+        except BaseException:
+            self.close()
+            raise
+
+    def options(self) -> list[str]:
+        return ["--runtime-dir", str(self.runtime), "--bin-dir", str(self.bin), "--settings-dir", str(self.settings)]
+
+    @property
+    def endpoint(self) -> Path:
+        return self.runtime / "backend.sock"
+
+    def open_admission(self) -> None:
+        """Run off the asyncio event loop: the operator gate runs its own SQL probes."""
+        from arbol_backend.exchange_context import Context
+        from arbol_backend.exchange_drain import begin_maintenance, freeze, reopen
+        from arbol_backend.model import identity, parse
+
+        cluster = self.cluster
+        configured = identity(self.package, parse(["backend", *self.options()]), home=self.home)
+        context = Context(configured)
+        oid = int(cluster.sql(b"SELECT oid FROM pg_database WHERE datname = current_database()"))
+        source: dict[str, str | int] = {"host": str(cluster.socket), "port": cluster.port,
+                                       "database": cluster.database, "databaseOid": oid}
+        receipt = self.package / "package-manifest.json"
+        if configured.build == "0":
+            receipt = self.package / "database/migrations.toml"
+
+        def release() -> str:
+            return sha256(receipt.read_bytes()).hexdigest()
+
+        session = begin_maintenance(source, runtime=self.runtime)
+        freeze(context, source, session)
+        reopen(context, source, session, release=release(), schema=BASELINE, verify_release=release)
+
+    def close(self) -> None:
+        self.cluster.close()
