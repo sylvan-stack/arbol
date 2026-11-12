@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import shutil
 import subprocess
@@ -9,6 +10,7 @@ import sys
 import tarfile
 import tomllib
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from backend_package import ROOT, destination, digest, metadata, source, verify, write_manifest  # noqa: E402
@@ -16,6 +18,27 @@ from build_support import archive, pin, target  # noqa: E402
 
 sys.path.insert(0, str(ROOT))
 from tools.elma_bundle import package as package_elma  # noqa: E402
+
+SOURCE_ONLY_TOP = "tests/top/test_top_roots.py"
+
+
+def packaged_top(root: Path, inventory: list[dict[str, Any]]) -> set[str]:
+    """Select the active Build cases and fail on missing or commented definitions."""
+    modules: dict[str, ast.Module] = {}
+    for item in inventory:
+        if item["tier"] != "top":
+            continue
+        relative = item["file"]
+        if item["kind"] != "python" or item["status"] != "active" or Path(relative).parent != Path("tests/top"):
+            raise ValueError(f"Expected an active Python top-tier case: {item['id']}")
+        if relative not in modules:
+            modules[relative] = ast.parse((root / relative).read_bytes(), filename=relative)
+        if not any(isinstance(cls, ast.ClassDef) and cls.name == item["class"] and any(
+            isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)) and method.name == item["name"]
+            for method in cls.body
+        ) for cls in modules[relative].body):
+            raise ValueError(f"Missing top-tier definition: {item['id']}")
+    return set(modules) - {SOURCE_ONLY_TOP}
 
 
 def package(root: Path = ROOT) -> Path:
@@ -46,11 +69,14 @@ def package(root: Path = ROOT) -> Path:
     inventory = json.loads((root / "test-tiers.json").read_text())
     selections = {
         item["file"] for item in inventory["tests"]
-        if item["kind"] == "python" and (
+        if item["tier"] == "mid" and item["kind"] == "python" and (
             item.get("support_file", "").startswith(("tests/backend/", "tests/radar/", "tests/ui/"))
             or item.get("support_file") == "tests/test_backend.py"
         )
     }
+    selections.update(packaged_top(root, inventory["tests"]))
+    selections.update(("tests/exchange_groups_support.py", "tests/exchange_start_support.py",
+                       "tests/exchange_trunk_standin.py"))
     selections.update(("tests/top/__init__.py", "tests/mid/__init__.py",
                        "tests/mid/archived/scripts/check_backend.py"))
     for relative in sorted(selections):

@@ -8,7 +8,7 @@ Reviewed revision: `f66335c7e203794dc84e40fe3106e85f8cae2dd6` under SYL-327 (29 
 
 ## Selection and limits
 
-3 top-tier inventory entries and 152 mid-tier entries are available: 151 after the higher-bar review and C44, admitted by SYL-399 and passed on 11 November 2026 against both installed Drivers. 505 low-tier entries were removed under SYL-327. Definitions, scenarios, programs and entry points overlap; this is not a runtime suite count. Top-tier bodies are unchanged. Retained mid-tier sources remain uncommented.
+6 top-tier inventory entries and 152 mid-tier entries are available: 151 after the higher-bar review and C44, admitted by SYL-399 and passed on 11 November 2026 against both installed Drivers. 505 low-tier entries were removed under SYL-327. Definitions, scenarios, programs and entry points overlap; this is not a runtime suite count. ASD-8 moved three Exchange lifecycle regressions from the historical Root runtime to the installation runtime. Retained mid-tier sources remain uncommented.
 
 ## Active top tier
 
@@ -17,6 +17,9 @@ Reviewed revision: `f66335c7e203794dc84e40fe3106e85f8cae2dd6` under SYL-327 (29 
 | [`test_top_backend_test_chat_wire.Windows.test_late_older_write_reply_cannot_publish_stale_settings`](tests/top/test_top_backend_test_chat_wire.py#L15) | Delays one completed database write while another window changes settings. Observes the real Bridge subscription to reject stale publication after the older reply resumes. Requires a disposable PostgreSQL fixture. |
 | [`test_top_backend_test_event_file.Files.test_captured_cutoff_excludes_later_blocks_and_partial_line_finishes_on_next_poll`](tests/top/test_top_backend_test_event_file.py#L15) | Appends bytes after a captured file cutoff and splits a later record before its newline. Checks that the first snapshot excludes later events and that a subsequent poll recovers every complete event once. |
 | [`test_top_roots.DatabaseAccess.test_roots_creation_retains_a_recovery_receipt_for_uncertain_outcomes_or_failed_rollback`](tests/top/test_top_roots.py#L16) | Injects both an uncertain CREATE result and a refused compensating DROP. Requires the private recovery receipt to survive without publishing a Root or dropping a database whose creation is uncertain. |
+| [`test_top_exchange_start.DetachedStart.test_returns_on_a_fragmented_object_without_waiting_for_trunk_exit`](tests/top/test_top_exchange_start.py#L12) | Splits the installation acceptance line across two writes from a detached process. Requires a complete reply while the child is still running. |
+| [`test_top_exchange_start.DetachedStart.test_timeout_keeps_request_and_process_and_a_late_writer_can_still_finish`](tests/top/test_top_exchange_start.py#L29) | Holds the child reply past the caller's deadline. Requires request retention and successful late child completion after the caller releases its output descriptor. |
+| [`test_top_exchange_groups.GroupIdentity.test_reused_or_unanchored_group_is_never_killed_after_term`](tests/top/test_top_exchange_groups.py#L13) | Changes the process table after TERM. Requires `not_ended` without sending KILL to a reused or unanchored group. |
 
 ## Layout and shared support
 
@@ -44,7 +47,7 @@ The shared conformance runner requires explicit `--only` selections. Removed sce
 
 ## Builds
 
-Since SYL-329 (29 October 2026) a Build runs the top tier only. The Arbol Build runs the two packaged backend cases in `unit` with the Build's interpreter and private PostgreSQL. It runs the global Root catalogue recovery case from source in `roots-unit`, with disposable files and stand-ins. The mid tier runs only when the owner asks for a mid-tier run.
+Since SYL-329 (29 October 2026) a Build runs the top tier only. The Arbol Build runs five packaged cases in `unit` with the Build's interpreter. The chat-wire case uses private PostgreSQL; the detached-start cases use a real stand-in child, and the force-stop case injects process observations without signalling a real group. The global Root catalogue recovery case still runs from source in `roots-unit` with disposable files and stand-ins. The historical `arbol-root` Build keeps its own top tier for recovery Builds. The mid tier runs only when the owner asks for a mid-tier run.
 
 ## Owner-controlled testing and archived examples — SYL-330
 

@@ -1,11 +1,14 @@
 # Test inventory: arbol
 
-SYL-327 source review of `f66335c7e203794dc84e40fe3106e85f8cae2dd6`. No tests executed. Top selections are unchanged. Entries distinguish Python definitions, scenarios and orchestration; do not sum overlapping entries as runtime cases. Earlier removals retain their original historical rationale; references in those historical reasons describe the suite at their removal date.
+SYL-327 source review of `f66335c7e203794dc84e40fe3106e85f8cae2dd6`. No tests executed in that review. ASD-8 adds the three relocated Exchange lifecycle regressions to the packaged top tier; the source-only Root catalogue recovery case is unchanged. Entries distinguish Python definitions, scenarios and orchestration; do not sum overlapping entries as runtime cases. Earlier removals retain their original historical rationale; references in those historical reasons describe the suite at their removal date.
 
 ## Retained selections
 
 | Tier | Kind | Selection | Justification |
 | --- | --- | --- | --- |
+| top | python | [`test_returns_on_a_fragmented_object_without_waiting_for_trunk_exit`](../tests/top/test_top_exchange_start.py#L12) | Port of `root.start-acceptance`: splits the installation acceptance line across writes while a real detached child waits. A valid reply must arrive before child exit. |
+| top | python | [`test_timeout_keeps_request_and_process_and_a_late_writer_can_still_finish`](../tests/top/test_top_exchange_start.py#L29) | Port of `root.start-timeout`: holds the reply past timeout. Observes retained request bytes and successful late output and completion from the real child. |
+| top | python | [`test_reused_or_unanchored_group_is_never_killed_after_term`](../tests/top/test_top_exchange_groups.py#L13) | Port of `root.stop-group-identity`: injects leader reuse and loss of the last verified member after TERM. Requires refusal without KILL in both cases. |
 | mid | entrypoint | [`run_suite`](../tests/mid/archived/conformance/runner.py#L53) | Explicit mid-tier orchestration for retained shared scenarios; not an additional behavioral case and not historical full qualification. |
 | mid | scenario | [`run`](../tests/mid/archived/conformance/scenarios/c14.py#L136) | Exercises actual Driver processes and durable native conversation maps across resume, rebuild, edited history and competing owners; verifies history and conditional map ownership survive. |
 | mid | support | [`run`](../tests/mid/archived/conformance/scenarios/errors.py#L127) | Shared invocation helper used by retained C26–C30; not an independent scenario. |
