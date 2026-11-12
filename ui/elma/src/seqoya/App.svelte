@@ -15,7 +15,7 @@
   let rootId = $state<string>();
   let appearance = $state(readSeqoyaAppearance());
   let subscriptions = $state<SubscriptionView>({ connected: false });
-  let subscriptionsOpen = false;
+  let subscriptionsOpen = true;
   let readSubscriptions: (() => Promise<void>) | undefined;
   let readUsage: ((driver: string, subscription: string) => Promise<void>) | undefined;
   let openConsole: (() => Promise<void>) | undefined;
@@ -32,8 +32,8 @@
     void openConsole?.();
   }
 
-  function changePage(page: string) {
-    subscriptionsOpen = page === 'Subscriptions';
+  function changeTab(tab: string) {
+    subscriptionsOpen = tab === 'Subscriptions';
     if (subscriptionsOpen) refreshSubscriptions();
   }
 
@@ -185,7 +185,7 @@
 </script>
 
 <SeqoyaLab fitted {trunk} {trunkSelector} {connectionStatus}
-  {subscriptions} onPageChange={changePage} onRefreshSubscriptions={refreshSubscriptions}
+  {subscriptions} onTabChange={changeTab} onRefreshSubscriptions={refreshSubscriptions}
   onRefreshUsage={refreshUsage} onOpenMiMo={openMiMo}
   appearanceReady={rootId !== undefined} bind:theme={appearance.theme} bind:uiScale={appearance.uiScale}
   onAppearanceChange={() => { if (rootId !== undefined) saveSeqoyaAppearance(rootId, appearance); }} />

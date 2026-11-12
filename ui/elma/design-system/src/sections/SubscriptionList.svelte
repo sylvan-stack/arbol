@@ -9,11 +9,13 @@
 
   let {
     view = { connected: false },
+    embedded = false,
     onRefresh,
     onRefreshUsage,
     onOpenMiMo,
   }: {
     view?: SubscriptionView;
+    embedded?: boolean;
     onRefresh?: () => void;
     onRefreshUsage?: (driver: string, subscription: string) => void;
     onOpenMiMo?: () => void;
@@ -67,13 +69,20 @@
     left.driver.localeCompare(right.driver) ||
     left.subscription.id.localeCompare(right.subscription.id),
   ));
+  const accountCount = $derived(view.listing && (!failures.length || rows.length) ? rows.length : undefined);
 </script>
 
 <section class="stack" aria-label="Subscriptions">
   <div class="row spread">
-    <PageHeader title="Subscriptions" description="Accounts reported by this Root’s drivers." count={view.listing && (!failures.length || rows.length) ? rows.length : undefined} />
-    <Button label="Refresh" onclick={onRefresh} busy={view.loading} disabled={!view.connected || !onRefresh}
-      title="Reread stored accounts and usage" />
+    {#if !embedded}
+      <PageHeader title="Subscriptions" description="Accounts reported by this Root’s drivers." count={accountCount} />
+    {:else if accountCount !== undefined}
+      <p class="small muted">{accountCount} {accountCount === 1 ? 'subscription' : 'subscriptions'}</p>
+    {/if}
+    <div class="subscription-actions">
+      <Button label="Refresh" onclick={onRefresh} busy={view.loading} disabled={!view.connected || !onRefresh}
+        title="Reread stored accounts and usage" />
+    </div>
   </div>
 
   {#if !view.connected}
@@ -182,6 +191,7 @@
 </section>
 
 <style>
+  .subscription-actions { margin-inline-start: auto; }
   .accounts {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr));
