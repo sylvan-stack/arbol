@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/sylvan-stack/arbol-design-system",
-  "commit": "e61283eac272c6a76e45a0d9f5577048048ee6d9",
+  "commit": "3eef3223d53191f77c033be2a5278d0b95dce816",
   "files": {
     "docs/licenses/Hanken-Grotesk-OFL.txt": "f45f60ca871850c58d8dc9c973bd6fcad40c137e9d037172b961e8ca68c87ef7",
     "docs/licenses/Spline-Sans-Mono-OFL.txt": "3127290ccd196ec0c4ffa60296845224a034b92c81de8231b0916278ed7607e1",
@@ -46,7 +46,7 @@
     "src/sections/VigorPanel.svelte": "a5f6ee6fe35a5500b8042cc5ca57ffd6453c9b396fd2bb322c7c9792613f638f",
     "src/sections/elma-response.ts": "2c2167e98b686f3c090583307a40781a93c4664ce087b837492ebc1faa1b085d",
     "src/sections/elma-types.ts": "53199f27384908b5197b692393752905145982bed7c20f04c8f50640f2f19088",
-    "src/sections/seqoya-subscriptions.ts": "f7e1f2992b89266baf2c2d5d6992f242f3c28852d46c20523b3580e0c9d619d4",
+    "src/sections/seqoya-subscriptions.ts": "ca0bf2970f2fa62881cb4fa32f39242a26ebd148bd4ec7e1ffecdf3fa635f749",
     "src/sections/seqoya-vigor.ts": "54a72ccc553477fc5e36ecce3df3c4b9ad8dd98415621cddbc9f717e00b19cf8",
     "src/styles/legacy-tokens.css": "54bac8ebf24bf5092b04bfa79832b0391895db0f44518a8f1e87566d8b499705",
     "src/styles/system.css": "2ad2d5c3ad36925863f2037ef450c07b5d547cb4ff492e07a8a7a032cb1e0d15",

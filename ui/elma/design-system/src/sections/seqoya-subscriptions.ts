@@ -38,7 +38,7 @@ export interface SubscriptionRecord {
     extra?: {
       balances?: { currency: 'USD' | 'CNY'; amount: string }[];
       apiAvailable?: boolean;
-      tokenPlanCredits?: { total: string; remaining: string };
+      planCredits?: { total: string; remaining: string };
     };
   };
 }

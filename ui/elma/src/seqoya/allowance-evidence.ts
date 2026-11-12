@@ -32,6 +32,7 @@ export interface UsageEvidence {
   codex?: {
     subscription: string;
     createdAt: string;
+    checkedAt: string;
     plan: 'plus' | 'pro';
     resetsAt: string;
     startedAt: string;
@@ -76,7 +77,7 @@ function mimoQuota(account: SubscriptionRecord, saved: Result | undefined, readi
   if (report && directWindow?.usedPercent != null) {
     quota = {
       source: 'Xiaomi Token Plan', plan: report.plan, observedAt: report.fetchedAt,
-      credits: validCredits(report.extra?.tokenPlanCredits) ? report.extra.tokenPlanCredits : undefined,
+      credits: validCredits(report.extra?.planCredits) ? report.extra.planCredits : undefined,
       windows: [windowReading(directWindow.label, directWindow.resetsAt, now, 100 - directWindow.usedPercent)],
     };
   } else if (manual) {
@@ -135,8 +136,10 @@ function chatGPTQuota(account: SubscriptionRecord, reading: UsageEvidence['piCha
 
 function codexCapacity(account: SubscriptionRecord, sample: UsageEvidence['codex'], now: number): AllowanceView {
   const usage = account.lastUsage;
+  const checkedAt = 'checkedAt' in account && typeof account.checkedAt === 'string' ? account.checkedAt : undefined;
   const weekly = usage?.windows.find((window) => window.kind === 'weekly' && window.windowMinutes === 10_080);
   if (!sample || !usage || !weekly || sample.subscription !== account.id || sample.createdAt !== account.createdAt
+    || !checkedAt || Date.parse(sample.checkedAt) !== Date.parse(checkedAt)
     || sample.plan !== usage.plan || Date.parse(sample.observedAt) > now || Date.parse(sample.observedAt) < now - 28 * day
     || !weekly.resetsAt || Date.parse(weekly.resetsAt) < Date.parse(sample.resetsAt) - 1_000) {
     return { issues: ['Absolute Codex capacity unavailable. The reported plan and weekly share need a matching recent token calibration.'] };
