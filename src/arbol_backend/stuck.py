@@ -1,4 +1,4 @@
-"""Own-Root awake-clock outside looks and revalidated, serialized force requests."""
+"""Installation awake-clock outside looks and revalidated, serialized force requests."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from .bridge import Params
 from .controls import Controls
 from .listings import Listings
 from .metadata import Attention, now
-from .model import Identity, Refused
+from .model import Refused
 from .notes import Notes
 
 LOOK = 30.0
@@ -37,10 +37,10 @@ class Observation:
 
 
 class Stuck:
-    def __init__(self, identity: Identity, listings: Listings, controls: Controls, notes: Notes, attention: Attention,
+    def __init__(self, listings: Listings, controls: Controls, notes: Notes, attention: Attention,
                  *, clock: Callable[[], float] = awake, look: float = LOOK, unchanged: float = UNCHANGED,
                  poll: float = 1.0) -> None:
-        self.identity, self.listings, self.controls, self.notes, self.attention = identity, listings, controls, notes, attention
+        self.listings, self.controls, self.notes, self.attention = listings, controls, notes, attention
         self.clock, self.look, self.unchanged, self.poll = clock, look, unchanged, poll
         self.observed: dict[str, Observation] = {}
         self.handled: dict[str, tuple[tuple[Any, ...], int]] = {}
@@ -50,12 +50,11 @@ class Stuck:
         self.watcher: asyncio.Task[None] | None = None
         self.closed = False
 
-    def failed(self, root: str) -> None:
-        if root == self.identity.root:
-            self.observed.clear()
+    def failed(self) -> None:
+        self.observed.clear()
 
-    def observe(self, root: str, value: Params) -> None:
-        if self.closed or root != self.identity.root:
+    def observe(self, value: Params) -> None:
+        if self.closed:
             return
         at = self.clock()
         current: dict[str, Observation] = {}
@@ -79,7 +78,7 @@ class Stuck:
 
     async def still_stuck(self, exchange: str, expected: Observation) -> bool:
         try:
-            value = await self.listings.get(self.identity.root, after=time.monotonic())
+            value = await self.listings.get(after=time.monotonic())
         except Refused:
             return False
         actual = next((row for row in value["exchanges"] if row["exchange"] == exchange), None)
@@ -125,9 +124,9 @@ class Stuck:
 
     async def check_once(self) -> None:
         try:
-            await self.listings.get(self.identity.root)
+            await self.listings.get()
         except Refused:
-            self.failed(self.identity.root)
+            self.failed()
 
     async def watch(self) -> None:
         next_look = self.clock()

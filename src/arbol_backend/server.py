@@ -56,25 +56,25 @@ class Backend:
                                  database=self.database)
         self.drafts = Drafts(self.chats, self.registry)
         self.dispatch = Dispatch(identity, self.programs, self.chats, self.drafts, self.registry, self.settings)
-        self.live = Live(identity, self.chats, self.dispatch)
+        self.listings = Listings(self.programs, self.database)
+        self.live = Live(identity, self.chats, self.dispatch, self.listings)
         self.notes = Notes(identity, self.database, self.chats, self.live)
         self.controls = Controls(self.programs, self.dispatch, self.live, self.registry)
         self.settling = Settling(self.programs, self.database, self.live)
-        self.listings = Listings(self.programs, self.database)
-        self.stuck = Stuck(identity, self.listings, self.controls, self.notes, self.chats.attention)
+        self.stuck = Stuck(self.listings, self.controls, self.notes, self.chats.attention)
         self.listings.on_rows = self.listed
         self.listings.on_failed = self.stuck.failed
         self.settling.read_listing = self.listings.get
-        self.discovery = Discovery(self.roots, self.listings)
+        self.discovery = Discovery(self.listings, self.registry)
         self.recovery = Recovery(self.health, self.chats, self.registry, self.settling, self.notes, self.discovery, self.stuck)
         self.recovery.on_returned = self.measurements.returned
         self.windows: set[asyncio.StreamWriter] = set()
         self.tasks: set[asyncio.Task[None]] = set()
         self.stopped = asyncio.Event()
 
-    def listed(self, root: str, value: dict[str, Any]) -> None:
-        self.settling.listed(root, value)
-        self.stuck.observe(root, value)
+    def listed(self, value: dict[str, Any]) -> None:
+        self.settling.listed(value)
+        self.stuck.observe(value)
 
     def task(self, work: Coroutine[Any, Any, None]) -> None:
         task = asyncio.create_task(work)
@@ -173,7 +173,6 @@ class Backend:
             await self.stuck.close()
             await self.health.close()
             await self.controls.close()
-            await self.discovery.close()
             await self.settling.close()
             await self.listings.close()
             await self.notes.close()

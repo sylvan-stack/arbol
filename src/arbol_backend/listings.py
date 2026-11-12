@@ -1,4 +1,4 @@
-"""Shared bounded explicit-Root manager listings, with only public metadata projected."""
+"""Shared, bounded installation inventory with safe public metadata."""
 
 from __future__ import annotations
 
@@ -8,133 +8,127 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from .bridge import Error, Params
+from .bridge import Error, Params, uuid_id
 from .database import Database
 from .dispatch import Forwarded
 from .exchange_files import timestamp
 from .migration import message
-from .model import Refused
+from .model import BUILD_ID
 from .process import Programs
-from .settling import listing
-from .validation import text
-
-CAPACITY = 8
+from .validation import integer, text
 
 
 class Listings:
-    def __init__(self, programs: Programs, database: Database, *, capacity: int = CAPACITY) -> None:
-        self.programs, self.database = programs, database
-        self.capacity = asyncio.Semaphore(capacity)
-        self.closed = False
-        self.tasks: dict[str, asyncio.Task[Params | Error]] = {}
-        self.started: dict[str, float] = {}
-        self.on_rows: Callable[[str, Params], None] | None = None
-        self.on_failed: Callable[[str], None] | None = None
+    """One coalesced inventory for the Bridge, live events, settlement and stuck detection."""
 
-    def checked(self, value: Any, root: str) -> Params:
-        if isinstance(value, dict) and "error" in value:
+    def __init__(self, programs: Programs, database: Database) -> None:
+        self.programs, self.database = programs, database
+        self.closed = False
+        self.task: asyncio.Task[Params | Error] | None = None
+        self.started = 0.0
+        self.on_rows: Callable[[Params], None] | None = None
+        self.on_failed: Callable[[], None] | None = None
+
+    def checked(self, value: Any) -> Params:
+        if not isinstance(value, dict) or "root" in value:
+            raise Error("no_answer", source="runtime")
+        if "error" in value:
             error = value["error"]
             if (not isinstance(error, dict) or not isinstance(error.get("code"), str)
                     or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", error["code"])
                     or not isinstance(error.get("message"), str)):
-                raise Error("no_answer")
+                raise Error("no_answer", source="runtime")
             secret = (self.database.parameters or {}).get("password", "")
-            raise Forwarded(error["code"], "root-manager", message(error["message"], secrets=(secret,),
-                fallback="The Root manager refused; its diagnostic is not safe to display."))
-        rows = listing(value, root)
+            code = "schema_incompatible" if error["code"] == "schema_invalid" else error["code"]
+            raise Forwarded(code, "runtime", message(error["message"], secrets=(secret,),
+                fallback="The Exchange runtime refused; its diagnostic is not safe to display."))
+        rows, raw_unreadable = value.get("exchanges"), value.get("unreadable")
+        if not isinstance(rows, list) or not isinstance(raw_unreadable, list):
+            raise Error("no_answer", source="runtime")
+        unreadable = [uuid_id(id) for id in raw_unreadable]
+        if len(unreadable) != len(set(unreadable)):
+            raise Error("no_answer", source="runtime")
         result: list[Params] = []
-        seen: set[str] = set()
+        seen = set(unreadable)
         for row in rows:
-            if row["exchange"] in seen:
-                raise Error("no_answer")
-            seen.add(row["exchange"])
-            state, waiting = text(row["state"]), text(row["signsOfLife"]["waitingFor"])
-            projected: Params = {key: row[key] for key in ("root", "exchange", "chat", "trunk", "build")}
-            projected["state"] = state
-            projected["process"] = {key: row["process"][key] for key in ("pid", "startedAt", "alive")}
-            projected["signsOfLife"] = {"heartbeat": row["signsOfLife"]["heartbeat"], "waitingFor": waiting,
-                                        "since": row["signsOfLife"]["since"]}
+            if (not isinstance(row, dict) or "root" in row or type(row.get("exchangeFormat")) is not int
+                    or row["exchangeFormat"] != 1 or not isinstance(row.get("process"), dict)
+                    or not isinstance(row.get("signsOfLife"), dict)):
+                raise Error("no_answer", source="runtime")
+            exchange, chat = uuid_id(row.get("exchange")), uuid_id(row.get("chat"))
+            if exchange in seen:
+                raise Error("no_answer", source="runtime")
+            seen.add(exchange)
+            state, trunk, build = text(row.get("state")), text(row.get("trunk")), text(row.get("build"))
+            if not re.fullmatch(r"[a-z][a-z0-9]{0,31}", trunk) or (build != "0" and not BUILD_ID.fullmatch(build)):
+                raise Error("no_answer", source="runtime")
+            process, life = row["process"], row["signsOfLife"]
+            pid = integer(process.get("pid"), 1, 2147483647)
+            if type(process.get("alive")) is not bool:
+                raise Error("no_answer", source="runtime")
+            timestamp(process.get("startedAt"))
+            timestamp(life.get("since"))
+            heartbeat = integer(life.get("heartbeat"), 0, 9223372036854775807)
+            projected: Params = {"exchange": exchange, "chat": chat, "trunk": trunk, "build": build,
+                                 "state": state, "exchangeFormat": 1,
+                                 "process": {"pid": pid, "startedAt": process["startedAt"], "alive": process["alive"]},
+                                 "signsOfLife": {"heartbeat": heartbeat, "waitingFor": text(life.get("waitingFor")),
+                                                 "since": life["since"]}}
             if "end" in row:
                 end = row["end"]
                 if not isinstance(end, dict):
-                    raise Error("no_answer")
+                    raise Error("no_answer", source="runtime")
                 text(end.get("state"))
                 timestamp(end.get("at"))
                 projected["end"] = {"state": end["state"], "at": end["at"]}
                 if "error" in end:
                     error = end["error"]
                     if not isinstance(error, dict):
-                        raise Error("no_answer")
+                        raise Error("no_answer", source="runtime")
                     code = text(error.get("code"))
                     if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code) or not isinstance(error.get("message"), str):
-                        raise Error("no_answer")
+                        raise Error("no_answer", source="runtime")
                     secret = (self.database.parameters or {}).get("password", "")
                     projected["end"]["error"] = {"code": code, "message": message(error["message"], secrets=(secret,),
                         fallback="The Exchange failed; its diagnostic is not safe to display.")}
             result.append(projected)
-        if seen & set(value["unreadable"]):
-            raise Error("no_answer")
-        return {"exchanges": result, "unreadable": value["unreadable"]}
+        return {"exchanges": result, "unreadable": unreadable}
 
-    async def run(self, root: str) -> Params | Error:
+    async def run(self) -> Params | Error:
         result: Params | Error
         try:
-            reply = await self.programs.call("arbol-root", ["list"], kind="list", root=root)
-            result = self.checked(reply, root)
+            reply = await self.programs.call("arbol-exchanges", ["list"], kind="list")
+            result = self.checked(reply)
             if self.on_rows:
-                self.on_rows(root, result)
+                self.on_rows(result)
             return result
         except Forwarded as error:
             result = error
-        except Refused:
-            result = Error("no_answer", source="root-manager")
         except asyncio.CancelledError:
             raise
         except Exception:
-            result = Error("no_answer", source="root-manager")
+            result = Error("no_answer", source="runtime")
         if self.on_failed:
-            try:
-                self.on_failed(root)
-            except Exception:
-                pass
+            self.on_failed()
         return result
 
-    async def get(self, root: str, *, after: float | None = None) -> Params:
-        if self.closed:
-            raise Error("ended", source="root-manager")
-        task = self.tasks.get(root)
-        if task is not None and not task.done() and after is not None and self.started.get(root, 0) < after:
-            await asyncio.shield(task)
-            return await self.get(root, after=after)
-        if task is None or task.done():
-            await self.capacity.acquire()
-            if self.closed:
-                self.capacity.release()
-                raise Error("ended", source="root-manager")
-            task = self.tasks.get(root)
-            if task is not None and not task.done():
-                self.capacity.release()
-            else:
-                self.started[root] = time.monotonic()
-                task = asyncio.create_task(self.run(root))
-                self.tasks[root] = task
-                task.add_done_callback(lambda _: self.capacity.release())
-        result = await asyncio.shield(task)
-        if isinstance(result, Error):
-            raise result
-        return result
-
-    def forget(self, roots: set[str]) -> None:
-        for root, task in list(self.tasks.items()):
-            if root not in roots and task.done():
-                self.tasks.pop(root, None)
-                self.started.pop(root, None)
+    async def get(self, *, after: float | None = None) -> Params:
+        while not self.closed:
+            task = self.task
+            if task is None or task.done():
+                self.started = time.monotonic()
+                task = self.task = asyncio.create_task(self.run())
+            started = self.started
+            result = await asyncio.shield(task)
+            if after is not None and started < after:
+                continue  # A proof for force-stop must start after the caller requested it.
+            if isinstance(result, Error):
+                raise result
+            return result
+        raise Error("ended", source="runtime")
 
     async def close(self) -> None:
         self.closed = True
-        tasks = list(self.tasks.values())
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        self.tasks.clear()
-        self.started.clear()
+        if self.task is not None:
+            self.task.cancel()
+            await asyncio.gather(self.task, return_exceptions=True)

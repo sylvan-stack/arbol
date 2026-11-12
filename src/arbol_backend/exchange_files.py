@@ -1,10 +1,8 @@
-"""Own-Root private Exchange descriptors, validated records and bounded UTC process reads."""
+"""Installation Exchange descriptors and versioned UUID records."""
 
 from __future__ import annotations
 
-import asyncio
 import os
-import signal
 import stat
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -18,8 +16,6 @@ from .model import BUILD_ID, Identity, Refused
 from .validation import integer, text
 
 MAX_RECORD = 1024 * 1024
-PS_SECONDS = 5.0
-MONTHS = {name: n for n, name in enumerate("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split(), 1)}
 
 
 def timestamp(value: object) -> datetime:
@@ -44,6 +40,8 @@ def private(info: os.stat_result, *, directory: bool = False) -> bool:
 class Record:
     exchange: str
     chat: str
+    trunk: str
+    build: str
     pid: int
     started: datetime
     accepted: datetime | None
@@ -65,6 +63,8 @@ class Record:
         if stopping and self.end is None:
             state = "stopping"
         value: Params = {"exchange": self.exchange, "state": state}
+        if self.accepted is not None:
+            value.update(trunk=self.trunk, build=self.build)
         if state == "running":
             value.update(waitingFor=self.waiting, since=iso(self.since))
         if self.end is not None:
@@ -72,9 +72,9 @@ class Record:
         return value
 
 
-def record(value: Params, identity: Identity, exchange: str, *, secrets: tuple[str, ...] = ()) -> Record:
+def record(value: Params, exchange: str, *, secrets: tuple[str, ...] = ()) -> Record:
     try:
-        if type(value.get("rootContract")) is not int or value["rootContract"] != 1 or value.get("root") != identity.root:
+        if type(value.get("exchangeFormat")) is not int or value["exchangeFormat"] != 1 or "root" in value:
             raise Error("no_answer")
         if uuid_id(value.get("exchange")) != exchange:
             raise Error("no_answer")
@@ -112,7 +112,7 @@ def record(value: Params, identity: Identity, exchange: str, *, secrets: tuple[s
                         fallback="The Exchange failed; its diagnostic is not safe to display.")
         # Structural equality of these private metadata values is enough to detect a rewritten identity.
         immutable = (chat, trunk, build, pid, started, value["route"], value.get("smallCallRoute"), folder)
-        return Record(exchange, chat, pid, started, accepted, heartbeat, waiting, since, ended, immutable)
+        return Record(exchange, chat, trunk, build, pid, started, accepted, heartbeat, waiting, since, ended, immutable)
     except (Refused, ValueError, UnicodeError, KeyError, TypeError) as error:
         raise Error("no_answer") from error
 
@@ -149,15 +149,15 @@ class Folders:
         self.identities: dict[str, tuple[Any, ...]] = {}
 
     def directory(self) -> int:
-        root = os.open(self.identity.folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        runtime = os.open(self.identity.folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
-            folder = os.open("exchanges", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root)
+            folder = os.open("exchanges", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=runtime)
             if not private(os.fstat(folder), directory=True):
                 os.close(folder)
                 raise Error("no_answer")
             return folder
         finally:
-            os.close(root)
+            os.close(runtime)
 
     def open(self, exchange: str, *, temporary: bool = False) -> Folder:
         uuid_id(exchange)
@@ -169,27 +169,6 @@ class Folders:
                 os.close(descriptor)
                 raise Error("no_answer")
             return Folder(descriptor, exchange)
-        finally:
-            os.close(parent)
-
-    def names(self) -> list[str]:
-        try:
-            parent = self.directory()
-        except FileNotFoundError:
-            return []
-        try:
-            result = []
-            for name in os.listdir(parent):
-                if name.startswith("."):
-                    continue
-                try:
-                    uuid_id(name)
-                    info = os.stat(name, dir_fd=parent, follow_symlinks=False)
-                    if private(info, directory=True):
-                        result.append(name)
-                except (FileNotFoundError, Refused):
-                    continue
-            return sorted(result)
         finally:
             os.close(parent)
 
@@ -211,7 +190,7 @@ class Folders:
             value = json.loads(raw.decode("utf-8"), object_pairs_hook=pairs)
             if not isinstance(value, dict):
                 raise Error("no_answer")
-            result = record(value, self.identity, exchange, secrets=secrets)
+            result = record(value, exchange, secrets=secrets)
             previous = self.identities.get(exchange)
             if previous is not None and previous != result.immutable:
                 raise Error("no_answer")
@@ -225,51 +204,3 @@ class Folders:
     def forget(self, names: set[str]) -> None:
         for exchange in set(self.identities) - names:
             self.identities.pop(exchange)
-
-
-async def processes(pids: set[int], *, seconds: float = PS_SECONDS) -> dict[int, datetime | None]:
-    if not pids:
-        return {}
-    for pid in pids:
-        integer(pid, 1, 2147483647)
-    child = None
-    try:
-        child = await asyncio.create_subprocess_exec(
-            "/bin/ps", "-p", ",".join(str(pid) for pid in sorted(pids)), "-o", "pid=,lstart=",
-            env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "TZ": "UTC"},
-            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-            start_new_session=True, close_fds=True)
-        async with asyncio.timeout(seconds):
-            assert child.stdout is not None
-            raw = await child.stdout.read(MAX_RECORD + 1)
-            status = await child.wait()
-        if status not in (0, 1) or len(raw) > MAX_RECORD:
-            raise Error("no_answer")
-        result: dict[int, datetime | None] = {pid: None for pid in pids}
-        for line in raw.decode("ascii").splitlines():
-            parts = line.split()
-            if (len(parts) != 6 or not parts[0].isdigit() or parts[1] not in {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
-                    or parts[2] not in MONTHS):
-                raise Error("no_answer")
-            pid = int(parts[0])
-            if pid not in pids or result[pid] is not None:
-                raise Error("no_answer")
-            result[pid] = datetime.fromisoformat(f"{parts[5]}-{MONTHS[parts[2]]:02d}-{int(parts[3]):02d}T{parts[4]}+00:00")
-        return result
-    except (OSError, ValueError, UnicodeError, TimeoutError) as error:
-        raise Error("no_answer") from error
-    finally:
-        if child is not None and child.returncode is None:
-            try:
-                os.killpg(child.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            try:
-                await asyncio.wait_for(child.wait(), 0.2)
-            except TimeoutError:
-                pass
-
-
-def living(value: Record, observed: dict[int, datetime | None]) -> bool:
-    start = observed.get(value.pid)
-    return start is not None and abs((start - value.started).total_seconds()) <= 2

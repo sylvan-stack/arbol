@@ -1,12 +1,13 @@
-"""Per-window file replay and shared own-Root record/process observation."""
+"""Per-window file replay using the shared installation Exchange inventory."""
 
 from __future__ import annotations
 
 import asyncio
 import os
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import Coroutine
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from .bridge import MAX_LINE, Error, Params, Subscription, encode
@@ -14,7 +15,8 @@ from .chat_data import encoded
 from .chats import Chats
 from .dispatch import Dispatch
 from .event_file import Line, Scanner, completed, superseded
-from .exchange_files import Folder, Folders, Record, living, processes
+from .exchange_files import Folder, Folders, Record, timestamp
+from .listings import Listings
 from .model import Identity, Refused
 
 POLL = 0.1
@@ -111,13 +113,13 @@ class Lines:
 
 
 class Live:
-    def __init__(self, identity: Identity, chats: Chats, dispatch: Dispatch) -> None:
+    def __init__(self, identity: Identity, chats: Chats, dispatch: Dispatch, listings: Listings) -> None:
         self.identity, self.chats, self.dispatch = identity, chats, dispatch
-        self.folders = Folders(identity)
+        self.folders, self.listings = Folders(identity), listings
         self.records: dict[str, Record] = {}
         self.known: dict[str, Record] = {}
         self.unreadable: set[str] = set()
-        self.observed: dict[int, Any] = {}
+        self.observed: dict[str, tuple[int, datetime, bool]] = {}
         self.failed = False
         self.ready = asyncio.Event()
         self.stopping: dict[str, str] = {}
@@ -133,8 +135,6 @@ class Live:
         self.saved_at: dict[tuple[str, str], float] = {}
         self.tasks: set[asyncio.Task[None]] = set()
         self.scan_task: asyncio.Task[None] | None = None
-        self.dead: set[tuple[Any, ...]] = set()
-        self.on_dead: Callable[[], None] | None = None
 
     def task(self, work: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
         task = asyncio.create_task(work)
@@ -152,36 +152,41 @@ class Live:
         self.chats.chat_view.topic.publish({"kind": "exchange", "exchange": {"exchange": exchange, "state": "stopping"}},
                                            params={"chat": chat})
 
+    def alive(self, record: Record) -> bool:
+        return self.observed.get(record.exchange) == (record.pid, record.started, True)
+
     async def scan(self) -> None:
         try:
-            names = self.folders.names()
+            inventory = await self.listings.get()
             records: dict[str, Record] = {}
-            unreadable: set[str] = set()
+            observed: dict[str, tuple[int, datetime, bool]] = {}
+            unreadable = set(inventory["unreadable"])
             secret = (self.chats.database.parameters or {}).get("password", "")
-            for exchange in names:
+            for row in inventory["exchanges"]:
+                exchange = row["exchange"]
                 try:
-                    records[exchange] = self.folders.read(exchange, secrets=(secret,))
+                    record = self.folders.read(exchange, secrets=(secret,))
+                    process = row["process"]
+                    started = timestamp(process["startedAt"])
+                    if ((record.chat, record.trunk, record.build, record.pid, record.started)
+                            != (row["chat"], row["trunk"], row["build"], process["pid"], started)):
+                        raise Error("no_answer")
+                    records[exchange] = record
+                    observed[exchange] = process["pid"], started, process["alive"]
                 except FileNotFoundError:
-                    pass
+                    pass  # Settlement may remove a verified folder after the inventory.
                 except (OSError, Refused):
                     unreadable.add(exchange)
                 await asyncio.sleep(0)
-            observed = await processes({record.pid for record in records.values()})
-            dead = {(id, record.pid, record.started, record.accepted, bool(record.end)) for id, record in records.items()
-                    if not living(record, observed)}
-            new_dead = bool(dead - self.dead)
-            self.dead = dead
             self.known = {**{id: value for id, value in self.known.items() if id in unreadable}, **records}
             for id in records.keys() - self.records.keys():
                 self.row_at[records[id].chat] = 0
             self.records, self.unreadable, self.observed, self.failed = records, unreadable, observed, False
-            self.folders.forget(set(names))
-            if new_dead and self.on_dead:
-                self.on_dead()
+            self.folders.forget(set(records) | unreadable)
+            self.chats.attention.close("exchange_inventory_unavailable")
         except (OSError, Refused):
             self.failed = True
-        except Exception:
-            self.failed = True
+            self.chats.attention.open("exchange_inventory_unavailable", "The live Exchange inventory is unavailable.")
         finally:
             self.ready.set()
 
@@ -218,7 +223,7 @@ class Live:
                     record = self.folders.read(exchange, secrets=(secret,))
                 except FileNotFoundError as error:
                     raise Restart() from error
-                status = record.status(living(record, self.observed), stopping=exchange in self.stopping)
+                status = record.status(self.alive(record), stopping=exchange in self.stopping)
                 if status is not None:
                     self.status(sub, state, status)
                 next_record = time.monotonic() + POLL
@@ -298,7 +303,7 @@ class Live:
             raise Error("database_unavailable")
         self.check(sub, state)
         if self.failed:
-            raise Error("no_answer")
+            return  # Preserve saved views and subscriptions until the inventory returns.
         if any(self.known[id].chat == params["chat"] for id in self.unreadable if id in self.known):
             raise Error("no_answer")
         rows = {row["exchange"]: row for row in snapshot["exchanges"]}
@@ -327,7 +332,7 @@ class Live:
                 record = self.folders.read(exchange, secrets=(secret,))
             except FileNotFoundError:
                 continue
-            alive = living(record, self.observed)
+            alive = self.alive(record)
             status = record.status(alive, stopping=exchange in self.stopping)
             if record.end is not None:
                 self.stopping.pop(exchange, None)
@@ -406,7 +411,6 @@ class Live:
             listeners = set(self.chats.chat_view.topic.listeners)
             if listeners and not watching:
                 self.ready.clear()
-                self.dead.clear()
                 next_scan = 0
             watching = bool(listeners)
             if listeners and time.monotonic() >= next_scan and (self.scan_task is None or self.scan_task.done()):
