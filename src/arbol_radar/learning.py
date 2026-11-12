@@ -182,7 +182,7 @@ def pairs(reports: Sequence[Report]) -> list[tuple[Report, Report]]:
 
 
 async def runs_between(database: Database, subscription: Subscription, since: datetime, until: datetime) -> int:
-    """The runs of this Mac for the Subscription that ended between two fetch times, from the Root's chat tables."""
+    """The runs of this Mac for the Subscription that ended between two fetch times, from the installation's chat tables."""
     rows = await database.execute(RUNS, [subscription.driver, subscription.id, since, until])
     return int(rows[0][0]) if rows else 0
 
@@ -232,7 +232,7 @@ async def survey(records: Records, learning: Learning) -> tuple[list[Series], li
 
 
 async def observations(records: Records, learning: Learning) -> list[Observation]:
-    """Every gate's observation over the recorded reports of every Subscription of the Root's `vigor_reports`."""
+    """Every gate's observation over the recorded reports of every Subscription of the installation's `vigor_reports`."""
     return (await survey(records, learning))[1]
 
 
@@ -243,6 +243,11 @@ async def learn(records: Records, now: datetime, first: Profile = FIRST_PROFILE)
     writes one profile row at most, `proposed`, and approves nothing: only the owner's `arbol vigor approve` does
     (SGM-D17). With too few trusted pairs it writes nothing and says how many are missing.
     """
+    async with records.writing():
+        return await learn_admitted(records, now, first)
+
+
+async def learn_admitted(records: Records, now: datetime, first: Profile) -> Learned:
     await records.require_layout()
     await records.ensure_profile(first, now)
     profile = await records.in_use(first)

@@ -1,15 +1,15 @@
 """The read `arbol vigor` of the `arbol` command line (SGM-1.13, SGM-D28), its manual refresh (SGM-D20, SGM-D30), and
 the profile commands `arbol vigor learn`, `arbol vigor profiles` and `arbol vigor approve <version>` (SGM-1.11).
 
-`arbol [--root <root>] vigor [--refresh [<driver>/<subscription>]] [--text]` prints the rollup of the latest recorded
+`arbol vigor [--refresh [<driver>/<subscription>]] [--text]` prints the rollup of the latest recorded
 calculations of every Subscription of every Driver among the launchers: as one JSON document on standard output, as
 every Arbol program answers, or as the Radar's lines with `--text`. A plain read lists the Subscriptions through
 `subscriptions list`, which contacts no vendor, reads the latest record of each and recomputes nothing. With
 `--refresh` a fresh report of every Subscription, or of the one named, is fetched first through the Driver's
 `subscriptions usage`, recorded, and every Subscription is recomputed and recorded, which replaces predicted windows
-with the vendor's numbers. The command line works while no backend runs: it opens the Root's database itself.
+with the vendor's numbers. The command line works while no backend runs: it opens the installation database itself.
 
-`learn` runs the learner over the Root's records and writes a proposed profile when a gate's estimate is calibrated,
+`learn` runs the learner over the installation records and writes a proposed profile when a gate's estimate is calibrated,
 with each Subscription's Vigor now by the profile in use beside the proposed one; `profiles` lists every profile with
 its state and the one in use; `approve <version>` is the owner's approval, the one command that makes a profile the
 one the calculation uses. None of them runs a Driver.
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -111,25 +112,26 @@ async def read(
 
     A plain read recomputes nothing and contacts no vendor (SGM-D30). With `refresh`, the fresh reports are recorded
     first and every Subscription is recomputed and recorded, as a tick does, so a report the vendor just gave replaces
-    every predicted window (SGM-D20). A Subscription without a record is listed as such; a Root whose database lacks
+    every predicted window (SGM-D20). A Subscription without a record is listed as such; an installation whose database lacks
     the Vigor tables refuses with `layout_incomplete` before any Driver is run.
     """
     moment = now or datetime.now(UTC)
     programs = Programs(selected)
-    database = Database(selected)
+    database = Database(selected, application=True)
     records = Records(database)
     try:
-        await records.require_layout()
-        listing = await list_subscriptions(programs)
-        failures = dict(listing.failures)
-        if choice.refresh:
-            failures.update(await refresh(programs, records, listing, choice.target, moment))
-            failures.update((await recompute(records, listing, profile, moment)).failures)
-        entries = [
-            Entry(item.subscription, label_of(item), await records.last_result(item.subscription))
-            for item in listing.subscriptions
-        ]
-        return rollup(moment, entries, failures)
+        async with records.writing() if choice.refresh else nullcontext():
+            await records.require_layout()
+            listing = await list_subscriptions(programs)
+            failures = dict(listing.failures)
+            if choice.refresh:
+                failures.update(await refresh(programs, records, listing, choice.target, moment))
+                failures.update((await recompute(records, listing, profile, moment)).failures)
+            entries = [
+                Entry(item.subscription, label_of(item), await records.last_result(item.subscription))
+                for item in listing.subscriptions
+            ]
+            return rollup(moment, entries, failures)
     finally:
         await database.close()
         programs.close()
@@ -290,9 +292,9 @@ def version_of(value: str | None) -> int:
 
 
 async def profile_command(selected: Identity, action: str, value: str | None, *, text: bool, now: datetime) -> str:
-    """`learn`, `profiles` or `approve <version>` over the Root's records, as one JSON document or as text lines."""
+    """`learn`, `profiles` or `approve <version>` over the installation records, as one JSON document or as text lines."""
     version = version_of(value) if action == "approve" else None
-    database = Database(selected)
+    database = Database(selected, application=True)
     records = Records(database)
     try:
         await records.require_layout()
@@ -305,8 +307,9 @@ async def profile_command(selected: Identity, action: str, value: str | None, *,
                 else json.dumps(learned_json(learned, vigor), separators=(",", ":"))
             )
         if version is not None:
-            approved = await records.approve(version, now)
-            in_use = (await records.in_use()).version
+            async with records.writing():
+                approved = await records.approve(version, now)
+                in_use = (await records.in_use()).version
             if text:
                 return f"Profile {approved.version} approved: the calculation uses it from the next tick or refresh."
             return json.dumps({"approved": approved.version, "inUse": in_use}, separators=(",", ":"))

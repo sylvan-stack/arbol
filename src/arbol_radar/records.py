@@ -1,9 +1,9 @@
-"""The records of Subscriptions Vigor in the current Root's database (SGM-1.10, SGM-D22, SGM-D29).
+"""The records of Subscriptions Vigor in the installed database (SGM-1.10, SGM-D22, SGM-D29).
 
 Every report is recorded as it arrives when its fetchedAt is newer than the last recorded one of its Subscription; every
 calculation is recorded with its inputs, the profile version, each window's loss and the result; a named profile can be
 replayed over the recorded reports of a Subscription (SGM-1.14). The three tables, `vigor_profiles`, `vigor_reports`
-and `vigor_results`, come from each Root's own layout (RTM-1): nothing here creates one (BKD-0.6), and a database that
+and `vigor_results`, come from the installed schema (ARC-4): nothing here creates one (BKD-0.6), and a database that
 lacks them refuses with `layout_incomplete`. The connection is the backend's `Database`, bounded and autocommitted.
 """
 
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping, Sequence
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any
@@ -131,8 +132,12 @@ class Records:
     def __init__(self, database: Database) -> None:
         self.database = database
 
+    def writing(self) -> AbstractAsyncContextManager[None]:
+        """Hold ordinary admission over a complete refresh, tick or profile operation."""
+        return self.database.permit()
+
     async def layout(self) -> bool:
-        """Whether the Root's database has the three tables of the Vigor records; the Arbol process creates none."""
+        """Whether the installation's database has the three tables of the Vigor records; the Arbol process creates none."""
         rows = await self.database.execute(
             "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
             "WHERE n.nspname='public' AND c.relkind IN ('r','p') AND c.relname = ANY(%s)",
@@ -142,7 +147,7 @@ class Records:
 
     async def require_layout(self) -> None:
         if not await self.layout():
-            raise Refused("layout_incomplete", "The Root's own layout lacks the Subscriptions Vigor tables.")
+            raise Refused("layout_incomplete", "The installed database lacks the Subscriptions Vigor tables.")
 
     async def ensure_profile(self, profile: Profile, now: datetime) -> bool:
         """Write the profile when the table has no profile of its version; True when it was written now."""
@@ -226,14 +231,14 @@ class Records:
     async def approve(self, version: int, now: datetime) -> Profile:
         """The owner's approval of a recorded profile, recorded in its row: the one in use from the next calculation.
 
-        Refused for a version the Root does not record (`unknown_profile`), a profile already approved
+        Refused for a version the installation does not record (`unknown_profile`), a profile already approved
         (`already_approved`), and one older than the approved profile in use (`older_profile`), since the profile in
         use is the highest approved version.
         """
         await self.ensure_profile(FIRST_PROFILE, now)
         profile = await self.profile(version)
         if profile is None:
-            raise Refused("unknown_profile", f"The Root records no profile {version}.")
+            raise Refused("unknown_profile", f"The installation records no profile {version}.")
         if profile.approval == "approved":
             raise Refused("already_approved", f"Profile {version} is approved already.")
         current = await self.in_use()
@@ -264,7 +269,8 @@ class Records:
         rows = await self.database.execute(
             "INSERT INTO vigor_reports (id, driver, subscription, family, outcome, fetched_at, message, windows, extra, "
             "arrived_at, run) SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s WHERE NOT EXISTS "
-            "(SELECT 1 FROM vigor_reports WHERE driver=%s AND subscription=%s AND fetched_at >= %s) RETURNING id",
+            "(SELECT 1 FROM vigor_reports WHERE driver=%s AND subscription=%s AND fetched_at >= %s) "
+            "ON CONFLICT(driver,subscription,fetched_at) DO NOTHING RETURNING id",
             [
                 report.id,
                 subscription.driver,
