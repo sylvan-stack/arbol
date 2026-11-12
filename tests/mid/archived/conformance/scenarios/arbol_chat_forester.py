@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
-from conformance.check import check
+from conformance.check import check, equal
 from conformance.harness import ScenarioHome
 
 PROBE = r'''
@@ -43,7 +44,7 @@ if turn == 1:
     marker.write_text(booked["stdout"])
 where = call(["where"])
 payload = {"session_id": native, "cwd": str(root / "checkout"), "tool_name": "Bash",
-           "tool_use_id": "normal-" + str(turn), "tool_input": {"command": "printf qualified"}}
+           "tool_use_id": "normal-" + str(turn), "tool_input": {"command": "python --version"}}
 normal = call(["hook", "pre-tool-use", "--tool", "codex"], payload)
 payload["tool_use_id"] = "managed-" + str(turn)
 payload["tool_input"] = {"command": "git commit -m qualified"}
@@ -83,9 +84,9 @@ class ForesterProbe:
             '[repos.fixture]\nenabled = true\ncode_root = ' + json.dumps(str(self.checkout))
             + '\nartifact_root = ' + json.dumps(str(self.root / "fixture-artifacts")) + '\n')
         (self.root / "probe.py").write_text(PROBE)
-        original = Path(home.tool_path).read_text().split("exec ", 1)[1]
+        original = Path(home.tool_path).read_text().removeprefix("#!/bin/sh\n")
         Path(home.tool_path).write_text("#!/bin/sh\n" + shlex.quote(sys.executable) + " "
-                                       + shlex.quote(str(self.root / "probe.py")) + ' "$@" || exit $?\nexec ' + original)
+                                       + shlex.quote(str(self.root / "probe.py")) + ' "$@" || exit $?\n' + original)
 
     def results(self) -> list[dict[str, Any]]:
         return [json.loads(path.read_text()) for path in sorted(self.root.glob("turn-*.json"))]
@@ -97,3 +98,38 @@ class ForesterProbe:
     def shell_calls(self) -> list[dict[str, Any]]:
         return [json.loads(line) for path in sorted((self.root / "corpus/shell-calls").rglob("*.jsonl"))
                 for line in path.read_text().splitlines() if line]
+
+    def verify(self, chat: str) -> None:
+        turns = self.results()
+        equal("Two designated inference probes", len(turns), 2)
+        booked = json.loads((self.root / "booking.json").read_text())
+        equal("Stored UUID-only booking owner", booked["sessions"], ["arbol:" + chat])
+        for turn in turns:
+            equal("Probe requested chat", turn["chat"], chat)
+            equal("Probe no Root", turn["root"], None)
+            equal("Where exit", turn["where"]["exit"], 0)
+            rows = json.loads(turn["where"]["stdout"])
+            equal("Same booking across native sessions", [row["id"] for row in rows], [booked["id"]])
+            equal("Normal hook", turn["normal"]["exit"], 0)
+            equal("Managed Git refusal", turn["managed"]["exit"], 2)
+            equal("Edit reaches Intention guard", turn["edit"]["exit"], 2)
+            check("Booked path reaches Intention guard", "FOR-D38" in turn["edit"]["stderr"],
+                  "FOR-D38 rather than an unbooked-path refusal", turn["edit"])
+            equal("Native SessionEnd", turn["end"]["exit"], 0)
+        check("Different native sessions", turns[0]["native"] != turns[1]["native"], "different sessions", turns)
+        hooks = [row for row in self.ledger() if row["type"] == "hook"
+                 and row["data"].get("arbolChat") == chat]
+        for turn in turns:
+            own = [row for row in hooks if row.get("agent") == "codex:" + turn["native"]]
+            check("Normal hook by chat UUID", any(row["data"].get("verdict") == "ok" for row in own),
+                  "normal hook event", own)
+            check("Managed refusal by chat UUID", any(row["data"].get("rule") == "FOR-D112" for row in own),
+                  "managed Git refusal hook event", own)
+        calls = [row for row in self.shell_calls() if row.get("type") == "started" and row.get("arbolChat") == chat]
+        check("Shell calls by chat UUID", len(calls) >= 4, "normal and managed calls across both sessions", calls)
+        equal("Shell calls resolve UUID booking", sorted({row.get("booking") for row in calls}), [booked["id"]])
+        destination = os.environ.get("ASD14_EVIDENCE_DIR")
+        if destination:
+            target = Path(destination)
+            target.mkdir(parents=True, exist_ok=True, mode=0o700)
+            shutil.copytree(self.root, target / "forester", dirs_exist_ok=True)

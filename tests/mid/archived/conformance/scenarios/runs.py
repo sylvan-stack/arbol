@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib.util
+import json
 import os
 import re
 import uuid
@@ -341,6 +343,13 @@ async def run_c44(home: ScenarioHome) -> None:
         "exec ", 'if [ -z "${CLAUDE_CONFIG_DIR:-}" ]; then export CLAUDE_CONFIG_DIR="$HOME/.claude"; fi\nexec ', 1))
     home.id = "C14"
     await home.part("plain")
+    helper_path = Path(__file__).resolve().parents[2] / "tests/mid/archived/conformance/scenarios/arbol_chat_forester.py"
+    spec = importlib.util.spec_from_file_location("arbol_chat_forester", helper_path)
+    check("Forester probe module", spec is not None and spec.loader is not None, "loadable probe", str(helper_path))
+    assert spec is not None and spec.loader is not None
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    probe = helper.ForesterProbe(home)
     chat = str(uuid.uuid4())
     reply, records = await identity_run(home, JSObject(base, arbolChat=True, chatSessionId=chat))
     first = stream(reply)
@@ -395,6 +404,14 @@ async def run_c44(home: ScenarioHome) -> None:
         equal(f"{label} only final", len(refused), 1)
         equal(f"{label} refusal", prop(refused[0]["error"], "code"), "invalid_input")
         equal(f"{label} starts no tool", len(records), 0)
+
+    probe.verify(chat)
+    destination = os.environ.get("ASD14_EVIDENCE_DIR")
+    if destination:
+        target = Path(destination)
+        (target / "stand-in.jsonl").write_text((Path(home.tool) / "received.jsonl").read_text())
+        (target / "continuity.json").write_text(json.dumps(
+            {"chat": chat, "initial": initial, "resumed": resumed, "first": first, "second": second}, indent=2))
 
 
 def array_of(value: Any) -> list[Any]:
