@@ -10,7 +10,7 @@
  <label>Search <input aria-label="Search loaded messages" type="search" bind:value={query}/></label>
  {#if problem}<p role="alert">{problem}</p>{/if}
  <p class="scope">{rows.length} of {items.length} loaded prompts</p>
- {#if branching}<p class="scope">Advanced Root proposal: alternative branches are outside First Sapling.</p>{/if}
+ {#if branching}<p class="scope">Advanced conversation proposal: alternative branches are outside First Sapling.</p>{/if}
  <ul>{#each rows as row,i}<li style:margin-left={branching?Math.min(row.depth??0,4)*12+'px':undefined}><button data-history-row aria-current={(selected||local)===row.id?'true':undefined} onclick={()=>choose(row.id)}><span class="turn">Turn {row.number}</span><span class="message">{row.branchLabel?row.branchLabel+' · ':''}{row.message}</span>{#if i<10}<kbd>{(i+1)%10}</kbd>{/if}</button></li>{/each}</ul>
  {#if !rows.length}<p>No matching loaded messages.</p>{/if}
  {#if more}<button class="more" disabled={busy||!onmore} onclick={onmore}>{busy?'Loading…':'Load older turns'}</button>{/if}

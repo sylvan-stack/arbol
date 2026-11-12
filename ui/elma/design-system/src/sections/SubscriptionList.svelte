@@ -79,7 +79,7 @@
 <section class="stack" aria-label="Subscriptions">
   <div class="row spread">
     {#if !embedded}
-      <PageHeader title="Subscriptions" description="Accounts reported by this Root’s drivers." count={accountCount} />
+      <PageHeader title="Subscriptions" description="Accounts reported by the installation’s drivers." count={accountCount} />
     {:else if accountCount !== undefined}
       <p class="small muted">{accountCount} {accountCount === 1 ? 'subscription' : 'subscriptions'}</p>
     {/if}
@@ -90,7 +90,7 @@
   </div>
 
   {#if !view.connected}
-    <Notice message={view.listing ? 'Showing the last account list while disconnected.' : 'Waiting for the Root connection…'} tone={view.listing ? 'warning' : 'info'} />
+    <Notice message={view.listing ? 'Showing the last account list while disconnected.' : 'Waiting for the installation connection…'} tone={view.listing ? 'warning' : 'info'} />
   {:else if view.loading}
     <Notice message={view.listing ? 'Refreshing subscriptions…' : 'Loading subscriptions…'} />
   {:else if view.error}
@@ -206,7 +206,7 @@
   {:else if view.listing && !failures.length}
     <div class="panel">
       <EmptyState title="No subscriptions found" action=""
-        description={view.listing.drivers.length ? 'The available drivers reported no subscriptions.' : 'This Root’s backend found no installed drivers.'} />
+        description={view.listing.drivers.length ? 'The available drivers reported no subscriptions.' : 'The installation’s backend found no installed drivers.'} />
     </div>
   {/if}
 </section>

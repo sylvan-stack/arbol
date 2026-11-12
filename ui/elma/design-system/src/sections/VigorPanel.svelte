@@ -131,7 +131,7 @@
               {/if}
               {#if entry.allowance}<AllowanceMetrics view={entry.allowance} />{/if}
               {#if activity || activityError}
-                <p class="small muted">Arbol activity in this Root · Last 30 days</p>
+                <p class="small muted">Arbol activity in this installation · Last 30 days</p>
                 {#if activity}
                   <p>{integer.format(activity.runCount)} {activity.runCount === 1 ? 'run' : 'runs'} recorded</p>
                   {#if activity.runCount}
