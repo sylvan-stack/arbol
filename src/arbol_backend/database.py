@@ -10,10 +10,11 @@ import signal
 import tempfile
 import tomllib
 from collections.abc import AsyncIterator, Callable, Sequence
-from contextlib import AbstractContextManager, ExitStack, asynccontextmanager
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal
 from urllib.parse import unquote, urlsplit
 
 import psycopg
@@ -21,6 +22,9 @@ from psycopg import AsyncConnection
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.rows import tuple_row
 
+from arbol_installation.admission import AdmissionRefusal
+
+from .exchange_admission import Admission, Lease, register_database_writer
 from .model import Identity, Refused, object_file, private_directory
 
 SERVICE = "com.sylvan-stack.arbol.database"
@@ -79,14 +83,20 @@ def release_history(path: Path) -> tuple[SchemaRow, ...]:
 
 
 WriteMode = Literal["normal", "controlled"]
+CURRENT_ADMISSION: ContextVar[tuple[Path, Lease, asyncio.Task[Any] | None] | None] = ContextVar(
+    "arbol_backend_admission", default=None)
 
 
-class Admission(Protocol):
-    """The installation runtime implements both the observation and authoritative permit."""
-
-    def status(self) -> tuple[str, int | str | None]: ...
-
-    def permit(self, mode: WriteMode) -> AbstractContextManager[None]: ...
+def current_lease(runtime: Path) -> Lease | None:
+    scope = CURRENT_ADMISSION.get()
+    if scope is None or scope[0] != runtime or scope[2] is not asyncio.current_task():
+        return None
+    lease = scope[1]
+    try:
+        lease.require()
+    except AdmissionRefusal:
+        return None  # A background task must acquire its own lease after the spawning operation ends.
+    return lease
 
 
 async def protected_thread[T](work: Callable[[], T]) -> T:
@@ -284,12 +294,16 @@ class Database:
     async def permit(self, mode: WriteMode = "normal") -> AsyncIterator[None]:
         if self.admission is None:
             raise Refused("maintenance", "The installation writer admission state is unknown.")
-        with ExitStack() as stack:
-            try:
-                stack.enter_context(self.admission.permit(mode))
-            except (OSError, ValueError) as error:
-                raise Refused("maintenance", "The installation writer admission state is unknown.") from error
+        existing = current_lease(self.identity.folder)
+        if existing is not None and (mode == "controlled" or existing.state.phase == "normal"):
             yield
+            return
+        with self.admission.lease(mode) as lease:
+            token = CURRENT_ADMISSION.set((self.identity.folder, lease, asyncio.current_task()))
+            try:
+                yield
+            finally:
+                CURRENT_ADMISSION.reset(token)
 
     async def renew(self) -> None:
         async with self.credentials_lock:
@@ -382,16 +396,31 @@ class Database:
                     os.close(fd)
                     self.passfile = Path(name)
                     self.parameters["passfile"] = name
+            parameters = dict(self.parameters)
+            lease = current_lease(self.identity.folder) if self.application and not probe else None
+            if self.application and not probe:
+                if lease is None:
+                    raise Refused("maintenance", "An application connection requires an installation permit.")
+                source = lease.state.source
+                if ((parameters["host"], int(parameters["port"]), parameters["dbname"])
+                        != (source["host"], source["port"], source["database"])):
+                    raise Refused("maintenance", "The database configuration does not match writer admission.")
+                if any(os.environ.get(key) for key in ("PGSERVICE", "PGSERVICEFILE", "PGHOSTADDR")):
+                    raise Unavailable("Environment routing is unavailable for an admitted database connection.")
+                parameters.update(hostaddr="" if parameters["host"].startswith("/") else parameters["host"],
+                                  sslmode="disable", gssencmode="disable", target_session_attrs="any")
             try:
                 async with asyncio.timeout(self.seconds):
                     connection = await AsyncConnection.connect(
-                        make_conninfo(**self.parameters), autocommit=True, row_factory=tuple_row, connect_timeout=5,
+                        make_conninfo(**parameters), autocommit=True, row_factory=tuple_row, connect_timeout=5,
                         options="-c statement_timeout=5000 -c lock_timeout=5000 -c client_encoding=UTF8",
                     )
             except (TimeoutError, psycopg.Error) as error:
                 raise Unavailable("The database server does not answer.") from error
             self.connections.add(connection)
             session = Session(connection, self.seconds)
+            if lease is not None:
+                await register_database_writer(session, lease)
             if snapshot:
                 await session.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
             self.schema = await self.read_schema(session)

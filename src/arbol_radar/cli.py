@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from arbol_backend.database import Database
+from arbol_backend.exchange_admission import Admission
 from arbol_backend.model import Identity, Refused
 from arbol_backend.process import Programs
 from arbol_radar.drivers import Listed, Listing, list_subscriptions
@@ -117,7 +118,7 @@ async def read(
     """
     moment = now or datetime.now(UTC)
     programs = Programs(selected)
-    database = Database(selected, application=True)
+    database = Database(selected, admission=Admission(selected.folder), application=True)
     records = Records(database)
     try:
         async with records.writing() if choice.refresh else nullcontext():
@@ -294,7 +295,7 @@ def version_of(value: str | None) -> int:
 async def profile_command(selected: Identity, action: str, value: str | None, *, text: bool, now: datetime) -> str:
     """`learn`, `profiles` or `approve <version>` over the installation records, as one JSON document or as text lines."""
     version = version_of(value) if action == "approve" else None
-    database = Database(selected, application=True)
+    database = Database(selected, admission=Admission(selected.folder), application=True)
     records = Records(database)
     try:
         await records.require_layout()

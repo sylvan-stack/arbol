@@ -19,7 +19,8 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from .bridge import BRIDGE_VERSION, constant, finite, pairs
-from .database import configured_target, explicit_target
+from .database import configured_target, current_lease, explicit_target
+from .exchange_admission import GENERATION_ENV
 from .model import Identity, Refused
 
 LIMITS = {"start": 25.0, "stop": 90.0, "settle": 120.0, "list": 10.0, "account": 10.0}
@@ -225,7 +226,12 @@ class Programs:
         arguments += args
         env = {key: value for key, value in os.environ.items()
                if not key.startswith("PG") and key not in
-               {"ARBOL_ROOT", "ARBOL_CHAT", "ARBOL_EXCHANGE_RUNTIME_DIR", "ARBOL_EXCHANGE_BIN_DIR"}}
+               {"ARBOL_ROOT", "ARBOL_CHAT", "ARBOL_EXCHANGE_RUNTIME_DIR", "ARBOL_EXCHANGE_BIN_DIR", GENERATION_ENV}}
+        if program == "arbol-exchanges" and kind in ("start", "stop", "settle"):
+            lease = current_lease(self.identity.folder)
+            if lease is None:
+                raise Refused("maintenance", "A runtime mutation requires an installation permit.")
+            env[GENERATION_ENV] = lease.state.generation
         env["HOME"] = str(self.identity.home)
         env["PATH"] = str(self.identity.bin_dir) + os.pathsep + env.get("PATH", "/usr/bin:/bin")
         output = tempfile.TemporaryFile(mode="w+b")

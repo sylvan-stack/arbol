@@ -1,4 +1,4 @@
-"""Own one Root backend and isolate its Bridge connections and asynchronous work."""
+"""Own the installation backend and isolate its Bridge connections and asynchronous work."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ from .database import Database
 from .discovery import Discovery
 from .dispatch import Dispatch
 from .drafts import Drafts
+from .exchange_admission import Admission
 from .health import Health
 from .lifetime import Lifetime
 from .listings import Listings
@@ -41,7 +42,7 @@ class Backend:
         self.identity = identity
         self.settings = settings(identity.settings)
         self.programs = Programs(identity)
-        self.database = Database(identity, application=True)
+        self.database = Database(identity, admission=Admission(identity.folder), application=True)
         self.registry = Registry()
         self.workspace = Workspace(identity, self.settings, self.registry)
         self.installation = Installation(identity, self.database, self.registry)
