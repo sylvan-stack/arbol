@@ -49,7 +49,8 @@ class Backend:
         self.ticker = Ticker(self.programs, Records(self.database))  # Subscriptions Vigor every three minutes (SGM-1.14)
         self.chats = Chats(identity, self.database, self.programs, self.roots, self.registry)
         self.health = Health(self.database, self.chats.attention)
-        self.measurements = Measurements(self.health, self.roots, self.registry)
+        self.health.on_status = self.installation.publish
+        self.measurements = Measurements(self.health, self.registry)
         self.accounts = Accounts(self.programs, self.chats.catalogues, self.registry,
                                  lambda: ((self.database.parameters or {}).get("password", ""),),
                                  database=self.database)

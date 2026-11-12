@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import os
 import re
 import signal
@@ -136,7 +137,13 @@ async def credentials(identity: Identity) -> dict[str, str]:
                 raise ValueError("Explicit database must name only a private host/port/user/database.")
             if any(not isinstance(item, str) for item in info.values()):
                 raise ValueError("Database fields must be strings.")
-            private_directory(Path(str(info["host"])))
+            socket = Path(str(info["host"])).resolve(strict=True)
+            if socket == (identity.home / "Library/Application Support/Arbol/database/socket").resolve():
+                raise ValueError("The installed database socket is not an isolated target.")
+            if not 1 <= int(str(info.get("port", "5432"))) <= 65535:
+                raise ValueError("An isolated database needs a valid port.")
+            private_directory(socket)
+            info["host"] = str(socket)
             return {
                 **{key: str(value) for key, value in info.items()},
                 "port": str(info.get("port", "5432")),
@@ -160,9 +167,12 @@ async def credentials(identity: Identity) -> dict[str, str]:
             or url.fragment
         ):
             raise ValueError("Invalid server address.")
-        role = unquote(url.username)
+        host = ipaddress.ip_address(url.hostname)
+        role = unquote(url.username, errors="strict")
+        if not host.is_loopback or not role.strip() or "\0" in role:
+            raise ValueError("The installed PostgreSQL address must be local.")
         result = {
-            "host": url.hostname,
+            "host": str(host),
             "port": str(url.port),
             "user": role,
             "dbname": value["database"],
@@ -237,6 +247,25 @@ class Database:
         except (OSError, Refused):
             return Schema("incompatible")
         try:
+            relations = await session.execute(
+                "SELECT c.relname,c.relkind,c.relpersistence FROM pg_catalog.pg_class c "
+                "JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
+                "WHERE n.nspname='public' AND c.relname IN ('arbol_schema_migrations','arbol_schema_upgrades')"
+            )
+            if not relations:
+                empty = await session.execute(
+                    "SELECT pg_catalog.to_regnamespace('public') IS NOT NULL "
+                    "AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_namespace WHERE "
+                    "nspname NOT IN ('public','information_schema','pg_catalog','pg_toast')) "
+                    "AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_depend WHERE "
+                    "refclassid='pg_catalog.pg_namespace'::pg_catalog.regclass "
+                    "AND refobjid=pg_catalog.to_regnamespace('public')) "
+                    "AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_extension WHERE extname<>'plpgsql') "
+                    "AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_event_trigger)"
+                )
+                return Schema("uninitialized" if empty == [(True,)] else "incompatible")
+            if set(relations) != {("arbol_schema_migrations", "r", "p"), ("arbol_schema_upgrades", "r", "p")}:
+                return Schema("incompatible")
             rows = await session.execute(
                 "SELECT revision, migration_id, checksum, compatibility_version "
                 "FROM public.arbol_schema_migrations ORDER BY revision LIMIT %s",
@@ -245,12 +274,12 @@ class Database:
         except Unavailable:
             raise
         except Refused as error:
-            if isinstance(error.__cause__, psycopg.errors.UndefinedTable):
-                return Schema("uninitialized")
-            if isinstance(error.__cause__, psycopg.errors.UndefinedColumn):
+            if isinstance(error.__cause__, (psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn,
+                                            psycopg.errors.InsufficientPrivilege)):
                 return Schema("incompatible")
             raise
-        if not rows or tuple(rows) != history[:len(rows)]:
+        if (not rows or tuple(rows) != history[:len(rows)]
+                or any(type(row[0]) is not int or type(row[3]) is not int for row in rows)):
             return Schema("incompatible")
         revision, _, _, version = history[len(rows) - 1]
         compatible = any(version == supported and revision >= minimum
@@ -293,6 +322,8 @@ class Database:
             if snapshot:
                 await session.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
             self.schema = await self.read_schema(session)
+            if self.on_connected:
+                self.on_connected()
             if not probe:
                 self.schema.require()
             try:

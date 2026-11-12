@@ -1,4 +1,4 @@
-"""Partial own-connection PostgreSQL sizes and confirmed local data-disk measurements."""
+"""Bounded installation PostgreSQL size and confirmed local data-disk measurements."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ from .database import Session
 from .health import Health
 from .metadata import now
 from .model import Refused
-from .roots import Roots
 from .storage import LocalDisk
 from .stuck import awake
 
@@ -22,10 +21,10 @@ DISK_PROBLEM = "The database server's local data disk could not be measured."
 
 
 class Measurements:
-    def __init__(self, health: Health, roots: Roots, registry: Registry, *, total: float = TOTAL,
+    def __init__(self, health: Health, registry: Registry, *, total: float = TOTAL,
                  disk: LocalDisk | None = None, clock: Callable[[], float] = awake,
                  interval: float = INTERVAL, poll: float = 1) -> None:
-        self.health, self.database, self.roots = health, health.database, roots
+        self.health, self.database = health, health.database
         self.total, self.disk = total, disk or LocalDisk()
         self.task: asyncio.Task[Params] | None = None
         self.clock, self.interval, self.poll = clock, interval, poll
@@ -54,12 +53,11 @@ class Measurements:
         report["warning"] = warning
         folder = report.get("dataFolderBytes")
         detail = ("Data folder uses "+self.amount(folder)+". " if type(folder) is int else "Data folder size is unavailable. ")
-        known = [row for row in report["roots"] if type(row.get("bytes")) is int]
-        if known:
-            largest = max(known, key=lambda row: row["bytes"])
-            detail += str(largest["name"])+"'s chats take "+self.amount(largest["bytes"])+"."
+        size = report["database"].get("bytes")
+        if type(size) is int:
+            detail += "The installation database uses "+self.amount(size)+"."
         else:
-            detail += "Database sizes are unavailable."
+            detail += "The installation database size is unavailable."
         self.health.attention.open("space_low", self.amount(free)+" left on the disk of the database. "+detail,
                                    severity="urgent" if warning == "urgent" else "warning")
 
@@ -91,7 +89,9 @@ class Measurements:
             return None
 
     async def collect(self) -> Params:
-        report: Params = {"measuredAt": now(), "server": {"ok": False, "problem": "The database check did not finish."}, "roots": []}
+        size: Params = {"problem": SIZE_PROBLEM}
+        report: Params = {"measuredAt": now(), "server": {"ok": False, "problem": "The database check did not finish."},
+                          "database": size}
         disk_task: asyncio.Task[None] | None = None
         epoch = -1
         try:
@@ -99,51 +99,41 @@ class Measurements:
                 await self.health.probe()
                 epoch = self.health.epoch
                 report["server"] = self.server()
-                try:
-                    records = await self.roots.database_records()
-                    report["roots"] = [{**row, "problem": row.get("problem", SIZE_PROBLEM)} for row in records]
-                except Refused:
-                    report["catalogueProblem"] = "The retained Roots could not be listed."
-                if self.database.away:
-                    report["diskProblem"] = DISK_PROBLEM
-                else:
+                async with self.database.session() as session:
                     try:
-                        async with self.database.session() as session:
-                            try:
-                                rows = await session.execute("SELECT current_setting('data_directory'), inet_server_addr()::text")
-                                if (len(rows) != 1 or len(rows[0]) != 2 or not isinstance(rows[0][0], str) or
-                                        rows[0][1] is not None and not isinstance(rows[0][1], str)):
-                                    report["diskProblem"] = DISK_PROBLEM
-                                else:
-                                    disk_task = asyncio.create_task(self.read_disk(report, rows[0][0], session.connection.info.host, rows[0][1]))
-                            except Refused:
-                                attested = await self.limited_disk(report, session)
-                                if attested is not None:
-                                    disk_task = asyncio.create_task(self.read_disk(report, *attested))
-                            for row in report["roots"]:
-                                if not row["database"]:
-                                    continue
-                                try:
-                                    sizes = await session.execute("SELECT pg_database_size(%s::name)", [row["database"]])
-                                    if len(sizes) == 1 and len(sizes[0]) == 1 and type(sizes[0][0]) is int and sizes[0][0] >= 0:
-                                        row["bytes"] = sizes[0][0]
-                                        row.pop("problem", None)
-                                except Refused as error:
-                                    row["problem"] = ("This database's size query exceeded its time limit." if error.code == "timeout" else SIZE_PROBLEM)
-                                    if self.database.away:
-                                        break
-                            if disk_task is not None:
-                                await disk_task
+                        sizes = await session.execute("SELECT pg_database_size(current_database())")
+                        if len(sizes) == 1 and len(sizes[0]) == 1 and type(sizes[0][0]) is int and sizes[0][0] >= 0:
+                            size["bytes"] = sizes[0][0]
+                            size.pop("problem")
+                    except Refused as error:
+                        if error.code == "timeout":
+                            size["problem"] = "The database size query exceeded its time limit."
+                    try:
+                        rows = await session.execute("SELECT current_setting('data_directory'), inet_server_addr()::text")
+                        if (len(rows) != 1 or len(rows[0]) != 2 or not isinstance(rows[0][0], str) or
+                                rows[0][1] is not None and not isinstance(rows[0][1], str)):
+                            report["diskProblem"] = DISK_PROBLEM
+                        else:
+                            disk_task = asyncio.create_task(
+                                self.read_disk(report, rows[0][0], session.connection.info.host, rows[0][1])
+                            )
                     except Refused:
-                        report["diskProblem"] = DISK_PROBLEM
+                        attested = await self.limited_disk(report, session)
+                        if attested is not None:
+                            disk_task = asyncio.create_task(self.read_disk(report, *attested))
+                    if disk_task is not None:
+                        await disk_task
         except asyncio.CancelledError:
             raise
         except TimeoutError:
-            for row in report["roots"]:
-                if "bytes" not in row:
-                    row["problem"] = "This database's size measurement did not finish within its time limit."
+            if "bytes" not in size:
+                size["problem"] = "The database size measurement exceeded its time limit."
             if "freeBytes" not in report or "dataFolderBytes" not in report:
                 report["diskProblem"] = "The storage measurement exceeded its time limit."
+        except Refused as error:
+            if "bytes" not in size:
+                size["problem"] = str(Error(error.code)) if error.code != "timeout" else SIZE_PROBLEM
+            report["diskProblem"] = DISK_PROBLEM
         except Exception:
             report["diskProblem"] = DISK_PROBLEM
         finally:

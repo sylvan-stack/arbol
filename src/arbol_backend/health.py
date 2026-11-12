@@ -6,7 +6,7 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 
-from .database import Database
+from .database import SCHEMA_MESSAGES, Database, Schema
 from .metadata import Attention
 from .model import Refused
 
@@ -18,8 +18,10 @@ class Health:
         self.database, self.attention, self.retry = database, attention, retry
         self.epoch = 0
         self.cause = ""
+        self.schema = Schema()
         self.on_return: Callable[[int], Awaitable[None]] | None = None
         self.on_away: Callable[[], None] | None = None
+        self.on_status: Callable[[], None] | None = None
         self.monitor: asyncio.Task[None] | None = None
         self.probing: asyncio.Task[None] | None = None
         self.recoveries: set[asyncio.Task[None]] = set()
@@ -29,20 +31,41 @@ class Health:
     def failed(self, cause: str) -> None:
         if not self.database.away:
             self.database.away = True
+            self.database.schema = self.schema = Schema()
             self.epoch += 1
             self.cause = cause
+            for state in ("incompatible", "uninitialized"):
+                self.attention.close(SCHEMA_MESSAGES[state][0])
             self.attention.open("database_unreachable", cause+" New messages cannot be sent; answers in progress go on.")
             if self.on_away:
                 self.on_away()
+            if self.on_status:
+                self.on_status()
 
     def connected(self) -> None:
-        if not self.database.away:
+        schema = self.database.schema
+        if not self.database.away and self.schema == schema:
             return
+        self.schema = schema
         self.database.away = False
         self.epoch += 1
         self.cause = ""
         self.attention.close("database_unreachable")
-        if self.on_return:
+        for state in ("incompatible", "uninitialized"):
+            code, message = SCHEMA_MESSAGES[state]
+            if state == schema.state:
+                self.attention.open(code, message)
+            else:
+                self.attention.close(code)
+        if self.on_status:
+            self.on_status()
+        if self.on_away:
+            self.on_away()
+        if schema.state == "ready":
+            self.resume()
+
+    def resume(self) -> None:
+        if self.on_return and self.schema.state == "ready" and not self.database.away:
             task = asyncio.create_task(self.recover(self.epoch))
             self.recoveries.add(task)
             task.add_done_callback(self.recoveries.discard)
@@ -63,9 +86,8 @@ class Health:
             async with asyncio.timeout(self.database.seconds):
                 if self.database.away:
                     await self.database.renew()
-                async with self.database.session(probe=True) as session:
-                    await session.execute("SELECT 1")
-            self.connected()
+                async with self.database.session(probe=True):
+                    pass
         except (TimeoutError, Refused, OSError):
             self.failed("The database server does not answer.")
 
@@ -95,3 +117,4 @@ class Health:
         self.database.on_connected = None
         self.on_away = None
         self.on_return = None
+        self.on_status = None
