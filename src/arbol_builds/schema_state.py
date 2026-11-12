@@ -1,7 +1,6 @@
 """Read the installed schema through the migration tool (ARC-4.1)."""
 
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path

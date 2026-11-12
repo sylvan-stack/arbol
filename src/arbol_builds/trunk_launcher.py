@@ -1,9 +1,6 @@
-"""The launcher arbol-trunk, which starts every Trunk (RCT-0, "The command arbol-trunk"; BLD-0, BLD-D17).
+"""Select a Trunk Build for the installed database (ARC-4.3).
 
-arbol-builds writes the text of launcher.py, of roots.py and of this module, followed by one call of
-launch_trunk(), into the file arbol-trunk: that file is the launcher (service.launcher_source). This module
-therefore uses the standard library only; there, the imports from the package below are left out, and the names
-they import are those of the text before it.
+The generated arbol-trunk launcher embeds this module after the registry and schema readers.
 """
 
 import os
@@ -16,6 +13,7 @@ from .launcher import (
     Record,
     close_build_use,
     code_name,
+    default_record,
     executable_entry,
     hold_build_use,
     json_line,
@@ -23,20 +21,18 @@ from .launcher import (
     read_records,
     readable,
     record_start,
-    root_identifier,
-    runnable,
     standard_descriptors,
     warning,
     write_all,
 )
-from .roots import current_root, read_root, read_roots, roots_folder
+from .schema_state import SCHEMA_ERRORS, SchemaPair, SchemaState, read_schema
 
 DEFAULT_TRUNK = "trivial"
-LIST = "list"  # the one command the launcher answers itself
+LIST = "list"
 
 
 class Refused(Exception):
-    """A call the launcher refuses: one line { error: { code, message }, available } and exit status 1."""
+    """A call the launcher refuses, with the available alternatives for no_fit."""
 
     def __init__(self, code: str, message: str, available: list[str] | None = None) -> None:
         super().__init__(message)
@@ -45,109 +41,82 @@ class Refused(Exception):
 
 
 class Call:
-    """A call read: the value of --root when it is the first argument, the code name, the value of -v, and the
-    command with everything after it. A plain class, since importing dataclasses would slow every start."""
-
-    def __init__(self, root: str | None, trunk: str | None, build: str | None, command: list[str]) -> None:
-        self.root = root
+    def __init__(self, trunk: str | None, build: str | None, command: list[str]) -> None:
         self.trunk = trunk
         self.build = build
         self.command = command
 
 
 def read_call(args: list[str]) -> Call:
-    """[--root <root>] [<code name>] [-v <build>] <command> …: --root only first, and a code name is never -v, a
-    command word or an argument that begins with "-" (BLD-D17)."""
+    """[<code name>] [-v <build>] <command> …, with run, settle or list."""
     index = 0
-    root: str | None = None
     trunk: str | None = None
     build: str | None = None
-    if args[:1] == ["--root"]:
-        root = args[1] if len(args) > 1 else ""
-        index = 2
-    if index < len(args) and args[index] not in COMMAND_WORDS and not args[index].startswith("-"):
-        trunk = args[index]
-        index += 1
+    if args and args[0] not in COMMAND_WORDS and not args[0].startswith("-"):
+        trunk = args[0]
+        if not code_name(trunk):
+            raise Refused("invalid_input", f"Invalid Trunk code name {shown(trunk)!r}.")
+        index = 1
     if args[index:index + 1] == ["-v"]:
         build = args[index + 1] if index + 1 < len(args) else ""
+        if BUILD_PATTERN.fullmatch(build) is None:
+            raise Refused("invalid_input", "Build numbers are lower-case hexadecimal without a leading zero.")
         index += 2
-    call = Call(root, trunk, build, args[index:])
-    if not call.command:
-        raise Refused("invalid_input", "No command: arbol-trunk [--root <root>] [<code name>] [-v <build>] "
-                                       "<command> …, where the command is run, settle or list.")
-    if call.command[0] == LIST and (call.build is not None or len(call.command) > 1):
-        raise Refused("invalid_input", "list takes no -v and nothing after it: arbol-trunk [--root <root>] "
-                                       "[<code name>] list.")
-    return call
+    command = args[index:]
+    if not command or command[0] not in COMMAND_WORDS:
+        raise Refused("invalid_input", "Use arbol-trunk [<code name>] [-v <build>] <run|settle|list> …")
+    if command[0] == LIST and (build is not None or len(command) > 1):
+        raise Refused("invalid_input", "list takes no -v or trailing arguments.")
+    return Call(trunk, build, command)
 
 
 def shown(value: str) -> str:
-    """An argument as it may be shown: bytes that are not UTF-8 as U+FFFD."""
+    """Show command line bytes outside UTF-8 as U+FFFD."""
     return value.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
 
 
-def the_root(name: str | None) -> Record:
-    """The Root named with --root, or else the current Root (BLD-D17)."""
-    folder = roots_folder()
-    if name is None:
-        record = current_root(read_roots(folder), folder=folder)
-        if record is None:
-            raise Refused("unknown_root", "No Root is named and none is working, so there is no current Root: "
-                                          "name one with --root <root>.")
-        return record
-    if not root_identifier(name):
-        raise Refused("unknown_root", f"{shown(name)!r} is not a Root identifier: one lower-case word of letters and "
-                                      "digits.")
-    named = read_root(folder, name)
-    if named is None:
-        raise Refused("unknown_root", f"There is no Root {name}: {os.path.join(folder, name, 'root.json')} is "
-                                      "missing or damaged.")
-    return named
-
-
 def known_trunk(registry: str, code: str) -> bool:
-    """A Trunk the registry knows: a folder in builds/arbol-trunk/ named by a code name."""
     folder = os.path.join(registry, TRUNKS, code)
     return code_name(code) and os.path.isdir(folder) and not os.path.islink(folder)
 
 
-def fits(record: Record, root: Record) -> bool:
-    """A Trunk Build fits a Root when its rootContracts hold the Root's version (RCT-0)."""
-    return int(root["rootContract"]) in {int(number) for number in record["rootContracts"]}
+def fits(record: Record, pair: SchemaPair | None) -> bool:
+    """The installed compatibility version matches, and the installed revision meets the Build's minimum."""
+    return pair is not None and any(
+        item["compatibilityVersion"] == pair.compatibility_version and item["minRevision"] <= pair.revision
+        for item in record.get("schemaCompatibility", [])
+    )
 
 
-def chosen(registry: str, records: list[Record], root: Record) -> Record | None:
-    """The newest working Build that fits the Root and has its program: the Build run starts (RCT-0.7)."""
-    return next((record for record in records
-                 if record["status"] == "working" and runnable(registry, record) and fits(record, root)), None)
+def chosen(registry: str, records: list[Record], pair: SchemaPair | None) -> Record | None:
+    """The newest working, runnable Build compatible with a verified installed schema."""
+    return default_record(registry, [record for record in records if fits(record, pair)])
 
 
-def pick_build(registry: str, component: str, number: str | None, root: Record) -> Record:
-    """The Build to start, or no_fit, with the runnable Builds of the Trunk that fit the Root (RCT-0.9)."""
+def pick_build(registry: str, component: str, number: str | None, pair: SchemaPair) -> Record:
     records = read_records(registry, component)
-    available = [record["build"] for record in records if named_runnable(registry, record) and fits(record, root)]
-    version = int(root["rootContract"])
     if number is None:
-        selected = chosen(registry, records, root)
-        if selected is None:
-            raise Refused("no_fit", f"No working Build of {component} fits the Root {root['root']}, which uses Root "
-                                    f"Contract version {version}. Builds that fit: {', '.join(available) or 'none'}.",
-                          available)
-        return selected
-    named = (next((record for record in records if record["build"] == number), None)
-             if BUILD_PATTERN.fullmatch(number) else None)
-    if named is None or not named_runnable(registry, named):
-        why = ("is not a build number" if not BUILD_PATTERN.fullmatch(number)
-               else "is unknown" if named is None else "is still building" if named["status"] == "building"
-               else "is pruned" if named.get("prunedAt") else "has no program to run")
-        raise Refused("no_fit", f"Build {shown(number)!r} of {component} {why}. Builds that fit the Root "
-                                f"{root['root']}: {', '.join(available) or 'none'}.", available)
-    if not fits(named, root):
-        versions = ", ".join(str(int(item)) for item in named["rootContracts"])
-        raise Refused("no_fit", f"{component}@{number} does not fit the Root {root['root']}: it implements Root "
-                                f"Contract versions {versions}, and the Root uses {version}. Builds that fit: "
-                                f"{', '.join(available) or 'none'}.", available)
-    return named
+        selected = chosen(registry, records, pair)
+        if selected is not None:
+            return selected
+        why = f"No working Build of {component} fits"
+    else:
+        named = next((record for record in records if record["build"] == number), None)
+        if named is not None and named_runnable(registry, named) and fits(named, pair):
+            return named
+        label = f"{component}@{number}"
+        if named is None:
+            why = f"{label} is unknown and cannot run on"
+        elif not named_runnable(registry, named):
+            state = ("is still building" if named["status"] == "building"
+                     else "is pruned" if named.get("prunedAt") else "has no executable")
+            why = f"{label} {state} and cannot run on"
+        else:
+            why = f"{label} does not fit"
+    available = [record["build"] for record in records if fits(record, pair) and named_runnable(registry, record)]
+    raise Refused("no_fit", f"{why} the installed schema at revision {pair.revision} "
+                            f"(compatibility version {pair.compatibility_version}). "
+                            f"Compatible runnable Builds: {', '.join(available) or 'none'}.", available)
 
 
 def trunks_in(registry: str) -> list[str]:
@@ -161,59 +130,59 @@ def trunks_in(registry: str) -> list[str]:
     return sorted(codes, key=lambda code: (code != DEFAULT_TRUNK, code))
 
 
-def trunk_list(registry: str, root: Record, codes: list[str]) -> dict[str, object]:
-    """TrunkList (RCT-0.10), from the Root's record and the Build records alone: the Root and its version, and each
-    Trunk with its Builds, newest first, marking the one run would start. No Build is started."""
+def trunk_list(registry: str, schema: SchemaState, codes: list[str]) -> dict[str, object]:
+    """Show the schema state and each Trunk's Build history. Choose only against a verified pair."""
     trunks: list[dict[str, object]] = []
     for code in codes:
         records = read_records(registry, f"{TRUNKS}/{code}")
-        selected = chosen(registry, records, root)
+        selected = chosen(registry, records, schema.pair)
         trunks.append({"trunk": code, "default": code == DEFAULT_TRUNK, "builds": [
-            {"build": record["build"], "status": record["status"], "rootContracts": record["rootContracts"],
-             "fits": fits(record, root), "runnable": named_runnable(registry, record), "chosen": record is selected}
+            {"build": record["build"], "status": record["status"],
+             "schemaCompatibility": record.get("schemaCompatibility"),
+             "fits": fits(record, schema.pair), "runnable": named_runnable(registry, record),
+             "chosen": record is selected}
             for record in records]})
-    return {"root": root["root"], "rootContract": root["rootContract"], "trunks": trunks}
+    schema_view: dict[str, object] = {"status": schema.status}
+    if schema.pair is not None:
+        schema_view.update(revision=schema.pair.revision, compatibilityVersion=schema.pair.compatibility_version)
+    return {"schema": schema_view, "trunks": trunks}
 
 
 def launch_trunk(registry: str, args: list[str]) -> int:
-    """Choose the Root, the Trunk and the Build, and replace this process with the Build's program, handing it
-    --root <root> before the command; return a status only when it cannot."""
+    """Choose the exact Build and replace this process with its executable."""
     standard_descriptors()
-    # A Ctrl-C while the Build is being chosen ends the launcher quietly, as in launch().
     if signal.getsignal(signal.SIGINT) is signal.default_int_handler:
         signal.signal(signal.SIGINT, signal.SIG_DFL)
     use_descriptor: int | None = None
     try:
         call = read_call(args)
-        root = the_root(call.root)
-        if call.command[0] == LIST and call.trunk is None:
-            write_all(1, json_line(trunk_list(registry, root, trunks_in(registry))))
-            return 0
         code = call.trunk or DEFAULT_TRUNK
-        if not known_trunk(registry, code):
-            raise Refused("unknown_trunk", f"There is no Trunk {shown(code)!r}: no Build of {TRUNKS}/{shown(code)} is "
-                                           "in the registry.")
+        listing_all = call.command[0] == LIST and call.trunk is None
+        if not listing_all and not known_trunk(registry, code):
+            raise Refused("unknown_trunk", f"No Build of {TRUNKS}/{code} is in the registry.")
+        schema = read_schema()
         if call.command[0] == LIST:
-            write_all(1, json_line(trunk_list(registry, root, [code])))
+            write_all(1, json_line(trunk_list(registry, schema, trunks_in(registry) if listing_all else [code])))
             return 0
+        if schema.pair is None:
+            raise Refused(*SCHEMA_ERRORS[schema.status])
         component = f"{TRUNKS}/{code}"
-        selected = pick_build(registry, component, call.build, root)
+        selected = pick_build(registry, component, call.build, schema.pair)
         line = warning(component, selected)
         if line is not None:
             try:
                 write_all(2, readable(line))
             except OSError:
-                pass  # the warning is a courtesy; the Build starts without it
-        entry = executable_entry(os.path.join(registry, component, selected["build"]), selected.get("entry"))
+                pass
+        use_descriptor = hold_build_use(registry, component, selected["build"])
+        folder = os.path.join(registry, component, selected["build"])
+        entry = executable_entry(folder, selected.get("entry"))
         if entry is None:
             raise OSError(f"The program of {component}@{selected['build']} is no longer there.")
-        use_descriptor = hold_build_use(registry, component, selected["build"])
-        record_start(os.path.join(registry, component, selected["build"]))
-        # Python ignores these two signals when it starts; a direct start would leave them at their default.
+        record_start(folder)
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
         signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
-        # execv passes the process's own environment exactly as the caller gave it.
-        os.execv(entry, [entry, "--root", root["root"], *call.command])
+        os.execv(entry, [entry, *call.command])
     except Refused as refused:
         try:
             write_all(1, json_line({"error": {"code": refused.code, "message": str(refused)},

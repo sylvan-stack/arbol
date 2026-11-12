@@ -38,9 +38,8 @@ from .root_launcher import root_default_record, select_root
 from .roots import current_root, read_roots, roots_folder
 
 PACKAGE = os.path.dirname(os.path.abspath(__file__))
-# A component's launcher holds the text of launcher.py; arbol-trunk, which every Trunk shares, holds the text of
-# these three, in this order (RCT-0, BLD-D17).
-TRUNK_MODULES = ("launcher.py", "roots.py", "schema_state.py", "trunk_launcher.py")
+# The shared Trunk launcher embeds the registry reader, the schema reader and the selector.
+TRUNK_MODULES = ("launcher.py", "schema_state.py", "trunk_launcher.py")
 ROOT_MODULES = ("launcher.py", "roots.py", "root_launcher.py")
 LAUNCHER_MARK = "# arbol-builds launcher (BLD-0): written by arbol-builds, rewritten when it is installed again."
 # The first statement of the launcher and of the tool: from here on a Ctrl-C ends the program quietly, as it would
