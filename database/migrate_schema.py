@@ -10,11 +10,13 @@ import re
 import stat
 import subprocess
 import tomllib
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import dataclass, field
 from hashlib import sha256
 from importlib import import_module
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 from urllib.parse import unquote, urlsplit
 
 import psycopg
@@ -33,6 +35,8 @@ MANIFEST = Path(__file__).resolve().with_name("migrations.toml")
 MIGRATION_LOCK = 0x4152424F4C534348  # ARBOLSCH
 CHECKSUM = re.compile(r"[0-9a-f]{64}")
 LedgerRow = tuple[int, str, str, int]
+UpgradePin = tuple[int, int, str, str, str]
+SourceIdentity = dict[str, str | int]
 Database = Connection[tuple[Any, ...]]
 
 
@@ -81,6 +85,14 @@ class Target:
             connection.close()
             raise Refusal("unavailable", "PostgreSQL did not connect to the specified database.")
         return connection
+
+    def identity(self, connection: Database) -> SourceIdentity:
+        row = connection.execute(
+            "SELECT oid FROM pg_catalog.pg_database WHERE datname = pg_catalog.current_database()"
+        ).fetchone()
+        if not row or type(row[0]) is not int or row[0] <= 0 or connection.info.dbname != self.database:
+            raise Refusal("unavailable", "Cannot verify the connected PostgreSQL database identity.")
+        return {"host": self.host, "port": self.port, "database": self.database, "databaseOid": row[0]}
 
 
 def database_target(
@@ -237,6 +249,11 @@ def _empty_database(connection: Database) -> bool:
            AND NOT EXISTS (
                SELECT 1 FROM pg_catalog.pg_namespace
                WHERE nspname NOT IN ('public', 'information_schema', 'pg_catalog', 'pg_toast')
+                 AND nspname !~ '^pg_(toast_)?temp_[0-9]+$'
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+               WHERE n.nspname ~ '^pg_(toast_)?temp_[0-9]+$'
            )
            AND NOT EXISTS (
                SELECT 1 FROM pg_catalog.pg_depend
@@ -359,7 +376,11 @@ def _check_target(manifest: Manifest, prefix: tuple[LedgerRow, ...], target_revi
 
 
 def _apply_prefix(
-    connection: Database, manifest: Manifest, prefix: tuple[LedgerRow, ...], target_revision: int
+    connection: Database,
+    manifest: Manifest,
+    prefix: tuple[LedgerRow, ...],
+    target_revision: int,
+    verify_pin: Callable[[], None],
 ) -> dict[str, str | int]:
     """Apply SQL under the caller's migration lock and exclusive admission."""
     _check_target(manifest, prefix, target_revision)
@@ -376,6 +397,7 @@ def _apply_prefix(
                 _record(connection, migration)
                 if read_prefix(connection, manifest) != expected:
                     raise Refusal("invalid", "The migration ledger entry could not be verified.")
+                verify_pin()
             prefix = _read_committed(connection, manifest)
         except psycopg.Error as error:
             code = f" (SQLSTATE {error.sqlstate})" if error.sqlstate else ""
@@ -388,6 +410,166 @@ def _apply_prefix(
     return _ready(prefix[-1])
 
 
+@dataclass(frozen=True)
+class Upgrade:
+    target_revision: int
+    maintenance_session: str
+    prior_release: str
+    upgrade_release: str
+    snapshot_dir: Path
+    restore_receipt: Path
+
+
+class RecoveryVerifier(Protocol):
+    def __call__(
+        self,
+        snapshot_dir: Path,
+        restore_receipt: Path,
+        /,
+        *,
+        source: SourceIdentity,
+        schema: dict[str, int],
+        release_sha256: str,
+        maintenance_session: str,
+    ) -> object: ...
+
+
+Exclusive = Callable[[SourceIdentity, str], AbstractContextManager[str]]
+
+
+def _read_pin(connection: Database, session: str) -> UpgradePin | None:
+    row = connection.execute(
+        """
+        SELECT starting_revision, target_revision, prior_release, release_checksum, receipt_checksum
+        FROM public.arbol_schema_upgrades WHERE maintenance_session = %s
+        """,
+        (session,),
+    ).fetchone()
+    if row is None:
+        return None
+    starting, target, prior, release, receipt = row
+    if type(starting) is not int or type(target) is not int or not all(
+        isinstance(value, str) and CHECKSUM.fullmatch(value) for value in (prior, release, receipt)
+    ):
+        raise Refusal("invalid", "The recorded upgrade checkpoint is invalid.")
+    return starting, target, prior, release, receipt
+
+
+def _receipt_digest(path: Path) -> str:
+    try:
+        return sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        raise Refusal("recovery_refused", "The original isolated restore receipt could not be read.") from None
+
+
+def upgrade(
+    target: Target,
+    manifest: Manifest,
+    request: Upgrade,
+    *,
+    exclusive: Exclusive,
+    verify_recovery: RecoveryVerifier,
+) -> dict[str, str | int]:
+    """Apply or resume under the same durable fence, release and recovery proof."""
+    session = request.maintenance_session
+    if not session.strip() or "\0" in session:
+        raise Refusal("invalid_input", "An exclusive maintenance session ID is required.")
+    if not CHECKSUM.fullmatch(request.prior_release) or not CHECKSUM.fullmatch(request.upgrade_release):
+        raise Refusal("invalid_input", "Name both releases by their lowercase SHA-256 digests.")
+    release_checksum = sha256(f"{request.upgrade_release}:{manifest.checksum}".encode("ascii")).hexdigest()
+    with target.connect() as connection, ExitStack() as held:
+        source = target.identity(connection)
+        try:
+            authoritative_session = held.enter_context(exclusive(source, session))
+        except Exception:
+            raise Refusal("maintenance", "Could not hold exclusive maintenance for this database and session.") from None
+        if authoritative_session != session:
+            raise Refusal("maintenance", "The exclusive handoff belongs to a different maintenance session.")
+
+        _lock(connection)
+        prefix = _read_committed(connection, manifest)
+        revision = request.target_revision
+        _check_target(manifest, prefix, revision)
+        pin = _read_pin(connection, session)
+        installed = len(prefix)
+        if pin is None and installed == revision:
+            return _ready(prefix[-1])
+        starting = pin[0] if pin else installed
+        if not 1 <= starting <= installed or starting >= revision:
+            raise Refusal("invalid", "The installed ledger does not match the fenced upgrade checkpoint.")
+
+        receipt_checksum = _receipt_digest(request.restore_receipt)
+        expected = (starting, revision, request.prior_release, release_checksum, receipt_checksum)
+        if pin is not None and pin != expected:
+            raise Refusal("recovery_refused", "Retry requires the original receipt, releases and target revision.")
+        try:
+            proof = verify_recovery(
+                request.snapshot_dir,
+                request.restore_receipt,
+                source=source,
+                schema={"revision": starting, "compatibilityVersion": prefix[starting - 1][3]},
+                release_sha256=request.prior_release,
+                maintenance_session=session,
+            )
+        except Exception:
+            raise Refusal("recovery_refused", "The archive or isolated restore receipt does not verify.") from None
+        if (
+            not isinstance(proof, dict)
+            or proof.get("receiptSha256") != receipt_checksum
+            or _receipt_digest(request.restore_receipt) != receipt_checksum
+        ):
+            raise Refusal("recovery_refused", "The isolated restore receipt changed or could not be verified.")
+
+        if pin is None:
+            with connection.transaction():
+                connection.execute(
+                    """
+                    INSERT INTO public.arbol_schema_upgrades
+                        (maintenance_session, starting_revision, target_revision,
+                         prior_release, release_checksum, receipt_checksum)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (session, *expected),
+                )
+
+        def verify_pin() -> None:
+            if _read_pin(connection, session) != expected:
+                raise Refusal("invalid", "The original upgrade checkpoint could not be verified.")
+
+        verify_pin()
+        return _apply_prefix(connection, manifest, prefix, revision, verify_pin)
+
+
+@contextmanager
+def _runtime_exclusive(source: SourceIdentity, session: str) -> Iterator[str]:
+    # ASD-7 owns the admission state and reopen. No private-file or session-ID
+    # fallback can authorize an installed schema change.
+    drain = import_module("arbol_backend.exchange_drain")
+    with drain.exclusive_upgrade(source, session) as held:
+        yield held
+
+
+def _recovery_verifier(
+    snapshot_dir: Path,
+    restore_receipt: Path,
+    /,
+    *,
+    source: SourceIdentity,
+    schema: dict[str, int],
+    release_sha256: str,
+    maintenance_session: str,
+) -> object:
+    recovery = import_module(".recovery", __package__) if __package__ else import_module("recovery")
+    return recovery.verify_recovery(
+        snapshot_dir,
+        restore_receipt,
+        source=source,
+        schema=schema,
+        release_sha256=release_sha256,
+        maintenance_session=maintenance_session,
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", required=True)
@@ -398,6 +580,13 @@ def main() -> int:
     actions.add_parser("status", help="Read the installed migration ledger.")
     initialize_action = actions.add_parser("initialize", help="Initialize revision 1 in an empty database.")
     initialize_action.add_argument("--authorize-empty", action="store_true")
+    upgrade_action = actions.add_parser("upgrade", help="Upgrade or resume under an exclusive maintenance session.")
+    upgrade_action.add_argument("--target-revision", type=int, required=True)
+    upgrade_action.add_argument("--maintenance-session", required=True)
+    upgrade_action.add_argument("--prior-release", required=True, help="Prior release record SHA-256.")
+    upgrade_action.add_argument("--upgrade-release", required=True, help="Upgrade release record SHA-256.")
+    upgrade_action.add_argument("--snapshot-dir", type=Path, required=True)
+    upgrade_action.add_argument("--restore-receipt", type=Path, required=True)
     args = parser.parse_args()
     result: dict[str, str | int]
     try:
@@ -405,8 +594,23 @@ def main() -> int:
         target = database_target(args.database, socket=args.socket, port=args.port, user=args.user)
         if args.action == "status":
             result = lookup(target, manifest)
-        else:
+        elif args.action == "initialize":
             result = initialize(target, manifest, authorized=args.authorize_empty)
+        else:
+            result = upgrade(
+                target,
+                manifest,
+                Upgrade(
+                    args.target_revision,
+                    args.maintenance_session,
+                    args.prior_release,
+                    args.upgrade_release,
+                    args.snapshot_dir,
+                    args.restore_receipt,
+                ),
+                exclusive=_runtime_exclusive,
+                verify_recovery=_recovery_verifier,
+            )
     except Refusal as error:
         result = {"status": error.status, "message": str(error)}
     except psycopg.Error as error:
