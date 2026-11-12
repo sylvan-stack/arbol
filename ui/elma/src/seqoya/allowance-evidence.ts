@@ -13,6 +13,7 @@ interface QuotaReading {
 interface ManualReading {
   subscription: string;
   updatedAt: string;
+  labelUpdatedAt?: string;
   observedAt: string;
 }
 
@@ -75,7 +76,7 @@ const mimoCreditsPerOutputToken = 600;
 const planNames = { lite: 'Lite', standard: 'Standard', pro: 'Pro', max: 'Max' };
 
 function matches<T extends ManualReading>(reading: T | undefined, account: SubscriptionRecord, now: number): reading is T {
-  return !!reading && reading.subscription === account.id && reading.updatedAt === account.updatedAt
+  return !!reading && reading.subscription === account.id && (reading.labelUpdatedAt ?? reading.updatedAt) === account.updatedAt
     && Date.parse(reading.observedAt) <= now;
 }
 
