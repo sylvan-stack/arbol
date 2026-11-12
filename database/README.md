@@ -194,3 +194,15 @@ session, releases, and target revision; or restore the previous release:
    stale clients. Use read-only checks on the installation and exercise writes
    on disposable state. Reopen explicitly to the verified release and record
    the admission boundary.
+
+## Recovery after reopening
+
+Repair forward by default. To use an older archive, enter maintenance again,
+drain and settle accepted work, and establish exclusive admission. Preserve
+the current database and affected persistent files first. Verify that every
+write accepted since the older snapshot is captured and can be reapplied
+consistently, including writes outside PostgreSQL that affect the recovered
+release. Rehearse the replay on isolated state and compare the result with
+the preserved current state before changing the installation. If any write
+cannot be accounted for or replayed without loss, repair forward. Record the
+write boundary, the evidence of replay and the release that reopens.
