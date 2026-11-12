@@ -1,4 +1,4 @@
-"""Read contract-v1 chats using own SQL and one consistent read-only snapshot."""
+"""Read installation chats in one consistent read-only snapshot."""
 
 from __future__ import annotations
 
@@ -8,10 +8,9 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
 
-from .bridge import Error, Params, uuid_id
+from .bridge import Error, Params
 from .database import Database, Session
 from .metadata import Attention, Layout, inspect, iso
-from .model import ROOT_ID
 
 TOOL_BYTES = 8192
 
@@ -53,14 +52,6 @@ def metadata(value: Any) -> Any:
     return value
 
 
-def provenance(root: Any, chat: Any, stale: Any) -> Params | None:
-    if root is None:
-        return None
-    if not isinstance(root, str) or not ROOT_ID.fullmatch(root) or type(stale) is not bool:
-        raise Error("layout_incomplete")
-    return {"fromRoot": root, "fromChat": uuid_id(str(chat)), "stale": stale}
-
-
 def draft(row: tuple[Any, ...] | None) -> Params | None:
     if row is None:
         return None
@@ -79,17 +70,17 @@ def draft(row: tuple[Any, ...] | None) -> Params | None:
 
 
 class Reader:
-    def __init__(self, database: Database, attention: Attention, *, lineage: bool = False) -> None:
-        self.database, self.attention, self.lineage = database, attention, lineage
+    def __init__(self, database: Database, attention: Attention) -> None:
+        self.database, self.attention = database, attention
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[tuple[Session, Layout]]:
         async with self.database.session(snapshot=True) as session:
-            layout = await inspect(session, lineage=self.lineage)
+            layout = await inspect(session)
             if layout.complete:
                 self.attention.close("layout_incomplete")
             else:
-                self.attention.open("layout_incomplete", "The Root lacks required backend or provenance tables; apply its Root layout.")
+                self.attention.open("layout_incomplete", "The installed database lacks the required backend tables.")
             yield session, layout
 
     async def complete(self) -> bool:
@@ -100,22 +91,20 @@ class Reader:
         async with self.session() as (session, layout):
             local = ("EXISTS(SELECT 1 FROM drafts d WHERE d.chat_id=c.id),coalesce(cm.ongoing,false),cm.archived_at"
                      if layout.own else "false,false,NULL::timestamptz")
-            migration = "mc.from_root,mc.from_chat,mc.stale" if layout.provenance and self.lineage else "NULL::text,NULL::uuid,NULL::boolean"
             rows = await session.execute(
                 "SELECT c.id,c.title,c.created_at,e.id,e.number,e.state,e.error,e.route,e.working_folder,"
                 "e.accepted_at,e.ended_at,coalesce((SELECT left(m.text,200) FROM exchanges first "
                 "JOIN messages m ON m.exchange_id=first.id AND m.position=0 "
                 "WHERE first.chat_id=c.id AND first.replaced_by IS NULL ORDER BY first.number LIMIT 1),''),"
-                + local + "," + migration + " FROM chats c "
+                + local + " FROM chats c "
                 "LEFT JOIN LATERAL (SELECT * FROM exchanges WHERE chat_id=c.id AND replaced_by IS NULL "
                 "ORDER BY number DESC LIMIT 1) e ON true "
                 + ("LEFT JOIN chat_marks cm ON cm.chat_id=c.id " if layout.own else "")
-                + ("LEFT JOIN migrated_chats mc ON mc.chat_id=c.id " if layout.provenance and self.lineage else "")
             )
             summaries: list[Params] = []
             for row in rows:
                 (chat, title, created, exchange, number, state, error, saved_route, folder, accepted, ended,
-                 first, has_draft, ongoing, archived, from_root, from_chat, stale) = row
+                 first, has_draft, ongoing, archived) = row
                 activity: datetime = max(accepted, ended) if ended else accepted or created
                 value: Params = {"chat": str(chat), "title": title, "firstMessage": first,
                                  "activityAt": iso(activity), "hasDraft": has_draft, "ongoing": ongoing}
@@ -128,8 +117,6 @@ class Reader:
                     value["workingFolder"] = folder
                 if archived is not None:
                     value["archived"] = True
-                if migration_info := provenance(from_root, from_chat, stale):
-                    value["migration"] = migration_info
                 summaries.append(value)
             summaries.sort(key=lambda row: (row["activityAt"], row["chat"]), reverse=True)
             return {"kind": "snapshot", "chats": summaries}
@@ -227,10 +214,6 @@ class Reader:
                             "exchangeCount": counts[0][0], "usage": totals}
             if headers:
                 info["createdAt"] = iso(headers[0][1])
-            if layout.provenance and self.lineage:
-                rows = await session.execute("SELECT from_root,from_chat,stale FROM migrated_chats WHERE chat_id=%s", [chat])
-                if rows and (migration := provenance(*rows[0])):
-                    info["migration"] = migration
             exchanges, more = await self.exchanges(session, layout, chat)
             local: Params = {"draft": None, "settings": {}, "marks": {"ongoing": False}}
             if layout.own:

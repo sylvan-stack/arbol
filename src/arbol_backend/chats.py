@@ -1,9 +1,9 @@
-"""Bridge chat views and Root-local changes; the Trunk remains the history writer."""
+"""Bridge chat views and installation changes; the Trunk remains the history writer."""
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Coroutine
+from collections.abc import Coroutine
 from datetime import datetime
 from typing import Any
 
@@ -84,10 +84,10 @@ async def paste_params(params: Params) -> Params:
 
 class Chats:
     def __init__(self, identity: Identity, database: Database, programs: Programs, roots: Roots,
-                 registry: Registry, *, lineage: bool = False) -> None:
+                 registry: Registry) -> None:
         self.identity, self.database, self.roots = identity, database, roots
         self.attention = Attention()
-        self.reader = Reader(database, self.attention, lineage=lineage)
+        self.reader = Reader(database, self.attention)
         self.catalogues = Catalogues(identity, programs)
         self.list_view = View(self.reader.summaries, self.list_changed)
         self.chat_view = View(self.reader.chat, self.chat_changed, chat)
@@ -103,7 +103,6 @@ class Chats:
         registry.method("paste.save", self.paste, paste_params)
         self.tasks: set[asyncio.Task[None]] = set()
         self.observers: dict[tuple[str, str], asyncio.Task[None]] = {}
-        self.on_list_open: Callable[[], None] | None = None
         self.extra_views: dict[str, View] = {}
 
     def task(self, work: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
@@ -153,14 +152,10 @@ class Chats:
         return [row for row in state["chats"] if not row.get("archived")]
 
     async def list_snapshot(self, params: Params) -> Snapshot:
-        if self.on_list_open:
-            self.on_list_open()
         snapshot = await self.list_view.snapshot({})
         return Snapshot(snapshot.version, {"kind": "snapshot", "chats": self.visible(snapshot.event)[:100]})
 
     async def page(self, params: Params) -> Params:
-        if self.on_list_open and "before" not in params:
-            self.on_list_open()
         snapshot = await self.list_view.snapshot({})
         rows = self.visible(snapshot.event)
         if before := params.get("before"):
@@ -302,8 +297,6 @@ class Chats:
             await self.reader.complete()
         except Refused:
             pass
-        if self.on_list_open:
-            self.on_list_open()
 
     def start(self) -> None:
         self.catalogues.start()
