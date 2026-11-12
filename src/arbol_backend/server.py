@@ -68,16 +68,18 @@ class Backend:
         self.recovery.on_returned = self.measurements.returned
         self.windows: set[asyncio.StreamWriter] = set()
         self.tasks: set[asyncio.Task[None]] = set()
+        self.vigor_task: asyncio.Task[None] | None = None
         self.stopped = asyncio.Event()
 
     def listed(self, value: dict[str, Any]) -> None:
         self.settling.listed(value)
         self.stuck.observe(value)
 
-    def task(self, work: Coroutine[Any, Any, None]) -> None:
+    def task(self, work: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
         task = asyncio.create_task(work)
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
+        return task
 
     async def connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self.windows.add(writer)
@@ -109,15 +111,21 @@ class Backend:
         finally:
             self.health.maintenance_changed()
 
+    async def wake_vigor(self) -> None:
+        try:
+            await self.ticker.wake()
+        except Refused:
+            pass  # Maintenance or an unavailable schema pauses Vigor without delaying status.
+
     async def monitor(self) -> None:
         while True:
             self.programs.reap()
             try:
                 await self.watch_maintenance()
-                if self.database.admission is not None:
-                    await self.ticker.wake()  # ticks once the interval has passed, no faster (SGM-D30)
             except (Refused, OSError):
-                pass  # Health remains available while the installation cannot record Vigor.
+                pass
+            if self.vigor_task is None or self.vigor_task.done():
+                self.vigor_task = self.task(self.wake_vigor())
             await asyncio.sleep(4)
 
     async def run(self) -> int:

@@ -1,10 +1,9 @@
 """The recompute of Subscriptions Vigor (SGM-1.14, SGM-D30): every three minutes while the backend runs, and on a refresh.
 
 One tick lists every Subscription of every Driver among the launchers through `subscriptions list`, which contacts no
-vendor, records every report newer than the last recorded one of its Subscription, and recalculates and records every
-Subscription's Vigor at the tick's moment, so a reset that passed takes effect at that tick and never earlier. The
+vendor, updates Subscriptions already seeded by a new report and recalculates their Vigor at the tick's moment, so a reset that passed takes effect at that tick and never earlier. The
 `Ticker` is what the backend's loop calls at every wake: it ticks once the profile's interval has passed since the
-last tick, three minutes, and no faster. A Root whose database lacks the Vigor tables refuses with `layout_incomplete`
+last tick, three minutes, and no faster. An installation whose database lacks the Vigor tables refuses with `layout_incomplete`
 and nothing is run; the backend swallows it and runs on without Vigor.
 """
 
@@ -32,9 +31,9 @@ class Tick:
 
 
 async def recompute(records: Records, listing: Listing, profile: Profile, now: datetime) -> Tick:
-    """Record every listed report newer than the last recorded one, then calculate and record every Subscription.
+    """Record every listed report newer than the last recorded one, then calculate and record Vigor for each Subscription with installed evidence.
 
-    The calculation uses the profile in use: the highest approved version the Root records, else `profile`, the first
+    The calculation uses the profile in use: the highest approved version the installation records, else `profile`, the first
     profile, so an approval takes effect at the next tick or refresh and a proposed profile never (SGM-1.11, SGM-D37).
     """
     profile = await records.in_use(profile)
@@ -43,6 +42,10 @@ async def recompute(records: Records, listing: Listing, profile: Profile, now: d
     failures = dict(listing.failures)
     for listed in listing.subscriptions:
         subscription = listed.subscription
+        if await records.last_report(subscription) is None:
+            # A retained Driver cache cannot seed the new installation's history.
+            # Explicit refresh records the first newly collected report.
+            continue
         if listed.last_usage is not None:
             try:
                 report = await records.record_report(subscription, listed.last_usage, now=now)
@@ -57,6 +60,11 @@ async def recompute(records: Records, listing: Listing, profile: Profile, now: d
 
 async def tick(programs: Programs, records: Records, profile: Profile, now: datetime) -> Tick:
     """One tick of SGM-1.14 at `now`: the Drivers listed, new reports recorded, every Subscription recalculated."""
+    async with records.writing():
+        return await tick_admitted(programs, records, profile, now)
+
+
+async def tick_admitted(programs: Programs, records: Records, profile: Profile, now: datetime) -> Tick:
     await records.require_layout()
     return await recompute(records, await list_subscriptions(programs), profile, now)
 
@@ -90,11 +98,11 @@ class Ticker:
     async def wake(self) -> Tick | None:
         """Tick when the interval has passed since the last tick, else do nothing; the first wake ticks at once.
 
-        The moment is taken before the tick, so a tick that takes time or fails moves the next one no closer: a
-        database that refuses is tried again one interval later, never sooner.
+        Record the moment only after admission; a tick refused for maintenance stays due on reopening.
         """
         now = self.clock()
         if not self.due(now):
             return None
-        self.last = now
-        return await tick(self.programs, self.records, self.profile, now)
+        async with self.records.writing():
+            self.last = now
+            return await tick_admitted(self.programs, self.records, self.profile, now)
