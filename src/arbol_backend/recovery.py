@@ -8,7 +8,9 @@ from collections.abc import Callable, Iterable
 from .bridge import Registry, Subscription
 from .chats import Chats
 from .discovery import Discovery
+from .drafts import Drafts
 from .health import RETRY, Health
+from .model import Refused
 from .notes import Notes
 from .settling import Settling
 from .stuck import Stuck
@@ -17,9 +19,10 @@ from .views import View
 
 class Recovery:
     def __init__(self, health: Health, chats: Chats, registry: Registry, settling: Settling,
-                 notes: Notes, discovery: Discovery, stuck: Stuck, *, retry: float = RETRY) -> None:
+                 notes: Notes, discovery: Discovery, stuck: Stuck, drafts: Drafts, *, retry: float = RETRY) -> None:
         self.health, self.chats, self.registry = health, chats, registry
         self.settling, self.notes, self.discovery, self.stuck = settling, notes, discovery, stuck
+        self.drafts = drafts
         self.on_returned: Callable[[], None] | None = None
         self.closed = False
         self.retry = retry
@@ -51,6 +54,13 @@ class Recovery:
             raise
         except Exception:
             pass  # A later inventory observation can retry independently.
+
+    async def recover_drafts(self) -> None:
+        try:
+            async with self.health.database.permit("controlled"):
+                await self.drafts.reconcile_admitted()
+        except Refused:
+            pass  # A later reopen or reconnect supplies a new controlled opportunity.
 
     async def refresh(self, epoch: int, subscriptions: list[Subscription]) -> None:
         first = subscriptions[0]
@@ -88,9 +98,10 @@ class Recovery:
         self.settling.request()
         self.notes.request()
         self.stuck.retry_notes()
-        look = asyncio.create_task(self.discover())
-        self.looks.add(look)
-        look.add_done_callback(self.looks.discard)
+        for job in (self.discover(), self.recover_drafts()):
+            look = asyncio.create_task(job)
+            self.looks.add(look)
+            look.add_done_callback(self.looks.discard)
         groups: dict[tuple[int, bytes], list[Subscription]] = {}
         for topic in self.registry.topics.values():
             for sub in list(topic.listeners):

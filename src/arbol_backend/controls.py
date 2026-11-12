@@ -40,7 +40,7 @@ class Controls:
                  *, start_wait: float = START_WAIT, stop_wait: float = STOP_WAIT) -> None:
         self.programs, self.dispatch, self.live = programs, dispatch, live
         self.start_wait, self.stop_wait = start_wait, stop_wait
-        self.answers = Answers(live.folders)
+        self.answers = Answers(live.folders, live.chats.database)
         self.tasks: dict[str, asyncio.Task[Params | Error]] = {}
         self.force_tasks: dict[str, asyncio.Task[Params | Error]] = {}
         registry.method("exchange.stop", self.stop, stop_params)
@@ -119,6 +119,13 @@ class Controls:
 
     async def run(self, exchange: str, *, force: bool = False, before: Guard | None = None, chat: str = "") -> Params | Error:
         try:
+            async with self.live.chats.database.permit("controlled"):
+                return await self.run_admitted(exchange, force=force, before=before, chat=chat)
+        except Refused as error:
+            return error if isinstance(error, Error) else Error(error.code)
+
+    async def run_admitted(self, exchange: str, *, force: bool = False, before: Guard | None = None, chat: str = "") -> Params | Error:
+        try:
             if not force:
                 await self.notice(exchange)
             await self.start_done(exchange)
@@ -148,6 +155,8 @@ class Controls:
         except TimeoutError:
             return Error("no_answer")
         except Refused as error:
+            if error.code == "maintenance":
+                self.live.stopping.pop(exchange, None)
             return error if isinstance(error, Error) else Error(error.code)
         except asyncio.CancelledError:
             raise

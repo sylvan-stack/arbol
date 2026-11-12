@@ -64,7 +64,7 @@ class Backend:
         self.listings.on_rows = self.listed
         self.listings.on_failed = self.stuck.failed
         self.discovery = Discovery(self.listings, self.registry)
-        self.recovery = Recovery(self.health, self.chats, self.registry, self.settling, self.notes, self.discovery, self.stuck)
+        self.recovery = Recovery(self.health, self.chats, self.registry, self.settling, self.notes, self.discovery, self.stuck, self.drafts)
         self.recovery.on_returned = self.measurements.returned
         self.windows: set[asyncio.StreamWriter] = set()
         self.tasks: set[asyncio.Task[None]] = set()

@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass
 
 from .bridge import Error, Params, uuid_id
+from .database import Database
 from .event_file import Scanner
 from .exchange_files import Folder, Folders, private
 from .model import Refused
@@ -114,8 +115,9 @@ def validate(question: Question, answer: Params) -> None:
 
 
 class Answers:
-    def __init__(self, folders: Folders, *, wait: float = PUBLICATION_SECONDS) -> None:
+    def __init__(self, folders: Folders, database: Database, *, wait: float = PUBLICATION_SECONDS) -> None:
         self.folders, self.wait = folders, wait
+        self.database = database
 
     async def published(self, exchange: str) -> Folder:
         deadline = time.monotonic() + self.wait
@@ -160,13 +162,20 @@ class Answers:
         return Error("ended")
 
     async def write(self, params: Params) -> Params:
+        async with self.database.permit("controlled"):
+            return await self.write_admitted(params)
+
+    async def write_admitted(self, params: Params) -> Params:
         folder: Folder | None = None
         events: int | None = None
         control: int | None = None
         try:
             folder = await self.published(params["exchange"])
-            if self.folders.read(params["exchange"]).end is not None:
+            record = self.folders.read(params["exchange"])
+            if record.end is not None:
                 raise Error("ended")
+            if record.accepted is None:
+                raise Error("no_answer")
             events = folder.open("events.jsonl")
             question = await current(events, params["askId"])
             validate(question, params["answer"])

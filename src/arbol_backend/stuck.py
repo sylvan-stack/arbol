@@ -88,9 +88,12 @@ class Stuck:
                 and observation is not None and observation.identity == expected.identity
                 and observation.heartbeat == expected.heartbeat and self.clock()-observation.first >= self.unchanged)
 
-    async def save_note(self, exchange: str, chat: str, at: str) -> None:
+    async def save_note(self, exchange: str, chat: str, at: str, *, admitted: bool = False) -> None:
         try:
-            await self.notes.record(exchange, chat, at=at)
+            if admitted:
+                await self.notes.record_admitted(exchange, chat, at=at)
+            else:
+                await self.notes.record(exchange, chat, at=at)
             self.failed_notes.pop(exchange, None)
             if not self.failed_notes:
                 self.attention.close("notes_unavailable")
@@ -111,10 +114,11 @@ class Stuck:
         async def check() -> bool:
             return await self.still_stuck(exchange, expected)
         try:
-            result = await self.controls.force(exchange, chat, check)
-            self.handled[exchange] = (expected.identity, expected.heartbeat)
-            if result["ended"] == "interrupted":
-                await self.save_note(exchange, chat, at)
+            async with self.notes.database.permit("controlled"):
+                result = await self.controls.force(exchange, chat, check)
+                self.handled[exchange] = (expected.identity, expected.heartbeat)
+                if result["ended"] == "interrupted":
+                    await self.save_note(exchange, chat, at, admitted=True)
         except Refused:
             pass  # No invented end or note; a later successful look can supply a new reason.
         except asyncio.CancelledError:

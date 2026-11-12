@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 
 from .bridge import Params
 from .chats import Chats
-from .database import Database
+from .database import Database, protected_thread
 from .live import Live
 from .metadata import iso, now
 from .model import Identity, Refused
@@ -25,8 +26,12 @@ class Notes:
         self.closed = False
 
     async def record(self, exchange: str, chat: str, *, at: str | None = None) -> Params:
-        note = await asyncio.to_thread(self.files.put, {"version": NOTE_VERSION,
-            "exchange": exchange, "chat": chat, "kind": "ended_stuck", "at": at if at is not None else now()})
+        async with self.database.permit("controlled"):
+            return await self.record_admitted(exchange, chat, at=at)
+
+    async def record_admitted(self, exchange: str, chat: str, *, at: str | None = None) -> Params:
+        note = await protected_thread(partial(self.files.put, {"version": NOTE_VERSION,
+            "exchange": exchange, "chat": chat, "kind": "ended_stuck", "at": at if at is not None else now()}))
         self.request()
         return note.wire
 
@@ -67,28 +72,30 @@ class Notes:
                 continue
             for exchange in names:
                 try:
-                    note = await asyncio.to_thread(self.files.read, exchange)
+                    async with self.database.permit("controlled"):
+                        await self.flush_note(exchange)
                 except (OSError, Refused, ValueError, RecursionError):
-                    continue  # Unsafe or malformed files stay available for repair, never guessed.
-                wire, blocked = None, False
-                if not self.database.away:
-                    try:
-                        wire, blocked = await self.persist(note)
-                    except (TimeoutError, Refused):
-                        pass  # Keep the write-ahead file after an uncertain SQL outcome.
-                if blocked:
-                    self.live.notes.pop(exchange, None)
-                    continue
-                if wire is not None:
-                    self.chats.invalidate(note.value["chat"])
-                self.live.note(note.value["chat"], wire or note.wire, committed=wire is not None)
-                if wire is not None:
-                    try:
-                        await asyncio.to_thread(self.files.remove, note)
-                    except (OSError, Refused):
-                        continue  # Preserve any replacement at the same name.
-                    self.chats.changed(note.value["chat"])
+                    pass  # A refused or unreadable write-ahead note stays pending.
                 await asyncio.sleep(0)
+
+    async def flush_note(self, exchange: str) -> None:
+        # Reading can heal a crash link; the same permit covers repair, SQL and removal.
+        note = await protected_thread(partial(self.files.read, exchange))
+        wire, blocked = None, False
+        if not self.database.away:
+            try:
+                wire, blocked = await self.persist(note)
+            except (TimeoutError, Refused):
+                pass  # Keep the write-ahead file after an uncertain SQL outcome.
+        if blocked:
+            self.live.notes.pop(exchange, None)
+            return
+        if wire is not None:
+            self.chats.invalidate(note.value["chat"])
+        self.live.note(note.value["chat"], wire or note.wire, committed=wire is not None)
+        if wire is not None:
+            await protected_thread(partial(self.files.remove, note))
+            self.chats.changed(note.value["chat"])
 
     def start(self) -> None:
         self.request()

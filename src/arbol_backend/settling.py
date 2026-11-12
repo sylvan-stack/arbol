@@ -40,14 +40,15 @@ class Settling:
                 self.programs.reap()
                 if ("settle", exchange) in self.programs.running:
                     continue  # The detached runtime is still the owner of the earlier call.
-                await self.database.execute("SELECT 1")
-                value = await self.programs.call("arbol-exchanges", ["settle", exchange], kind="settle", key=exchange)
-                if not isinstance(value, dict) or "root" in value or not isinstance(value.get("results"), list):
-                    continue
-                saved = [row for row in value["results"] if isinstance(row, dict) and row.get("exchange") == exchange
-                         and "error" not in row and isinstance(row.get("settled"), str)]
-                if len(saved) == 1 and self.on_settled:
-                    self.on_settled()
+                async with self.database.permit("controlled"):
+                    await self.database.execute("SELECT 1")
+                    value = await self.programs.call("arbol-exchanges", ["settle", exchange], kind="settle", key=exchange)
+                    if not isinstance(value, dict) or "root" in value or not isinstance(value.get("results"), list):
+                        continue
+                    saved = [row for row in value["results"] if isinstance(row, dict) and row.get("exchange") == exchange
+                             and "error" not in row and isinstance(row.get("settled"), str)]
+                    if len(saved) == 1 and self.on_settled:
+                        self.on_settled()
             except Refused:
                 pass  # The runtime retains an unverified folder. Reopen, reconnect or a new observation can retry.
 
