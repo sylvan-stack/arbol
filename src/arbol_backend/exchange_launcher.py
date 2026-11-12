@@ -7,6 +7,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any
 
+from .exchange_admission import GENERATION_ENV
 from .exchange_command import Command
 from .exchange_context import Context, Refusal
 from .model import BUILD_ID
@@ -37,10 +38,14 @@ def object_line(line: bytes) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-def command_reply(context: Context, arguments: list[str], *, timeout: float) -> Reply:
+def command_reply(context: Context, arguments: list[str], *, timeout: float,
+                  generation: str | None = None) -> Reply:
     executable = context.bin_dir / "arbol-trunk"
+    environment = context.environment()
+    if generation is not None:
+        environment[GENERATION_ENV] = generation
     try:
-        result = subprocess.run([str(executable), *arguments], env=context.environment(), stdin=subprocess.DEVNULL,
+        result = subprocess.run([str(executable), *arguments], env=environment, stdin=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL, stdout=subprocess.PIPE, timeout=timeout, check=False)
     except subprocess.TimeoutExpired:
         raise Refusal("no_answer", "The Trunk command did not answer within its time limit.") from None

@@ -7,6 +7,7 @@ import os
 from typing import Any
 
 from .database import Unavailable
+from .exchange_admission import GENERATION_ENV, Admission, Lease
 from .exchange_cleanup import cleanup
 from .exchange_context import Context, Refusal
 from .exchange_launcher import Reply, command_reply
@@ -43,7 +44,8 @@ def failure(exchange: str, error: Refused) -> dict[str, Any]:
     return value
 
 
-def settle_after_stop(context: Context, exchange: str) -> dict[str, Any]:
+def settle_after_stop(context: Context, exchange: str, lease: Lease) -> dict[str, Any]:
+    lease.require()
     try:
         record = lookup(context, exchange)
         if record is None:
@@ -57,7 +59,8 @@ def settle_after_stop(context: Context, exchange: str) -> dict[str, Any]:
             raise Refusal("alive", "The Exchange's recorded process is still alive.")
         # Schema fit alone cannot qualify a different Build to replay this folder.
         # There are no alternate Builds qualified for this format.
-        reply = command_reply(context, [record["trunk"], "-v", record["build"], "settle", exchange], timeout=25.0)
+        reply = command_reply(context, [record["trunk"], "-v", record["build"], "settle", exchange],
+                              timeout=25.0, generation=lease.state.generation)
         if reply.status:
             return {**reply.value, "exchange": exchange}
         if reply.value.get("exchange") != exchange or reply.value.get("settled") not in TERMINAL | {"none"}:
@@ -68,6 +71,12 @@ def settle_after_stop(context: Context, exchange: str) -> dict[str, Any]:
 
 
 def settle(context: Context, exchange: str | None = None) -> Reply:
+    admission = Admission(context.identity.folder)
+    with admission.lease("controlled", generation=os.environ.get(GENERATION_ENV)) as lease:
+        return settle_admitted(context, exchange, lease)
+
+
+def settle_admitted(context: Context, exchange: str | None, lease: Lease) -> Reply:
     unreadable: set[str] = set()
     if exchange is None:
         cleanup(context, lambda uuid: asyncio.run(stored_state(context, uuid)))
@@ -81,7 +90,7 @@ def settle(context: Context, exchange: str | None = None) -> Reply:
         if target in unreadable:
             value = failure(target, Refusal("runtime_unavailable", "The Exchange folder or its process is unresolved."))
         else:
-            value = settle_after_stop(context, target)
+            value = settle_after_stop(context, target, lease)
         results.append(value)
         if value.get("error", {}).get("code") == "database_unavailable":
             break

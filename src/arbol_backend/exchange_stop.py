@@ -12,6 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from .exchange_admission import GENERATION_ENV, Admission, Lease
 from .exchange_clock import awake
 from .exchange_context import Context, Refusal
 from .exchange_groups import force_group
@@ -117,8 +118,8 @@ def result(exchange: str, ended: str, forced: bool,
     return Reply(document)
 
 
-def save_ended(context: Context, exchange: str, observed: Observed, forced: bool) -> Reply:
-    saved = settle_after_stop(context, exchange)
+def save_ended(context: Context, exchange: str, observed: Observed, forced: bool, lease: Lease) -> Reply:
+    saved = settle_after_stop(context, exchange, lease)
     state = saved.get('settled')
     ended = 'saved' if state == 'none' else state if isinstance(state, str) and state in ENDS else observed.end or 'interrupted'
     return result(exchange, ended, forced, saved)
@@ -126,6 +127,13 @@ def save_ended(context: Context, exchange: str, observed: Observed, forced: bool
 
 def stop(context: Context, exchange: str, force: bool = False, *,
          clock: Callable[[], float] = awake, pause: Callable[[float], None] = time.sleep) -> Reply:
+    admission = Admission(context.identity.folder)
+    with admission.lease("controlled", generation=os.environ.get(GENERATION_ENV)) as lease:
+        return stop_admitted(context, exchange, force, lease, clock=clock, pause=pause)
+
+
+def stop_admitted(context: Context, exchange: str, force: bool, lease: Lease, *,
+                  clock: Callable[[], float], pause: Callable[[float], None]) -> Reply:
     observed = read_exchange(context, exchange)
     deadline = clock()+15
     while observed is None and pending(context, exchange) and clock() < deadline:
@@ -134,7 +142,7 @@ def stop(context: Context, exchange: str, force: bool = False, *,
     if observed is None:
         return result(exchange, 'none', False)
     if not observed.alive:
-        return save_ended(context, exchange, observed, False)
+        return save_ended(context, exchange, observed, False, lease)
     if observed.end is not None:
         return result(exchange, observed.end, False)
     expected = observed
@@ -147,7 +155,7 @@ def stop(context: Context, exchange: str, force: bool = False, *,
                 return result(exchange, 'saved', False)
             same_process(observed, expected)
             if not observed.alive:
-                return save_ended(context, exchange, observed, False)
+                return save_ended(context, exchange, observed, False, lease)
             if observed.end is not None:
                 return result(exchange, observed.end, False)
             if clock() >= deadline:
@@ -156,10 +164,10 @@ def stop(context: Context, exchange: str, force: bool = False, *,
     forced = force_end(context, exchange, expected, clock, pause)
     observed = read_exchange(context, exchange)
     if observed is None:
-        return save_ended(context, exchange, expected, True) if forced else result(exchange, 'saved', False)
+        return save_ended(context, exchange, expected, True, lease) if forced else result(exchange, 'saved', False)
     same_process(observed, expected)
     if not forced and observed.end is not None:
         return result(exchange, observed.end, False)
     if not forced and observed.alive and observed.end is None:
         raise Refusal('runtime_unavailable', 'The Exchange still lives but its group could not be ended.')
-    return save_ended(context, exchange, observed, forced)
+    return save_ended(context, exchange, observed, forced, lease)
