@@ -1,4 +1,4 @@
-"""Root-scoped Arbol image identity, payload hashes and pinned dependency metadata."""
+"""Arbol image identity, schema compatibility, payload hashes and pinned dependencies."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-from arbol_backend.model import BUILD_ID, ROOT_ID, object_file  # noqa: E402
+from arbol_backend.model import BUILD_ID, object_file, schema_compatibility  # noqa: E402
 
 MUTABLE = {"build.json", "build.log", "last-start", "package-manifest.json"}
 
@@ -35,18 +35,27 @@ def files(folder: Path) -> dict[str, str]:
     }
 
 
+def compatibility(folder: Path, record: dict[str, Any]) -> tuple[tuple[int, int], ...]:
+    declared = schema_compatibility(object_file(folder / "arbol-build.json").get("schemaCompatibility"))
+    if dict(declared) != dict(schema_compatibility(record.get("schemaCompatibility"))):
+        raise ValueError("The Build and source must declare the same schema compatibility.")
+    return declared
+
+
 def build_record(folder: Path) -> dict[str, Any]:
     record = object_file(folder / "build.json")
     if (
         record.get("component") != "arbol"
         or record.get("entry") != "bin/arbol"
-        or not isinstance(record.get("root"), str)
-        or not ROOT_ID.fullmatch(record["root"])
+        or "root" in record
         or not isinstance(record.get("build"), str)
         or not BUILD_ID.fullmatch(record["build"])
         or record.get("packageVersion") != object_file(folder / "package.json").get("version")
     ):
         raise ValueError("The Arbol Build identity must match its package.")
+    declared = compatibility(folder, record)
+    if dict(declared) != dict(schema_compatibility(object_file(folder / "package.json").get("schemaCompatibility"))):
+        raise ValueError("The Build and package must declare the same schema compatibility.")
     return record
 
 
@@ -64,14 +73,14 @@ def destination(root: Path) -> Path:
     if (
         record.get("component") != "arbol"
         or record.get("entry") != "bin/arbol"
-        or not isinstance(record.get("root"), str)
-        or not ROOT_ID.fullmatch(record["root"])
+        or "root" in record
         or not isinstance(record.get("build"), str)
         or not BUILD_ID.fullmatch(record["build"])
         or record["build"] != os.environ.get("ARBOL_BUILD_NUMBER")
         or record.get("packageVersion") != object_file(root / "package.json").get("version")
     ):
         raise ValueError("The allocated Build must agree with the source and number.")
+    compatibility(root, record)
     return folder
 
 
@@ -104,7 +113,8 @@ def verify(folder: Path) -> None:
     manifest = object_file(folder / "package-manifest.json")
     if (
         manifest.get("component") != "arbol"
-        or manifest.get("root") != record["root"]
+        or "root" in manifest
+        or dict(schema_compatibility(manifest.get("schemaCompatibility"))) != dict(compatibility(folder, record))
         or manifest.get("build") != record["build"]
         or manifest.get("entry") != record["entry"]
         or manifest.get("packageVersion") != record["packageVersion"]

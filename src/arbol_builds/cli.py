@@ -21,8 +21,8 @@ from .service import (
 )
 from .unused import prune_unused
 
-USAGE = ("arbol-builds build <component> [--repo <folder>] [--root <identifier>] "
-         "| list [<component>] [--root <identifier>] | show <component>[@<build>] [--root <identifier>] "
+USAGE = ("arbol-builds build <component> [--repo <folder>] "
+         "| list [<component>] | show <component>[@<build>] "
          "| withdraw <component>@<build> --reason <text> "
          "| lock <component>@<build> | unlock <component>@<build> | prune <component> --keep <n> | prune --unused "
          "[--registry-dir <folder>] [--bin-dir <folder>]; a Trunk is the component arbol-trunk/<code name>")

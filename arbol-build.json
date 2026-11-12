@@ -1,9 +1,15 @@
 {
   "component": "arbol",
   "entry": "bin/arbol",
+  "schemaCompatibility": [
+    {
+      "compatibilityVersion": 1,
+      "minRevision": 1
+    }
+  ],
   "build": [
     "uv sync --locked --group dev",
-    "uv run --no-sync ruff check src tests scripts tools bin/builds_entry.py bin/roots_entry.py bin/arbol_entry.py database conformance",
+    "uv run --no-sync ruff check src tests scripts tools bin/builds_entry.py bin/roots_entry.py bin/arbol_entry.py bin/exchanges_entry.py database conformance",
     "uv run --no-sync mypy",
     "uv run --no-sync mypy --strict tools/bridge_relay.py tools/sync_elma_design.py tools/elma_bundle.py tests/ui",
     "uv run --no-sync python -B scripts/package_backend.py"

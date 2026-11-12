@@ -145,6 +145,14 @@ def schema_compatibility(value: object) -> bool:
     return True
 
 
+def backend_fits(record: Record, pair: tuple[int, int] | None) -> bool:
+    if pair is None or "root" in record:
+        return False
+    revision, version = pair
+    return any(item["compatibilityVersion"] == version and item["minRevision"] <= revision
+               for item in record.get("schemaCompatibility", []))
+
+
 def valid_record(value: object, component: str, build: str) -> bool:
     if (not isinstance(value, dict) or value.get("component") != component or value.get("build") != build
             or BUILD_PATTERN.fullmatch(build) is None or not text(value.get("packageVersion"))
@@ -165,7 +173,9 @@ def valid_record(value: object, component: str, build: str) -> bool:
     if declares_schema and not schema_compatibility(value["schemaCompatibility"]):
         return False
     # Legacy records stay readable so their Build numbers and history are preserved.
-    if ("root" in value or component in ROOT_COMPONENTS) and not root_identifier(value.get("root")):
+    if ("root" in value or component == "arbol-root") and not root_identifier(value.get("root")):
+        return False
+    if component == "arbol" and "root" not in value and not declares_schema:
         return False
     needs_root_contracts = "rootContracts" in value or (trunk(component) and not declares_schema)
     if needs_root_contracts and not root_contracts(value.get("rootContracts")):
@@ -379,7 +389,8 @@ def close_build_use(fd: int | None) -> None:
             pass
 
 
-def launch(registry: str, component: str, args: list[str]) -> int:
+def launch(registry: str, component: str, args: list[str], *, schema: tuple[int, int] | None = None,
+           schema_error: tuple[str, str] | None = None) -> int:
     """Choose the Build and replace this process with its program; return a status only when it cannot."""
     standard_descriptors()
     # A Ctrl-C while the Build is being chosen ends the launcher quietly, as it would end the Build;
@@ -389,6 +400,12 @@ def launch(registry: str, component: str, args: list[str]) -> int:
     use_descriptor: int | None = None
     try:
         records = read_records(registry, component)
+        if component == "arbol":
+            if schema is None:
+                code, message = schema_error or ("schema_invalid", "The installed schema has not been verified.")
+                write_all(1, json_line({"error": {"code": code, "message": message}}))
+                return 1
+            records = [record for record in records if backend_fits(record, schema)]
         available = [record["build"] for record in records if named_runnable(registry, record)]
         selected: Record | None = None
         if args[:1] == ["-v"]:

@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -63,10 +64,22 @@ def package(root: Path = ROOT) -> Path:
     for name in ("backend_package.py", "check_backend.py", "python-distribution.json"):
         shutil.copy2(root / "scripts" / name, folder / "scripts" / name)
     (folder / "bin").mkdir()
-    for name in ("arbol", "arbol_entry.py"):
+    for name in ("arbol", "arbol_entry.py", "arbol-exchanges", "exchanges_entry.py"):
         shutil.copy2(root / "bin" / name, folder / "bin" / name)
     for name in ("package.json", "pyproject.toml", ".python-version", "uv.lock", "arbol-build.json"):
         shutil.copy2(root / name, folder / name)
+    record = json.loads((folder / "build.json").read_text())
+    package_record = json.loads((folder / "package.json").read_text())
+    package_record["schemaCompatibility"] = record["schemaCompatibility"]
+    (folder / "package.json").write_text(json.dumps(package_record, indent=2) + "\n")
+    database = root / "database"
+    migrations = tomllib.loads((database / "migrations.toml").read_text())["migrations"]
+    (folder / "database").mkdir()
+    for name in ("migrations.toml", "migrate_schema.py", "database_server.py", "recovery.py", "recovery_release.py",
+                 *(migration["file"] for migration in migrations)):
+        if not isinstance(name, str) or Path(name).name != name or name in ("", ".", ".."):
+            raise ValueError("Each migration input must be a file in the database directory.")
+        shutil.copy2(database / name, folder / "database" / name)
     contract = Path.home() / "repos/sylvan-stack/arbol-root/contract/1/layout.sql"
     if not contract.is_file():
         # A private test HOME changes no source input: locate the same stack's merged checkout.
@@ -109,7 +122,6 @@ def package(root: Path = ROOT) -> Path:
         cwd=root,
         timeout=120,
     )
-    record = json.loads((folder / "build.json").read_text())
     renderer = package_elma(root, folder / "ui/elma", record["build"])
     write_manifest(
         folder,
@@ -117,7 +129,7 @@ def package(root: Path = ROOT) -> Path:
             "format": 1,
             "component": "arbol",
             "entry": "bin/arbol",
-            "root": record["root"],
+            "schemaCompatibility": record["schemaCompatibility"],
             "build": record["build"],
             "packageVersion": record["packageVersion"],
             "source": source(root),
