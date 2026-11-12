@@ -40,7 +40,7 @@ from arbol_builds.service import LAUNCHER_MARK, SIGINT_LINE, atomic_write, sheba
 USAGE = "Usage: uv run --no-sync python scripts/install_builds.py [--bin-dir <folder>]"
 NODE_LAUNCH = re.compile(r'launch\(("(?:[^"\\\n]|\\.)*"), ("(?:[^"\\\n]|\\.)*"), process\.argv\.slice\(2\)\);')
 NODE_FILES = ("cli.js", "config.js", "records.js", "service.js", "mutation.js", "package.json")
-PACKAGES = ("arbol_builds", "arbol_agents")
+PACKAGES = ("arbol_installation", "arbol_builds", "arbol_agents")
 LAUNCHER_LIMIT = 1024 * 1024
 # A temporary file of service.atomic_write: <name>.<pid>.<uuid>.tmp.
 TEMPORARY = re.compile(r"(?P<name>[a-z][a-z0-9]*(?:-[a-z0-9]+)*)\.(?P<pid>[0-9]+)\.[0-9a-f-]{36}\.tmp")

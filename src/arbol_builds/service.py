@@ -15,6 +15,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from arbol_installation.admission import Admission, AdmissionRefusal, runtime_folder
+
 from .config import Locations, default_repository, description, load_json
 from .launcher import (
     BUILD_PATTERN,
@@ -475,6 +477,14 @@ def remove_build_payload(registry: str, record: Record, eligible: Callable[[], b
 
 
 def prune_builds(registry: str, component: str, keep: int, *, bin_dir: str | None = None) -> dict[str, Any]:
+    try:
+        with Admission(runtime_folder()).permit("normal"):
+            return prune_admitted(registry, component, keep, bin_dir=bin_dir)
+    except AdmissionRefusal:
+        return {"component": component, "pruned": [], "maintenance": True}
+
+
+def prune_admitted(registry: str, component: str, keep: int, *, bin_dir: str | None = None) -> dict[str, Any]:
     from .unused import shared_runtime, usage_snapshot
 
     dynamic = trunk(component) or shared_runtime(component)

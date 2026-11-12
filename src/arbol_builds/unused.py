@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from arbol_installation.admission import Admission, AdmissionRefusal, runtime_folder
+
 from .config import Locations
 from .launcher import (
     BUILD_PATTERN,
@@ -69,6 +71,14 @@ def prune_unused(paths: Locations, *, now_ms: float | None = None) -> list[dict[
     names = components_in(paths.registry)
     if days is None:
         return [{"component":component,"pruned":[]} for component in names]
+    try:
+        with Admission(runtime_folder()).permit("normal"):
+            return prune_admitted(paths, names, days, now_ms)
+    except AdmissionRefusal:
+        return [{"component": component, "pruned": [], "maintenance": True} for component in names]
+
+
+def prune_admitted(paths: Locations, names: list[str], days: float, now_ms: float | None) -> list[dict[str, Any]]:
     schema = read_schema()
     usage = usage_snapshot(paths, schema)
     clock = time.time()*1000 if now_ms is None else now_ms
