@@ -15,6 +15,7 @@ from uuid import UUID
 
 from .model import Refused
 
+BRIDGE_VERSION = 2
 MAX_LINE = 16 * 1024 * 1024
 MAX_WAITING = 64 * 1024 * 1024
 MAX_IDS = 65536
@@ -23,14 +24,17 @@ MESSAGES = {
     "invalid_input": "The Bridge request is invalid.",
     "unknown_method": "This Build does not provide that method or topic.",
     "not_found": "The requested item was not found.",
-    "database_unavailable": "The Root database is unavailable.",
+    "database_unavailable": "The installation database is unavailable.",
+    "schema_incompatible": "This Build cannot use the installed database schema.",
+    "schema_uninitialized": "The installation database schema has not been initialized.",
+    "maintenance": "Arbol is in maintenance; this operation is paused.",
     "timeout": "The operation exceeded its time limit.",
-    "layout_incomplete": "The Root lacks the backend database layout.",
+    "layout_incomplete": "The installed database lacks the backend layout.",
     "ended": "The subscription has ended.",
     "no_answer": "The requested program did not provide a valid answer.",
     "slow_reader": "This window has more than 64 MiB waiting to be sent.",
 }
-SOURCES = {"trunk", "root-manager", "roots", "driver"}
+SOURCES = {"trunk", "runtime", "root-manager", "roots", "driver"}
 Params = dict[str, Any]
 Validator = Callable[[Params], Awaitable[Params]]
 Handler = Callable[[Params], Awaitable[Any]]

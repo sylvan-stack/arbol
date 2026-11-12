@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from .bridge import Error, Params, Registry, Snapshot, Topic
+from .bridge import BRIDGE_VERSION, Error, Params, Registry, Snapshot, Topic
 from .database import Database
-from .model import ROOT_ID, Identity, Refused, root_record
+from .model import ROOT_ID, Identity, Refused
 from .process import GLOBAL_CATALOGUE, Programs
 
 
@@ -25,8 +24,6 @@ class Roots:
         self.identity, self.programs, self.database = identity, programs, database
         self.inflight: asyncio.Task[Catalogue | Error] | None = None
         self.current: Params | None = None
-        self.complete: Callable[[], Awaitable[bool]] | None = None
-        self.topic = Topic(self.snapshot)
 
     async def catalogue_read(self) -> Catalogue:
         try:
@@ -101,52 +98,39 @@ class Roots:
                     result["failed"] = {"at": failed["at"], "reason": "The Root is marked failed."}
         return result
 
-    async def refresh(self) -> Snapshot:
-        catalogue = await self.catalogue()
-        # No await separates reading the local state, its publication and the snapshot cutoff.
-        # Concurrent refreshes share the catalogue operation without serializing later callers.
-        try:
-            record = root_record(self.identity.folder, self.identity.root)
-        except Refused as error:
-            raise Error("no_answer") from error
-        record["current"] = any(row["root"] == self.identity.root and row["current"] for row in catalogue)
-        info = self.info(record)
-        if info != self.current:
-            self.current = info
-            self.topic.publish({"kind": "root", "root": info})
-        return Snapshot(self.topic.version, {"kind": "snapshot", "root": info})
-
-    async def snapshot(self, params: Params) -> Snapshot:
-        return await self.refresh()
-
-    async def hello(self) -> Params:
-        snapshot = await self.refresh()
-        return {"type": "hello", "bridge": 1, "root": snapshot.event["root"],
-                "build": self.identity.build, "trunkSelection": True}
-
-    async def get(self, params: Params) -> Params:
-        snapshot = await self.refresh()
-        if self.complete is not None:
-            complete = await self.complete()
-        else:
-            rows = await self.database.execute(
-                "SELECT count(*)=5 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
-                "WHERE n.nspname='public' AND ((c.relname IN "
-                "('drafts','chat_settings','chat_marks','exchange_notes') AND c.relkind IN ('r','p')) "
-                "OR (c.relname='drafts_revision' AND c.relkind='S'))"
-            )
-            complete = rows[0][0] is True
-        return {"root": snapshot.event["root"], "layoutComplete": complete}
-
-    async def list(self, params: Params) -> Params:
-        return {"roots": [{"root": row} for row in await self.catalogue()]}
-
-    def register(self, registry: Registry) -> None:
-        registry.method("root.get", self.get)
-        registry.method("roots.list", self.list)
-        registry.topics["root"] = self.topic
-
     async def close(self) -> None:
         if self.inflight:
             self.inflight.cancel()
             await asyncio.gather(self.inflight, return_exceptions=True)
+
+
+class Installation:
+    """Bridge status observations do not grant permission to read or write."""
+
+    def __init__(self, identity: Identity, database: Database, registry: Registry) -> None:
+        self.identity, self.database = identity, database
+        self.maintenance = "unknown"
+        self.last: Params | None = None
+        self.topic = Topic(self.snapshot)
+        registry.method("installation.get", self.get)
+        registry.topics["installation"] = self.topic
+
+    def state(self) -> Params:
+        schema = self.database.schema
+        return {"database": schema.state, "schema": schema.pair(), "maintenance": self.maintenance}
+
+    def publish(self) -> None:
+        state = self.state()
+        if state != self.last:
+            self.last = state
+            self.topic.publish({"kind": "changed", "installation": state})
+
+    async def snapshot(self, params: Params) -> Snapshot:
+        return Snapshot(self.topic.version, {"kind": "snapshot", "installation": self.state()})
+
+    async def get(self, params: Params) -> Params:
+        return {"installation": self.state()}
+
+    async def hello(self) -> Params:
+        return {"type": "hello", "bridge": BRIDGE_VERSION, "build": self.identity.build,
+                "installation": self.state(), "trunkSelection": True}

@@ -6,7 +6,7 @@ import asyncio
 import time
 from typing import Any
 
-from .bridge import MAX_LINE, Error, Params, Registry
+from .bridge import MAX_LINE, Error, Params
 from .chat_data import encoded
 from .listings import CAPACITY, Listings
 from .model import Refused
@@ -16,10 +16,9 @@ TOTAL = 25.0
 
 
 class Discovery:
-    def __init__(self, roots: Roots, listings: Listings, registry: Registry, *, total: float = TOTAL) -> None:
+    def __init__(self, roots: Roots, listings: Listings, *, total: float = TOTAL) -> None:
         self.roots, self.listings, self.total = roots, listings, total
         self.task: asyncio.Task[Params | Error] | None = None
-        registry.method("roots.list", self.get)
 
     async def read(self) -> Params:
         started = time.monotonic()

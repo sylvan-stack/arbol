@@ -30,7 +30,7 @@ from .model import Identity, Refused, private_directory, settings
 from .notes import Notes
 from .process import Programs, backend_ready
 from .recovery import Recovery
-from .roots import Roots
+from .roots import Installation, Roots
 from .settling import Settling
 from .stuck import Stuck
 from .workspace import Workspace
@@ -45,7 +45,7 @@ class Backend:
         self.registry = Registry()
         self.workspace = Workspace(identity, self.settings, self.registry)
         self.roots = Roots(identity, self.programs, self.database)
-        self.roots.register(self.registry)
+        self.installation = Installation(identity, self.database, self.registry)
         self.ticker = Ticker(self.programs, Records(self.database))  # Subscriptions Vigor every three minutes (SGM-1.14)
         self.chats = Chats(identity, self.database, self.programs, self.roots, self.registry)
         self.health = Health(self.database, self.chats.attention)
@@ -64,7 +64,7 @@ class Backend:
         self.listings.on_rows = self.listed
         self.listings.on_failed = self.stuck.failed
         self.settling.read_listing = self.listings.get
-        self.discovery = Discovery(self.roots, self.listings, self.registry)
+        self.discovery = Discovery(self.roots, self.listings)
         self.recovery = Recovery(self.health, self.chats, self.registry, self.settling, self.notes, self.discovery, self.stuck)
         self.recovery.on_returned = self.measurements.returned
         self.windows: set[asyncio.StreamWriter] = set()
@@ -83,7 +83,7 @@ class Backend:
     async def connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self.windows.add(writer)
         try:
-            await Connection(reader, writer, self.registry).run(self.roots.hello)
+            await Connection(reader, writer, self.registry).run(self.installation.hello)
         finally:
             self.windows.discard(writer)
 
@@ -93,6 +93,7 @@ class Backend:
     async def monitor(self) -> None:
         while True:
             await asyncio.sleep(4)
+            self.installation.publish()
             self.programs.reap()
             try:
                 await self.ticker.wake()  # ticks once the interval has passed, no faster (SGM-D30)

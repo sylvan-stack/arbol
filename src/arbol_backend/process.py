@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, BinaryIO
 from uuid import UUID
 
-from .bridge import constant, finite, pairs
+from .bridge import BRIDGE_VERSION, constant, finite, pairs
 from .model import ROOT_ID, Identity, Refused
 
 LIMITS = {"start": 25.0, "stop": 90.0, "settle": 120.0, "list": 10.0, "account": 10.0, "migrate-check": 90.0, "reimport": 90.0}
@@ -79,7 +79,7 @@ async def running_backend(identity: Identity) -> dict[str, Any] | None:
         return None
     except (ValueError, UnicodeError) as error:
         raise Refused("no_answer", "The backend did not send a valid greeting.") from error
-    if (not isinstance(hello, dict) or hello.get("type") != "hello" or hello.get("bridge") != 2
+    if (not isinstance(hello, dict) or hello.get("type") != "hello" or hello.get("bridge") != BRIDGE_VERSION
             or not isinstance(hello.get("build"), str) or not re.fullmatch(r"0|[1-9a-f][0-9a-f]*", hello["build"])):
         raise Refused("bridge_incompatible", "The backend at the installation endpoint does not speak Bridge 2.")
     return backend_ready(identity, pid, hello["build"])

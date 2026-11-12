@@ -101,7 +101,6 @@ class Chats:
         registry.method("chat.settings", self.settings, self.catalogues.settings)
         registry.method("chat.mark", self.mark, mark_params)
         registry.method("paste.save", self.paste, paste_params)
-        self.roots.complete = self.reader.complete
         self.tasks: set[asyncio.Task[None]] = set()
         self.observers: dict[tuple[str, str], asyncio.Task[None]] = {}
         self.on_list_open: Callable[[], None] | None = None
