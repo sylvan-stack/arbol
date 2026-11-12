@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -9,6 +10,7 @@ import stat
 import subprocess
 from typing import Any, NoReturn
 
+from .exchange_admission import lock, private_dir
 from .exchange_command import UUID
 from .exchange_context import Context, Refusal
 from .exchange_process import process_alive, timestamp
@@ -119,7 +121,7 @@ def lookup(context: Context, exchange: str) -> dict[str, Any] | None:
         os.close(catalogue)
 
 
-def listing(context: Context) -> dict[str, Any]:
+def listing(context: Context, *, strict: bool = False) -> dict[str, Any]:
     readable: list[dict[str, Any]] = []
     unreadable: set[str] = set()
     catalogue = open_catalogue(context)
@@ -142,6 +144,8 @@ def listing(context: Context) -> dict[str, Any]:
                     except FileNotFoundError:
                         continue
                     unreadable.add(name[1:-4])
+                elif strict:
+                    raise Refusal("runtime_unavailable", "The Exchange directory contains an unrecognized hidden entry.")
                 continue
             if not UUID.fullmatch(name):
                 raise Refusal('runtime_unavailable', 'The Exchange directory contains a name without an Exchange UUID.')
@@ -164,3 +168,34 @@ def listing(context: Context) -> dict[str, Any]:
         os.close(catalogue)
     return {'exchanges': [row for row in readable if row['exchange'] not in unreadable],
             'unreadable': sorted(unreadable)}
+
+
+
+def drained_inventory(context: Context) -> None:
+    """Require the complete runtime catalogue to be empty with admission closed."""
+    pending = listing(context, strict=True)
+    if pending["exchanges"] or pending["unreadable"]:
+        raise Refusal("maintenance_busy", "The runtime still has live, staged, unreadable or unsettled Exchanges.")
+    starts = context.identity.folder / "exchange-starts"
+    try:
+        folder = os.open(starts, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise Refusal("runtime_unavailable", "Cannot inspect unresolved Exchange starts.") from None
+    try:
+        private_dir(folder)
+        for name in os.listdir(folder):
+            if not UUID.fullmatch(name):
+                raise ValueError("Unrecognized start lock name.")
+            # A detached launcher inherits its UUID lock even before Trivial
+            # has acquired its own admission permit. An unlocked marker is
+            # harmless after the independent catalogue and SQL proofs pass.
+            with lock(folder, name, fcntl.LOCK_EX):
+                pass
+    except BlockingIOError:
+        raise Refusal("maintenance_busy", "An Exchange launch has not resolved.") from None
+    except (OSError, ValueError):
+        raise Refusal("runtime_unavailable", "Cannot verify the Exchange start inventory.") from None
+    finally:
+        os.close(folder)

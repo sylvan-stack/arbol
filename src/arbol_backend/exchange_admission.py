@@ -15,10 +15,13 @@ from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
 from .model import Refused as Refusal
+
+if TYPE_CHECKING:
+    from .database import Session
 
 Mode = Literal["normal", "controlled"]
 Source = dict[str, str | int]
@@ -187,8 +190,7 @@ def directory_lease(runtime: Path, mode: Mode, generation: str | None) -> Iterat
             lease.pid = -1
 
 
-def write_state(folder: int, state: State) -> None:
-    """Publish one complete transition under the gate, never overwrite in place."""
+def staged_state(folder: int, state: State) -> str:
     value = {"format": 1, "state": state.phase, "generation": state.generation,
              "source": state.source, "session": state.session, "release": state.release}
     name = f".{uuid4().hex}.tmp"
@@ -198,13 +200,38 @@ def write_state(folder: int, state: State) -> None:
             stream.write(json.dumps(value, separators=(",", ":")).encode())
             stream.flush()
             os.fsync(stream.fileno())
+    except BaseException:
+        os.unlink(name, dir_fd=folder)
+        raise
+    return name
+
+
+def write_state(folder: int, state: State) -> None:
+    """Publish one complete transition under the gate, never overwrite in place."""
+    previous = staged_state(folder, read_state(folder)) if state.phase == "normal" else None
+    name = None
+    try:
+        name = staged_state(folder, state)
         os.replace(name, STATE, src_dir_fd=folder, dst_dir_fd=folder)
-        os.fsync(folder)
-    finally:
         try:
-            os.unlink(name, dir_fd=folder)
-        except FileNotFoundError:
-            pass
+            os.fsync(folder)
+        except OSError:
+            # If publishing normal failed, restore the fence before admitting
+            # anyone. A missing state is also a refusal if restoration fails.
+            if previous is not None:
+                try:
+                    os.replace(previous, STATE, src_dir_fd=folder, dst_dir_fd=folder)
+                except OSError:
+                    os.unlink(STATE, dir_fd=folder)
+                os.fsync(folder)
+            raise
+    finally:
+        for item in (name, previous):
+            if item is not None:
+                try:
+                    os.unlink(item, dir_fd=folder)
+                except FileNotFoundError:
+                    pass
 
 
 def prepare_directory(runtime: Path) -> None:
@@ -229,3 +256,20 @@ def prepare_directory(runtime: Path) -> None:
         os.fsync(root)
     finally:
         os.close(root)
+
+
+
+async def register_database_writer(session: Session, lease: Lease) -> None:
+    """Bind an application connection to its file lease before issuing any writes."""
+    lease.require()
+    source = lease.state.source
+    info = session.connection.info
+    if (info.host, info.port, info.dbname) != (source["host"], source["port"], source["database"]):
+        raise Refusal("maintenance", "The database connection does not match the writer admission target.")
+    rows = await session.execute("SELECT pg_catalog.pg_try_advisory_lock_shared(%s::bigint)", [DATABASE_WRITER_LOCK])
+    if rows != [(True,)]:
+        raise Refusal("maintenance", "PostgreSQL is fenced for migration.")
+    rows = await session.execute(
+        "SELECT oid FROM pg_catalog.pg_database WHERE datname = pg_catalog.current_database()")
+    if rows != [(source["databaseOid"],)]:
+        raise Refusal("maintenance", "PostgreSQL did not confirm the writer admission target.")
