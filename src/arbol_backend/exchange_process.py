@@ -40,7 +40,7 @@ def started_at(pid: int) -> datetime | None:
 
 def process_alive(process: dict[str, Any]) -> bool:
     pid = process.get('pid')
-    if type(pid) is not int or pid < 1:
+    if type(pid) is not int or not 1 <= pid <= 2147483647:
         raise ValueError('A process needs a positive integer PID.')
     recorded = timestamp(process.get('startedAt'))
     actual = started_at(pid)

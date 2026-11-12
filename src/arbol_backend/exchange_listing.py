@@ -120,10 +120,11 @@ def lookup(context: Context, exchange: str) -> dict[str, Any] | None:
 
 
 def listing(context: Context) -> dict[str, Any]:
-    result: dict[str, Any] = {'exchanges': [], 'unreadable': []}
+    readable: list[dict[str, Any]] = []
+    unreadable: set[str] = set()
     catalogue = open_catalogue(context)
     if catalogue is None:
-        return result
+        return {'exchanges': [], 'unreadable': []}
     try:
         try:
             with os.scandir(catalogue) as entries:
@@ -134,15 +135,23 @@ def listing(context: Context) -> dict[str, Any]:
         for name, symlink, directory in names:
             if name.startswith('.'):
                 if name.endswith(('.new', '.old')):
-                    result['unreadable'].append(name)
+                    if not UUID.fullmatch(name[1:-4]):
+                        raise Refusal('runtime_unavailable', 'The Exchange directory has an invalid staging name.')
+                    try:
+                        os.stat(name, dir_fd=catalogue, follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue
+                    unreadable.add(name[1:-4])
                 continue
+            if not UUID.fullmatch(name):
+                raise Refusal('runtime_unavailable', 'The Exchange directory contains a name without an Exchange UUID.')
             if symlink or not directory:
-                result['unreadable'].append(name)
+                unreadable.add(name)
                 continue
             try:
                 record = read_record(catalogue, name)
                 os.stat(name, dir_fd=catalogue, follow_symlinks=False)
-                result['exchanges'].append(project(record, name))
+                readable.append(project(record, name))
             except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
                 try:
                     os.stat(name, dir_fd=catalogue, follow_symlinks=False)
@@ -150,7 +159,8 @@ def listing(context: Context) -> dict[str, Any]:
                     continue
                 except OSError:
                     pass
-                result['unreadable'].append(name)
+                unreadable.add(name)
     finally:
         os.close(catalogue)
-    return result
+    return {'exchanges': [row for row in readable if row['exchange'] not in unreadable],
+            'unreadable': sorted(unreadable)}

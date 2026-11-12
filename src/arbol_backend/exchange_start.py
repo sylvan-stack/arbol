@@ -19,7 +19,7 @@ from .database import Unavailable
 from .exchange_command import UUID, Command
 from .exchange_context import Context, Refusal
 from .exchange_launcher import MAX_REPLY, Reply, object_line, select_build
-from .model import BUILD_ID, private_directory
+from .model import BUILD_ID, Refused, private_directory
 
 ACCEPT_SECONDS = 20.0
 UNRESOLVED = {"no_answer", "in_progress"}
@@ -37,6 +37,10 @@ async def receipt(context: Context, exchange: str, timeout: float, *, wait_for_c
                     "SELECT chat_id::text, number, trunk, build FROM public.exchanges WHERE id = %s", [exchange])
     except (TimeoutError, Unavailable):
         raise Refusal("database_unavailable", "The installation database could not confirm the Exchange UUID.") from None
+    except Refused as error:
+        if error.code == "schema_incompatible" and database.schema.pair() is None:
+            raise Refusal("schema_invalid", "The installed migration history could not be verified.") from None
+        raise
     finally:
         await database.close()
     if not rows:
@@ -118,15 +122,25 @@ def start(context: Context, command: Command, *, timeout: float = ACCEPT_SECONDS
     deadline = time.monotonic() + timeout
     exchange = command.options["--exchange"]
     request = Path(command.options["--request"])
-    prior = asyncio.run(receipt(context, exchange, max(0, deadline - time.monotonic())))
+    folders = tuple(context.exchanges / name for name in (exchange, f".{exchange}.new", f".{exchange}.old"))
+    lock_file = context.identity.folder / "exchange-starts" / exchange
+    try:
+        prior = asyncio.run(receipt(context, exchange, max(0, deadline - time.monotonic())))
+    except Refused:
+        if any(os.path.lexists(path) for path in (*folders, lock_file)):
+            raise Refusal("in_progress", "The database could not resolve this earlier Exchange start.") from None
+        raise
     if prior is not None:
         return prior
     with launch_lock(context, exchange) as (lock, lock_path):
-        prior = asyncio.run(receipt(context, exchange, max(0, deadline - time.monotonic()), wait_for_commit=True))
+        try:
+            prior = asyncio.run(receipt(context, exchange, max(0, deadline - time.monotonic()), wait_for_commit=True))
+        except Refused:
+            raise Refusal("in_progress", "The Exchange acceptance could not be confirmed under its UUID lock.") from None
         if prior is not None:
             forget(lock_path)
             return prior
-        if any(os.path.lexists(context.exchanges / name) for name in (exchange, f".{exchange}.new", f".{exchange}.old")):
+        if any(os.path.lexists(path) for path in folders):
             raise Refusal("in_progress", "The Exchange already has a pending folder. Resolve it before retrying.")
         try:
             selected = select_build(context, command, timeout=max(0, deadline - time.monotonic()))
