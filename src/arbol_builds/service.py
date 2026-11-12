@@ -12,6 +12,7 @@ import time
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from .config import Locations, default_repository, description, load_json
@@ -511,21 +512,38 @@ def remove_build_payload(registry: str, record: Record, eligible: Callable[[], b
         os.close(descriptor)
 
 
-def prune_builds(registry: str, component: str, keep: int) -> dict[str, Any]:
+def prune_builds(registry: str, component: str, keep: int, *, bin_dir: str | None = None) -> dict[str, Any]:
+    from .unused import shared_runtime, usage_snapshot
+
+    dynamic = trunk(component) or shared_runtime(component)
+    schema = read_schema() if dynamic or component == "arbol" else None
+    paths = Locations(registry, bin_dir or str(Path.home() / ".local/bin"))
+
     def change() -> dict[str, Any]:
         working = [record for record in read_records(registry, component)
                    if record["status"] == "working" and not record.get("prunedAt")]
-        protected = prune_protections(registry, component, working)
+        protected = prune_protections(registry, component, working, schema=schema)
+        usage = usage_snapshot(paths, schema) if dynamic and schema is not None else None
+        if usage is not None and usage.unavailable:
+            return {"component": component, "pruned": [], "runtimeUnavailable": True}
         pruned: list[str] = []
         retained: dict[str, list[str]] = {}
         for record in working[keep:]:
             if record.get("lockedAt") or record["build"] in protected:
                 continue
-            outcome = remove_build_payload(registry, record)
+            number = record["build"]
+            if usage is not None and usage.retains(component, number):
+                retained.setdefault("inUse", []).append(number)
+                continue
+
+            def still_unused(number: str = number) -> bool:
+                return schema is None or not dynamic or not usage_snapshot(paths, schema).retains(component, number)
+
+            outcome = remove_build_payload(registry, record, still_unused)
             if outcome == "pruned":
                 pruned.append(record["build"])
-            elif outcome in ("inUse", "unverifiable"):
-                retained.setdefault(outcome, []).append(record["build"])
+            elif outcome in ("inUse", "unverifiable", "recent"):
+                retained.setdefault("inUse" if outcome == "recent" else outcome, []).append(number)
         return {"component": component, "pruned": pruned, **retained}
 
     return with_mutation_lock(os.path.join(registry, component), change)

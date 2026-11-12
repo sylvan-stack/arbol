@@ -128,7 +128,7 @@ def main(args: list[str]) -> int:
             keep = values.get("--keep")
             if keep is None or re.fullmatch(r"[1-9][0-9]{0,15}", keep) is None or int(keep) > SAFE_INTEGER:
                 raise ValueError("--keep must be a positive whole number.")
-            output(prune_builds(paths.registry, component, int(keep)))
+            output(prune_builds(paths.registry, component, int(keep), bin_dir=paths.bin))
         else:
             stop = Stop()
 
