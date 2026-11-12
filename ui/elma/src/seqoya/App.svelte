@@ -94,9 +94,11 @@
 
     async function withActivity(listing: SubscriptionListing): Promise<SubscriptionListing> {
       const drivers = await Promise.all(listing.drivers.map(async (entry) => {
-        if (entry.driver !== 'mimo' || !entry.subscriptions) return entry;
+        if ((entry.driver !== 'mimo' && entry.driver !== 'pi') || !entry.subscriptions) return entry;
         const accounts = await Promise.all(entry.subscriptions.map(async (subscription) => {
-          if (subscription.family !== 'xiaomi') return subscription;
+          const hasActivity = (entry.driver === 'mimo' && subscription.family === 'xiaomi')
+            || (entry.driver === 'pi' && subscription.family === 'chatgpt');
+          if (!hasActivity) return subscription;
           try {
             const activity = await bridge.call<SubscriptionActivity>('accounts.activity', {
               driver: entry.driver, subscription: subscription.id,
@@ -106,8 +108,8 @@
             return {
               ...subscription,
               activityError: error instanceof Refusal && error.detail.code === 'unknown_method'
-                ? 'This Root’s backend needs an update to show MiMo activity.'
-                : 'Could not read MiMo activity for this Root.',
+                ? 'This Root’s backend needs an update to show account activity.'
+                : 'Could not read account activity for this Root.',
             };
           }
         }));
@@ -124,8 +126,11 @@
         if (!Array.isArray(listing?.drivers)) throw new Error('Invalid account list.');
         vigorAccounts = retainAccounts(listing, vigorAccounts);
         subscriptions = { ...subscriptions, loading: false, listing };
-        const withMiMo = await withActivity(withModelLabels(listing));
-        if (isCurrent(requestedOn)) subscriptions = { ...subscriptions, listing: withMiMo };
+        const withLocalActivity = await withActivity(withModelLabels(listing));
+        if (isCurrent(requestedOn)) {
+          vigorAccounts = retainAccounts(withLocalActivity, vigorAccounts);
+          subscriptions = { ...subscriptions, listing: withLocalActivity };
+        }
       } catch (error) {
         if (!isCurrent(requestedOn)) return;
         subscriptions = {

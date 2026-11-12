@@ -1,3 +1,5 @@
+import type { SubscriptionActivity } from './seqoya-subscriptions';
+
 /** Displayed fields from the saved Radar rollup. */
 export interface VigorRollup {
   moment: string;
@@ -25,6 +27,10 @@ export interface VigorRollup {
         loss: number | null;
         weight?: number | null;
         contribution: number | null;
+        usedPercent?: number | null;
+        resetsAt?: string | null;
+        windowMinutes?: number | null;
+        reached?: boolean;
         predicted: boolean;
         reason: string | null;
       }[];
@@ -35,11 +41,13 @@ export interface VigorRollup {
 
 export type VigorEntry = VigorRollup['subscriptions'][number] & {
   unavailable?: string;
+  activity?: SubscriptionActivity;
+  activityError?: string;
   estimate?: {
     score: number;
     reason: string;
     exhausted?: boolean;
-    budget?: { tokens: number; currency: string; rate: number; referenceTokens: number; ceiling: number };
+    budget?: { amount: string; tokens: number; currency: string; rate: number; referenceTokens: number; ceiling: number };
   };
 };
 

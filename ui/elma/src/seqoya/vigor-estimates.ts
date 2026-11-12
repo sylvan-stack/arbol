@@ -40,7 +40,7 @@ function deepSeekEstimate(account: SubscriptionRecord, entry: VigorEntry): Estim
     score: capacityCeiling * tokens / (tokens + tokensPerRate),
     exhausted: tokens === 0,
     reason: 'Saved balance ' + amount + ' ' + currency + '.',
-    budget: { tokens, currency, rate, referenceTokens: tokensPerRate, ceiling: capacityCeiling },
+    budget: { amount, tokens, currency, rate, referenceTokens: tokensPerRate, ceiling: capacityCeiling },
   };
 }
 
@@ -78,7 +78,10 @@ export function rankVigor(rollup?: VigorRollup, listing?: SubscriptionListing): 
       }
     }
   }
-  return [...entries].map(([key, entry]) => scoreEntry(entry, accounts.get(key)))
+  return [...entries].map(([key, entry]) => {
+    const account = accounts.get(key);
+    return scoreEntry({ ...entry, activity: account?.activity, activityError: account?.activityError }, account);
+  })
     .sort((left, right) => (displayedVigor(right) ?? -1) - (displayedVigor(left) ?? -1));
 }
 

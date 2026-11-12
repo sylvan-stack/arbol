@@ -18,6 +18,11 @@
     const hours = Math.floor(rounded / 60);
     return hours ? hours + ' h ' + rounded % 60 + ' min' : rounded + ' min';
   }
+
+  function minutesUntil(reset: string | null | undefined, moment: string) {
+    const minutes = reset ? (Date.parse(reset) - Date.parse(moment)) / 60_000 : NaN;
+    return Number.isFinite(minutes) ? Math.max(0, minutes) : undefined;
+  }
 </script>
 
 <section class="stack" aria-label="Subscriptions Vigor">
@@ -46,7 +51,7 @@
   {#if entries?.length}
     <ol class="ranked" aria-label="Subscriptions ranked by Vigor">
       {#each entries as entry (subscriptionKey(entry.driver, entry.subscription))}
-        {@const { driver, subscription, family, label, result, estimate, unavailable } = entry}
+        {@const { driver, subscription, family, label, result, estimate, unavailable, activity, activityError } = entry}
         {@const vendor = subscriptionVendor(driver, family)}
         {@const value = displayedVigor(entry)}
         <li>
@@ -68,13 +73,13 @@
               {#if unavailable}
                 <p>{unavailable}</p>
               {:else}
-                {#if estimate}
-                  <p>{estimate.reason}</p>
-                  {#if estimate.budget}
-                    {@const { tokens, currency, rate, referenceTokens, ceiling } = estimate.budget}
-                    <p><strong>{integer.format(tokens)}</strong> estimated output tokens at {currency} {rate} per million for DeepSeek Flash.</p>
-                    <p class="small muted">{ceiling} × tokens ÷ (tokens + {integer.format(referenceTokens)}) = {score.format(estimate.score)}</p>
-                  {/if}
+                {#if estimate?.budget}
+                  {@const { amount, tokens, currency, rate, referenceTokens, ceiling } = estimate.budget}
+                  <p>Estimated output tokens = ({amount} {currency} ÷ {rate} {currency}) × 1,000,000 ≈ <strong>{integer.format(tokens)}</strong></p>
+                  <p class="small muted">DeepSeek Flash peak output rate per million tokens.</p>
+                  <p>Vigor = {ceiling} × {integer.format(tokens)} ÷ ({integer.format(tokens)} + {integer.format(referenceTokens)}) ≈ <strong>{score.format(estimate.score)}</strong></p>
+                {:else if estimate}
+                  <p>Vigor = <strong>{score.format(estimate.score)}</strong> · {estimate.reason}</p>
                 {/if}
                 {#if result?.vigor === null && result.unknown}<p class="muted">{result.unknown}</p>{/if}
                 {#if result?.stale}<p class="small muted">Usage report is {reportAge(result.stale.reportAgeMinutes)} old.</p>{/if}
@@ -87,18 +92,54 @@
                 {#if result?.windows.length}
                   <ul class="windows">
                     {#each result.windows as window}
+                      {@const minutesLeft = minutesUntil(window.resetsAt, result.moment)}
                       <li>
                         <strong>{window.label}</strong>
                         {#if window.predicted}<span class="small muted"> · Predicted</span>{/if}
-                        {#if window.loss !== null}<p class="small">{share.format(window.loss)} may expire unused</p>{/if}
-                        {#if window.weight != null}<p class="small muted">Weight {score.format(window.weight)}</p>{/if}
-                        {#if window.contribution !== null}<p class="small muted">Vigor contribution {score.format(window.contribution)}</p>{/if}
+                        {#if window.loss !== null}
+                          {#if window.reached}
+                            <p class="small">Loss = 0 · limit reached</p>
+                          {:else if window.usedPercent != null && minutesLeft !== undefined && window.windowMinutes}
+                            <p class="small">Loss = max(0, 1 − {share.format(window.usedPercent / 100)} − {score.format(minutesLeft)} min ÷ {score.format(window.windowMinutes)} min) ≈ {score.format(window.loss)}</p>
+                          {:else}
+                            <p class="small">Saved loss {score.format(window.loss)}</p>
+                          {/if}
+                        {/if}
+                        {#if window.contribution !== null && window.weight != null && window.loss !== null}
+                          <p class="small muted">Contribution = {score.format(window.loss)} × {score.format(window.weight)} ≈ {score.format(window.contribution)}</p>
+                        {:else if window.contribution !== null}
+                          <p class="small muted">Saved contribution {score.format(window.contribution)}</p>
+                        {/if}
                         {#if window.reason}<p class="small muted">{window.reason}</p>{/if}
                       </li>
                     {/each}
                   </ul>
                 {:else if !estimate && !result}
                   <p class="muted">No Vigor record yet.</p>
+                {/if}
+                {#if !estimate && result?.vigor != null}
+                  {@const terms = result.windows.flatMap((window) => window.contribution === null ? [] : [score.format(window.contribution)])}
+                  {#if result.exhausted}
+                    <p>Vigor = <strong>0</strong> · inference limit reached</p>
+                  {:else if terms.length}
+                    <p>Vigor = min(1, {terms.join(' + ')}) ≈ <strong>{score.format(result.vigor)}</strong></p>
+                  {:else}
+                    <p>Saved Vigor = <strong>{score.format(result.vigor)}</strong></p>
+                  {/if}
+                {/if}
+              {/if}
+              {#if activity || activityError}
+                <p class="small muted">Arbol activity in this Root · Last 30 days</p>
+                {#if activity}
+                  <p>{integer.format(activity.runCount)} {activity.runCount === 1 ? 'run' : 'runs'} recorded</p>
+                  {#if activity.runCount}
+                    <p class="small">Input tokens {activity.inputTokens ?? 'unavailable'} · Output tokens {activity.outputTokens ?? 'unavailable'}</p>
+                    {#if activity.lastRunAt}
+                      <p class="small muted">Last run <time datetime={activity.lastRunAt}>{formatSubscriptionTime(activity.lastRunAt)}</time></p>
+                    {/if}
+                  {/if}
+                {:else}
+                  <p class="small muted">{activityError}</p>
                 {/if}
               {/if}
             </div>
