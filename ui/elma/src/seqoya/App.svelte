@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import SeqoyaLab from '../../design-system/src/pages/SeqoyaLab.svelte';
   import {
-    canRefreshSubscriptionUsage, subscriptionKey, type SubscriptionActivity, type SubscriptionListing, type SubscriptionView, type UsageDestination,
+    canRefreshSubscriptionUsage, subscriptionKey, type RenameSubscription, type SubscriptionActivity, type SubscriptionListing, type SubscriptionView, type UsageDestination,
   } from '../../design-system/src/sections/seqoya-subscriptions';
   import type { VigorRollup, VigorView } from '../../design-system/src/sections/seqoya-vigor';
   import { AppChannel } from '../app-channel';
@@ -35,6 +35,7 @@
         error ? [driver + ' accounts · ' + error.message] : []) ?? []),
     ],
   });
+  let renameSubscription: RenameSubscription | undefined;
   let activeTab = 'Subscriptions';
   let readSubscriptions: (() => Promise<void>) | undefined;
   let readVigor: (() => Promise<void>) | undefined;
@@ -54,6 +55,11 @@
     void openUsagePage?.(destination, driver, subscription);
   }
 
+  const renameName: RenameSubscription = async (driver, account, name) => {
+    if (!renameSubscription) throw new Error('Subscription editing requires the native App.');
+    await renameSubscription(driver, account, name);
+  };
+
   function changeTab(tab: string) {
     activeTab = tab;
     if (tab === 'Subscriptions' || tab === 'Vigor') refreshSubscriptions();
@@ -65,6 +71,7 @@
     const expiryClock = setInterval(() => { now = Date.now(); refreshPassedWindows(); }, 30_000);
     let active = true;
     let connection = 0;
+    let evidenceRevision = 0;
     let listRequest: Promise<void> | undefined;
     const isCurrent = (requestedOn: number) => active && requestedOn === connection;
     const bridge = new Bridge({
@@ -160,6 +167,7 @@
     readVigor = async () => {
       if (!active || vigor.loading || !subscriptions.connected) return;
       const requestedOn = connection;
+      const requestedEvidenceRevision = evidenceRevision;
       vigor = { ...vigor, loading: true, error: undefined };
       try {
         const reply = await app.call('app.readVigor');
@@ -169,8 +177,10 @@
           || (reply.headline !== null && (!reply.headline || typeof reply.headline !== 'object'))) {
           throw new Error('Invalid Vigor rollup.');
         }
-        evidence = reply.usageEvidence as UsageEvidence | undefined;
-        evidenceError = typeof reply.usageEvidenceError === 'string' ? reply.usageEvidenceError : undefined;
+        if (requestedEvidenceRevision === evidenceRevision) {
+          evidence = reply.usageEvidence as UsageEvidence | undefined;
+          evidenceError = typeof reply.usageEvidenceError === 'string' ? reply.usageEvidenceError : undefined;
+        }
         now = Date.now();
         vigor = { rollup: retainVigor(reply as unknown as VigorRollup, vigor.rollup) };
         refreshPassedWindows();
@@ -240,6 +250,35 @@
       subscriptions = { ...subscriptions, usageRequests: requests };
     };
 
+    renameSubscription = async (driver, account, label) => {
+      if (!active || !subscriptions.connected || !account.createdAt) throw new Error('Reconnect and refresh this subscription before editing.');
+      const requestedOn = connection;
+      const current = subscriptions.listing?.drivers.find(entry => entry.driver === driver)?.subscriptions?.find(row => row.id === account.id);
+      if (!current || current.createdAt !== account.createdAt || current.checkedAt !== account.checkedAt || current.label !== account.label) {
+        throw new Error('This subscription changed while you were editing. Refresh before saving.');
+      }
+      const reply = await app.call('app.renameSubscription', {
+        driver, subscription: account.id, label, expectedLabel: account.label,
+        createdAt: account.createdAt, checkedAt: account.checkedAt ?? null,
+      });
+      if (!isCurrent(requestedOn)) throw new Error('The save finished after the connection changed. Refresh to see the saved name.');
+      if (reply.label !== label || typeof reply.updatedAt !== 'string') throw new Error('The App did not confirm this name. Refresh before trying again.');
+      evidenceRevision++;
+      evidence = reply.usageEvidence as UsageEvidence | undefined;
+      evidenceError = typeof reply.usageEvidenceError === 'string' ? reply.usageEvidenceError : undefined;
+      const key = subscriptionKey(driver, account.id);
+      subscriptions = {
+        ...subscriptions,
+        nameNotices: { ...subscriptions.nameNotices, [key]: typeof reply.warning === 'string' ? reply.warning : undefined },
+        listing: subscriptions.listing && { drivers: subscriptions.listing.drivers.map(entry => entry.driver !== driver ? entry : ({
+          ...entry, subscriptions: entry.subscriptions?.map(row => row.id === account.id && row.createdAt === account.createdAt
+            ? { ...row, label, updatedAt: reply.updatedAt as string } : row),
+        })) },
+      };
+      await listRequest;
+      if (isCurrent(requestedOn)) await reloadList();
+    };
+
     openUsagePage = async (destination, driver, subscription) => {
       const key = subscriptionKey(driver, subscription);
       const requestedOn = connection;
@@ -271,6 +310,7 @@
       readVigor = undefined;
       readUsage = undefined;
       openUsagePage = undefined;
+      renameSubscription = undefined;
       clearInterval(expiryClock);
       bridge.close();
       app.close();
@@ -281,6 +321,6 @@
 <SeqoyaLab fitted {connectionStatus}
   subscriptions={subscriptionView} vigor={vigorView} onTabChange={changeTab}
   onRefreshSubscriptions={refreshSubscriptions} onRefreshVigor={refreshSubscriptions}
-  onRefreshUsage={refreshUsage} onOpenUsage={openUsage}
+  onRefreshUsage={refreshUsage} onOpenUsage={openUsage} onRenameSubscription={renameName}
   appearanceReady={ready} bind:theme={appearance.theme} bind:uiScale={appearance.uiScale}
   onAppearanceChange={() => { if (ready) saveSeqoyaAppearance('installation', appearance); }} />

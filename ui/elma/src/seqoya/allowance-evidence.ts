@@ -26,6 +26,11 @@ interface WindowEstimate {
   observedAt: string;
   amount: number;
   scale?: number;
+  calibration?: {
+    startedAt: string; endedAt: string; startResetsAt: string; endResetsAt: string;
+    startUsedPercent: number; endUsedPercent: number;
+    model: 'Kimi Code K3.1 Pro'; outputTokens: number;
+  };
 }
 
 /** The optional bounded projection returned by the native app.readVigor channel. */
@@ -312,12 +317,24 @@ function windowCapacity(
   const checkedAt = 'checkedAt' in account && typeof account.checkedAt === 'string' ? Date.parse(account.checkedAt) : NaN;
   const samples = evidence?.windowEstimates?.filter((sample) => {
     const reference = references[sample.basis];
+    if (sample.basis === 'kimiCalls') return false; // Normalized quota units are not calls.
+    if (sample.basis === 'kimiLocal' && sample.window === 'Five hours') {
+      const calibration = sample.calibration;
+      if (!calibration || calibration.model !== reference.model || calibration.outputTokens !== sample.amount
+        || Math.abs(calibration.endUsedPercent - calibration.startUsedPercent - (sample.scale ?? 0)) > .001
+        || (sample.scale ?? 0) < 5 || Date.parse(sample.observedAt) < now - 28 * day
+        || Date.parse(calibration.startedAt) >= Date.parse(calibration.endedAt)
+        || Date.parse(calibration.endedAt) !== Date.parse(sample.observedAt)
+        || Date.parse(calibration.startResetsAt) !== Date.parse(calibration.endResetsAt)
+        || Date.parse(calibration.startedAt) < Date.parse(calibration.endResetsAt) - 300 * 60_000
+        || Date.parse(calibration.endedAt) >= Date.parse(calibration.endResetsAt)) return false;
+    }
     return reference && reference.driver === driver && reference.family === account.family && sample.subscription === account.id
       && checkedAt === Date.parse(sample.checkedAt) && sample.window === label && Date.parse(sample.observedAt) <= now
       && (sample.basis !== 'zaiCredits' || resource === 'credits');
   });
   if (samples?.length !== 1) return undefined;
-  const [{ basis, amount, scale, observedAt }] = samples;
+  const [{ basis, amount, scale, observedAt, calibration }] = samples;
   const model = references[basis].model;
   const number = (value: number) => integer.format(Math.round(value));
   let total: number;
@@ -331,17 +348,17 @@ function windowCapacity(
     source = 'Verified Coding Plan credit cap at the published GLM-5.3 Standard output rate.';
   } else {
     if (!scale) return undefined;
-    if (basis === 'kimiCalls') {
-      total = amount * scale;
-      calculation = `${number(amount)} output tokens per turn × ${number(scale)} calls.`;
-      source = 'Median local Kimi Code output. This estimate uses one local turn per reported call.';
-    } else {
       total = amount / (scale / 100);
       calculation = `${number(amount)} observed output equivalents ÷ ${scale}% of the window.`;
-      source = basis === 'piChatGPT'
+      source = basis === 'kimiLocal' && calibration
+        ? 'Local K3.1 Pro output between ' + formatSubscriptionCardTime(calibration.startedAt)
+          + ' and ' + formatSubscriptionCardTime(calibration.endedAt) + '. Usage moved from '
+          + calibration.startUsedPercent + '% to ' + calibration.endUsedPercent
+          + '% before the same reset at ' + formatSubscriptionCardTime(calibration.endResetsAt)
+          + '. Other shared-account activity can affect this reference estimate.'
+        : basis === 'piChatGPT'
         ? 'Local Codex usage matched to the ChatGPT Plus window, using published Standard credit weights.'
         : 'Local output from the observed workload, scaled by the provider’s reported used share. Other account usage can affect the estimate.';
-    }
   }
   return { model, total, source: `${source} Sampled ${formatSubscriptionCardTime(observedAt)}. ${calculation}`, calculation };
 }

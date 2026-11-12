@@ -17,6 +17,7 @@ export interface SubscriptionRecord {
   auth: string;
   state: string;
   createdAt?: string;
+  checkedAt?: string;
   updatedAt?: string;
   allowance?: AllowanceView;
   metrics?: SubscriptionMetrics;
@@ -76,6 +77,40 @@ export interface SubscriptionMetrics {
   };
 }
 
+export type RenameSubscription = (
+  driver: string, account: SubscriptionRecord, name: string,
+) => Promise<void>;
+
+export type AllowanceWindowType = '5h' | 'week' | 'month' | 'other';
+
+export function allowanceWindowType(window: SubscriptionWindow): AllowanceWindowType {
+  if (window.windowMinutes === 300) return '5h';
+  if (window.windowMinutes === 10_080) return 'week';
+  if (window.windowMinutes !== undefined && window.windowMinutes >= 28 * 1440 && window.windowMinutes <= 32 * 1440
+    || window.label.startsWith('Monthly,') || window.label === 'Token Plan') return 'month';
+  return 'other';
+}
+
+export function allowanceWindowLabel(window: SubscriptionWindow): string {
+  return { '5h': '5 hours', week: '7 days', month: 'a month', other: 'other' }[allowanceWindowType(window)];
+}
+
+export function sortAllowanceWindows(windows: readonly SubscriptionWindow[]): SubscriptionWindow[] {
+  const rank = { '5h': 0, week: 1, month: 2, other: 3 };
+  return [...windows].sort((a, b) => rank[allowanceWindowType(a)] - rank[allowanceWindowType(b)]
+    || (a.windowMinutes ?? Infinity) - (b.windowMinutes ?? Infinity) || a.label.localeCompare(b.label));
+}
+
+/** Preserve familiar headings for Driver defaults, and show edited account names. */
+export function subscriptionName(driver: string, account: SubscriptionRecord): string {
+  const defaults: Record<string, string> = {
+    anthropic: 'Anthropic', chatgpt: 'ChatGPT', xiaomi: 'Xiaomi MiMo',
+    zai: 'z.ai Coding Plan', 'kimi-coding': 'Kimi Code', deepseek: 'DeepSeek',
+  };
+  return account.label === defaults[account.family] || !account.label.trim()
+    ? subscriptionVendor(driver, account.family) : account.label;
+}
+
 export type UsageDestination = 'chatgpt' | 'mimo';
 export type OpenSubscriptionUsage = (destination: UsageDestination, driver: string, subscription: string) => void;
 
@@ -129,6 +164,7 @@ export interface SubscriptionView {
   usageRequests?: Record<string, { pending?: boolean; error?: string }>;
   usageLinkErrors?: Record<string, string | undefined>;
   evidenceError?: string;
+  nameNotices?: Record<string, string | undefined>;
 }
 
 export function subscriptionKey(driver: string, subscription: string): string {
