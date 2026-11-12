@@ -7,9 +7,12 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
+import tempfile
+import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +25,7 @@ sys.path[:0] = [str(ROOT / relative) for relative in ("", "src", "tests", "scrip
 from backend.support import SingleInstallation  # noqa: E402
 from backend_package import verify as verify_backend  # noqa: E402
 
+from arbol_backend.exchange_start import accepted, wait_reply  # noqa: E402
 from arbol_builds.launcher import BUILD_PATTERN, code_name, executable_entry, valid_record  # noqa: E402
 from arbol_builds.service import shebang, write_launcher  # noqa: E402
 
@@ -84,11 +88,14 @@ class JourneyInstallation(SingleInstallation):
     def __init__(self, arbol: Build, trunk: Build) -> None:
         self._ready = False
         self._starts: set[str] = set()
-        revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, timeout=10).strip()
-        if revision != arbol.source:
-            raise ValueError("Run the fixture from the pinned source revision of the qualified Arbol Build.")
-        subprocess.run(["git", "diff", "--quiet", "HEAD", "--", "src/arbol_builds", "src/arbol_installation",
-                        "tools/trunk_runtime_journeys.py", "tools/backend_fault_driver.py"], cwd=ROOT, check=True, timeout=10)
+        self._public_children: list[subprocess.Popen[bytes]] = []
+        self.harness_source = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, timeout=10).strip()
+        subprocess.run(["git", "diff", "--quiet", arbol.source, "--", "src", "tests/backend/support.py",
+                        "scripts/backend_package.py", "tools/backend_fault_driver.py"],
+                       cwd=ROOT, check=True, timeout=10)
+        subprocess.run(["git", "diff", "--quiet", "HEAD", "--", "tools/trunk_runtime_journeys.py"],
+                       cwd=ROOT, check=True, timeout=10)
         verify_backend(arbol.folder)
         super().__init__(arbol.folder)
         try:
@@ -215,8 +222,26 @@ class JourneyInstallation(SingleInstallation):
         selection = [code, "-v", build] if build is not None else [code]
         args = ["--exchange", str(exchange), "--request", str(request)]
         if public:
-            return self._call(self.bin / "arbol-trunk", *selection, "run", "--detach", *args)
+            return self.public_start([*selection, "run", "--detach", *args], str(exchange))
         return self._call(self.package / "bin/arbol-exchanges", "start", *selection, *args)
+
+    def public_start(self, arguments: list[str], exchange: str) -> Reply:
+        executable = self.bin / "arbol-trunk"
+        if not executable.resolve(strict=True).is_relative_to(self.cluster.base):
+            raise ValueError("The public journey refuses an executable outside the disposable installation.")
+        with tempfile.TemporaryFile(mode="w+b") as output:
+            child = subprocess.Popen([str(executable), *arguments], cwd=self.work, env=self.env,
+                                     stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.DEVNULL,
+                                     start_new_session=True)
+            self._public_children.append(child)
+            value = wait_reply(child, output, time.monotonic() + 30)
+        if value is None:
+            raise ValueError("The public start did not return an acceptance or refusal object.")
+        if "error" in value:
+            return Reply(child.wait(timeout=5), value)
+        if not accepted(value, exchange):
+            raise ValueError("The public start did not confirm the requested Exchange identity.")
+        return Reply(0, value)
 
     def close(self) -> None:
         try:
@@ -224,8 +249,22 @@ class JourneyInstallation(SingleInstallation):
                 for item in self.runtime_call("list").require()["exchanges"]:
                     if item["exchange"] in self._starts and item["process"]["alive"]:
                         self.runtime_call("stop", UUID(item["exchange"]), force=True).require()
+                for exchange in sorted(self._starts):
+                    self.runtime_call("settle", UUID(exchange)).require()
         finally:
-            super().close()
+            try:
+                for child in self._public_children:
+                    try:
+                        child.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        child.terminate()
+                        try:
+                            child.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            os.killpg(child.pid, signal.SIGKILL)
+                            child.wait(timeout=5)
+            finally:
+                super().close()
 
 
 def main() -> int:
@@ -238,7 +277,7 @@ def main() -> int:
         trunk = Build.checked(options.trunk_build, "arbol-trunk/trivial")
         fixture = JourneyInstallation(arbol, trunk)
         try:
-            print(json.dumps({"arbolBuild": arbol.number, "arbolSource": arbol.source, "trivialBuild": trunk.number,
+            print(json.dumps({"harnessSource": fixture.harness_source, "arbolBuild": arbol.number, "arbolSource": arbol.source, "trivialBuild": trunk.number,
                               "trivialSource": trunk.source, "inventory": fixture.trunks().require(),
                               "runtime": fixture.runtime_call("list").require()}))
         finally:
