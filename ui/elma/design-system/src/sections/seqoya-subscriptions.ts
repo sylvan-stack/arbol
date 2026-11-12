@@ -148,20 +148,22 @@ export function subscriptionVendor(driver: string, family: string): string {
   return driver === 'codex' && family === 'chatgpt' ? 'Codex' : (vendors.get(family) ?? family);
 }
 
-const dateTime = new Intl.DateTimeFormat(undefined, {
-  year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
-  timeZoneName: 'short',
-});
-
+/** Local calendar days (rather than 24-hour offsets) keep Tomorrow correct across DST. */
 export function formatSubscriptionTime(value: string): string {
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? 'Time unavailable' : dateTime.format(date);
+  if (Number.isNaN(date.getTime())) return 'Time unavailable';
+  const today = new Date();
+  const tomorrow = new Date(today);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const time = new Intl.DateTimeFormat('en-GB', {
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).format(date);
+  if (date.toDateString() === today.toDateString()) return time;
+  if (date.toDateString() === tomorrow.toDateString()) return 'Tomorrow ' + time;
+  const day = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short' }).format(date);
+  return day + ', ' + time;
 }
 
-const localClock = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
-
 export function formatSubscriptionCardTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return 'Time unavailable';
-  return date.toDateString() === new Date().toDateString() ? localClock.format(date) : formatSubscriptionTime(value);
+  return formatSubscriptionTime(value);
 }

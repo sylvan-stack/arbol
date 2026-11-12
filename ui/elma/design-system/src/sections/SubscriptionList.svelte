@@ -120,9 +120,6 @@
         {@const usageRequest = view.usageRequests?.[key]}
         <li class="panel stack account">
           <h2>{vendor}</h2>
-          {#if subscription.label !== vendor}
-            <p class="small muted">{subscription.label}</p>
-          {/if}
           {#if subscription.problem}
             <p class="small warning">{subscription.problem.message}</p>
           {/if}
@@ -150,7 +147,9 @@
                   {#if !window.pendingStart}
                     <dt>Time remaining</dt><dd>{window.resetsAt === null ? 'No scheduled end' : window.remainingMinutes === undefined ? missingReading : duration(window.remainingMinutes)}</dd>
                   {/if}
-                  <dt>Allowance expires</dt><dd>{#if !window.terminal && (window.resetsAt || window.pendingStart) && window.expiresAt === undefined}No separate expiry{:else if !deepseek && window.expiresAt === undefined}{missingReading}{:else}{@render expiration(window.expiresAt)}{/if}</dd>
+                  {#if window.expiresAt !== undefined || window.terminal || deepseek}
+                    <dt>Allowance expires</dt><dd>{#if !deepseek && window.expiresAt === undefined}{missingReading}{:else}{@render expiration(window.expiresAt)}{/if}</dd>
+                  {/if}
                   <dt>Allowance used</dt><dd>{window.usedPercent === undefined ? missingReading : percentValue(window.usedPercent)}</dd>
                   <dt>Allowance remaining</dt><dd>{window.remainingPercent === undefined ? missingReading : percentValue(window.remainingPercent)}</dd>
                   <dt>Output-token equivalents used</dt><dd title={estimateTitle(window)}>{estimateValue(window.outputTokensUsed, missingEstimate)}</dd>
