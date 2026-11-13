@@ -42,7 +42,7 @@ export interface BridgeOptions {
 }
 const limit=16*1024*1024;
 const error=(code:string,message:string)=>new Refusal({code,message});
-export function deadline(method:string):number {return ['chat.send','exchange.sendAgain'].includes(method)?150000:method==='exchange.stop'?120000:30000;}
+export function deadline(method:string):number {return ['chat.send','exchange.sendAgain'].includes(method)?150000:method==='exchange.stop'?120000:method==='accounts.startWindow'?60000:30000;}
 export class Bridge {
  private serial=0;private online=false;private stopped=false;private versionOk=true;private trunkSelection=false;
  get supportsTrunkSelection(){return this.trunkSelection;}

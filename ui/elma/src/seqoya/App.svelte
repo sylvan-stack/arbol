@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import SeqoyaLab from '../../design-system/src/pages/SeqoyaLab.svelte';
   import {
-    canRefreshSubscriptionUsage, subscriptionKey, type RenameSubscription, type SubscriptionActivity, type SubscriptionListing, type SubscriptionView, type UsageDestination,
+    canRefreshSubscriptionUsage, subscriptionKey, type RenameSubscription, type SubscriptionActivity, type SubscriptionListing, type SubscriptionRecord, type SubscriptionView, type UsageDestination,
   } from '../../design-system/src/sections/seqoya-subscriptions';
   import type { VigorRollup, VigorView } from '../../design-system/src/sections/seqoya-vigor';
   import { AppChannel } from '../app-channel';
@@ -39,15 +39,18 @@
   let activeTab = 'Subscriptions';
   let readSubscriptions: (() => Promise<void>) | undefined;
   let readVigor: (() => Promise<void>) | undefined;
-  let readUsage: ((driver: string, subscription: string) => Promise<void>) | undefined;
+  let readUsage: ((driver: string, subscription: string, startWindow?: boolean) => Promise<void>) | undefined;
+  let retryWindowStarts: ((key?: string) => void) | undefined;
   let openUsagePage: ((destination: UsageDestination, driver: string, subscription: string) => Promise<void>) | undefined;
 
-  function refreshSubscriptions() {
+  function refreshSubscriptions(retryStarts = false) {
+    if (retryStarts) retryWindowStarts?.();
     void readSubscriptions?.();
     void readVigor?.();
   }
 
   function refreshUsage(driver: string, subscription: string) {
+    retryWindowStarts?.(subscriptionKey(driver, subscription));
     void readUsage?.(driver, subscription);
   }
 
@@ -68,7 +71,9 @@
   onMount(() => {
     const app = new AppChannel();
     const attemptedBoundaries = new Map<string, Set<number>>();
-    const expiryClock = setInterval(() => { now = Date.now(); refreshPassedWindows(); }, 30_000);
+    const attemptedStarts = new Map<string, string>();
+    retryWindowStarts = (key) => { if (key) attemptedStarts.delete(key); else attemptedStarts.clear(); };
+    const expiryClock = setInterval(() => { now = Date.now(); refreshWindows(); }, 30_000);
     let active = true;
     let connection = 0;
     let evidenceRevision = 0;
@@ -139,7 +144,7 @@
         if (isCurrent(requestedOn)) {
           vigorAccounts = retainAccounts(withLocalActivity, vigorAccounts);
           subscriptions = { ...subscriptions, listing: withLocalActivity };
-          queueMicrotask(refreshPassedWindows);
+          queueMicrotask(refreshWindows);
         }
       } catch (error) {
         if (!isCurrent(requestedOn)) return;
@@ -187,7 +192,7 @@
         }
         now = Date.now();
         vigor = { rollup: retainVigor(reply as unknown as VigorRollup, vigor.rollup) };
-        refreshPassedWindows();
+        refreshWindows();
       } catch (error) {
         if (!isCurrent(requestedOn)) return;
         vigor = {
@@ -203,7 +208,7 @@
     };
 
     function refreshPassedWindows() {
-      if (!active || !subscriptions.connected || activeTab !== 'Subscriptions' || !readUsage) return;
+      if (!active || !subscriptions.connected || !['Subscriptions', 'Vigor'].includes(activeTab) || !readUsage) return;
       for (const { driver, subscriptions: accounts } of subscriptionView.listing?.drivers ?? []) {
         for (const account of accounts ?? []) {
           if (!canRefreshSubscriptionUsage(driver, account)) continue;
@@ -221,24 +226,77 @@
       }
     }
 
-    readUsage = async (driver, subscription) => {
+    function canStartWindow(driver: string, account: SubscriptionRecord) {
+      return account.state === 'signed_in' && !!account.createdAt && (
+        driver === 'claude' && account.family === 'anthropic'
+        || driver === 'codex' && account.family === 'chatgpt'
+        || driver === 'pi' && ['chatgpt', 'kimi-coding', 'zai'].includes(account.family)
+      );
+    }
+
+    function refreshWindows() {
+      refreshPassedWindows();
+      if (!active || !subscriptions.connected || !['Subscriptions', 'Vigor'].includes(activeTab) || !readUsage) return;
+      for (const { driver, subscriptions: accounts } of subscriptionView.listing?.drivers ?? []) {
+        for (const account of accounts ?? []) {
+          if (!canStartWindow(driver, account)) continue;
+          const key = subscriptionKey(driver, account.id);
+          const windows = account.metrics?.windows ?? [];
+          if (!windows.some(window => window.pendingStart)) {
+            if (windows.some(window => window.windowMinutes === 300 && window.remainingMinutes !== undefined)) {
+              attemptedStarts.delete(key);
+            }
+            continue;
+          }
+          const binding = JSON.stringify([account.createdAt, account.family]);
+          if (subscriptions.usageRequests?.[key]?.pending || attemptedStarts.get(key) === binding) continue;
+          // Claim before dispatch. A still-pending report must not recursively retry.
+          attemptedStarts.set(key, binding);
+          void readUsage(driver, account.id, true);
+        }
+      }
+    }
+
+    readUsage = async (driver, subscription, startWindow = false) => {
       const account = subscriptions.listing?.drivers.find((entry) => entry.driver === driver)
         ?.subscriptions?.find((row) => row.id === subscription);
       const key = subscriptionKey(driver, subscription);
       if (!active || !subscriptions.connected || subscriptions.usageRequests?.[key]?.pending
-        || !account || !canRefreshSubscriptionUsage(driver, account)) return;
+        || !account || !(startWindow ? canStartWindow(driver, account) : canRefreshSubscriptionUsage(driver, account))) return;
       const requestedOn = connection;
+      const sameAccount = () => isCurrent(requestedOn) && subscriptions.listing?.drivers
+        .find(entry => entry.driver === driver)?.subscriptions?.some(row => row.id === subscription
+          && row.createdAt === account.createdAt && row.family === account.family && row.state === 'signed_in');
+      const pending = { pending: true };
       subscriptions = {
-        ...subscriptions, usageRequests: { ...subscriptions.usageRequests, [key]: { pending: true } },
+        ...subscriptions, usageRequests: { ...subscriptions.usageRequests, [key]: pending },
       };
       let problem: string | undefined;
+      if (startWindow) {
+        try {
+          const result = await bridge.call<{ outcome: string }>('accounts.startWindow', {
+            driver, subscription, createdAt: account.createdAt,
+          });
+          if (!['started', 'skipped'].includes(result?.outcome)) problem = 'The provider did not confirm the window start.';
+        } catch (error) {
+          problem = error instanceof Refusal ? error.message : 'Could not start this allowance window.';
+        }
+        if (!sameAccount()) {
+          if (subscriptions.usageRequests?.[key] === pending) {
+            const requests = { ...subscriptions.usageRequests };
+            delete requests[key];
+            subscriptions = { ...subscriptions, usageRequests: requests };
+          }
+          return;
+        }
+      }
       try {
         const result = await bridge.call<{ outcome: string; message?: string }>('accounts.usage', {
           driver, subscription,
         });
-        if (result?.outcome !== 'ok') problem = result?.message || 'The provider did not return a usage report.';
+        if (result?.outcome !== 'ok') problem ??= result?.message || 'The provider did not return a usage report.';
       } catch (error) {
-        problem = error instanceof Refusal ? error.message : 'Could not refresh usage.';
+        problem ??= error instanceof Refusal ? error.message : 'Could not refresh usage.';
       }
       if (!isCurrent(requestedOn)) return;
       // A listing begun before the provider replied may still contain the previous report.
@@ -252,6 +310,7 @@
       if (problem && current?.family === account.family && current?.createdAt === account.createdAt) requests[key] = { error: problem };
       else delete requests[key];
       subscriptions = { ...subscriptions, usageRequests: requests };
+      queueMicrotask(refreshWindows);
     };
 
     renameSubscription = async (driver, account, label) => {
@@ -313,6 +372,7 @@
       readSubscriptions = undefined;
       readVigor = undefined;
       readUsage = undefined;
+      retryWindowStarts = undefined;
       openUsagePage = undefined;
       renameSubscription = undefined;
       clearInterval(expiryClock);
@@ -324,7 +384,7 @@
 
 <SeqoyaLab fitted {connectionStatus}
   subscriptions={subscriptionView} vigor={vigorView} onTabChange={changeTab}
-  onRefreshSubscriptions={refreshSubscriptions} onRefreshVigor={refreshSubscriptions}
+  onRefreshSubscriptions={() => refreshSubscriptions(true)} onRefreshVigor={() => refreshSubscriptions(true)}
   onRefreshUsage={refreshUsage} onOpenUsage={openUsage} onRenameSubscription={renameName}
   appearanceReady={ready} bind:theme={appearance.theme} bind:uiScale={appearance.uiScale}
   onAppearanceChange={() => { if (ready) saveSeqoyaAppearance('installation', appearance); }} />

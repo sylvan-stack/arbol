@@ -65,9 +65,10 @@
   </div>
   {#if window.next === 'projected'}<p class="small muted">Estimated next allowance</p>{/if}
   <div class="time-row">
+    <span class="time-label">Time remaining</span>
     <Tooltip text={resetTip}>
       <button class="time-remaining" aria-label={'Time remaining: ' + timeLeft + '. ' + resetTip}>
-        <span>Time remaining</span><span>{timeLeft}</span>
+        {timeLeft}
       </button>
     </Tooltip>
   </div>
@@ -90,10 +91,10 @@
   .remaining { display: block; height: 100%; background: var(--accent); border-radius: 999px 0 0 999px; }
   .bar-labels { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 5px 12px; margin-top: 5px; font-size: .85em; color: var(--muted); }
   .bar-labels strong { margin-left: 4px; font-weight: 500; color: var(--text); font-variant-numeric: tabular-nums; }
-  .time-row :global(.tooltip-wrap) { display: block; }
-  .time-remaining { display: flex; justify-content: space-between; gap: 16px; width: 100%; padding: 0; border: 0; background: transparent; color: var(--text); font: inherit; text-align: start; cursor: help; }
-  .time-remaining span:first-child { color: var(--muted); }
-  .time-remaining span:last-child { text-align: end; font-variant-numeric: tabular-nums; text-decoration: underline dotted var(--muted); text-underline-offset: 4px; }
+  .time-row { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; }
+  .time-label { color: var(--muted); }
+  .time-row :global(.tooltip-wrap) { min-width: 0; text-align: end; }
+  .time-remaining { padding: 0; border: 0; background: transparent; color: var(--text); font: inherit; text-align: end; font-variant-numeric: tabular-nums; text-decoration: underline dotted var(--muted); text-underline-offset: 4px; cursor: help; }
   .metrics { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 16px; margin: 0; }
   .metrics dt { color: var(--muted); }
   .metrics dd { margin: 0; text-align: end; font-variant-numeric: tabular-nums; }
