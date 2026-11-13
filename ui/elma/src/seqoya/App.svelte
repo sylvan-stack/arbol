@@ -96,6 +96,10 @@
         }
       },
     });
+    // Bridge projects validated installation snapshots and events through onstate.
+    bridge.subscribe('installation', {}, () => {}, (error) => {
+      connectionStatus = error?.message ?? 'Installation status updates ended.';
+    });
 
     async function withActivity(listing: SubscriptionListing): Promise<SubscriptionListing> {
       const drivers = await Promise.all(listing.drivers.map(async (entry) => {
