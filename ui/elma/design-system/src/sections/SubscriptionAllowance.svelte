@@ -59,8 +59,8 @@
       {/if}
     </div>
     <div class="bar-labels">
-      <span>Used <strong>{used === undefined ? '—' : percent.format(100 - remaining!) + '%'}</strong></span>
       <span>Remaining <strong>{remaining === undefined ? '—' : percent.format(remaining) + '%'}</strong></span>
+      <span>Used <strong>{used === undefined ? '—' : percent.format(100 - remaining!) + '%'}</strong></span>
     </div>
   </div>
   {#if window.next === 'projected'}<p class="small muted">Estimated next allowance</p>{/if}
@@ -86,8 +86,8 @@
   .window-divider { display: flex; align-items: center; gap: 10px; margin: 2px 0; font-size: .85em; font-weight: 500; color: var(--muted); }
   .window-divider::before, .window-divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
   .window-divider span { flex: 0 0 auto; }
-  .bar { height: 10px; border-radius: 999px; background: var(--border); display: flex; justify-content: flex-end; overflow: hidden; }
-  .remaining { display: block; height: 100%; background: var(--accent); border-radius: 0 999px 999px 0; }
+  .bar { height: 10px; border-radius: 999px; background: var(--border); display: flex; justify-content: flex-start; overflow: hidden; }
+  .remaining { display: block; height: 100%; background: var(--accent); border-radius: 999px 0 0 999px; }
   .bar-labels { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 5px 12px; margin-top: 5px; font-size: .85em; color: var(--muted); }
   .bar-labels strong { margin-left: 4px; font-weight: 500; color: var(--text); font-variant-numeric: tabular-nums; }
   .time-row :global(.tooltip-wrap) { display: block; }
