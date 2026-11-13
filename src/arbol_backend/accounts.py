@@ -9,11 +9,13 @@ from functools import partial
 from typing import Any
 
 from .account_data import CODE, Public
+from .allowance_start import pending_window, start_window
 from .bridge import MAX_LINE, Error, Params, Registry, driver_id, encode
 from .database import Database
 from .dispatch import Forwarded
 from .metadata import iso
 from .migration import message
+from .model import Refused
 from .process import Programs
 from .validation import Catalogues
 
@@ -50,6 +52,7 @@ class Accounts:
         registry.method("accounts.list", self.list)
         for operation in ("check", "usage", "models"):
             registry.method("accounts."+operation, partial(self.action, operation), self.target)
+        registry.method("accounts.startWindow", self.start_window, self.window_target)
         if database is not None:
             registry.method("accounts.activity", self.activity, self.target)
 
@@ -172,6 +175,50 @@ class Accounts:
             result["outputTokens"] = output_tokens
         if last_run is not None:
             result["lastRunAt"] = iso(last_run)
+        return result
+
+    async def window_target(self, params: Params) -> Params:
+        target = await self.target(params)
+        try:
+            target["createdAt"] = Public(self.secrets()).time(params.get("createdAt"))
+        except Error as error:
+            raise Error("invalid_input") from error
+        return target
+
+    async def window_outcome(self, params: Params) -> Params | Error:
+        try:
+            if self.closed or self.database is None:
+                raise Error("ended")
+            async with asyncio.timeout(40), self.database.permit():
+                public = Public(self.secrets())
+                rows = [public.subscription(row) for row in await self.raw(params["driver"])]
+                account = next((row for row in rows if row["id"] == params["subscription"]), None)
+                if account is None or account["createdAt"] != params["createdAt"]:
+                    raise Error("invalid_input")
+                if not pending_window(params["driver"], account):
+                    return {"outcome": "skipped"}
+                async with self.capacity:
+                    await start_window(self.programs, params["driver"], params["subscription"])
+                return {"outcome": "started"}
+        except asyncio.CancelledError:
+            raise
+        except Refused as error:
+            return error if isinstance(error, Error) else Error(error.code)
+        except Exception as error:
+            return error if isinstance(error, Error) else Error("no_answer", source="driver")
+
+    async def start_window(self, params: Params) -> Params:
+        # Incarnations cannot share a result, and a disconnected caller cannot cancel
+        # another window's admitted request or release its permit before cleanup.
+        key = ("startWindow:" + params["createdAt"], params["driver"], params["subscription"])
+        task = self.actions.get(key)
+        if task is None or task.done():
+            task = asyncio.create_task(self.window_outcome(params))
+            self.actions[key] = task
+            task.add_done_callback(lambda done: self.forget_action(key, done))
+        result = await asyncio.shield(task)
+        if isinstance(result, Error):
+            raise result
         return result
 
     async def action_outcome(self, key: tuple[str, str, str]) -> Params | Error:
