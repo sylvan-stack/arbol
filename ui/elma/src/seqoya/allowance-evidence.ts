@@ -20,6 +20,9 @@ interface ManualReading {
 type EstimateBasis = 'claudeLocal' | 'kimiLocal' | 'kimiCalls' | 'piChatGPT' | 'zaiCredits';
 
 interface WindowEstimate {
+  reference?: 'plan';
+  createdAt?: string;
+  plan?: 'pro' | 'max' | 'team' | 'enterprise';
   basis: EstimateBasis;
   subscription: string;
   checkedAt: string;
@@ -51,6 +54,7 @@ export interface UsageEvidence {
     remainingCredits: string;
   };
   codex?: {
+    reference?: 'plan';
     subscription: string;
     createdAt: string;
     checkedAt: string;
@@ -74,6 +78,22 @@ const integer = new Intl.NumberFormat();
 // https://mimo.mi.com/docs/en-US/quick-start/faq/token-plan/Usage%26Quota
 const mimoCreditsPerOutputToken = 600;
 const planNames = { lite: 'Lite', standard: 'Standard', pro: 'Pro', max: 'Max' };
+
+function sameCreation(expected: string | undefined, current: string | undefined): boolean {
+  const created = Date.parse(expected ?? '');
+  return Number.isFinite(created) && created === Date.parse(current ?? '');
+}
+
+function recentObservation(observedAt: string, now: number): boolean {
+  const observed = Date.parse(observedAt);
+  return Number.isFinite(observed) && observed <= now && observed >= now - 28 * day;
+}
+
+function publicAccountPlan(account: SubscriptionRecord): string | undefined {
+  if (!('account' in account) || !account.account || typeof account.account !== 'object') return undefined;
+  const plan = (account.account as Record<string, unknown>).plan;
+  return typeof plan === 'string' ? plan.trim().toLowerCase() : undefined;
+}
 
 function matches<T extends ManualReading>(reading: T | undefined, account: SubscriptionRecord, now: number): reading is T {
   return !!reading && reading.subscription === account.id && (reading.labelUpdatedAt ?? reading.updatedAt) === account.updatedAt
@@ -163,9 +183,9 @@ function codexCapacity(account: SubscriptionRecord, sample: UsageEvidence['codex
   const usage = account.lastUsage;
   const checkedAt = 'checkedAt' in account && typeof account.checkedAt === 'string' ? account.checkedAt : undefined;
   const weekly = usage?.windows.find((window) => window.kind === 'weekly' && window.windowMinutes === 10_080);
-  if (!sample || !usage || !weekly || sample.subscription !== account.id || sample.createdAt !== account.createdAt
-    || !checkedAt || Date.parse(sample.checkedAt) !== Date.parse(checkedAt)
-    || sample.plan !== usage.plan || Date.parse(sample.observedAt) > now || Date.parse(sample.observedAt) < now - 28 * day
+  if (!sample || !usage || !weekly || sample.subscription !== account.id || !sameCreation(sample.createdAt, account.createdAt)
+    || (sample.reference !== 'plan' && (!checkedAt || Date.parse(sample.checkedAt) !== Date.parse(checkedAt)))
+    || sample.plan !== usage.plan || !recentObservation(sample.observedAt, now)
     || !weekly.resetsAt || Date.parse(weekly.resetsAt) < Date.parse(sample.resetsAt) - 1_000) {
     return { issues: ['Absolute Codex capacity unavailable. The reported plan and weekly share need a matching recent token calibration.'] };
   }
@@ -182,7 +202,7 @@ function codexCapacity(account: SubscriptionRecord, sample: UsageEvidence['codex
   return { capacity: {
     model: 'GPT-6.1 Sol', total,
     remaining: reset > now && weekly.usedPercent != null ? total * (1 - weekly.usedPercent / 100) : undefined,
-    source: `${priorWindow ? 'Previous-window calibration' : 'Weekly calibration'} ending ${formatSubscriptionTime(sample.observedAt)}. Uses local Astra tokens and assumes paid-credit weights approximate included usage. Other shared-plan activity can affect the estimate.`,
+    source: `${sample.reference === 'plan' ? `Plan reference (ChatGPT ${sample.plan === 'pro' ? 'Pro' : 'Plus'}). ` : ''}${priorWindow ? 'Previous-window calibration' : 'Weekly calibration'} ending ${formatSubscriptionTime(sample.observedAt)}. Uses local Astra tokens and assumes paid-credit weights approximate included usage. Other shared-plan activity can affect the estimate.`,
     calculation: weekly.usedPercent != null && reset > now
       ? `${calculation} Remaining = estimated total × (100% − ${weekly.usedPercent}%).` : calculation,
   } };
@@ -330,12 +350,17 @@ function windowCapacity(
         || Date.parse(calibration.startedAt) < Date.parse(calibration.endResetsAt) - 300 * 60_000
         || Date.parse(calibration.endedAt) >= Date.parse(calibration.endResetsAt)) return false;
     }
+    const bindingMatches = sample.reference === 'plan'
+      ? sample.basis === 'claudeLocal' && sameCreation(sample.createdAt, account.createdAt)
+        && sample.plan !== undefined && sample.plan === publicAccountPlan(account)
+        && recentObservation(sample.observedAt, now)
+      : checkedAt === Date.parse(sample.checkedAt);
     return reference && reference.driver === driver && reference.family === account.family && sample.subscription === account.id
-      && checkedAt === Date.parse(sample.checkedAt) && sample.window === label && Date.parse(sample.observedAt) <= now
+      && bindingMatches && sample.window === label && Date.parse(sample.observedAt) <= now
       && (sample.basis !== 'zaiCredits' || resource === 'credits');
   });
   if (samples?.length !== 1) return undefined;
-  const [{ basis, amount, scale, observedAt, calibration }] = samples;
+  const [{ basis, amount, scale, observedAt, calibration, reference, plan }] = samples;
   const model = references[basis].model;
   const number = (value: number) => integer.format(Math.round(value));
   let total: number;
@@ -360,6 +385,9 @@ function windowCapacity(
         : basis === 'piChatGPT'
         ? 'Local Codex usage matched to the ChatGPT Plus window, using published Standard credit weights.'
         : 'Local output from the observed workload, scaled by the provider’s reported used share. Other account usage can affect the estimate.';
+  }
+  if (reference === 'plan') {
+    source = `Plan reference (Claude ${plan}). ${source} Capacity assumes a similar workload on the same reported plan.`;
   }
   return { model, total, source: `${source} Sampled ${formatSubscriptionCardTime(observedAt)}. ${calculation}`, calculation };
 }
