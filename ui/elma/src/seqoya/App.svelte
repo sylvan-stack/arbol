@@ -267,10 +267,10 @@
       const sameAccount = () => isCurrent(requestedOn) && subscriptions.listing?.drivers
         .find(entry => entry.driver === driver)?.subscriptions?.some(row => row.id === subscription
           && row.createdAt === account.createdAt && row.family === account.family && row.state === 'signed_in');
-      const pending = { pending: true };
       subscriptions = {
-        ...subscriptions, usageRequests: { ...subscriptions.usageRequests, [key]: pending },
+        ...subscriptions, usageRequests: { ...subscriptions.usageRequests, [key]: { pending: true } },
       };
+      const pending = subscriptions.usageRequests?.[key];
       let problem: string | undefined;
       if (startWindow) {
         try {
