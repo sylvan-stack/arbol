@@ -16,6 +16,7 @@ from pathlib import Path, PurePosixPath
 
 from .driver_admission import (
     COMPONENTS,
+    Authority,
     LIMIT,
     MANIFEST_LIMIT,
     Object,
@@ -311,3 +312,121 @@ def emit(root: Path, *, component: str, build: str, commit: str, tree: str, inte
     publish(root / MANIFEST, manifest, limit=MANIFEST_LIMIT)
     publish(root / DESCRIPTOR, descriptor)
     return load(root, component, build)
+
+
+@dataclass(frozen=True)
+class Gate:
+    document: Object
+    digest: str
+    provider: Payload
+
+
+def registered(registry: Path, component: str, build: str) -> Payload:
+    """Resolve exactly one registered Build without accepting a current-source path."""
+    from .launcher import named_runnable, valid_record
+
+    if component not in (*COMPONENTS, "arbol") or BUILD.fullmatch(build) is None:
+        refuse()
+    private_directory(registry)
+    folder = private_directory(registry / component / build)
+    record = decode(read_bytes(folder / "build.json"), exact=False)
+    if not valid_record(record, component, build) or not named_runnable(str(registry), record):
+        refuse()
+    payload = load(folder / SUBTREE, component, build)
+    source = record.get("source")
+    if (not isinstance(source, dict) or source.get("commit") != payload.descriptor["source"]["commit"]
+            or source.get("uncommittedChanges") is not False):
+        refuse()
+    return payload
+
+
+def resolve_provider(registry: Path, digest: str) -> Payload:
+    """The digest includes the registered Build string, so it must resolve uniquely."""
+    from .driver_admission import Refusal
+
+    if not valid_hash(digest):
+        refuse()
+    folder = private_directory(registry / "arbol")
+    matched: list[Payload] = []
+    count = 0
+    for item in folder.iterdir():
+        count += 1
+        if count > MAX_ENTRIES:
+            refuse()
+        if BUILD.fullmatch(item.name) is None:
+            continue
+        try:
+            raw = read_bytes(item / SUBTREE / DESCRIPTOR)
+        except (OSError, Refusal):
+            continue  # An unrelated incomplete Build cannot select the gate's provider.
+        if sha256(raw) == digest:
+            matched.append(registered(registry, "arbol", item.name))
+    if len(matched) != 1:
+        refuse()
+    return matched[0]
+
+
+def verify_gate(registry: Path) -> Gate:
+    private_directory(registry)
+    raw = read_bytes(registry / ".driver-qualification" / "gate.json")
+    value = decode(raw)
+    fields(value, "version kind providerPayloadSha256 components")
+    if value["kind"] != "driver-gate" or not valid_hash(value["providerPayloadSha256"]):
+        refuse()
+    components = value["components"]
+    if not isinstance(components, list) or len(components) != len(COMPONENTS):
+        refuse()
+    routes: set[Path] = set()
+    for component, row in zip(COMPONENTS, components, strict=True):
+        if (not isinstance(row, dict) or set(row) != {"component", "launcher", "launcherSha256"}
+                or row["component"] != component or not valid_hash(row["launcherSha256"])
+                or not isinstance(row["launcher"], str)):
+            refuse()
+        path = physical(row["launcher"], directory=False)
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) & 0o022 or not info.st_mode & 0o111
+                or path.name != component or path in routes):
+            refuse()
+        routes.add(path)
+        if _file_hash(path)[1] != row["launcherSha256"]:
+            refuse()
+    provider = resolve_provider(registry, value["providerPayloadSha256"])
+    return Gate(value, sha256(raw), provider)
+
+
+def verify_acceptance(authority: Authority, payload: Payload, *, digest: str | None = None) -> Object:
+    """Check owner-trust metadata; never issue it or infer qualification from D."""
+    import pwd
+
+    if payload.root != authority.registry / authority.component / payload.build / SUBTREE:
+        refuse()
+    qualification = authority.read("qualification")
+    if qualification["component"] != authority.component:
+        refuse()
+    selected = qualification["acceptanceSha256"]
+    if not valid_hash(selected) or (digest is not None and selected != digest):
+        refuse()
+    raw = read_bytes(authority.shared / "acceptances" / (selected + ".json"))
+    value = decode(raw)
+    fields(value, "version kind status scope contract providerPayloadSha256 producerPayloadSha256 gateSha256 platform evidenceSha256")
+    if (sha256(raw) != selected or value["kind"] != "driver-qualification"
+            or value["status"] not in ("candidate", "qualified")
+            or value["scope"] != str(authority.registry) or value["contract"] != "DRV-browser-identity-1"
+            or value["producerPayloadSha256"] != payload.digest):
+        refuse()
+    for key in ("providerPayloadSha256", "producerPayloadSha256", "gateSha256", "evidenceSha256"):
+        if not valid_hash(value[key]):
+            refuse()
+    uname = os.uname()
+    if (uname.sysname != "Darwin" or value["platform"] != {
+            "system": "Darwin", "release": uname.release, "machine": uname.machine}):
+        refuse()
+    installed = Path(pwd.getpwuid(os.getuid()).pw_dir) / "Library/Application Support/Arbol/builds"
+    if value["status"] == "candidate" and authority.registry == installed.resolve():
+        refuse()
+    gate = verify_gate(authority.registry)
+    if (value["gateSha256"] != gate.digest
+            or value["providerPayloadSha256"] != gate.provider.digest):
+        refuse()
+    return value
