@@ -388,3 +388,112 @@ class Authority:
     def write(self, kind: str, value: Object) -> None:
         validate(kind, value)
         publish(self.folder / (kind + ".json"), value)
+
+
+NORMAL_FD = "ARBOL_DRIVER_ADMISSION_FD"
+NORMAL_CONTEXT = "ARBOL_DRIVER_ADMISSION_CONTEXT"
+MAINTENANCE_FD = "ARBOL_DRIVER_MAINTENANCE_FD"
+MAINTENANCE_CONTEXT = "ARBOL_DRIVER_MAINTENANCE_CONTEXT"
+AUTHORITY_ENV = (NORMAL_FD, NORMAL_CONTEXT, MAINTENANCE_FD, MAINTENANCE_CONTEXT)
+
+
+def without_authority(environment: dict[str, str]) -> dict[str, str]:
+    return {key: value for key, value in environment.items() if key not in AUTHORITY_ENV}
+
+
+def normal_context(value: Object) -> None:
+    from .driver_payload import relative
+    from .driver_process import identity_record
+
+    fields(value, "version kind role registry registrySha256 component epoch boot invocation writer parent process handoff nonce payloadSha256 acceptanceSha256 entry")
+    if (value["kind"] != "driver-admission-context" or value["role"] not in ("main", "helper")
+            or value["component"] not in COMPONENTS or not isinstance(value["registry"], str)):
+        refuse()
+    for key in ("epoch", "invocation", "writer", "handoff", "nonce"):
+        if not valid_token(value[key]):
+            refuse()
+    for key in ("registrySha256", "payloadSha256", "acceptanceSha256"):
+        if not valid_hash(value[key]):
+            refuse()
+    if not canonical_uuid(value["boot"]):
+        refuse()
+    relative(value["entry"])
+    identity_record(value["process"])
+    parent = value["parent"]
+    if (not isinstance(parent, dict) or set(parent) != {"writer", "pid", "startedAt"}
+            or not valid_token(parent["writer"])):
+        refuse()
+    identity_record({key: parent[key] for key in ("pid", "startedAt")})
+
+
+def writer_path(authority: Authority, invocation: str, writer: str) -> Path:
+    if not valid_token(invocation) or not valid_token(writer):
+        refuse()
+    return authority.folder / "writers" / invocation / (writer + ".json")
+
+
+def read_writer(authority: Authority, invocation: str, writer: str) -> Object:
+    value = read(writer_path(authority, invocation, writer))
+    validate("writer", value)
+    if (value["component"] != authority.component or value["invocation"] != invocation
+            or value["writer"] != writer):
+        refuse()
+    return value
+
+
+def handoff_path(authority: Authority, handoff: str) -> Path:
+    if not valid_token(handoff):
+        refuse()
+    return authority.folder / "handoffs" / (handoff + ".json")
+
+
+def read_handoff(authority: Authority, handoff: str) -> Object:
+    value = read(handoff_path(authority, handoff))
+    validate("handoff", value)
+    if value["handoff"] != handoff or value["component"] != authority.component:
+        refuse()
+    return value
+
+
+def normal_control(authority: Authority, *, epoch: str | None = None) -> Object:
+    """Caller holds the mutex. A durable closed deployment overrides normal controls."""
+    control = authority.read("control")
+    if control["phase"] != "normal" or (epoch is not None and control["epoch"] != epoch):
+        refuse()
+    deployment = authority.shared / "deployment.json"
+    if deployment.exists():
+        value = read(deployment)
+        validate("deployment", value)
+        if value["phase"] != "complete":
+            refuse()
+    try:
+        taint = authority.read("taint")
+    except FileNotFoundError:
+        taint = None
+    if taint is not None:
+        if taint["component"] != authority.component or taint["reason"] != "legacy":
+            refuse()
+    return control
+
+
+def custody_loss(authority: Authority, *, invocation: str, epoch: str, boot: str,
+                 payload_sha256: str | None) -> None:
+    """Caller holds the mutex. Preserve an earlier cause before adding this one.
+
+    Normal launch checks this taint as closed; begin can claim a caller-owned
+    maintenance session without an invented automatic session UUID.
+    """
+    path = authority.folder / "taint.json"
+    try:
+        prior = read_bytes(path)
+    except FileNotFoundError:
+        prior = None
+    if prior is not None:
+        archive = private_directory(authority.folder / "archive") / ("taint-" + sha256(prior) + ".json")
+        if archive.exists() and read_bytes(archive) != prior:
+            refuse()
+        if not archive.exists():
+            publish_bytes(archive, prior)
+    value = {"version": 1, "component": authority.component, "epoch": epoch, "boot": boot,
+             "reason": "custody-loss", "invocation": invocation, "payloadSha256": payload_sha256}
+    authority.write("taint", value)
