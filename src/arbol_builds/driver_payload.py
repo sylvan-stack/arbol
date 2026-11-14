@@ -16,9 +16,9 @@ from pathlib import Path, PurePosixPath
 
 from .driver_admission import (
     COMPONENTS,
-    Authority,
     LIMIT,
     MANIFEST_LIMIT,
+    Authority,
     Object,
     canonical,
     decode,
