@@ -17,6 +17,7 @@ from .metadata import iso
 from .migration import message
 from .model import Refused
 from .process import Programs
+from .subscription_identity import SubscriptionIdentities, SubscriptionIdentity
 from .validation import Catalogues
 
 TOTAL = 25.0
@@ -44,6 +45,7 @@ class Accounts:
                  database: Database | None = None) -> None:
         self.programs, self.catalogues, self.secrets = programs, catalogues, secrets
         self.database = database
+        self.identities = SubscriptionIdentities(database) if database is not None else None
         self.total, self.capacity = total, asyncio.Semaphore(capacity)
         self.raws: dict[str, asyncio.Task[list[Any] | Error]] = {}
         self.actions: dict[tuple[str, str, str], asyncio.Task[Params | Error]] = {}
@@ -55,6 +57,60 @@ class Accounts:
         registry.method("accounts.startWindow", self.start_window, self.window_target)
         if database is not None:
             registry.method("accounts.activity", self.activity, self.target)
+
+    def identity_authority(self) -> SubscriptionIdentities:
+        if self.identities is None:
+            raise Refused("database_unavailable", "Subscription browser binding requires the installation database.")
+        return self.identities
+
+    async def browser_slot(self, driver: str, subscription: str) -> None:
+        """Validate a current catalogue slot without promoting it to identity.
+
+        A failed list propagates before any identity write. Relabel/sign-out,
+        disappearing launchers and catalogue-cache eviction are not removals.
+        """
+        driver_id(driver, set(self.scan()))
+        public = Public(self.secrets())
+        subscription = public.id(subscription)
+        rows = await self.raw(driver)
+        selected = [row for row in rows if public.subscription_slot(row) == subscription]
+        if len(selected) != 1:
+            raise Refused("needs_rebind", "The current Subscription cannot be established.")
+        public.subscription(selected[0])
+
+    async def browser_identity(self, driver: str, subscription: str) -> SubscriptionIdentity:
+        """No current catalogue producer proves durable incarnation continuity.
+
+        A future qualified producer must establish the same persisted lifetime
+        before a positive automatic open is possible. Never use an old database
+        row, createdAt or a matching reusable id as that proof.
+        """
+        authority = self.identity_authority()
+        await self.browser_slot(driver, subscription)
+        await authority.uncertain(driver, subscription)
+        raise Refused("needs_rebind", "This Driver cannot prove the Subscription lifetime; explicit rebind is required.")
+
+    async def rebind_browser_identity(self, driver: str, subscription: str, *, installation: str,
+                                      previous: str | None, confirmed: bool) -> SubscriptionIdentity:
+        """Fresh explicit binding action; no new Driver command or implicit adoption.
+
+        The consuming trusted workflow supplies confirmation and its exact
+        selected identity. This does not authorize later automatic continuity.
+        """
+        authority = self.identity_authority()
+        await self.browser_slot(driver, subscription)
+        return await authority.rebind(driver, subscription, installation=installation,
+                                      previous=previous, confirmed=confirmed)
+
+    async def retire_browser_identity(self, driver: str, subscription: str, *, installation: str,
+                                      incarnation: str) -> None:
+        """Only an explicit confirmed removal signal may retire an exact lifetime.
+
+        Current accounts APIs do not expose a removal command. Keep this seam
+        internal until a consuming lifecycle operation supplies that signal.
+        """
+        await self.identity_authority().retire(driver, subscription, installation=installation,
+                                               incarnation=incarnation)
 
     def scan(self) -> list[str]:
         drivers = self.programs.find_drivers()

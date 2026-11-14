@@ -172,9 +172,17 @@ class Public:
             result["extra"] = self.generic(self.object(data["extra"]))
         return result
 
+    def subscription_slot(self, value: Any) -> str:
+        """A reusable catalogue selector, never proof of a login incarnation.
+
+        Neither createdAt, account fields, display labels nor sign-in state
+        establish durable identity after external recreation or restoration.
+        """
+        return self.id(self.object(value).get("id"))
+
     def subscription(self, value: Any) -> Params:
         data = self.object(value)
-        result: Params = {"id": self.id(data.get("id"))}
+        result: Params = {"id": self.subscription_slot(data)}
         for key in ("family", "label", "auth", "state"):
             result[key] = self.text(data.get(key))
         result.update(createdAt=self.time(data.get("createdAt")), updatedAt=self.time(data.get("updatedAt")),
