@@ -408,7 +408,8 @@ def launch(registry: str, component: str, args: list[str], *, schema: tuple[int,
             records = [record for record in records if backend_fits(record, schema)]
         available = [record["build"] for record in records if named_runnable(registry, record)]
         selected: Record | None = None
-        if args[:1] == ["-v"]:
+        explicit_selection = args[:1] == ["-v"]
+        if explicit_selection:
             number = args[1] if len(args) > 1 else ""
             if number and BUILD_PATTERN.fullmatch(number):
                 selected = next((record for record in records
@@ -435,7 +436,15 @@ def launch(registry: str, component: str, args: list[str], *, schema: tuple[int,
         # Python ignores these two signals when it starts; a direct start would leave them at their default.
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
         signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
-        # execv passes the process's own environment exactly as the caller gave it.
+        # Browser-private selection context, never a public command option. Overwrite
+        # a caller copy. Other components retain their exact environment behavior.
+        if component == "arbol-browser":
+            os.environ["ARBOL_BROWSER_SELECTION"] = json.dumps({
+                "format": 1, "build": selected["build"], "explicit": explicit_selection,
+                "directory": os.path.realpath(os.path.join(registry, component, selected["build"])),
+                "guard": os.path.realpath(os.path.join(registry, component, ".uses", selected["build"])),
+            }, separators=(",", ":"))
+        # execv passes the environment, including the browser-only context above.
         os.execv(entry, [entry, *args])
     except Exception as error:
         try:
