@@ -10,3 +10,11 @@ id = "arbol-baseline"
 file = "001-baseline.sql"
 sha256 = "a7d558ccc0aeaf444d7601d0602d9392266428a2a7d46f8d576171f1c97d1fcf"
 compatibility_version = 1
+
+[[migrations]]
+revision = 2
+predecessor = 1
+id = "seqoya-browser-bindings"
+file = "002-browser-bindings.sql"
+sha256 = "19b9f26b1d8f4307b99f5eb60f96b0144ae56133dd3dfbfadfafab73f81c119f"
+compatibility_version = 1
