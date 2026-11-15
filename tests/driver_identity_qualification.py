@@ -6,6 +6,7 @@ permission to run itself.  Independent body admission precedes every use.
 
 from __future__ import annotations
 
+import fcntl
 import math
 import os
 import re
@@ -45,7 +46,6 @@ from arbol_builds.driver_admission import (
     admission_fingerprint,
     archive_terminal,
     canonical,
-    deployment_mutex,
     lock_identity,
     normal_context,
     normal_control,
@@ -452,6 +452,8 @@ class Baseline:
     generation_sha256: str
     boot: str
     platform: Object
+    authority_identities: Mapping[str, Object]
+    deployment_identity: Object
     receipts: Mapping[str, CompletedReceipt] = field(default_factory=dict)
 
 
@@ -496,6 +498,56 @@ def use_pins(registry: Path, pins: Sequence[TuplePin]) -> Iterator[dict[str, Reg
         yield images
 
 
+@dataclass(frozen=True)
+class DeploymentPin:
+    """One test-owned independent EX description of the actual shared lock."""
+
+    path: Path
+    descriptor: int
+    identity: Object
+
+    def verify(self) -> None:
+        physical_owned(self.path.parent, directory=True)
+        held, named = os.fstat(self.descriptor), self.path.lstat()
+        for value in (held, named):
+            require(stat.S_ISREG(value.st_mode) and value.st_uid == os.getuid()
+                    and stat.S_IMODE(value.st_mode) == 0o600, "Deployment lock is not private regular owned evidence.")
+        actual = {"path": str(self.path), "device": held.st_dev, "inode": held.st_ino,
+                  "uid": held.st_uid, "mode": stat.S_IMODE(held.st_mode)}
+        require((held.st_dev, held.st_ino) == (named.st_dev, named.st_ino) and actual == self.identity,
+                "Original deployment lock description or named identity changed.")
+
+
+@contextmanager
+def fixture_deployment_lock(registry: Path, *, original: Object | None) -> Iterator[DeploymentPin]:
+    """Use the same genuine file/schema/flock boundary; never nest production EX.
+
+    Production deployment_mutex yields None. This testing-only owner exposes
+    only its own description, so identity checks cannot pretend to inspect a
+    production descriptor or silently acquire EX on a replacement lock.
+    """
+    shared = private_directory(registry / ".driver-qualification")
+    path = shared / "deployment.lock"
+    flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    if original is None:
+        flags |= os.O_CREAT | os.O_EXCL  # New fixture genesis only.
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        held = os.fstat(descriptor)
+        identity: Object = {"path": str(path), "device": held.st_dev, "inode": held.st_ino,
+                            "uid": held.st_uid, "mode": stat.S_IMODE(held.st_mode)}
+        pin = DeploymentPin(path, descriptor, identity)
+        pin.verify()
+        require(original is None or identity == original, "Cannot lock an unknown replacement deployment file.")
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        pin.verify()
+        os.fsync(descriptor)
+        sync_directory(shared)
+        yield pin
+    finally:
+        os.close(descriptor)
+
+
 class FixtureAuthority:
     """No subject SH, deployment mode, resume, arbitrary patch or taint clearing."""
 
@@ -508,6 +560,19 @@ class FixtureAuthority:
         return {component: {"control": lock_identity(authority, "control.lock"),
                             "admission": lock_identity(authority, "admission.lock")}
                 for component, authority in self.authorities.items()}
+
+    def _authority_identities(self) -> dict[str, Object]:
+        shared = self.workspace.registry / ".driver-qualification"
+        paths = {"shared": shared, "fixture": shared / "fixture-authority",
+                 **{component: authority.folder for component, authority in self.authorities.items()}}
+        result: dict[str, Object] = {}
+        for name, path in paths.items():
+            identity = directory_identity(path)
+            info = physical_owned(path, directory=True)
+            require((identity["device"], identity["inode"]) == (info.st_dev, info.st_ino),
+                    "Authority directory changed during identity observation.")
+            result[name] = {**identity, "uid": info.st_uid, "mode": stat.S_IMODE(info.st_mode)}
+        return result
 
     def _prepare(self, images: Mapping[str, RegisteredImage]) -> PreparedGroup:
         routes: dict[str, tuple[bytes, int]] = {}
@@ -565,11 +630,20 @@ class FixtureAuthority:
                     os.close(descriptor)
             sync_directory(authority.folder)
 
-    def _healthy(self, old: Baseline) -> None:
+    def _healthy(self, old: Baseline, deployment: DeploymentPin) -> None:
+        self.workspace.verify(self.evidence)
+        deployment.verify()
+        require(deployment.identity == old.deployment_identity
+                and self._authority_identities() == old.authority_identities,
+                "Original shared/component/fixture directories or deployment lock changed.")
         require(read_bytes(self.workspace.registry / ".driver-qualification/gate.json") == old.gate_bytes,
                 "Old selected gate changed.")
         require(old.boot == boot_uuid() and old.platform == platform_identity(), "Boot/platform changed before rebind.")
         require(self._locks() == old.locks, "Stable authority lock inode changed.")
+        owner = read(self.workspace.registry / ".driver-qualification/fixture-authority/owner.json")
+        require(owner["authorityIdentities"] == dict(old.authority_identities)
+                and owner["deploymentLock"] == old.deployment_identity,
+                "Original genesis authority identity provenance changed.")
         self._assert_no_special_authority(old)
         for component, authority in self.authorities.items():
             require(authority.read("control") == {"version": 1, "phase": "normal", "session": None,
@@ -611,7 +685,11 @@ class FixtureAuthority:
                 return catalog_section(self.workspace.registry, lambda: self._publish(group, old, completed, deadline), deadline=deadline)
 
     def _validate_group(self, group: PreparedGroup, before: Mapping[str, MarkerImage],
-                        epochs: Mapping[str, str], locks: Mapping[str, Object]) -> None:
+                        epochs: Mapping[str, str], locks: Mapping[str, Object],
+                        authority_identities: Mapping[str, Object], deployment: DeploymentPin) -> None:
+        self.workspace.verify(self.evidence)
+        deployment.verify()
+        require(self._authority_identities() == authority_identities, "Stable authority directories were replaced.")
         require(self._locks() == locks, "Authority lock descriptions were replaced.")
         require(_gate_document(group.gate_bytes) == group.gate, "Actual routes do not match staged canonical gate.")
         provider = _candidate_payload(self.workspace.registry, "arbol", group.images["arbol"].payload.digest)
@@ -648,15 +726,16 @@ class FixtureAuthority:
         new_gate_published = False
         epochs: dict[str, str] = {}
         before: dict[str, MarkerImage] = {}
-        with deployment_mutex(self.workspace.registry), ExitStack() as locks:
+        with fixture_deployment_lock(self.workspace.registry, original=None if old is None else old.deployment_identity) as deployment, ExitStack() as locks:
             deadline.remaining()
             if fresh:
                 require({p.name for p in shared.iterdir()} == {"deployment.lock"},
                         "New shared directory has unowned additions.")
                 self._new_directories()
+                private_directory(shared / "fixture-authority", create=True)
             else:
                 assert old is not None
-                self._healthy(old)
+                self._healthy(old, deployment)
             for authority in self.authorities.values():
                 locks.enter_context(authority.mutex(seconds=min(20, deadline.remaining())))
             exclusive: dict[str, int] = {}
@@ -672,7 +751,7 @@ class FixtureAuthority:
                     # All four are now held, so revalidate the COMPLETE original
                     # normal controls/scopes/permitted receipt lineage before
                     # writing even the first transaction-owned draining control.
-                    self._healthy(old)
+                    self._healthy(old, deployment)
                     for component, authority in self.authorities.items():
                         authority.write("control", {"version": 1, "phase": "draining", "session": session,
                                                     "epoch": old.epochs[component]})
@@ -682,6 +761,8 @@ class FixtureAuthority:
                     exclusive[component] = descriptor
                     locks.callback(os.close, descriptor)
                 stable_locks = self._locks()
+                stable_authorities = self._authority_identities()
+                deployment.verify()
                 if not fresh:
                     assert old is not None
                     for component, authority in self.authorities.items():
@@ -731,6 +812,7 @@ class FixtureAuthority:
                 if fresh:
                     owner: Object = {"version": 1, "kind": "abr38-fixture-owner", "fixture": self.workspace.fixture,
                                      "registry": self.workspace.registry_identity, "bin": self.workspace.bin_identity,
+                                     "authorityIdentities": stable_authorities, "deploymentLock": deployment.identity,
                                      "creator": self.workspace.creator.object(), "boot": boot_uuid(),
                                      "platform": platform_identity(), "sourceInputsSha256": group.preparation_evidence_sha256,
                                      "initialInventorySha256": digest(evidence_bytes({"records": [
@@ -754,7 +836,8 @@ class FixtureAuthority:
                     "gateSha256": digest(group.gate_bytes), "acceptances": dict(group.acceptance_hashes),
                     "controls": {component: {"beforeEpoch": None if old is None else old.epochs[component],
                                               "afterEpoch": epochs[component]} for component in COMPONENTS},
-                    "locks": stable_locks, "normalAdmissions": {
+                    "locks": stable_locks, "authorityIdentities": stable_authorities,
+                    "deploymentLock": deployment.identity, "normalAdmissions": {
                         component: {"before": image.evidence(), "after": markers(self.authorities[component]).evidence()}
                         for component, image in before.items()},
                     "archives": archives, "evidenceSha256": group.preparation_evidence_sha256,
@@ -768,7 +851,7 @@ class FixtureAuthority:
                 publish_bytes(generation_path, generation_bytes, limit=32 * 1024 * 1024)
                 publish(fixture / "head.json", {"version": 1, "kind": "abr38-fixture-head", "fixture": self.workspace.fixture,
                                                 "generationSha256": generation_hash, "gateSha256": digest(group.gate_bytes)})
-                self._validate_group(group, before, epochs, stable_locks)
+                self._validate_group(group, before, epochs, stable_locks, stable_authorities, deployment)
                 deadline.remaining()
                 require(owner["boot"] == boot_uuid() and owner["platform"] == platform_identity(), "Actual machine changed.")
                 publish(gate_path, group.gate)  # The sole NEW group publication point, LAST.
@@ -782,13 +865,15 @@ class FixtureAuthority:
                     require(reconcile(authority, candidate=scopes[component]).resolved,
                             "Actual postcommit custody is not resolved.")
                     require(markers(authority) == before[component], "Postcommit marker inventory changed under EX.")
+                self._validate_group(group, before, epochs, stable_locks, stable_authorities, deployment)
                 self.evidence.write("committed-generation.json", generation, limit=32 * 1024 * 1024)
                 retained = {} if old is None else {
                     component: replace(proof, rebind_generations=(*proof.rebind_generations, generation_hash))
                     for component, proof in old.receipts.items()
                 }
                 return Baseline(group.gate_bytes, scopes, before, stable_locks, group.images, epochs,
-                                generation_hash, str(generation["boot"]), generation["platform"], retained)
+                                generation_hash, str(generation["boot"]), generation["platform"],
+                                stable_authorities, deployment.identity, retained)
             except BaseException:
                 # OLD partial closure leaves its exact OLD group, not a mixed NEW success.
                 # From withholding onward no partial NEW group may remain admitted.
