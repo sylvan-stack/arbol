@@ -502,6 +502,7 @@ import uuid
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 from unittest.mock import patch
@@ -1616,6 +1617,172 @@ def complete_main_admission_inventory(subjects: Mapping[str, AdmissionSubject], 
     for window_class in MAIN_CLASS_WINDOWS:
         guardian_class_window(subjects[window_class + "-death"], frozen, window=window_class, kill=True)
         guardian_class_window(subjects[window_class + "-positive"], frozen, window=window_class, kill=False)
+
+
+def provider_stale_owner_refuses(controller: WholeCheckController, baseline: Baseline, *,
+                                  component: str, provider_source_sha256: str) -> Object:
+    """Distinct NEGATIVE inspect-result fault at the real shared signal boundary.
+
+    Two real harmless owned processes remain alive during the observation. Only
+    one fresh inspect return value is replaced by a labelled wrong-birth row;
+    there is no kernel PID-reuse claim or forged durable custody/context. This
+    calls the real class boundary directly, not a claimed public-route run.
+    The ordinary public supervise-to-SignalBridge coupling is source-bound.
+    This prospective body has no gate registration or execution permission.
+    """
+    controller.workspace.verify(controller.evidence)
+    controller.scope.recheck()
+    require(component in baseline.scopes and component != "arbol"
+            and controller.scope == baseline.scopes[component]
+            and valid_hash(provider_source_sha256)
+            and threading.enumerate() == [threading.current_thread()],
+            "Stale-owner boundary needs the original actual tuple and sole observer thread.")
+    provider = controller.scope.gate.provider
+    source_path = provider.root / "src/arbol_builds/driver_process.py"
+    source = read_image(source_path, limit=1024 * 1024, private=False)
+    require(source.sha256 == provider_source_sha256 and provider_process.__file__ is not None
+            and vars(provider_process)["os"] is os
+            and Path(provider_process.__file__).resolve(strict=True) == source_path.resolve(strict=True)
+            and all(Path(method.__code__.co_filename).resolve(strict=True) == source_path.resolve(strict=True)
+                    for method in (provider_process.SignalBridge.__init__, provider_process.SignalBridge._forward,
+                                   provider_process.SignalBridge.prepared, provider_process.supervise)),
+            "Actual provider class/public call path differs from the admitted sealed source.")
+    executable = Path("/bin/sleep")
+    tool = read_image(executable, limit=16 * 1024 * 1024, private=False)
+    info = executable.lstat()
+    require(executable.resolve(strict=True) == executable and stat.S_ISREG(info.st_mode)
+            and info.st_uid == 0 and not info.st_mode & 0o022 and bool(info.st_mode & 0o111)
+            and info.st_nlink == 1, "Fixed harmless process program is unavailable.")
+    end = time.monotonic() + 20  # One shared observation AND owned-cleanup budget.
+    authority = Authority(controller.workspace.registry, component)
+    children: dict[str, subprocess.Popen[bytes]] = {}
+    owners: dict[str, ExactProcess] = {}
+    cleanup: dict[str, Object] = {}
+    attempts: list[Object] = []
+    terminal: provider_process.Terminal | None = None
+    original: BaseException | None = None
+    observation: Object = {"kind": "abr38-provider-stale-owner-negative-read-boundary",
+        "component": component, "providerSource": source.evidence(), "harmlessProgram": tool.evidence(),
+        "publicRouteExecuted": False, "kernelPidReuseObserved": False, "signalAttempts": attempts}
+
+    def remaining() -> float:
+        value = end - time.monotonic()
+        require(value > 0, "Stale-owner observation/owned cleanup exceeded its shared bound.")
+        return value
+
+    def forbidden_signal(*arguments: object) -> None:
+        attempts.append({"arguments": list(arguments)})
+        raise ObservationFailed("Stale-owner signal boundary attempted a forbidden signal.")
+
+    try:
+        # No subject admission, helper ticket, inherited grant, pipe, native
+        # process or provider context is attached to these two fixed children.
+        for name in ("owned-target", "unrelated-owned-survivor"):
+            remaining()
+            require(read_image(executable, limit=16 * 1024 * 1024, private=False) == tool,
+                    "Fixed harmless program changed before spawn.")
+            process = subprocess.Popen([str(executable), "60"], env=without_authority({}),
+                cwd=controller.workspace.registry, close_fds=True, start_new_session=True,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            children[name] = process  # Retain actual Popen before fallible identity inspection.
+            owner = ExactProcess.read(process_identity(process.pid))
+            owners[name] = owner
+            require(owner.live(parent=os.getpid()), "Owned harmless process birth/parent is unavailable.")
+        target = children["owned-target"]
+        target_owner = owners["owned-target"]
+        actual = provider_process.inspect(target.pid)
+        require(actual is not None and actual.owner == target_owner.object()
+                and actual.parent == os.getpid() and actual.group == target.pid,
+                "Real harmless target lacks its independently observed kernel birth/group/parent.")
+        assert actual is not None
+        birth = datetime.fromisoformat(target_owner.started_at.replace("Z", "+00:00"))
+        wrong_birth = (birth + timedelta(microseconds=1)).astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        require(provider_process.valid_start(wrong_birth) and wrong_birth != target_owner.started_at,
+                "Labelled negative read-boundary birth is not distinct/canonical.")
+        changed = provider_process.Process({"pid": target.pid, "startedAt": wrong_birth}, actual.parent, actual.group)
+        # A genuine Terminal is retained but never prepared/claimed, and no
+        # handlers are installed. The real stale-owner branch returns BEFORE
+        # using it; no controlling-terminal/process-group state is changed.
+        terminal = provider_process.Terminal()
+        bridge = provider_process.SignalBridge(terminal)
+        bridge.child, bridge.owner = target, target_owner.object()
+        with authority.mutex(seconds=remaining()):
+            before = _raw_authority_image(authority)
+        observation.update({"actualTarget": {"owner": actual.owner, "parent": actual.parent, "group": actual.group},
+            "fault": {"label": "wrong-birth-inspect-result-only", "owner": changed.owner,
+                      "parent": changed.parent, "group": changed.group},
+            "participants": {name: owner.object() for name, owner in owners.items()}, "metadataBefore": before})
+        with (patch.object(provider_process, "inspect", return_value=changed) as reader,
+              patch.object(os, "kill", side_effect=forbidden_signal) as kill,
+              patch.object(os, "killpg", side_effect=forbidden_signal) as killpg):
+            bridge._forward(signal.SIGTERM)
+            reader.assert_called_once_with(target.pid)
+            kill.assert_not_called()
+            killpg.assert_not_called()
+        # Fresh REAL observations occur only AFTER restoring inspect and both
+        # signal APIs. A mocked read can never prove an actual survivor.
+        require(not attempts and all(owner.live(parent=os.getpid()) for owner in owners.values())
+                and all(process.poll() is None for process in children.values()),
+                "Real owned/unrelated process did not survive the refusal observation.")
+        with authority.mutex(seconds=remaining()):
+            after = _raw_authority_image(authority)
+        require(after == before and bridge.owner == target_owner.object() and bridge.pending == set(),
+                "Negative stale-owner read changed actual metadata or retained boundary ownership.")
+        observation["metadataAfter"] = after
+        observation["realSurvivorsAfterRestoringFault"] = {name: owner.object() for name, owner in owners.items()}
+        remaining()
+    except BaseException as error:
+        original = error
+    finally:
+        # Independently attempt every owned target, then every actual Popen
+        # wait. No group kill, SIGKILL, reused/unverified PID or second timeout.
+        for name, process in children.items():
+            record: Object = {"pid": process.pid, "termAttempted": False, "waited": False, "errors": []}
+            cleanup[name] = record
+            try:
+                if process.poll() is None:
+                    cleanup_owner = owners.get(name)
+                    require(cleanup_owner is not None and cleanup_owner.live(parent=os.getpid()),
+                            "Owned cleanup identity unavailable; leave it explicitly unresolved.")
+                    assert cleanup_owner is not None
+                    record["termAttempted"] = True
+                    signal_verified(cleanup_owner, signal.SIGTERM)
+            except BaseException as error:
+                record["errors"].append(type(error).__name__)
+        for name, process in children.items():
+            record = cleanup[name]
+            try:
+                record["returncode"] = process.wait(timeout=max(0, end - time.monotonic()))
+                record["waited"] = True
+            except BaseException as error:
+                record["errors"].append(type(error).__name__)
+            record["unresolved"] = not record["waited"] or bool(record["errors"])
+        if terminal is not None:
+            try:
+                terminal.close()  # Only its own unclaimed data description.
+            except BaseException as error:
+                observation["terminalCloseError"] = type(error).__name__
+                if original is None:
+                    original = error
+                else:
+                    original.add_note("Unclaimed terminal close: " + type(error).__name__)
+        observation["ownedCleanup"] = cleanup
+        observation["budgetExpired"] = time.monotonic() >= end
+        if any(row["unresolved"] for row in cleanup.values()) or observation["budgetExpired"]:
+            if original is None:
+                original = ObservationFailed("Owned stale-owner observation cleanup is unresolved or expired.")
+            original.add_note("Actual owned cleanup: " + repr(cleanup))
+        observation["failed"] = original is not None
+        try:
+            controller.evidence.write("provider-stale-owner-refusal.json", observation, limit=16 * 1024 * 1024)
+        except BaseException as error:
+            if original is None:
+                original = error
+            else:
+                original.add_note("Private stale-owner observation unavailable: " + type(error).__name__)
+    if original is not None:
+        raise original
+    return observation
 
 
 def _raw_authority_image(authority: Authority) -> Object:
