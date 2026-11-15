@@ -7,17 +7,24 @@ Normal writer admission and exclusive maintenance remain separate protocols.
 from __future__ import annotations
 
 import os
+import re
+import signal
 import stat
 import sys
 from collections.abc import Callable
 from contextlib import ExitStack
+from dataclasses import dataclass
 from pathlib import Path
 
 from .driver_admission import (
     COMPONENTS,
+    LIMIT,
     Authority,
     Object,
     Refusal,
+    canonical,
+    canonical_uuid,
+    fields,
     normal_control,
     physical,
     private_directory,
@@ -27,12 +34,23 @@ from .driver_admission import (
     read_bytes,
     sha256,
     token,
+    valid_hash,
     validate,
     without_authority,
 )
-from .driver_payload import DESCRIPTOR, SUBTREE, Payload, pin_payloads, registered, verify_acceptance, verify_gate
+from .driver_payload import (
+    DESCRIPTOR,
+    SUBTREE,
+    Payload,
+    load,
+    pin_payloads,
+    registered,
+    resolve_provider,
+    verify_acceptance,
+    verify_gate,
+)
 from .driver_process import Guardian, boot_uuid, supervise
-from .launcher import Record, launch, open_use_guard
+from .launcher import BUILD_PATTERN, Record, launch, open_use_guard, standard_descriptors, write_all
 
 
 def _route(authority: Authority, route: str) -> None:
@@ -183,3 +201,183 @@ def guarded_publication[T](registry: Path, payloads: list[Payload], authorities:
         for authority in sorted(authorities, key=lambda value: value.component):
             stack.enter_context(authority.mutex())
         return action()
+
+
+ADMIN_COMMANDS = frozenset(("deploy", "begin", "drain", "execute", "status", "finish"))
+OPERATIONS = frozenset(("upgrade", "identity-reset", "restore", "identity-recover"))
+SUBSCRIPTION = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\Z", re.ASCII)
+
+
+@dataclass(frozen=True)
+class Request:
+    command: str
+    registry: Path
+    values: dict[str, str]
+
+    @property
+    def component(self) -> str:
+        return self.values["component"]
+
+    @property
+    def session(self) -> str:
+        return self.values["session"]
+
+
+# Each reviewed operation leaf installs only its fixed handler. Packaging checks
+# the complete table before it can emit a provider capability declaration.
+HANDLERS: dict[str, Callable[[Request], Object]] = {}
+
+
+def handler(name: str) -> Callable[[Callable[[Request], Object]], Callable[[Request], Object]]:
+    def register(function: Callable[[Request], Object]) -> Callable[[Request], Object]:
+        if name not in ADMIN_COMMANDS or name in HANDLERS:
+            raise Refusal("Invalid maintenance dispatch table.")
+        HANDLERS[name] = function
+        return function
+    return register
+
+
+def parse_request(arguments: list[str], default_registry: str) -> Request:
+    """No arbitrary positional argv, implicit flags or operation substitutions."""
+    from .cli import options
+
+    if not arguments or arguments[0] not in ADMIN_COMMANDS:
+        raise Refusal("Use driver-state deploy, begin, drain, execute, status or finish.")
+    name = arguments[0]
+    required = {
+        "deploy": {"session", "manifest", "callers"},
+        "begin": {"component", "session"},
+        "drain": {"component", "session"},
+        "status": {"component", "session"},
+        "execute": {"component", "session", "build", "state-dir", "operation", "backup"},
+        "finish": {"component", "session", "result"},
+    }[name]
+    allowed = required | {"registry-dir"}
+    if name == "drain":
+        allowed |= {"stop"}
+    if name == "execute":
+        allowed |= {"source", "subscription"}
+    words, parsed = options(arguments[1:], ["--" + key for key in sorted(allowed)], {"--stop"})
+    values = {key[2:]: value for key, value in parsed.items()}
+    if words or not required <= values.keys() or not canonical_uuid(values["session"]):
+        raise Refusal("Invalid maintenance command or session.")
+    if name != "deploy" and values["component"] not in COMPONENTS:
+        raise Refusal("Unknown Driver component.")
+    for key in ("manifest", "callers", "state-dir", "backup", "source", "result"):
+        if key in values:
+            value = values[key]
+            if (not os.path.isabs(value) or os.path.normpath(value) != value or value.startswith("//")
+                    or len(value.encode("utf-8", "strict")) > LIMIT or "\0" in value):
+                raise Refusal("Maintenance paths must be canonical absolute paths.")
+    if name == "execute":
+        operation = values["operation"]
+        if (operation not in OPERATIONS or BUILD_PATTERN.fullmatch(values["build"]) is None
+                or ("source" in values) != (operation == "restore")
+                or ("subscription" in values) != (operation == "identity-recover")
+                or ("subscription" in values and SUBSCRIPTION.fullmatch(values["subscription"]) is None)):
+            raise Refusal("Invalid maintenance operation selector.")
+    registry = physical(values.pop("registry-dir", default_registry))
+    return Request(name, registry, values)
+
+
+def _provider(request: Request) -> Payload:
+    if request.command != "deploy":
+        return verify_gate(request.registry).provider
+    # Deployment must bootstrap before new launcher bytes are installed. This
+    # resolves only the exact registered provider; deployment separately verifies
+    # closed routes, acceptance and checkpoint before any state operation.
+    manifest = read(physical(request.values["manifest"], directory=False))
+    fields(manifest, "version kind providerPayloadSha256 components")
+    rows = manifest["components"]
+    if (manifest["kind"] != "driver-gate" or not valid_hash(manifest["providerPayloadSha256"])
+            or not isinstance(rows, list) or len(rows) != len(COMPONENTS)):
+        raise Refusal("Invalid deployment gate manifest.")
+    for component, row in zip(COMPONENTS, rows, strict=True):
+        if (not isinstance(row, dict) or set(row) != {"component", "launcher", "launcherSha256"}
+                or row["component"] != component or not valid_hash(row["launcherSha256"])
+                or not isinstance(row["launcher"], str) or not os.path.isabs(row["launcher"])
+                or os.path.normpath(row["launcher"]) != row["launcher"]):
+            raise Refusal("Invalid deployment gate routes.")
+    return resolve_provider(request.registry, manifest["providerPayloadSha256"])
+
+
+def command(arguments: list[str], default_registry: str) -> int:
+    """Ordinary arbol-builds delegates before handling component authority."""
+    try:
+        request = parse_request(arguments, default_registry)
+        provider = _provider(request)
+        with pin_payloads(request.registry, [provider]):
+            # Preserve this process's Build pin across exec until the one-shot
+            # provider exits, including initial deployment before a gate pin.
+            descriptor = open_use_guard(str(request.registry), "arbol", provider.build)
+            try:
+                _use_provider_guard(request.registry, provider.build, descriptor)
+                os.set_inheritable(descriptor, True)
+                os.execve(provider.prefix[0], [*provider.prefix, "driver-state", *arguments],
+                          without_authority(os.environ.copy()))
+            finally:
+                os.close(descriptor)
+        return 1
+    except Exception:
+        _maintenance_error()
+        return 1
+
+
+def _use_provider_guard(registry: Path, build: str, descriptor: int) -> None:
+    info = os.fstat(descriptor)
+    named = (registry / "arbol" / ".uses" / build).lstat()
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600
+            or (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino)):
+        raise Refusal("Invalid provider Build-use guard.")
+
+
+def _maintenance_error() -> None:
+    write_all(1, canonical({"error": {"code": "builds_failed",
+                                    "message": "Driver maintenance refused; preserve closed recovery authority."}}))
+
+
+def provider_entry(descriptor: Object) -> None:
+    """Called only by the sealed immutable script after isolated M/D verification."""
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    standard_descriptors()
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT, signal.SIGTERM})
+    try:
+        root = Path(__file__).resolve().parents[2]
+        provider = load(root, "arbol", descriptor["build"])
+        if (provider.descriptor != descriptor or not sys.flags.isolated or not sys.flags.no_site
+                or not sys.flags.no_user_site or not sys.flags.safe_path or not sys.dont_write_bytecode
+                or Path(sys.executable).resolve() != Path(provider.prefix[0]).resolve()
+                or Path(sys.argv[0]).resolve() != Path(provider.prefix[2])):
+            raise Refusal("Unverified immutable provider entry.")
+        arguments = sys.argv[1:]
+        if arguments[:1] == ["--driver-launch"]:
+            if len(arguments) < 4 or arguments[2] not in COMPONENTS:
+                raise Refusal("Invalid fixed Driver launcher dispatch.")
+            registry = physical(arguments[1])
+            selected = verify_gate(registry).provider
+            if selected.root != provider.root or selected.digest != provider.digest:
+                raise Refusal("Driver launcher provider differs from installed gate.")
+            with pin_payloads(registry, [provider]):
+                result = launch_gated(str(registry), arguments[2], arguments[3], arguments[4:])
+            raise SystemExit(result)
+        if arguments[:1] != ["driver-state"]:
+            raise Refusal("Invalid immutable provider command.")
+        from .config import locations
+        request = parse_request(arguments[1:], locations().registry)
+        selected = _provider(request)
+        if selected.root != provider.root or selected.digest != provider.digest:
+            raise Refusal("Maintenance provider differs from the exact registered tuple.")
+        with pin_payloads(request.registry, [provider]):
+            # Future source leaves register their reviewed fixed operations. A
+            # partial source tree is never a publishable provider payload.
+            function = HANDLERS.get(request.command)
+            if function is None:
+                raise Refusal("Incomplete maintenance provider payload.")
+            raw = canonical(function(request))
+            if len(raw) > LIMIT:
+                raise Refusal("Maintenance result exceeds its protocol bound.")
+            write_all(1, raw)
+    except Exception:
+        _maintenance_error()
+        raise SystemExit(1) from None
+    raise SystemExit(0)

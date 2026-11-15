@@ -10,6 +10,6 @@ if "__arbol_sealed_payload__" not in globals():
     sys.stdout.write('{"error":{"code":"builds_failed","message":"Use the verified immutable Driver provider."}}\n')
     raise SystemExit(1)
 
-from arbol_builds.cli import entry  # noqa: E402
+from arbol_builds.driver_state import provider_entry  # noqa: E402
 
-entry()
+provider_entry(globals()["__arbol_sealed_payload__"])

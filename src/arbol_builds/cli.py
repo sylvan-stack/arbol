@@ -78,6 +78,9 @@ def main(args: list[str]) -> int:
         write_all(1, json_line(value))
 
     try:
+        if args[:1] == ["driver-state"]:
+            from .driver_state import command as driver_state_command
+            return driver_state_command(args[1:], locations().registry)
         if args == ["--help"]:
             output({"usage": USAGE})
             return 0
