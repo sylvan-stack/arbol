@@ -667,6 +667,12 @@ class FixtureAuthority:
                             "Conditional actual route before-image changed.")
                 if not fresh:
                     assert old is not None
+                    # The earlier preflight is not a serialization boundary:
+                    # a genuine begin can close admission before these mutexes.
+                    # All four are now held, so revalidate the COMPLETE original
+                    # normal controls/scopes/permitted receipt lineage before
+                    # writing even the first transaction-owned draining control.
+                    self._healthy(old)
                     for component, authority in self.authorities.items():
                         authority.write("control", {"version": 1, "phase": "draining", "session": session,
                                                     "epoch": old.epochs[component]})
