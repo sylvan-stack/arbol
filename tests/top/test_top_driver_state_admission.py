@@ -3287,9 +3287,8 @@ class MimoMainView:
 class MimoMainSubject:
     """One healthy disposable subject with REAL offline public preparation.
 
-    This owns13.1's ordinary stop only. A later separately admitted13.3 body may
-    reuse the split active boundary and settlement interfaces with its DISTINCT
-    source-defined cancellation trigger; there is no wire callback dispatcher.
+    Ordinary JSONLF stop and verified-main SIGTERM use distinct fresh subjects
+    and share the same active-boundary and settlement observations.
     No preparation or runtime operation occurs on construction/import.
     """
 
@@ -3731,6 +3730,92 @@ class MimoMainSubject:
         self.record["ordinaryJsonLfStopSentAfterBegin"] = True
         # KEEP stdin OPEN. No successful EOF trigger or communicate/collect.
 
+    def verified_main_stop(self) -> None:
+        require(self.begun and self.record.get("closedAdmissionRefusal") is not None
+                and not self.stop_sent and self.view is not None and self.child is not None
+                and self.stream is not None and self.original_control is not None,
+                "Verified-main cancellation requires the admitted pair across real begin.")
+        assert self.view is not None and self.child is not None and self.stream is not None
+        assert self.original_control is not None
+        view = self.view
+        provider = self.child
+        stdin = provider.process.stdin
+        require(stdin is not None and not stdin.closed
+                and set(threading.enumerate()) == {threading.current_thread(), self.stream.thread},
+                "Cancellation needs an open input pipe and the sole data reader.")
+        end = min(self.run_end - 15, time.monotonic() + 5)
+        sent_key = (view.main.pid, view.main.started_at)
+        real_kill = os.kill
+        context_hash = view.main_context_sha256
+        changed_hash = ("1" if context_hash.startswith("0") else "0") + context_hash[1:]
+        observation: Object = {"main": view.main.object(), "watcher": view.watcher.object(),
+                               "inputKeptOpen": True, "publicDrainInvoked": False, "signals": []}
+        self.record["verifiedMainCancellation"] = observation
+
+        def no_signal(*arguments: object) -> None:
+            observation["signals"].append(list(arguments))
+            raise ObservationFailed("A non-target or duplicate signal was attempted.")
+
+        def changed_reread(authority: Authority, invocation: str, writer: str) -> Object:
+            actual = provider_admission.read_writer(authority, invocation, writer)
+            require(authority is self.authority and actual == view.main_writer
+                    and invocation == view.main_context["invocation"] and writer == view.main_context["writer"],
+                    "The reread fault reached a writer other than the verified active MAIN.")
+            observation["changedReread"] = {"real": actual, "substitutedContextSha256": changed_hash}
+            return {**actual, "contextSha256": changed_hash}
+
+        def signal_main(pid: int, number: int) -> None:
+            require(time.monotonic() < end and pid == view.main.pid and number == signal.SIGTERM
+                    and not observation["signals"] and view.main.live(parent=provider.owner.pid)
+                    and view.watcher.live(parent=view.main.pid),
+                    "The actual signal is outside the fresh verified MAIN boundary.")
+            real_kill(pid, number)
+            self.stop_observed_at = time.monotonic()
+            self.stop_sent = True
+            observation["signals"].append([pid, int(number)])
+
+        with self.authority.mutex(seconds=max(.001, end - time.monotonic())):
+            require(self.authority.read("control") == {**self.original_control, "phase": "draining", "session": self.session},
+                    "The genuine draining session changed before cancellation.")
+            custody = reconcile(self.authority, persist_unknown=False, candidate=self.controller.scope)
+            require(not custody.unknown and custody.active == 2 and custody.pending == 0
+                    and list(custody.writers) == view.custody["writers"] and list(custody.handoffs) == view.custody["handoffs"]
+                    and view.main.live(parent=provider.owner.pid) and view.watcher.live(parent=view.main.pid),
+                    "The active pair differs from the independently verified custody graph.")
+            before = _raw_authority_image(self.authority)
+            require(before == view.before_metadata, "The original verified writer, control or marker bytes changed.")
+            with (patch.object(provider_process, "read_writer", side_effect=changed_reread) as reread,
+                  patch.object(os, "kill", side_effect=no_signal),
+                  patch.object(os, "killpg", side_effect=no_signal)):
+                fresh: set[tuple[int, str]] = set()
+                try:
+                    provider_process.request_cancellation(self.authority, custody, fresh)
+                except Refusal:
+                    reread.assert_called_once_with(self.authority, view.main_context["invocation"], view.main_context["writer"])
+                else:
+                    raise ObservationFailed("Cancellation accepted a mismatching fresh context hash.")
+                require("changedReread" in observation and not fresh and not observation["signals"]
+                        and _raw_authority_image(self.authority) == before,
+                        "The labelled reread fault changed real custody or attempted a signal.")
+            with (patch.object(os, "kill", side_effect=no_signal),
+                  patch.object(os, "killpg", side_effect=no_signal)):
+                sent = {sent_key}
+                provider_process.request_cancellation(self.authority, custody, sent)
+                require(sent == {sent_key} and not observation["signals"]
+                        and _raw_authority_image(self.authority) == before,
+                        "An already-signalled owner changed custody or received a duplicate signal.")
+            observation["priorSignalSuppressed"] = True
+            observation["negativeAuthoritySha256"] = digest(canonical(before))
+            with (patch.object(os, "kill", side_effect=signal_main),
+                  patch.object(os, "killpg", side_effect=no_signal)):
+                pending: set[tuple[int, str]] = set()
+                provider_process.request_cancellation(self.authority, custody, pending)
+            require(self.stop_sent and pending == {sent_key}
+                    and observation["signals"] == [[view.main.pid, int(signal.SIGTERM)]],
+                    "The verified MAIN did not receive exactly one real SIGTERM.")
+        require(time.monotonic() <= end and stdin is not None and not stdin.closed,
+                "Verified-main cancellation exceeded its budget or changed the open stdin boundary.")
+
     def _source_coupling(self) -> Object:
         """Exact packaged paths; static call-path proof has explicit limits.
 
@@ -3782,11 +3867,15 @@ class MimoMainSubject:
         provider = self.controller.scope.gate.provider
         require(vars(provider_state)["Guardian"] is provider_process.Guardian
                 and vars(provider_process)["normal_control"] is normal_control
+                and vars(provider_process)["read_writer"] is provider_admission.read_writer
+                and vars(provider_process)["os"] is os
                 and normal_control is provider_admission.normal_control,
                 "The loaded candidate route does not use the observed control check.")
         actual = (provider_process.supervise, provider_process.Guardian._close_owned,
                   provider_process.Guardian.admit, provider_process.inspect, provider_state.launch_candidate,
-                  provider_state.begin, provider_state.drain, normal_control, provider_admission.refuse, Authority.lease)
+                  provider_process.request_cancellation, provider_process.matches,
+                  provider_state.begin, provider_state.drain, normal_control, provider_admission.read_writer,
+                  provider_admission.refuse, Authority.lease)
         provider_paths: Object = {}
         bound_functions = 0
         for short in ("driver_process.py", "driver_state.py", "driver_admission.py"):
@@ -3846,10 +3935,10 @@ class MimoMainSubject:
         return {"retainedOriginalResources": observed,
                 "completeFinalInventory": "SOURCE-COUPLED verify_cleanup; no sampled-empty inventory claim"}
 
-    def settle_after_ordinary_stop(self) -> Object:
+    def settle_after_cancellation(self) -> Object:
         require(self.begun and self.stop_sent and self.view is not None and self.child is not None
                 and self.stream is not None and self.original_control is not None and not self.closed,
-                "No genuine ordinary cancellation subject is available for settlement.")
+                "No genuine cancellation subject is available for settlement.")
         assert self.view is not None and self.child is not None and self.stream is not None and self.original_control is not None
         settle_end = min(self.run_end - 15, self.stop_observed_at + 20)
         require(time.monotonic() + .5 < settle_end, "No original cancellation settlement/reader reserve remains.")
@@ -3864,7 +3953,7 @@ class MimoMainSubject:
                 and records[-1]["type"] == "finished" and records[-1].get("outcome") == "cancelled"
                 and "error" not in records[-1]
                 and not any(row["type"] == "notice" and row.get("code") == "cleanup_unresolved" for row in records),
-                "Actual ordinary stop did not produce its exact cancelled, proof-backed closure result.")
+                "Actual stop did not produce its exact cancelled, proof-backed closure result.")
         starts: dict[str, Object] = {}
         finishes: dict[str, Object] = {}
         stubborn_call = self.record["actualStubbornStart"].get("callId")
@@ -3879,7 +3968,7 @@ class MimoMainSubject:
                 target[call] = row
         require(bool(starts) and set(starts) == set(finishes) and stubborn_call in starts,
                 "Original held tool lacks balanced actual interruption/output completion.")
-        require(time.monotonic() <= settle_end, "Ordinary cancellation settlement exceeded its original twenty seconds.")
+        require(time.monotonic() <= settle_end, "Cancellation settlement exceeded its original twenty seconds.")
         require(not self.view.main.live() and not self.view.watcher.live(),
                 "Actual MAIN/Watcher remain live; no terminal-from-provider-exit inference.")
         self.controller.reaped.append(self.child)
@@ -4047,7 +4136,23 @@ def main_watcher_across_begin(controller: WholeCheckController, baseline: Baseli
         subject.prepare()
         subject.start_and_begin()
         subject.ordinary_stop()
-        return subject.settle_after_ordinary_stop()
+        return subject.settle_after_cancellation()
+    except BaseException as error:
+        subject.abort(error)
+        raise
+
+
+def verified_main_cancellation_across_begin(controller: WholeCheckController, baseline: Baseline, *, case: str,
+                                            native: MimoOfflineInput, full_run_end: float,
+                                            environment: Mapping[str, str]) -> Object:
+    """Prospective provider-triggered cancellation on a fresh offline subject."""
+    subject = MimoMainSubject(controller, baseline, case=case, native=native,
+                              full_run_end=full_run_end, environment=environment)
+    try:
+        subject.prepare()
+        subject.start_and_begin()
+        subject.verified_main_stop()
+        return subject.settle_after_cancellation()
     except BaseException as error:
         subject.abort(error)
         raise
