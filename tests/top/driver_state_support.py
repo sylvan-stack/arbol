@@ -546,6 +546,393 @@ class HelperSpanCollector:
         return self.cleanup_observation
 
 
+class TerminalSpanCollector(HelperSpanCollector):
+    """Fixed positive-H1 continuation followed by the af1 terminal interval.
+
+    Binding accepts only identities independently verified by the controller;
+    it grants no metadata authority or semantic trust to a reported PID. The
+    helper is retained for preterminal failure cleanup, never continued here.
+    """
+
+    def __init__(self, child: OwnedChild, *, case: str, seconds: float = 120,
+                 limit: int = CAPTURE_LIMIT) -> None:
+        super().__init__(child, case=case, seconds=seconds, limit=limit)
+        self._suite: ExactProcess | None = None
+        self._helper: ExactProcess | None = None
+        self._armed: bytes | None = None
+        self._armed_at: float | None = None
+        self._stops_at: float | None = None
+        self._terminal_end: float | None = None
+        self._resumed = False
+        self._finish_attempted = False
+        self._aborting = False
+        self._queries: list[Object] = []
+        self._state_errors: set[str] = set()
+        self._terminal_errors: list[str] = []
+        self._resume_attempts = {"suite": 0, "provider": 0}
+        self._terminal_cleanup: Object | None = None
+        self._settle_iterations = 0
+        self._ps = self._ps_image()
+
+    @staticmethod
+    def _ps_image() -> Object:
+        """Pin the fixed root-owned OS observer, not a caller-selected program."""
+        path = Path("/bin/ps")
+        if os.uname().sysname != "Darwin" or path.resolve(strict=True) != path:
+            raise ObservationFailed("Terminal observation needs the fixed supported OS program.")
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            before = os.fstat(descriptor)
+            if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_mode & 0o022
+                    or before.st_nlink != 1 or not before.st_mode & 0o111 or before.st_size > 16 * 1024 * 1024):
+                raise ObservationFailed("Unsafe fixed process-state observer.")
+            hashed, size = hashlib.sha256(), 0
+            while part := os.read(descriptor, 65536):
+                size += len(part)
+                if size > 16 * 1024 * 1024:
+                    raise ObservationFailed("Process-state observer exceeds its fixed bound.")
+                hashed.update(part)
+            after, named = os.fstat(descriptor), path.lstat()
+            keys = ("st_dev", "st_ino", "st_mode", "st_uid", "st_nlink", "st_size", "st_mtime_ns")
+            if (size != before.st_size or any(getattr(before, k) != getattr(after, k) for k in keys)
+                    or any(getattr(before, k) != getattr(named, k) for k in keys)):
+                raise ObservationFailed("Process-state observer changed while pinned.")
+            uname = os.uname()
+            return {"path": str(path), "device": before.st_dev, "inode": before.st_ino,
+                    "size": size, "mode": stat.S_IMODE(before.st_mode), "uid": 0,
+                    "sha256": hashed.hexdigest(), "platform": {"system": uname.sysname,
+                    "release": uname.release, "machine": uname.machine}}
+        finally:
+            os.close(descriptor)
+
+    def bind_verified_participants(self, *, suite: ExactProcess, helper: ExactProcess) -> None:
+        """Call after complete real report/context verification, BEFORE continue."""
+        self._active()
+        ExactProcess.read(suite.object())
+        ExactProcess.read(helper.object())
+        if (self._suite is not None or self._continued or self._ready is None
+                or len({suite.pid, helper.pid, self.child.owner.pid}) != 3
+                or not self.child.owner.live(parent=os.getpid())
+                or not suite.live(parent=self.child.owner.pid) or not helper.live(parent=suite.pid)):
+            raise ObservationFailed("Terminal cleanup targets are unverified, changed or repeated.")
+        self._suite, self._helper = suite, helper
+        self.end = min(self.end, self.ready_observed_at + 60)
+        self.deadline = min(self.deadline, self.end - 20)
+
+    def continue_after_validation(self, *, report_sha256: str) -> None:
+        if self._suite is None or self._helper is None:
+            raise ObservationFailed("Both terminal targets must be retained before H1 continue.")
+        super().continue_after_validation(report_sha256=report_sha256)
+
+    def _pump(self, *, until: float) -> None:
+        selector = self._active()
+        remaining = until - time.monotonic()
+        if remaining <= 0:
+            raise ObservationFailed("Terminal capture exceeded its fixed deadline.")
+        for key, events in selector.select(min(.05, remaining)):
+            if not events & selectors.EVENT_READ:
+                continue
+            name = key.data
+            if name not in ("stdout", "stderr"):
+                raise ObservationFailed("Unexpected terminal capture endpoint.")
+            bound = (len(self._ready or b"") + 4096 if self._continued else 4096) if name == "stdout" else self.limit
+            if not self._aborting and len(self._data[name]) > bound:
+                raise ObservationFailed("Terminal output already exceeded its fixed bound.")
+            # Cleanup still drains a violating stream, retaining its bounded
+            # actual prefix and an explicit overflow rather than blocking wait.
+            try:
+                part = os.read(key.fd, 65536 if self._aborting else min(65536, bound + 1 - len(self._data[name])))
+            except BlockingIOError:
+                continue
+            except BaseException as error:
+                if not self._aborting:
+                    raise
+                self._terminal_errors.append(name + "-read:" + type(error).__name__)
+                try:
+                    selector.unregister(key.fileobj)
+                except BaseException as cleanup:
+                    self._terminal_errors.append(name + "-unregister:" + type(cleanup).__name__)
+                self._open.discard(name)
+                continue
+            if not part:
+                selector.unregister(key.fileobj)
+                self._open.discard(name)
+                continue
+            room = max(0, bound + 1 - len(self._data[name]))
+            self._data[name].extend(part[:room])
+            if len(part) > room or len(self._data[name]) > bound:
+                if not self._aborting:
+                    raise ObservationFailed("Terminal capture overflow; preserve its actual prefix.")
+                message = name + "-overflow:bounded-prefix-truncated"
+                if message not in self._terminal_errors:
+                    self._terminal_errors.append(message)
+            if not self._aborting and self._ready is not None:
+                raw = bytes(self._data["stdout"])
+                if not raw.startswith(self._ready):
+                    raise ObservationFailed("Original H1 ready bytes changed.")
+                if not self._continued and raw != self._ready:
+                    raise ObservationFailed("Terminal notification preceded H1 continue.")
+                if self._armed is not None and raw != self._ready + self._armed:
+                    raise ObservationFailed("Extra data follows the sole terminal notification.")
+
+    def terminal_armed(self) -> bytes:
+        self._active()
+        if not self._continued or self._armed is not None or self._ready is None or self._suite is None:
+            raise ObservationFailed("Terminal arm is out of order or lacks retained targets.")
+        prefix = len(self._ready)
+        while b"\n" not in self._data["stdout"][prefix:]:
+            if "stdout" not in self._open or self.child.process.poll() is not None:
+                raise ObservationFailed("Provider exited before terminal arm.")
+            self._pump(until=self.deadline)
+        raw = bytes(self._data["stdout"][prefix:])
+        value = document(raw)
+        exact_fields(value, ("version", "kind", "case", "intentSha256"))
+        if (type(value["version"]) is not int or value["version"] != 1
+                or value["kind"] != "terminal-close-armed" or value["case"] != self.case
+                or not isinstance(value["intentSha256"], str)
+                or re.fullmatch(r"[0-9a-f]{64}", value["intentSha256"], re.ASCII) is None
+                or canonical(value) != raw):
+            raise ObservationFailed("Invalid ordered terminal-close-armed frame.")
+        self._armed, self._armed_at = raw, time.monotonic()
+        self._terminal_end = min(self.end, self._armed_at + 30)
+        return raw
+
+
+    def _state(self, name: str, owner: ExactProcess, *, until: float,
+               parent: int | None = None) -> str | None:
+        if not owner.live(parent=parent):
+            return None
+        if name in self._state_errors:
+            raise ObservationFailed("The fixed process-state observer is unavailable for this target.")
+        row: Object = {"target": name, **owner.object(), "argv": ["/bin/ps", "-p", str(owner.pid), "-o", "stat="],
+                       "observerSha256": self._ps["sha256"]}
+        try:
+            remaining = until - time.monotonic()
+            if remaining <= 0 or len(self._queries) >= 1000 or self._ps_image() != self._ps:
+                raise ObservationFailed("Process-state observation budget or original program changed.")
+            result = subprocess.run(row["argv"], stdin=subprocess.DEVNULL, capture_output=True,
+                                    close_fds=True, timeout=min(2, remaining))
+            row.update({"returncode": result.returncode, "stdoutHex": result.stdout[:4096].hex(),
+                        "stderrHex": result.stderr[:4096].hex(),
+                        "truncated": len(result.stdout) + len(result.stderr) > 4096})
+            if self._ps_image() != self._ps or time.monotonic() > until:
+                raise ObservationFailed("Fixed process-state observer failed or exceeded its bound.")
+            if not owner.live(parent=parent):
+                row["sameBirthNoLongerPresent"] = True
+                return None
+            if result.returncode != 0 or result.stderr or row["truncated"]:
+                raise ObservationFailed("Fixed process-state observer failed or exceeded its bound.")
+            words = result.stdout.decode("ascii", "strict").split()
+            if len(words) != 1 or re.fullmatch(r"[A-Za-z][A-Za-z0-9+<>?]*", words[0], re.ASCII) is None:
+                raise ObservationFailed("Process-state observation is not one bounded state token.")
+            row["state"] = words[0]
+            return words[0]
+        except BaseException as error:
+            self._state_errors.add(name)
+            row["error"] = type(error).__name__
+            if isinstance(error, subprocess.TimeoutExpired):
+                row["stdoutHex"] = (error.stdout or b"")[:4096].hex()
+                row["stderrHex"] = (error.stderr or b"")[:4096].hex()
+                row["partialOnTimeout"] = True
+            raise
+        finally:
+            self._queries.append(row)
+
+    def confirm_terminal_stops(self) -> None:
+        if (self._armed_at is None or self._terminal_end is None or self._stops_at is not None
+                or self._suite is None or self._helper is None):
+            raise ObservationFailed("Terminal stop observation is out of order.")
+        until = min(self._terminal_end, self._armed_at + 5)
+        while time.monotonic() < until:
+            if self._helper.live():
+                raise ObservationFailed("H1 is still live at the purported final terminal interval.")
+            suite_state = self._state("suite", self._suite, until=until, parent=self.child.owner.pid)
+            provider_state = self._state("provider", self.child.owner, until=until, parent=os.getpid())
+            if suite_state is None or provider_state is None:
+                raise ObservationFailed("A terminal target exited or changed before both STOP observations.")
+            if suite_state.startswith("T") and provider_state.startswith("T"):
+                # Bracket the second observation with a fresh Suite observation.
+                repeated = self._state("suite", self._suite, until=until, parent=self.child.owner.pid)
+                if repeated is not None and repeated.startswith("T"):
+                    self._stops_at = time.monotonic()
+                    return
+            self._pump(until=until)
+        raise ObservationFailed("Both terminal STOP states were not established within five seconds.")
+
+    @property
+    def terminal_interval_ends_at(self) -> float:
+        if self._armed_at is None or self._stops_at is None or self._terminal_end is None:
+            raise ObservationFailed("No independently observed terminal interval exists.")
+        return min(self._terminal_end, self._armed_at + 10, self._stops_at + 5)
+
+    def _continue_target(self, name: str, owner: ExactProcess, *, until: float) -> None:
+        if not owner.live():
+            return
+        try:
+            state = self._state(name, owner, until=until)
+        except BaseException as error:
+            self._terminal_errors.append(name + "-state:" + type(error).__name__)
+            # Failed ps must not leave an independently same-birth owned target
+            # stopped. This is cleanup, not a successful STOP observation.
+            state = "T-possibly-stopped"
+        if state is not None and state.startswith("T"):
+            self._resume_attempts[name] += 1
+            signal_verified(owner, signal.SIGCONT)
+
+    def resume_terminal(self) -> None:
+        if self._resumed or self._suite is None:
+            raise ObservationFailed("Terminal continuation is repeated or unbound.")
+        until = self.terminal_interval_ends_at
+        if time.monotonic() >= until:
+            raise ObservationFailed("The independent terminal interval expired before continuation.")
+        errors: list[str] = []
+        for name, owner in (("suite", self._suite), ("provider", self.child.owner)):
+            state = self._state(name, owner, until=until)
+            if state is None or not state.startswith("T"):
+                raise ObservationFailed("A terminal target changed before genuine continuation.")
+        for name, owner in (("suite", self._suite), ("provider", self.child.owner)):
+            try:
+                signal_verified(owner, signal.SIGCONT)
+                self._resume_attempts[name] += 1
+            except BaseException as error:
+                errors.append(name + "-continue:" + type(error).__name__)
+        self._terminal_errors.extend(errors)
+        if errors or self._terminal_errors:
+            raise ObservationFailed("Terminal continuation is unavailable; unconditional cleanup remains owed.")
+        self._resumed = True
+
+    def _settle_terminal(self, *, cancelling: bool) -> Object:
+        if self._suite is None or self._helper is None:
+            raise ObservationFailed("Terminal participants were never independently bound.")
+        end = min(self.end, time.monotonic() + 20)
+        if self._terminal_end is not None:
+            end = min(end, self._terminal_end)
+        self.end = end  # No later context unwind may create another full wait.
+        self._aborting = cancelling
+        terminated: set[str] = set()
+        present: dict[str, bool | None] = {"suite": True, "provider": True, "helper": True}
+        # Reserve the final shared iteration for failed-path cancellation when
+        # a positive attempt exhausts its iteration bound before its deadline.
+        limit = 200 if cancelling else 199
+        # At least one independent CONT/TERM/observation attempt still occurs
+        # when a prior operation consumed the wait budget; no new wait follows.
+        while self._settle_iterations < limit:
+            self._settle_iterations += 1
+            for name, owner in (("suite", self._suite), ("provider", self.child.owner)):
+                try:
+                    self._continue_target(name, owner, until=end)
+                except BaseException as error:
+                    self._terminal_errors.append(name + "-continue:" + type(error).__name__)
+            if cancelling:
+                for name, owner in (("helper", self._helper), ("suite", self._suite), ("provider", self.child.owner)):
+                    if name in terminated:
+                        continue
+                    terminated.add(name)
+                    try:
+                        if owner.live():
+                            signal_verified(owner, signal.SIGTERM)
+                    except BaseException as error:
+                        self._terminal_errors.append(name + "-term:" + type(error).__name__)
+            for name, owner in (("suite", self._suite), ("provider", self.child.owner), ("helper", self._helper)):
+                try:
+                    present[name] = owner.live()
+                except BaseException as error:
+                    present[name] = None
+                    self._terminal_errors.append(name + "-identity:" + type(error).__name__)
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                if self._open:
+                    self._pump(until=end)
+            except BaseException as error:
+                self._terminal_errors.append("capture:" + type(error).__name__)
+                if not cancelling:
+                    break
+            if not self.child.reaped:
+                try:
+                    self.child.wait_owned(seconds=min(.05, max(.001, end - time.monotonic())))
+                except subprocess.TimeoutExpired:
+                    pass
+                except BaseException as error:
+                    self._terminal_errors.append("provider-wait:" + type(error).__name__)
+                    if not cancelling:
+                        break
+            if self.child.reaped and not self._open and all(value is False for value in present.values()):
+                break
+            if not self._open and self.child.reaped:
+                try:
+                    time.sleep(min(.05, max(0, end - time.monotonic())))
+                except BaseException as error:
+                    self._terminal_errors.append("observation-wait:" + type(error).__name__)
+                    break
+        return {"iterations": self._settle_iterations, "sameBirthPresent": present,
+                "providerReaped": self.child.reaped, "providerReturncode": self.child.process.returncode,
+                "resumeAttempts": dict(self._resume_attempts), "errors": list(self._terminal_errors),
+                "budgetExpired": time.monotonic() >= end, "observerReapedDescendant": False,
+                "custodyResolutionClaimed": False}
+
+    def finish_positive(self) -> Captured:
+        self._active()
+        if self._finish_attempted or not self._resumed or self._armed is None or self._ready is None:
+            raise ObservationFailed("Positive terminal closure requires the actual observed interval and resume.")
+        self._finish_attempted = True
+        result = self._settle_terminal(cancelling=False)
+        if (result["errors"] or result["budgetExpired"] or not self.child.reaped
+                or self.child.process.returncode != 0 or self._open
+                or any(value is not False for value in result["sameBirthPresent"].values())
+                or bytes(self._data["stdout"]) != self._ready + self._armed):
+            raise ObservationFailed("Actual terminal lifetime/output closure is incomplete.")
+        errors = self._close_endpoints()
+        if errors:
+            raise ObservationFailed("Terminal endpoint closure failed: " + repr(errors))
+        if time.monotonic() > self.end:
+            raise ObservationFailed("Actual terminal closure exceeded its shared deadline.")
+        self._finished = True
+        return Captured(self.child.process.returncode, bytes(self._data["stdout"]),
+                        bytes(self._data["stderr"]), self.child.owner)
+
+    def capture_ended_failure(self) -> Captured:
+        raise ObservationFailed("The terminal fixture is a distinct healthy positive H1 path.")
+
+    def abort(self) -> Object:
+        if self._terminal_cleanup is not None:
+            return self._terminal_cleanup
+        if self._suite is None:
+            return super().abort()
+        stdin = self.child.process.stdin
+        if stdin is not None:
+            try:
+                stdin.close()
+            except BaseException as error:
+                self._terminal_errors.append("failure-input:" + type(error).__name__)
+        try:
+            result = self._settle_terminal(cancelling=True)
+        except BaseException as error:
+            self._terminal_errors.append("terminal-cleanup:" + type(error).__name__)
+            result = {"providerReaped": self.child.reaped, "cleanupUnresolved": True,
+                      "errors": list(self._terminal_errors), "custodyResolutionClaimed": False}
+        finally:
+            self._terminal_errors.extend(self._close_endpoints())
+        result["errors"] = list(self._terminal_errors)
+        self._terminal_cleanup = result
+        self.cleanup_observation = result
+        return result
+
+    def raw_observation(self) -> Object:
+        result = super().raw_observation()
+        result.update({"terminalArmedHex": None if self._armed is None else self._armed.hex(),
+                       "terminalArmedAt": self._armed_at, "terminalStopsAt": self._stops_at,
+                       "terminalResumed": self._resumed, "processStateObserver": self._ps,
+                       "kernelQueries": list(self._queries),
+                       "suite": None if self._suite is None else self._suite.object(),
+                       "helper": None if self._helper is None else self._helper.object(),
+                       "terminalErrors": list(self._terminal_errors)})
+        # Exposing evidence must not expose mutable aliases to the pinned
+        # program, prior kernel observations or cached failure disposition.
+        return document(canonical(result, limit=8 * 1024 * 1024), limit=8 * 1024 * 1024)
+
+
 class SocketBarrier:
     """One reviewed helper checkpoint; a data socket never carries admission."""
 
