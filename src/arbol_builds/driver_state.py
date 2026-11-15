@@ -681,13 +681,18 @@ def _rollout_record(path: Path) -> Object | None:
 
 
 def _rollout_bindings(authorities: list[Authority], record: Object, *, allow_exclusive: bool = False,
-                      recovering: bool = False) -> list[Object]:
+                      recovering: bool = False, reopening: Object | None = None) -> list[Object]:
     rows: list[Object] = []
     for authority, expected in zip(authorities, record["components"], strict=True):
         control = authority.read("control")
-        if (control["session"] != record["session"] or control["epoch"] != expected["epoch"]
-                or control["phase"] not in (("draining", "exclusive") if allow_exclusive else ("draining",))):
-            raise Refusal("Deployment no longer has all four unchanged closed epochs.")
+        closed = (control["session"] == record["session"] and control["epoch"] == expected["epoch"]
+                  and control["phase"] in (("draining", "exclusive") if allow_exclusive else ("draining",)))
+        normal = False
+        if reopening is not None:
+            row = next(row for row in reopening["components"] if row["component"] == authority.component)
+            normal = control == {"version": 1, "phase": "normal", "session": None, "epoch": row["nextEpoch"]}
+        if not closed and not normal:
+            raise Refusal("Deployment no longer has its unchanged closed or journaled normal tuple.")
         archived = authority.folder / "boot-archive" / record["checkpoint"] / "normal-admissions"
         if recovering and os.path.lexists(archived):
             active = authority.folder / "normal-admissions"
@@ -698,14 +703,15 @@ def _rollout_bindings(authorities: list[Authority], record: Object, *, allow_exc
             admissions_digest = admission_fingerprint(authority, folder=archived)
         else:
             admissions_digest = admission_fingerprint(authority)
-        rows.append({"component": authority.component, "epoch": control["epoch"],
+        rows.append({"component": authority.component, "epoch": expected["epoch"],
                      "controlLock": lock_identity(authority, "control.lock"),
                      "admissionLock": lock_identity(authority, "admission.lock"),
                      "admissionsSha256": admissions_digest})
     return rows
 
 
-def _verify_rollout(registry: Path, authorities: list[Authority], record: Object) -> tuple[Path, Object]:
+def _verify_rollout(registry: Path, authorities: list[Authority], record: Object, *,
+                    reopening: Object | None = None) -> tuple[Path, Object]:
     folder = _rollout_folder(registry, record["session"], record["checkpoint"])
     registry_digest = sha256(canonical(authorities[0].identity))
     if record["registrySha256"] != registry_digest:
@@ -729,7 +735,7 @@ def _verify_rollout(registry: Path, authorities: list[Authority], record: Object
     recovery = _recovery_journal(folder, record)
     if checkpoint["components"] != _rollout_bindings(
             authorities, record, allow_exclusive=record["phase"] in ("boot-verified", "maintaining"),
-            recovering=recovery is not None):
+            recovering=recovery is not None, reopening=reopening):
         raise Refusal("Closed authorities, lock inodes or normal admissions changed after checkpoint.")
     return folder, checkpoint
 
@@ -910,8 +916,8 @@ def deploy(request: Request) -> Object:
             if record is not None and record["phase"] not in ("failed-closed", "complete") and not same:
                 raise Refusal("Changed deployment inputs require a new closed rollout after failure.")
             if same and record is not None and record["phase"] == "complete":
-                verify_gate(request.registry)
-                return {"version": 1, "session": request.session, "phase": "complete", "callersMayEnable": True}
+                verified = _verified_complete(request.registry, authorities, payloads, verify_gate(request.registry), record)
+                return {"version": 1, "session": request.session, **verified}
             if record is None or record["phase"] in ("failed-closed", "complete"):
                 record = _stage_rollout(request, gate, callers_raw, provider, authorities, sources, record, build_pins)
             assert record is not None
@@ -921,7 +927,8 @@ def deploy(request: Request) -> Object:
                     if record["phase"] == "awaiting-boot":
                         _verify_rollout(request.registry, authorities, record)
                     else:
-                        _verify_rollout(request.registry, authorities, record)
+                        reopening = _reopen_record(folder, record)
+                        _verify_rollout(request.registry, authorities, record, reopening=reopening)
                         recovery = _recovery_journal(folder, record)
                         if recovery is None or recovery["phase"] != "complete":
                             raise Refusal("Verified boot phase lacks completed recovery evidence.")
@@ -1706,8 +1713,7 @@ def _normal_finish_retry(prepared: Prepared, control: Object, journal: Object | 
     return _finish_status(prepared, "normal")
 
 
-@handler("finish")
-def finish(request: Request) -> Object:
+def _finish_component(request: Request) -> Object:
     with _component(request) as (authority, payload, gate):
         descriptor = -1
         try:
@@ -1768,3 +1774,165 @@ def finish(request: Request) -> Object:
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
+
+
+def _reopen_record(folder: Path, record: Object) -> Object | None:
+    try:
+        value = read(folder / "reopen.json")
+    except FileNotFoundError:
+        return None
+    fields(value, "version kind session checkpoint registrySha256 gateSha256 callersSha256 phase components")
+    if (value["kind"] != "driver-deployment-reopen" or value["phase"] not in ("prepared", "complete")
+            or any(value[key] != record[key] for key in ("session", "checkpoint", "registrySha256", "gateSha256", "callersSha256"))
+            or not isinstance(value["components"], list) or len(value["components"]) != len(COMPONENTS)):
+        raise Refusal("All-four reopen journal identity changed.")
+    for expected, row in zip(record["components"], value["components"], strict=True):
+        if (not isinstance(row, dict) or set(row) != {
+                "component", "epoch", "nextEpoch", "attempt", "resultSha256", "contextSha256", "requestSha256", "finishSha256"}
+                or row["component"] != expected["component"] or row["epoch"] != expected["epoch"]
+                or not valid_token(row["nextEpoch"]) or row["nextEpoch"] == row["epoch"]
+                or not valid_token(row["attempt"])
+                or any(not valid_hash(row[key]) for key in ("resultSha256", "contextSha256", "requestSha256", "finishSha256"))):
+            raise Refusal("All-four reopen component tuple changed.")
+    return value
+
+
+def _completion_request(registry: Path, session: str, authority: Authority) -> Request:
+    path = authority.folder / "sessions" / session / "result.json"
+    return Request("finish", registry, {"component": authority.component, "session": session, "result": str(path)})
+
+
+def _reopen_row(prepared: Prepared, journal: Object) -> Object:
+    return {"component": prepared.authority.component, "epoch": journal["epoch"], "nextEpoch": journal["nextEpoch"],
+            "attempt": journal["attempt"], "resultSha256": journal["resultSha256"],
+            "contextSha256": journal["contextSha256"], "requestSha256": journal["requestSha256"],
+            "finishSha256": sha256(canonical({**journal, "phase": "ready"}))}
+
+
+def _verified_complete(registry: Path, authorities: list[Authority], payloads: list[Payload],
+                       gate: Gate, record: Object) -> Object:
+    """Caller owns all lexical mutexes; this reports readiness without enabling callers."""
+    folder = _rollout_folder(registry, record["session"], record["checkpoint"])
+    reopening = _reopen_record(folder, record)
+    if record["phase"] != "complete" or reopening is None or reopening["phase"] != "complete":
+        raise Refusal("All-four normal completion has no exact durable journal.")
+    _verify_rollout(registry, authorities, record, reopening=reopening)
+    for authority, payload, row in zip(authorities, payloads, reopening["components"], strict=True):
+        verify_acceptance(authority, payload)
+        request = _completion_request(registry, record["session"], authority)
+        prepared = _finish_inputs(request, authority, payload, gate, -1)
+        journal = _finish_record(prepared)
+        if journal is None or _reopen_row(prepared, journal) != row:
+            raise Refusal("Completed result no longer matches the all-four reopen journal.")
+        _normal_finish_retry(prepared, authority.read("control"), journal)
+        _pending_scope(prepared.context, marker_absent=True)
+    return {"phase": "normal", "deployment": "complete", "callersMayEnable": True}
+
+
+def _complete_deployment(request: Request) -> Object | None:
+    shared = request.registry / ".driver-qualification"
+    observed = _rollout_record(shared / "deployment.json")
+    if observed is None or observed["phase"] == "complete":
+        return None
+    if observed["session"] != request.session or observed["phase"] not in ("boot-verified", "maintaining"):
+        raise Refusal("The exact verified deployment must own all-four completion.")
+    pending_status = {"phase": "exclusive", "deployment": "awaiting-components", "callersMayEnable": False}
+    with deployment_mutex(request.registry):
+        authorities = [Authority(request.registry, name) for name in COMPONENTS]
+        payloads = _qualified_candidates(authorities)
+        gate = verify_gate(request.registry)
+        if not Path(__file__).resolve().is_relative_to(gate.provider.root):
+            raise Refusal("All-four completion requires the exact immutable provider.")
+        with pin_payloads(request.registry, [gate.provider, *payloads]), ExitStack() as stack:
+            for authority in authorities:
+                stack.enter_context(authority.mutex())
+            record = _rollout_record(shared / "deployment.json")
+            if record is None:
+                raise Refusal("Deployment disappeared before completion.")
+            if record != observed:
+                if record["phase"] == "complete" and record["session"] == request.session:
+                    return _verified_complete(request.registry, authorities, payloads, gate, record)
+                raise Refusal("Deployment changed before completion.")
+            folder = _rollout_folder(request.registry, record["session"], record["checkpoint"])
+            reopening = _reopen_record(folder, record)
+            _verify_rollout(request.registry, authorities, record, reopening=reopening)
+            for authority in authorities:
+                session = authority.folder / "sessions" / request.session
+                if not (session / "result.json").exists() or os.path.lexists(session / "operation.json"):
+                    if reopening is not None:
+                        raise Refusal("A journaled reopen lost its exact active result chain.")
+                    return pending_status
+            leases: list[int] = []
+            try:
+                for authority in authorities:
+                    descriptor = authority.lease(exclusive=True)
+                    stack.callback(os.close, descriptor)
+                    leases.append(descriptor)
+            except BlockingIOError:
+                return pending_status
+            rows: list[Object] = []
+            prepared_all: list[tuple[Prepared, Object]] = []
+            for authority, payload, descriptor in zip(authorities, payloads, leases, strict=True):
+                verify_acceptance(authority, payload)
+                _exclusive(authority, descriptor)
+                prepared = _finish_inputs(_completion_request(request.registry, request.session, authority),
+                                          authority, payload, gate, descriptor)
+                journal = _finish_record(prepared)
+                if journal is None or journal["phase"] not in ("ready", "complete"):
+                    if reopening is not None:
+                        raise Refusal("A journaled reopen lost a ready component finish.")
+                    return pending_status
+                control = authority.read("control")
+                closed = {"version": 1, "phase": "exclusive", "session": request.session, "epoch": journal["epoch"]}
+                normal = {"version": 1, "phase": "normal", "session": None, "epoch": journal["nextEpoch"]}
+                if control != closed and (reopening is None or control != normal):
+                    raise Refusal("A component is outside its exact closed/desired normal tuple.")
+                if journal["phase"] == "complete" and (reopening is None or control != normal):
+                    raise Refusal("A completed component finish cannot authorize rolled-back control.")
+                if reopening is not None and reopening["phase"] == "complete" and control != normal:
+                    raise Refusal("A completed reopen journal cannot authorize rolled-back control.")
+                custody = reconcile(authority, control=control)
+                if not custody.resolved or _tainted(authority):
+                    raise Refusal("All-four completion still has unresolved custody.")
+                if _archive_observation(prepared) != prepared.operation["backupSha256"]:
+                    raise Refusal("All-four completion before-manifest changed.")
+                _raw, present = _finish_marker(prepared, journal)
+                if present:
+                    raise Refusal("Every component must durably retire its own completed marker first.")
+                _pending_scope(prepared.context, marker_absent=True)
+                rows.append(_reopen_row(prepared, journal))
+                prepared_all.append((prepared, journal))
+            desired = {"version": 1, "kind": "driver-deployment-reopen",
+                       **{key: record[key] for key in ("session", "checkpoint", "registrySha256", "gateSha256", "callersSha256")},
+                       "phase": "prepared", "components": rows}
+            if reopening is None:
+                _immutable(folder / "reopen.json", canonical(desired))
+                reopening = desired
+            elif {**reopening, "phase": "prepared"} != desired:
+                raise Refusal("Desired normal epochs/results changed during reopen retry.")
+            record = {**record, "phase": "maintaining"}
+            publish(shared / "deployment.json", record)
+            # Global maintaining blocks every launcher even if a crash leaves
+            # any subset of these normal controls durably published.
+            for prepared, journal in prepared_all:
+                prepared.authority.write("control", {"version": 1, "phase": "normal", "session": None,
+                                                      "epoch": journal["nextEpoch"]})
+                publish(prepared.folder / "attempts" / journal["attempt"] / "finish.json", {**journal, "phase": "complete"})
+            for prepared, _journal in prepared_all:
+                _pending_scope(prepared.context, marker_absent=True)
+                if not reconcile(prepared.authority, control=prepared.authority.read("control")).resolved or _tainted(prepared.authority):
+                    raise Refusal("Custody changed before the global complete commit.")
+            publish(folder / "reopen.json", {**reopening, "phase": "complete"})
+            completed = {**record, "phase": "complete"}
+            # Verify the exact desired controls and unchanged gate before this
+            # sole global admission commit. No caller command is ever executed.
+            _verify_rollout(request.registry, authorities, record, reopening=reopening)
+            publish(shared / "deployment.json", completed)
+            return _verified_complete(request.registry, authorities, payloads, gate, completed)
+
+
+@handler("finish")
+def finish(request: Request) -> Object:
+    result = _finish_component(request)
+    completed = _complete_deployment(request)
+    return {**result, **completed} if completed is not None else result
