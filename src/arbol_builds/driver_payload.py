@@ -401,9 +401,85 @@ def resolve_provider(registry: Path, digest: str) -> Payload:
     return matched[0]
 
 
-def verify_gate(registry: Path) -> Gate:
-    private_directory(registry)
-    raw = read_bytes(registry / ".driver-qualification" / "gate.json")
+@dataclass(frozen=True)
+class CandidateScope:
+    """Verified isolated tuple, never a normal launcher selection policy."""
+
+    registry: Path
+    registry_sha256: str
+    component: str
+    build: str
+    acceptance_sha256: str
+    gate: Gate
+    producers: tuple[Payload, ...]
+    acceptances: tuple[tuple[str, str, Object], ...]
+
+    def producer(self, component: str) -> Payload:
+        for payload in self.producers:
+            if payload.component == component:
+                return payload
+        refuse()
+
+    def acceptance(self, component: str) -> tuple[str, Object]:
+        for name, digest, value in self.acceptances:
+            if name == component:
+                return digest, value
+        refuse()
+
+
+def _candidate_acceptance(registry: Path, component: str) -> tuple[str, Object]:
+    """Read selected owner-trust input; no payload or execution authority yet."""
+    import pwd
+
+    authority = Authority(registry, component)
+    selected = authority.read("qualification")
+    if selected["component"] != component or not valid_hash(selected["acceptanceSha256"]):
+        refuse()
+    digest = selected["acceptanceSha256"]
+    raw = read_bytes(authority.shared / "acceptances" / (digest + ".json"))
+    value = decode(raw)
+    fields(value, "version kind status scope contract providerPayloadSha256 producerPayloadSha256 gateSha256 platform evidenceSha256")
+    if (sha256(raw) != digest or value["kind"] != "driver-qualification"
+            or value["status"] not in ("candidate", "qualified") or value["scope"] != str(registry)
+            or value["contract"] != "DRV-browser-identity-1"):
+        refuse()
+    for key in ("providerPayloadSha256", "producerPayloadSha256", "gateSha256", "evidenceSha256"):
+        if not valid_hash(value[key]):
+            refuse()
+    uname = os.uname()
+    if (uname.sysname != "Darwin" or value["platform"] != {
+            "system": "Darwin", "release": uname.release, "machine": uname.machine}):
+        refuse()
+    installed = Path(pwd.getpwuid(os.getuid()).pw_dir) / "Library/Application Support/Arbol/builds"
+    if registry == installed.resolve():
+        refuse()
+    return digest, value
+
+
+def _candidate_payload(registry: Path, component: str, digest: str) -> Payload:
+    """Resolve a unique exact declared image; candidate validation follows."""
+    if not valid_hash(digest):
+        refuse()
+    matched: list[Payload] = []
+    for index, folder in enumerate(private_directory(registry / component).iterdir()):
+        if index >= MAX_ENTRIES:
+            refuse()
+        if not BUILD.fullmatch(folder.name):
+            continue
+        raw = optional_descriptor(folder)
+        if raw is None or sha256(raw) != digest:
+            continue
+        record, payload = _registered_payload(registry, component, folder.name)
+        if record["status"] not in ("building", "failed", "working") or payload.digest != digest:
+            refuse()
+        matched.append(payload)
+    if len(matched) != 1:
+        refuse()
+    return matched[0]
+
+
+def _gate_document(raw: bytes) -> Object:
+    """Verify all actual routes before resolving the provider's launch policy."""
     value = decode(raw)
     fields(value, "version kind providerPayloadSha256 components")
     if value["kind"] != "driver-gate" or not valid_hash(value["providerPayloadSha256"]):
@@ -426,6 +502,45 @@ def verify_gate(registry: Path) -> Gate:
         routes.add(path)
         if _file_hash(path)[1] != row["launcherSha256"]:
             refuse()
+    return value
+
+
+def resolve_candidate(registry: Path, component: str, build: str, digest: str) -> CandidateScope:
+    """Exact candidate-only bootstrap; ordinary registered() never calls this."""
+    if component not in COMPONENTS or BUILD.fullmatch(build) is None or not valid_hash(digest):
+        refuse()
+    private_directory(registry)
+    selected_digest, selected = _candidate_acceptance(registry, component)
+    if selected_digest != digest or selected["status"] != "candidate":
+        refuse()
+    gate_raw = read_bytes(registry / ".driver-qualification" / "gate.json")
+    gate_document = _gate_document(gate_raw)
+    gate_digest = sha256(gate_raw)
+    provider = _candidate_payload(registry, "arbol", gate_document["providerPayloadSha256"])
+    producers: list[Payload] = []
+    acceptances: list[tuple[str, str, Object]] = []
+    for name in COMPONENTS:
+        acceptance_digest, value = _candidate_acceptance(registry, name)
+        if value["gateSha256"] != gate_digest or value["providerPayloadSha256"] != provider.digest:
+            refuse()
+        payload = _candidate_payload(registry, name, value["producerPayloadSha256"])
+        record, _ = _registered_payload(registry, name, payload.build)
+        if record["status"] == "building" and value["status"] != "candidate":
+            refuse()
+        producers.append(payload)
+        acceptances.append((name, acceptance_digest, value))
+    identity = sha256(canonical(Authority(registry, component).identity))
+    scope = CandidateScope(registry, identity, component, build, digest,
+                           Gate(gate_document, gate_digest, provider), tuple(producers), tuple(acceptances))
+    if scope.producer(component).build != build:
+        refuse()
+    return scope
+
+
+def verify_gate(registry: Path) -> Gate:
+    private_directory(registry)
+    raw = read_bytes(registry / ".driver-qualification" / "gate.json")
+    value = _gate_document(raw)
     provider = resolve_provider(registry, value["providerPayloadSha256"])
     return Gate(value, sha256(raw), provider)
 
