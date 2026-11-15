@@ -23,6 +23,7 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import TracebackType
 from typing import Any
 
 from arbol_builds.driver_process import inspect, process_identity, valid_start
@@ -297,6 +298,252 @@ class OwnedChild:
         code = self.process.wait(timeout=seconds)
         self.reaped = True
         return code
+
+
+class HelperSpanCollector:
+    """H1-only data collection; it grants no admission or semantic report trust.
+
+    Use as a context manager around an already independently owned provider.
+    The controller must validate the pinned report/custody/ACK bindings before
+    continue_after_validation. This class only validates the finite wire shape.
+    It never signals/reaps a Suite or helper, supplies terminal authority, or
+    implements the separately blocked terminal-close pause protocol.
+    """
+
+    def __init__(self, child: OwnedChild, *, case: str, seconds: float = 120,
+                 limit: int = CAPTURE_LIMIT) -> None:
+        if (re.fullmatch(r"[0-9a-f]{32}", case, re.ASCII) is None
+                or not math.isfinite(seconds) or not 20 < seconds <= 7200
+                or type(limit) is not int or not 4096 <= limit <= 1024 * 1024):
+            raise ObservationFailed("Invalid H1 case or complete interactive budget.")
+        self.child, self.case, self.limit = child, case, limit
+        self.end = time.monotonic() + seconds
+        self.deadline = self.end - 20  # Owned cleanup is inside the complete bound.
+        self._selector: selectors.BaseSelector | None = None
+        self._data = {"stdout": bytearray(), "stderr": bytearray()}
+        self._open: set[str] = set()
+        self._ready: bytes | None = None
+        self._report_hash: str | None = None
+        self._ready_at: float | None = None
+        self._continued = False
+        self._entered = False
+        self._finished = False
+        self._closed = False
+        self.cleanup_observation: Object | None = None
+
+    def __enter__(self) -> HelperSpanCollector:
+        if self._entered or self._closed:
+            raise ObservationFailed("Interactive capture cannot be reused.")
+        self._entered = True
+        try:
+            if self.child.reaped or not self.child.owner.live(parent=os.getpid()):
+                raise ObservationFailed("Interactive provider ownership changed.")
+            child = self.child.process
+            if child.stdin is None or child.stdout is None or child.stderr is None:
+                raise ObservationFailed("Interactive owned streams are unavailable.")
+            self._selector = selectors.DefaultSelector()
+            for name, stream in (("stdout", child.stdout), ("stderr", child.stderr)):
+                os.set_blocking(stream.fileno(), False)
+                self._selector.register(stream, selectors.EVENT_READ, name)
+                self._open.add(name)
+            os.set_blocking(child.stdin.fileno(), False)
+            return self
+        except BaseException as error:
+            result = self.abort()
+            error.add_note("Interactive setup cleanup: " + repr(result))
+            raise
+
+    def __exit__(self, kind: type[BaseException] | None, error: BaseException | None,
+                 traceback: TracebackType | None) -> None:
+        if not self._finished:
+            result = self.abort()
+            if error is not None:
+                error.add_note("Interactive failed-span cleanup: " + repr(result))
+            else:
+                raise ObservationFailed("Interactive span ended without real capture: " + repr(result))
+
+    def _active(self) -> selectors.BaseSelector:
+        if not self._entered or self._closed or self._selector is None:
+            raise ObservationFailed("Interactive capture is not active.")
+        return self._selector
+
+    def _pump(self, *, until: float) -> None:
+        selector = self._active()
+        remaining = until - time.monotonic()
+        if remaining <= 0:
+            raise ObservationFailed("Interactive capture exceeded its finite bound.")
+        for key, events in selector.select(min(.05, remaining)):
+            if not events & selectors.EVENT_READ:
+                continue
+            name = key.data
+            if name not in ("stdout", "stderr"):
+                raise ObservationFailed("Unexpected interactive endpoint.")
+            limit = 4096 if name == "stdout" else self.limit
+            try:
+                part = os.read(key.fd, min(65536, limit + 1 - len(self._data[name])))
+            except BlockingIOError:
+                continue
+            if not part:
+                selector.unregister(key.fileobj)
+                self._open.discard(name)
+            else:
+                self._data[name].extend(part)
+                if len(self._data[name]) > limit:
+                    raise ObservationFailed("Interactive output overflow; preserve failed span.")
+                if self._ready is not None and bytes(self._data["stdout"]) != self._ready:
+                    raise ObservationFailed("Extra interactive control bytes after the single H1 frame.")
+
+    def ready(self) -> bytes:
+        """Return exact syntax-verified bytes, NOT a validated report or ACK."""
+        self._active()
+        if self._ready is not None:
+            raise ObservationFailed("H1 ready frame cannot be consumed twice.")
+        while b"\n" not in self._data["stdout"]:
+            if "stdout" not in self._open or self.child.process.poll() is not None:
+                raise ObservationFailed("H1 stream exited before its complete ready frame.")
+            self._pump(until=self.deadline)
+        raw = bytes(self._data["stdout"])
+        if raw.count(b"\n") != 1 or not raw.endswith(b"\n"):
+            raise ObservationFailed("H1 ready must be exactly one bounded JSONLF frame.")
+        value = document(raw)
+        exact_fields(value, ("version", "kind", "case", "reportSha256"))
+        if (type(value["version"]) is not int or value["version"] != 1
+                or value["kind"] != "helper-span-ready" or value["case"] != self.case
+                or not isinstance(value["reportSha256"], str)
+                or re.fullmatch(r"[0-9a-f]{64}", value["reportSha256"], re.ASCII) is None
+                or canonical(value) != raw or not self.child.owner.live(parent=os.getpid())):
+            raise ObservationFailed("H1 ready does not bind this live owned case/finite grammar.")
+        self._ready, self._report_hash = raw, value["reportSha256"]
+        self._ready_at = time.monotonic()
+        return raw
+
+    @property
+    def ready_observed_at(self) -> float:
+        if self._ready_at is None:
+            raise ObservationFailed("No actual ready receipt timestamp exists.")
+        return self._ready_at
+
+    def raw_observation(self) -> Object:
+        """Bounded immutable copies for private FAILED as well as positive evidence.
+
+        An observer must preserve this before discarding a failed collector;
+        hashes alone cannot retain malformed/extra/partial actual output bytes.
+        """
+        stdout, stderr = bytes(self._data["stdout"]), bytes(self._data["stderr"])
+        return {"provider": self.child.owner.object(), "providerReaped": self.child.reaped,
+                "providerReturncode": self.child.process.returncode, "readyObservedAt": self._ready_at,
+                "continueSent": self._continued, "stdoutHex": stdout.hex(), "stderrHex": stderr.hex(),
+                "stdoutSha256": digest(stdout), "stderrSha256": digest(stderr),
+                "readySha256": None if self._ready is None else digest(self._ready),
+                "cleanup": self.cleanup_observation, "custodyResolutionClaimed": False}
+
+    def continue_after_validation(self, *, report_sha256: str) -> None:
+        """Caller independently validated REAL report/custody/source before here."""
+        selector = self._active()
+        if (self._ready is None or self._ready_at is None or self._continued
+                or report_sha256 != self._report_hash
+                or not self.child.owner.live(parent=os.getpid())):
+            raise ObservationFailed("Unvalidated/repeated H1 continue or changed provider.")
+        child = self.child.process
+        if child.stdin is None or child.stdin.closed:
+            raise ObservationFailed("Owned H1 control input is unavailable.")
+        raw = canonical({"version": 1, "kind": "helper-span-control", "case": self.case, "command": "continue"})
+        deadline = min(self.deadline, self._ready_at + 5)
+        view = memoryview(raw)
+        selector.register(child.stdin, selectors.EVENT_WRITE, "control")
+        try:
+            while view:
+                self._pump(until=deadline)
+                try:
+                    count = os.write(child.stdin.fileno(), view)
+                except BlockingIOError:
+                    continue
+                if count <= 0:
+                    raise ObservationFailed("Owned H1 input closed before complete continue.")
+                view = view[count:]
+            self._continued = True
+        finally:
+            selector.unregister(child.stdin)
+        # There is no second command. EOF is no acknowledgement/terminal claim.
+        child.stdin.close()
+
+    def _capture(self) -> Captured:
+        self._active()
+        while self._open:
+            self._pump(until=self.deadline)
+        code = self.child.process.wait(timeout=max(.001, self.deadline - time.monotonic()))
+        self.child.reaped = True
+        if bytes(self._data["stdout"]) != self._ready:
+            raise ObservationFailed("H1 capture has extra or truncated control data.")
+        errors = self._close_endpoints()
+        if errors:
+            raise ObservationFailed("Interactive endpoint closure failed: " + repr(errors))
+        self._finished = True
+        return Captured(code, bytes(self._data["stdout"]), bytes(self._data["stderr"]), self.child.owner)
+
+    def finish_positive(self) -> Captured:
+        if not self._continued:
+            raise ObservationFailed("Positive H1 capture requires its genuine continue.")
+        captured = self._capture()
+        if captured.returncode != 0:
+            raise ObservationFailed("Positive H1 provider failed; no complete check success.")
+        return captured
+
+    def capture_ended_failure(self) -> Captured:
+        """A deliberate failed subject is never a positive gate/capture shortcut."""
+        if self._ready is None or self._continued:
+            raise ObservationFailed("Failed-span capture requires ready and NO positive continue.")
+        self._active()
+        stdin = self.child.process.stdin
+        if stdin is not None and not stdin.closed:
+            stdin.close()  # Failure/EOF only, never a successful continuation.
+        captured = self._capture()
+        if captured.returncode == 0:
+            raise ObservationFailed("Failed H1 subject unexpectedly reported success.")
+        return captured
+
+    def _close_endpoints(self) -> list[str]:
+        errors: list[str] = []
+        if self._selector is not None:
+            try:
+                self._selector.close()
+            except BaseException as error:
+                errors.append("selector:" + type(error).__name__)
+        for stream in (self.child.process.stdin, self.child.process.stdout, self.child.process.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except BaseException as error:
+                    errors.append("stream:" + type(error).__name__)
+        self._closed = True
+        return errors
+
+    def abort(self) -> Object:
+        """Only this actual owned provider is stopped/waited; no descendant claim."""
+        if self.cleanup_observation is not None:
+            return self.cleanup_observation
+        errors: list[str] = []
+        stdin = self.child.process.stdin
+        if stdin is not None:
+            try:
+                stdin.close()
+            except BaseException as error:
+                errors.append("failure-input:" + type(error).__name__)
+        try:
+            self.child.request_stop()
+        except BaseException as error:
+            errors.append("owned-stop:" + type(error).__name__)
+        try:
+            self.child.wait_owned(seconds=max(.001, min(20, self.end - time.monotonic())))
+        except BaseException as error:
+            errors.append("owned-wait:" + type(error).__name__)
+        finally:
+            errors.extend(self._close_endpoints())
+        self.cleanup_observation = {"provider": self.child.owner.object(), "providerReaped": self.child.reaped,
+            "providerReturncode": self.child.process.returncode, "errors": errors,
+            "stdoutSha256": digest(bytes(self._data["stdout"])), "stderrSha256": digest(bytes(self._data["stderr"])),
+            "observerReapedDescendant": False, "custodyResolutionClaimed": False}
+        return self.cleanup_observation
 
 
 class SocketBarrier:
