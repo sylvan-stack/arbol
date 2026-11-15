@@ -632,8 +632,11 @@ class SignalBridge:
         return next((number for number in self.received if number not in nonfatal), None)
 
 
-def supervise(guardian: Guardian, arguments: list[str]) -> int:
+def supervise(guardian: Guardian, arguments: list[str], *, gate_kind: str | None = None) -> int:
     """No read/write on caller stdio. Mirror child's exit or terminating signal."""
+    if gate_kind is not None and arguments:
+        guardian.abort()
+        refuse()
     try:
         terminal = Terminal()
     except BaseException:
@@ -644,7 +647,8 @@ def supervise(guardian: Guardian, arguments: list[str]) -> int:
     exit_code = 1
     try:
         bridge.install()
-        child = guardian.spawn_main(arguments, prepared=bridge.prepared)
+        child = (guardian.spawn_main(arguments, prepared=bridge.prepared) if gate_kind is None else
+                 guardian.spawn_gate(gate_kind, prepared=bridge.prepared))
         while True:
             try:
                 pid, status = os.waitpid(child.pid, os.WUNTRACED | os.WCONTINUED)
