@@ -126,16 +126,18 @@ def stage_provider(root: Path, folder: Path, provenance: dict[str, Any]) -> tupl
             output.write_bytes(raw)
             shutil.copymode(original, output)
     (provider / "bin").mkdir()
-    from arbol_builds import driver_bootstrap
+    from arbol_builds import driver_bootstrap, service
     # Reject a cached/source-root generator from a different checkout revision.
     generator_folder = Path(driver_bootstrap.__file__).resolve().parent
-    for name in ("driver_bootstrap.py", "driver_admission.py", "driver_payload.py"):
-        if (generator_folder / name).read_bytes() != (provider / "src/arbol_builds" / name).read_bytes():
+    generator_inputs = (Path(driver_bootstrap.__file__).resolve(), Path(service.__file__).resolve(),
+                        generator_folder / "driver_admission.py", generator_folder / "driver_payload.py")
+    for path in generator_inputs:
+        if path.read_bytes() != (provider / "src/arbol_builds" / path.name).read_bytes():
             raise ValueError("The provider generator differs from its committed copied verifier.")
     entry_body = subprocess.check_output(["git", "show", commit + ":bin/driver_state_entry.py"], cwd=root, timeout=10)
     if (generator_folder.parents[1] / "bin/driver_state_entry.py").read_bytes() != entry_body:
         raise ValueError("The provider entry body differs from the committed source.")
-    entry = driver_bootstrap.render_provider_entry()
+    entry = service.early_driver_signals(driver_bootstrap.render_provider_entry())
     compile(entry, "bin/driver_state_entry.py", "exec")
     (provider / "bin/driver_state_entry.py").write_bytes(entry)
     (provider / "provider-provenance.json").write_text(json.dumps({
