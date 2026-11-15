@@ -1519,3 +1519,83 @@ def complete_main_admission_inventory(subjects: Mapping[str, AdmissionSubject], 
     for window_class in MAIN_CLASS_WINDOWS:
         guardian_class_window(subjects[window_class + "-death"], frozen, window=window_class, kill=True)
         guardian_class_window(subjects[window_class + "-positive"], frozen, window=window_class, kill=False)
+
+
+def late_new_guardian_gate_after_begin_refuses(subject: AdmissionSubject) -> None:
+    """A NEW fixed runner transfer cannot start after actual begin closes it.
+
+    This is the shared Guardian new-launch rule. It does not claim that an
+    already admitted producer Session cannot finish a preregistered helper while
+    draining, or supply the still-unreviewed active-Suite/H1 death latch.
+    """
+    guardian, child = subject.guardian(), DirectChild()
+    before = subject.snapshot()
+    session = str(uuid.uuid4())
+    scope = subject.baseline.scopes[COMPONENT]
+    argv = [*scope.gate.provider.prefix, "driver-state", "begin", "--registry-dir", str(subject.workspace.registry),
+            "--component", COMPONENT, "--session", session]
+    try:
+        begin = OwnedChild(argv, environment=without_authority(dict(subject.environment)), cwd=subject.workspace.registry)
+        captured = _collect_real(begin, seconds=30)
+        require(begin.reaped and captured.returncode == 0 and document(captured.stdout)["phase"] == "draining",
+                "Actual begin did not close normal admission for the late-launch case.")
+    except BaseException:
+        guardian.abort()
+        raise
+    prepared = False
+
+    def forbidden_start(process: subprocess.Popen[bytes], identity: Object) -> None:
+        nonlocal prepared
+        prepared = True
+        child.prepared(process, identity)
+        raise ObservationFailed("Late new fixed gate reached actual Popen after begin.")
+
+    try:
+        with subject.authority.mutex():
+            require(subject.authority.read("control") == {"version": 1, "phase": "draining", "session": session,
+                                                          "epoch": guardian.epoch}, "Begin changed the original admitted epoch.")
+        refused = False
+        try:
+            guardian.spawn_gate("unit", prepared=forbidden_start)
+        except Refusal:
+            refused = True
+        require(refused and not prepared and child.process is None and guardian.handoff is None,
+                "A late new runner registered/spawned instead of refusing before execution.")
+        require(guardian.lease < 0 and guardian.build_use < 0 and subject.snapshot() == before,
+                "Failed transfer retained owned descriptions or accessed State.")
+        with subject.authority.mutex():
+            taint = subject.authority.read("taint")
+            require(taint["invocation"] == guardian.invocation and taint["epoch"] == guardian.epoch
+                    and taint["component"] == COMPONENT, "Actual aborted transfer lost its durable original obligation.")
+            try:
+                normal_control(subject.authority, candidate=scope)
+            except Refusal:
+                pass
+            else:
+                raise ObservationFailed("Closed/tainted late launch became normally usable.")
+        subject.evidence.write("late-gate-refusal.json", {"version": 1, "kind": "abr38-late-new-guardian-gate-refusal",
+                "actualBeginArgv": argv, "actualBegin": document(captured.stdout), "provider": captured.owner.object(),
+                "reaped": begin.reaped, "guardian": guardian.owner, "invocation": guardian.invocation,
+                "epoch": guardian.epoch, "preparedChild": prepared, "stateBefore": before, "stateAfter": subject.snapshot(),
+                "taint": taint, "activeSuiteH1DeathProved": False})
+    finally:
+        try:
+            child.cleanup()
+        finally:
+            if guardian.lease >= 0:
+                guardian.abort()
+
+
+# CURRENT8 REMAINS PARTIAL. The accepted whole-inner report has only version,
+# kind, component, build, payloadSha256, invocation, writer, contextSha256,
+# selected, pendingExternal and inventorySha256. It supplies neither a reviewed
+# preterminal Suite latch nor H1 entry/writer/handoff/ACK/PID bindings. Adding
+# such fields or an external actor-control endpoint here would invent a schema.
+# The real five-argument H1 actor uses its parent-owned socketpair; parent death
+# queues EOF, which is failure, not an authorized successful completion. A real
+# verified STOP can retain an existing H1 SH across death, but does not establish
+# full local inventory completion + STILL ACTIVE Suite ownership by itself.
+# Active Suite/H1 loss, exact helper terminal-before-release and remaining
+# helper/Watcher/reused-group observations are NOT supplied by the source above.
+# Their finite latch/report disposition needs separate specification/changed-Plan
+# review before those prospective bodies, then actual47/53 body admission.
