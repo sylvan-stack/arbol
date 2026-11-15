@@ -487,9 +487,12 @@ if __name__ == "__main__":
 # testing modules or widens the verified provider's declared importRoots.
 # ruff: noqa: E402
 
+import fcntl
 import os
+import re
 import selectors
 import signal
+import stat
 import struct
 import subprocess
 import sys
@@ -503,7 +506,16 @@ from pathlib import Path
 from typing import Literal
 from unittest.mock import patch
 
-from driver_identity_qualification import Baseline, CompletedLaunch, FixtureAuthority, Workspace, require
+from driver_identity_qualification import (
+    Baseline,
+    CompletedLaunch,
+    FixtureAuthority,
+    H1Schedule,
+    H1View,
+    WholeCheckController,
+    Workspace,
+    require,
+)
 
 import arbol_builds.driver_process as provider_process
 from arbol_builds.driver_admission import (
@@ -529,6 +541,7 @@ from top.driver_state_support import (
     Captured,
     EvidenceRecorder,
     ExactProcess,
+    HelperSpanCollector,
     Object,
     ObservationFailed,
     OwnedChild,
@@ -1753,3 +1766,674 @@ def late_new_guardian_gate_after_begin_refuses(subject: AdmissionSubject) -> Non
 # helper/Watcher/reused-group observations are NOT supplied by the source above.
 # Their finite latch/report disposition needs separate specification/changed-Plan
 # review before those prospective bodies, then actual47/53 body admission.
+
+
+# This source supersedes only the active-H1 gap in the historical CURRENT8
+# comment above. The terminal interval is the separate af1/controller allocation;
+# a successful precontinue observation below is NEVER a complete unit check.
+_H1_SELECTORS = {"arbol-codex-driver": "chatgpt", "arbol-claude-driver": "anthropic-2",
+                 "arbol-pi-driver": "zai-2", "arbol-mimo-driver": "xiaomi"}
+
+
+@dataclass(frozen=True)
+class H1ProgramPins:
+    """Static reviewed body pins from the REAL candidate payload/source cohort.
+
+    No path/module/selector is supplied: these three source entries are fixed.
+    Later gate wiring must bind the actual independently admitted final bodies,
+    not assume an older source hash qualifies a changed package.
+    """
+
+    support: str
+    actor: str
+    local_case: str
+
+    def verify(self, controller: WholeCheckController, component: str) -> Object:
+        controller.scope.recheck()  # Real M/D/runtime before any fixture read.
+        payload = controller.scope.producer(component)
+        case_path = ("tests/test_subscription_identity.py" if component == "arbol-mimo-driver"
+                     else "tests/top/test_top_subscription_identity.py")
+        observations: Object = {}
+        for name, expected in (("tests/identity_support.py", self.support),
+                               ("tests/identity_actor.py", self.actor), (case_path, self.local_case)):
+            require(valid_hash(expected), "Missing admitted fixed H1 source hash.")
+            image = read_image(payload.root / name, limit=1024 * 1024, private=False)
+            require(image.sha256 == expected, "Fixed packaged H1 body differs from its admitted source pin.")
+            observations[name] = image.evidence()
+        require("tests/identity_actor.py" in payload.descriptor["helpers"], "Actor is not an actual D helper.")
+        provider = controller.scope.gate.provider
+        shared: Object = {}
+        for module, name in ((provider_process, "src/arbol_builds/driver_process.py"),
+                             (sys.modules[Authority.__module__], "src/arbol_builds/driver_admission.py")):
+            location = module.__file__
+            require(location is not None, "Actual shared production module has no physical source origin.")
+            assert location is not None
+            actual = read_image(Path(location).resolve(strict=True), limit=1024 * 1024, private=False)
+            packaged = read_image(provider.root / name, limit=1024 * 1024, private=False)
+            require(actual.sha256 == packaged.sha256, "Observer's actual guard/process body differs from sealed provider.")
+            shared[name] = {"actualImported": actual.evidence(), "sealedProvider": packaged.evidence()}
+        return {"source": payload.descriptor["source"], "payloadSha256": payload.digest,
+                "runtime": payload.descriptor["interpreter"], "fixedBodies": observations,
+                "actualGuardAndProcessSourceCoupling": shared, "providerPayloadSha256": provider.digest}
+
+
+def _h1_canonical(raw: bytes, *, limit: int) -> Object:
+    value = document(raw, limit=limit)
+    require(canonical(value) == raw, "H1 observer evidence is not canonical JSONLF.")
+    return value
+
+
+def _h1_raw_ex(authority: Authority, expected: Object) -> bool:
+    """Actual original-inode EX|NB; True means blocked by some real SH.
+
+    No metadata guard, creation, duplicate SH, foreign unlock or inherited FD.
+    A successful own EX is released only by closing this fresh description.
+    Holder attribution is a SEPARATE obligation before the caller uses True.
+    """
+    fd = authority.open_lock("admission.lock")  # create=False, actual private schema.
+    try:
+        held, named = os.fstat(fd), (authority.folder / "admission.lock").lstat()
+        require(stat.S_ISREG(held.st_mode) and held.st_uid == named.st_uid == os.getuid()
+                and stat.S_IMODE(held.st_mode) == stat.S_IMODE(named.st_mode) == 0o600
+                and held.st_nlink == named.st_nlink == 1
+                and {"device": held.st_dev, "inode": held.st_ino} == expected
+                and (held.st_dev, held.st_ino) == (named.st_dev, named.st_ino), "Original H1 lock changed.")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            blocked = True
+        else:
+            blocked = False
+        again = (authority.folder / "admission.lock").lstat()
+        require((held.st_dev, held.st_ino) == (again.st_dev, again.st_ino), "Lock replaced during raw EX probe.")
+        return blocked
+    finally:
+        os.close(fd)
+
+
+@dataclass(frozen=True)
+class H1SystemPs:
+    """Pinned fixed OS process-state observer, never a caller-selected executable."""
+
+    identity: tuple[int, int, int, int, int]
+    sha256: str
+
+    @classmethod
+    def capture(cls) -> H1SystemPs:
+        require(sys.platform == "darwin", "H1 kernel STOP oracle requires actual Darwin.")
+        path = Path("/bin/ps")
+        require(path.resolve(strict=True) == path, "Fixed system ps is not physical.")
+        parent = path.parent.lstat()
+        require(stat.S_ISDIR(parent.st_mode) and parent.st_uid == 0 and not parent.st_mode & 0o022,
+                "Fixed system ps directory is writable or not OS-owned.")
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+        try:
+            before = os.fstat(fd)
+            require(stat.S_ISREG(before.st_mode) and before.st_uid == 0 and before.st_nlink == 1
+                    and not before.st_mode & 0o022 and bool(before.st_mode & 0o111)
+                    and 0 < before.st_size <= 32 * 1024 * 1024, "Fixed system ps is unsafe/oversized.")
+            raw = bytearray()
+            while len(raw) <= 32 * 1024 * 1024:
+                part = os.read(fd, min(65536, 32 * 1024 * 1024 + 1 - len(raw)))
+                if not part:
+                    break
+                raw.extend(part)
+            after, named = os.fstat(fd), path.lstat()
+            def key(item: os.stat_result) -> tuple[int, int, int, int, int]:
+                return (item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns, item.st_mode)
+            require(len(raw) == before.st_size and key(before) == key(after) == key(named),
+                    "Fixed system ps changed while pinned.")
+            return cls(key(before), digest(bytes(raw)))
+        finally:
+            os.close(fd)
+
+    def stopped(self, owner: ExactProcess, *, deadline: float) -> Object:
+        require(self.capture() == self and owner.live(), "STOP observer/program/process identity changed.")
+        end = min(deadline, time.monotonic() + 2)
+        require(end > time.monotonic(), "No remaining actual STOP observation budget.")
+        process = subprocess.Popen(["/bin/ps", "-p", str(owner.pid), "-o", "pid=,stat="],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True,
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
+        observer: ExactProcess | None = None
+        buffers = {"stdout": bytearray(), "stderr": bytearray()}
+        original: BaseException | None = None
+        cleanup: list[str] = []
+        try:
+            # A fast system observer may already have exited; never signal an
+            # unverified birth merely because this Popen once had that PID.
+            if process.poll() is None:
+                observer = ExactProcess.read(process_identity(process.pid))
+                require(observer.live(parent=os.getpid()), "Actual ps direct-child birth unavailable.")
+            with selectors.DefaultSelector() as selector:
+                for name, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
+                    require(stream is not None, "Actual ps pipe missing.")
+                    assert stream is not None
+                    os.set_blocking(stream.fileno(), False)
+                    selector.register(stream, selectors.EVENT_READ, name)
+                while selector.get_map():
+                    remaining = end - time.monotonic()
+                    require(remaining > 0, "Actual STOP observation exceeded two seconds.")
+                    for key, _ in selector.select(min(.02, remaining)):
+                        name = key.data
+                        raw = os.read(key.fd, 4097 - len(buffers[name]))
+                        if not raw:
+                            selector.unregister(key.fileobj)
+                        else:
+                            buffers[name].extend(raw)
+                            require(len(buffers[name]) <= 4096, "Actual ps output exceeds 4096 bytes.")
+            status = process.wait(timeout=max(.001, end - time.monotonic()))
+            require(time.monotonic() <= end and status == 0 and not buffers["stderr"] and owner.live()
+                    and self.capture() == self, "STOP query failed or target/system program changed.")
+            raw = bytes(buffers["stdout"])
+            match = re.fullmatch(rb"[ \t]*([0-9]+)[ \t]+([A-Za-z+<>NWs]+)[ \t]*\n", raw)
+            require(match is not None and int(match[1]) == owner.pid and match[2].startswith(b"T"),
+                    "Exact same-birth H1 is not actually kernel STOPPED.")
+            return {"target": owner.object(), "argv": ["/bin/ps", "-p", str(owner.pid), "-o", "pid=,stat="],
+                    "stdoutHex": raw.hex(), "stderrHex": bytes(buffers["stderr"]).hex(), "returncode": status,
+                    "systemPsSha256": self.sha256, "systemPsIdentity": list(self.identity), "actualOwnedWait": True}
+        except BaseException as error:
+            original = error
+            error.add_note("Actual failed ps bytes: " + repr({name: bytes(raw).hex() for name, raw in buffers.items()}))
+            raise
+        finally:
+            if process.poll() is None:
+                try:
+                    if observer is not None and observer.live(parent=os.getpid()):
+                        signal_verified(observer, signal.SIGTERM)
+                    else:
+                        cleanup.append("ps-ownership-unverified:no-signal")
+                except BaseException as error:
+                    cleanup.append("ps-stop:" + type(error).__name__)
+                try:
+                    process.wait(timeout=max(.001, end - time.monotonic()))
+                except BaseException as error:
+                    cleanup.append("ps-wait:" + type(error).__name__)
+            for stream in (process.stdout, process.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except BaseException as error:
+                        cleanup.append("ps-pipe:" + type(error).__name__)
+            if cleanup:
+                note = "Actual STOP observer cleanup unresolved: " + repr(cleanup)
+                if original is None:
+                    raise ObservationFailed(note)
+                original.add_note(note)
+
+
+@dataclass(frozen=True)
+class H1ShortOrigins:
+    """Actual readiness origins plus hash-bound local result/receipt observations."""
+
+    paths: tuple[Path, ...]
+    identities: tuple[tuple[int, int, int, int], ...]
+    receipts: tuple[tuple[Path, str], ...]
+
+    @classmethod
+    def capture(cls, view: H1View) -> H1ShortOrigins:
+        root, component = view.root, view.component
+        local = _h1_canonical(view.images["local-results.json"].raw, limit=1024 * 1024)
+        row = local["rows"][-1]
+        result_hash = row["resultSha256"]
+        require(valid_hash(result_hash) and row["id"] == local["h1CaseId"], "Missing fixed H1 preconditions result.")
+        receipts: list[tuple[Path, str]] = []
+        if component == "arbol-codex-driver":
+            path = root / "h1-preconditions.json"
+            raw = read_image(path, limit=65536).raw
+            require(digest(raw) == result_hash, "Codex readiness origins not bound to actual H1 result.")
+            result = _h1_canonical(raw, limit=65536)
+            require(result["kind"] == "abr38-H1-local-preconditions" and result["case"] == view.case
+                    and result["helperContextSha256"] == view.helper_context_sha256
+                    and result["actorReadySha256"] == view.images["actor-ready.json"].sha256,
+                    "Codex directory origins belong to another actual capture/context.")
+            records = result["shortLockDirectories"]
+            receipts.append((path, digest(raw)))
+        else:
+            path = (root / ("result-" + result_hash + ".json") if component == "arbol-pi-driver"
+                    else root / "local-evidence" / f"{len(local['rows']) - 1:04d}.result")
+            result_raw = read_image(path, limit=65536).raw
+            require(digest(result_raw) == result_hash, "Actual local H1 result bytes differ from full report.")
+            result = _h1_canonical(result_raw, limit=65536)
+            receipt_path = root / "short-lock-directories.json"
+            directory_raw = read_image(receipt_path, limit=65536).raw
+            directory_result = _h1_canonical(directory_raw, limit=65536)
+            exact_fields(directory_result, ("version", "directories"))
+            require(type(directory_result["version"]) is int and directory_result["version"] == 1,
+                    "Wrong exact readiness directory receipt.")
+            if component == "arbol-pi-driver":
+                require(result["directoryEvidenceSha256"] == digest(directory_raw)
+                        and result["contextSha256"] == view.helper_context_sha256
+                        and result["actorReadySha256"] == view.images["actor-ready.json"].sha256,
+                        "Pi origins/result are not bound to the actual capture-return.")
+            else:
+                # Claude/Mimo fixed admitted source writes this exclusive receipt
+                # immediately after real capture-ready; their H1 result binds the
+                # same actor/context/ACK. Do not invent a field in their wire.
+                require(result["contextSha256"] == view.helper_context_sha256
+                        and result["actorReadySha256"] == view.images["actor-ready.json"].sha256,
+                        "Actual Claude/Mimo H1 result belongs to another capture.")
+            records = directory_result["directories"]
+            receipts.extend(((path, digest(result_raw)), (receipt_path, digest(directory_raw))))
+        require(isinstance(records, list) and len(records) == 3, "All THREE original readiness directories are required.")
+        expected = (root / "state", root / "state/subscriptions", root / "state/subscriptions" / _H1_SELECTORS[component])
+        identities: list[tuple[int, int, int, int]] = []
+        for path, record in zip(expected, records, strict=True):
+            require(isinstance(record, dict), "Invalid physical readiness directory row.")
+            if component == "arbol-codex-driver":
+                exact_fields(record, ("relative", "device", "inode", "uid", "mode"))
+                require(record["relative"] == path.relative_to(root).as_posix(), "A report selected another directory.")
+            else:
+                require(record["path"] == str(path), "A report selected another directory.")
+                exact_fields(record, ("path", "device", "inode") if component == "arbol-pi-driver"
+                             else ("path", "device", "inode", "uid", "mode"))
+            info = physical_owned(path, directory=True)
+            require(type(record["device"]) is int and type(record["inode"]) is int
+                    and (info.st_dev, info.st_ino) == (record["device"], record["inode"]),
+                    "Actual short-lock parent differs from ORIGINAL readiness origin.")
+            if component != "arbol-pi-driver":
+                require(record["uid"] == info.st_uid and record["mode"] == stat.S_IMODE(info.st_mode),
+                        "Original readiness ownership/mode differs.")
+            identities.append((info.st_dev, info.st_ino, info.st_uid, stat.S_IMODE(info.st_mode)))
+        observation = cls(expected, tuple(identities), tuple(receipts))
+        observation.recheck()
+        return observation
+
+    def recheck(self) -> None:
+        for path, identity in zip(self.paths, self.identities, strict=True):
+            info = physical_owned(path, directory=True)
+            require((info.st_dev, info.st_ino, info.st_uid, stat.S_IMODE(info.st_mode)) == identity,
+                    "Original readiness physical parent was replaced/re-owned.")
+        for path, expected in self.receipts:
+            require(read_image(path, limit=65536).sha256 == expected, "Immutable readiness receipt changed.")
+
+    def absent_lock(self) -> Object:
+        self.recheck()
+        parent = self.paths[-1]
+        fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            info = os.fstat(fd)
+            require((info.st_dev, info.st_ino, info.st_uid, stat.S_IMODE(info.st_mode)) == self.identities[-1],
+                    "Short-lock observation descriptor is not the retained parent.")
+            try:
+                os.stat("lock", dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise ObservationFailed("Actual ephemeral Subscription lock still exists after stopped capture-return.")
+            self.recheck()
+            return {"parent": str(parent), "original": list(self.identities[-1]), "exactLockName": "lock",
+                    "actualErrno": "ENOENT", "lockCreatedOpenedOrReclaimed": False,
+                    "receipts": [{"path": str(path), "sha256": value} for path, value in self.receipts]}
+        finally:
+            os.close(fd)
+
+
+class H1SpanObservation:
+    """One verified no-SH external observer; no CLI, authority or gate result."""
+
+    def __init__(self, controller: WholeCheckController, baseline: Baseline, collector: HelperSpanCollector,
+                 *, component: str, case: str, schedule: H1Schedule, ready_raw: bytes) -> None:
+        # Pure ownership-container setup only. bind retains this instance across
+        # EVERY fallible source/ready/origin/ps/evidence operation below.
+        self.controller, self.baseline, self.collector = controller, baseline, collector
+        self.component, self.case, self.schedule, self.ready_raw = component, case, schedule, ready_raw
+        self.view: H1View | None = None
+        self.ps: H1SystemPs | None = None
+        self.origins: H1ShortOrigins | None = None
+        self.may_be_stopped = False
+        self.cont_attempted = False
+        self.closed = False
+        self.observations: Object = {"component": component, "case": case, "completeCheckClaimed": False}
+        self.cleanup_record: Object | None = None
+        self.sources: Object = {}
+        self.end = min(collector.deadline, collector.ready_observed_at + 5)
+        self.authority = Authority(controller.workspace.registry, component)
+
+    @classmethod
+    def bind(cls, controller: WholeCheckController, baseline: Baseline, collector: HelperSpanCollector,
+             *, component: str, case: str, schedule: H1Schedule, ready_raw: bytes,
+             programs: H1ProgramPins) -> H1SpanObservation:
+        require(component in _H1_SELECTORS, "Wrong fixed H1 family.")
+        span = cls(controller, baseline, collector, component=component, case=case,
+                   schedule=schedule, ready_raw=ready_raw)
+        try:
+            span.sources = programs.verify(controller, component)
+            # Assignment is BEFORE subsequent fallible ps/origin/evidence work.
+            span.view = controller.verify_h1_ready(component, baseline=baseline, child=collector.child,
+                case=case, schedule=schedule, ready_raw=ready_raw)
+            span.ps = H1SystemPs.capture()
+            span.origins = H1ShortOrigins.capture(span.view)
+            span.observations["packagedSource"] = span.sources
+            return span
+        except BaseException as error:
+            span.cleanup(error)
+            raise
+
+    def _remaining(self) -> float:
+        remaining = self.end - time.monotonic()
+        require(remaining > 0, "H1 observer exceeded its fixed five-second ready boundary.")
+        return remaining
+
+    def _fresh_active(self) -> H1View:
+        self._remaining()
+        assert self.view is not None
+        current = self.controller.verify_h1_ready(self.component, baseline=self.baseline, child=self.collector.child,
+            case=self.case, schedule=self.schedule, ready_raw=self.ready_raw)
+        require(current == self.view, "Actual H1 report/process/custody changed before STOP/death.")
+        assert self.origins is not None
+        self.origins.recheck()
+        return current
+
+    def _continue(self) -> None:
+        if self.may_be_stopped:
+            assert self.view is not None
+            self.cont_attempted = True
+            # Orphan adoption after Suite death is legitimate; SAME retained
+            # PID/birth, not its former parent's liveness, authorizes this CONT.
+            signal_verified(self.view.helper, signal.SIGCONT)
+            self.may_be_stopped = False
+
+    def _stop_and_observe(self) -> None:
+        view = self._fresh_active()
+        assert self.ps is not None and self.origins is not None
+        # This flag is set BEFORE syscall: an exception/cancel after delivery
+        # cannot suppress unconditional fresh-identity CONT in cleanup.
+        self.may_be_stopped = True
+        signal_verified(view.helper, signal.SIGSTOP)
+        self.observations["actualStop"] = self.ps.stopped(view.helper, deadline=self.end)
+        self.observations["shortLockReleased"] = self.origins.absent_lock()
+        self._remaining()
+        with self.authority.mutex(seconds=self._remaining()):
+            self.observations["beforeAuthority"] = _raw_authority_image(self.authority)
+            self.observations["beforeState"] = tree_inventory(view.root / "state")
+
+    def positive_precontinue(self) -> Object:
+        """Called by the full positive coordinator BEFORE its normal H1 continue.
+
+        This returns only provisional STOP/release evidence. The caller still
+        owes real helper/whole Suite/provider/terminal phases and EVERY original
+        deferred assertion. No local unit success is produced by this method.
+        """
+        try:
+            self._stop_and_observe()
+            assert self.view is not None
+            self.observations["bothActiveRawExBlocked"] = _h1_raw_ex(self.authority, self.view.admission_lock)
+            require(self.observations["bothActiveRawExBlocked"], "Active Suite/H1 have no independently held real SH.")
+            self._continue()
+            self._fresh_active()
+            with self.authority.mutex(seconds=self._remaining()):
+                require(_raw_authority_image(self.authority) == self.observations["beforeAuthority"]
+                        and tree_inventory(self.view.root / "state") == self.observations["beforeState"],
+                        "Positive STOP/CONT changed original metadata or Subscription state.")
+            self.observations["positiveContinueStillPending"] = True
+            self.controller.evidence.write("h1-positive-stop-precontinue.json", self.observations, limit=32 * 1024 * 1024)
+            return dict(self.observations)
+        except BaseException as error:
+            self.cleanup(error)
+            raise
+        finally:
+            if self.may_be_stopped:
+                original = sys.exception()
+                try:
+                    self._continue()
+                except BaseException as error:
+                    if original is None:
+                        self.cleanup(error)
+                        raise
+                    original.add_note("Unconditional H1 CONT failed: " + type(error).__name__)
+
+    def death(self) -> Object:
+        """Deliberately failed disposable subject; NEVER a full gate pass."""
+        try:
+            self._stop_and_observe()
+            view = self._fresh_active()
+            assert self.ps is not None and self.origins is not None
+            # Still ACTIVE Suite and same stopped H1 are bound independently.
+            self.ps.stopped(view.helper, deadline=self.end)
+            with self.authority.mutex(seconds=self._remaining()):
+                require(normal_control(self.authority, epoch=view.suite_context["epoch"],
+                                       candidate=self.controller.scope)["epoch"] == view.suite_context["epoch"],
+                        "Actual control changed before intended Suite death.")
+                actual_writer = read(writer_path(self.authority, view.suite_context["invocation"],
+                                                 view.suite_context["writer"]))
+                originals = [row for row in view.custody["writers"]
+                             if row["writer"] == view.suite_context["writer"]]
+                require(len(originals) == 1 and actual_writer == originals[0] and actual_writer["phase"] == "active"
+                        and view.helper.live(parent=view.suite.pid)
+                        and self.collector.child.owner.live(parent=os.getpid()),
+                        "Suite/helper/provider no longer match the actual active death boundary.")
+                signal_verified(view.suite, signal.SIGKILL)  # ONLY the intended exact Suite death.
+            while view.suite.live():
+                time.sleep(min(.01, self._remaining()))
+            # c2e: real owned-provider reap, NOT root-terminal/EOF sampling,
+            # closes all provider SH descriptions before sole-H1 attribution.
+            code = self.collector.child.wait_owned(seconds=self._remaining())
+            require(self.collector.child.reaped and not view.suite.live(), "Actual provider/Suite closure unavailable.")
+            self.observations["actualProviderReap"] = {"process": self.collector.child.owner.object(),
+                "returncode": code, "reaped": self.collector.child.reaped, "observerReapedSuiteOrH1": False}
+            self.observations["sameH1StillStopped"] = self.ps.stopped(view.helper, deadline=self.end)
+            self.origins.recheck()
+            with self.authority.mutex(seconds=self._remaining()):
+                current = _raw_authority_image(self.authority)
+                require(current == self.observations["beforeAuthority"],
+                        "Suite death changed original metadata before guarded unknown publication.")
+                require(tree_inventory(view.root / "state") == self.observations["beforeState"],
+                        "STOP/death modified original State.")
+                require(_h1_raw_ex(self.authority, view.admission_lock), "Stopped independently admitted H1 lost its OWN SH.")
+            self.observations["soleStoppedH1RawExBlocked"] = True
+            self._continue()  # Real queued parent-socket EOF remains failure.
+            # The normal collector retains actual failed bytes/reaps only its
+            # provider. No helper/Suite waitpid or synthetic terminal is added.
+            captured = self.collector.capture_ended_failure()
+            self.observations["actualFailedProviderCapture"] = {"returncode": captured.returncode,
+                "stdoutHex": captured.stdout.hex(), "stderrHex": captured.stderr.hex()}
+            # Give the ACTUAL queued parent-socket EOF/error path its bounded
+            # chance to execute. A helper SIGTERM fallback is cleanup only and
+            # cannot be reported as an observed ordinary EOF disposition.
+            eof_end = min(self.collector.end - 1, time.monotonic() + 5)
+            while view.helper.live() and time.monotonic() < eof_end:
+                time.sleep(min(.02, max(0, eof_end - time.monotonic())))
+            require(not view.helper.live(), "Real parent-EOF helper cleanup not observed; retain unavailable obligation.")
+            self.observations["helperKernelGoneAfterCONTWithoutObserverTERM"] = True
+            self.observations["actualParentSocketEOFQueuedBySuiteDeath"] = True
+            self.observations["actorReportedEOFReadDirectly"] = False
+            self.observations["observerSignalledHelperTERMBeforeEOFCleanup"] = False
+            failure = ObservationFailed("Intentional active Suite loss retains unknown custody.")
+            self.cleanup(failure)
+            require(self.cleanup_record is not None, "Missing actual failed-subject cleanup observation.")
+            assert self.cleanup_record is not None
+            require(not self.cleanup_record["errors"] and not self.cleanup_record["possiblyStoppedH1"]
+                    and all(value is False for value in self.cleanup_record["sameBirthLive"].values())
+                    and self.collector.child.reaped, "Failed-subject cleanup remains unavailable/unresolved.")
+            with self.authority.mutex(seconds=max(.001, min(2, self.collector.end - time.monotonic()))):
+                custody = reconcile(self.authority, persist_unknown=False, candidate=self.controller.scope)
+                require(custody.unknown and self.authority.read("control")["epoch"] == view.suite_context["epoch"],
+                        "Real active loss was silently treated as resolved or rotated.")
+                taint_before_guard = os.path.lexists(self.authority.folder / "taint.json")
+                try:
+                    normal_control(self.authority, candidate=self.controller.scope)
+                except Refusal:
+                    pass
+                else:
+                    raise ObservationFailed("Normal admission accepted the actual unresolved subject.")
+                # Codex real abandon can already have published its own taint.
+                # Claude/Pi/Mimo intentionally leave ACTIVE records and exit;
+                # the ACTUAL normal guard then persists reconcile's generic
+                # unknown-custody taint (new token, payload=None). Never invent
+                # a helper-abandon call or demand its nonexistent taint/terminal.
+                taint = self.authority.read("taint")
+                require(taint["component"] == self.component and taint["reason"] == "custody-loss"
+                        and taint["epoch"] == view.helper_context["epoch"]
+                        and taint["boot"] == view.helper_context["boot"] and valid_token(taint["invocation"])
+                        and taint["payloadSha256"] in (None, view.helper_context["payloadSha256"]),
+                        "Actual normal guard lost the original epoch/boot/component custody binding.")
+                if taint["payloadSha256"] is not None:
+                    require(taint["invocation"] == view.helper_context["invocation"],
+                            "Actual own-context taint belongs to another invocation.")
+                self.observations["taintExistedBeforeActualNormalGuard"] = taint_before_guard
+                after_metadata = _raw_authority_image(self.authority)
+                retained = {"root": after_metadata["root"], "entries": [row for row in after_metadata["entries"]
+                                                                             if row["path"] != "taint.json"]}
+                require(retained == self.observations["beforeAuthority"],
+                        "Actual loss changed original writer/handoff/context/marker/control bytes beyond taint.")
+                self.observations["afterAuthority"] = after_metadata
+                self.observations["unknownCustody"] = {"unknown": custody.unknown, "active": custody.active,
+                    "pending": custody.pending, "taint": self.authority.read("taint"),
+                    "writers": list(custody.writers), "handoffs": list(custody.handoffs)}
+            require(not _h1_raw_ex(self.authority, view.admission_lock),
+                    "Kernel-gone participants left another unexplained SH holder; no closure proof.")
+            self.observations["freshRawExAvailableWithCustodyStillUnknown"] = True
+            self.observations["afterState"] = tree_inventory(view.root / "state")
+            require(self.observations["afterState"] == self.observations["beforeState"],
+                    "Failure cleanup changed original captured Subscription state.")
+            self.observations["requiresRealClosedRecovery"] = True
+            self.controller.evidence.write("h1-actual-active-loss.json", self.observations, limit=32 * 1024 * 1024)
+            return dict(self.observations)
+        except BaseException as error:
+            self.cleanup(error)
+            raise
+        finally:
+            if self.may_be_stopped:
+                original = sys.exception()
+                try:
+                    self._continue()
+                except BaseException as error:
+                    if original is None:
+                        self.cleanup(error)
+                        raise
+                    original.add_note("Unconditional H1 CONT failed: " + type(error).__name__)
+
+    def cleanup(self, original: BaseException) -> None:
+        if self.closed:
+            if self.cleanup_record is not None:
+                original.add_note("Retained H1 cleanup: " + repr(self.cleanup_record))
+            return
+        self.closed = True
+        end = min(self.collector.end, time.monotonic() + 20)
+        self.collector.end = end  # No second collector cleanup budget on unwind.
+        errors: list[str] = []
+        if self.view is not None and self.may_be_stopped:
+            try:
+                self._continue()  # EVERY exit, before any wait/evidence call.
+            except BaseException as error:
+                errors.append("same-birth-CONT:" + type(error).__name__)
+        targets = {} if self.view is None else {"suite": self.view.suite, "helper": self.view.helper}
+        states: dict[str, bool | None] = {}
+        for name, owner in targets.items():
+            try:
+                states[name] = owner.live()
+                if states[name]:
+                    signal_verified(owner, signal.SIGTERM)
+            except BaseException as error:
+                states[name] = None
+                errors.append(name + "-verified-cancel:" + type(error).__name__)
+        stdin = self.collector.child.process.stdin
+        if stdin is not None:
+            try:
+                stdin.close()  # FAILURE EOF, never successful continue.
+            except BaseException as error:
+                errors.append("failure-input:" + type(error).__name__)
+        try:
+            self.collector.child.request_stop()
+        except BaseException as error:
+            errors.append("provider-stop:" + type(error).__name__)
+        iterations = 0
+        while time.monotonic() < end - .05 and iterations < 400:
+            iterations += 1
+            for name, owner in targets.items():
+                try:
+                    states[name] = owner.live()
+                except BaseException as error:
+                    states[name] = None
+                    errors.append(name + "-observation:" + type(error).__name__)
+            if self.collector.child.reaped and all(value is False for value in states.values()):
+                break
+            if not self.collector.child.reaped:
+                try:
+                    self.collector.child.wait_owned(seconds=min(.05, max(.001, end - time.monotonic())))
+                except subprocess.TimeoutExpired:
+                    pass
+                except BaseException as error:
+                    errors.append("provider-wait:" + type(error).__name__)
+                    break  # Endpoint/wait cleanup below still runs independently.
+            else:
+                try:
+                    time.sleep(min(.02, max(0, end - time.monotonic())))
+                except BaseException as error:
+                    errors.append("participant-wait:" + type(error).__name__)
+                    break
+        try:
+            owned = self.collector.abort()  # Same deadline, independent endpoint attempts.
+        except BaseException as error:
+            errors.append("provider-endpoints:" + type(error).__name__)
+            owned = {"providerReaped": self.collector.child.reaped, "unresolved": True}
+        self.cleanup_record = {"verified": {name: owner.object() for name, owner in targets.items()},
+            "sameBirthLive": states, "possiblyStoppedH1": self.may_be_stopped, "contAttempted": self.cont_attempted,
+            "providerCleanup": owned, "errors": errors, "iterations": iterations, "observerReapedDescendant": False,
+            "custodyResolvedOrTerminalClaimed": False}
+        original.add_note("H1 bounded cleanup: " + repr(self.cleanup_record))
+        try:
+            self.controller.evidence.write("h1-span-failure-cleanup.json", self.cleanup_record)
+        except BaseException as error:
+            original.add_note("H1 cleanup evidence unavailable: " + type(error).__name__)
+
+
+def h1_active_loss_subject(controller: WholeCheckController, baseline: Baseline, *, component: str, case: str,
+                           schedule: H1Schedule, programs: H1ProgramPins, environment: Mapping[str, str],
+                           seconds: float) -> Object:
+    """Fixed complete-unit launch in a fresh disposable subject, never a filter.
+
+    Each family gets a distinct registry/fixture; no taint-copy/reset/rebind.
+    The outer full check separately consumes the successful full positive domain.
+    """
+    require(component in _H1_SELECTORS and not controller.reaped and not controller.finished_external,
+            "H1 active-loss subject cannot reuse a completed or partly observed check.")
+    controller.workspace.verify(controller.evidence)
+    programs.verify(controller, component)
+    schedule.verify(controller.scope.producer(component))
+    child = OwnedChild(controller.fixed_argv(component, controller.scope.producer(component).build, "build-unit"),
+                       environment=without_authority(dict(environment)), cwd=controller.workspace.registry)
+    collector: HelperSpanCollector | None = None
+    span: H1SpanObservation | None = None
+    try:
+        collector = HelperSpanCollector(child, case=case, seconds=seconds)
+        with collector:
+            ready_raw = collector.ready()
+            # bind itself retains verified identities through every fallible
+            # source/origin setup path and performs bounded failure cleanup.
+            span = H1SpanObservation.bind(controller, baseline, collector, component=component, case=case,
+                                          schedule=schedule, ready_raw=ready_raw, programs=programs)
+            return span.death()
+    except BaseException as subject_error:
+        if span is not None and getattr(span, "view", None) is not None:
+            span.cleanup(subject_error)
+        elif collector is not None:
+            try:
+                collector.abort()
+            except BaseException as error:
+                subject_error.add_note("H1 provider setup cleanup: " + type(error).__name__)
+        else:
+            try:
+                child.request_stop()
+            except BaseException as error:
+                subject_error.add_note("H1 setup provider stop: " + type(error).__name__)
+            try:
+                child.wait_owned(seconds=20)
+            except BaseException as error:
+                subject_error.add_note("H1 setup provider wait: " + type(error).__name__)
+            for stream in (child.process.stdin, child.process.stdout, child.process.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except BaseException as error:
+                        subject_error.add_note("H1 setup pipe: " + type(error).__name__)
+        raise
+    finally:
+        if collector is not None:
+            outer_error = sys.exception()
+            try:
+                controller.evidence.write("h1-loss-raw-capture.json", collector.raw_observation(), limit=4 * 1024 * 1024)
+            except BaseException as error:
+                if outer_error is None:
+                    raise
+                outer_error.add_note("H1 raw output evidence unavailable: " + type(error).__name__)
