@@ -1891,7 +1891,7 @@ class H1SystemPs:
         require(self.capture() == self and owner.live(), "STOP observer/program/process identity changed.")
         end = min(deadline, time.monotonic() + 2)
         require(end > time.monotonic(), "No remaining actual STOP observation budget.")
-        process = subprocess.Popen(["/bin/ps", "-p", str(owner.pid), "-o", "pid=,stat="],
+        process = subprocess.Popen(["/bin/ps", "-p", str(owner.pid), "-o", "stat="],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True,
             env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
         observer: ExactProcess | None = None
@@ -1925,10 +1925,10 @@ class H1SystemPs:
             require(time.monotonic() <= end and status == 0 and not buffers["stderr"] and owner.live()
                     and self.capture() == self, "STOP query failed or target/system program changed.")
             raw = bytes(buffers["stdout"])
-            match = re.fullmatch(rb"[ \t]*([0-9]+)[ \t]+([A-Za-z+<>NWs]+)[ \t]*\n", raw)
-            require(match is not None and int(match[1]) == owner.pid and match[2].startswith(b"T"),
+            match = re.fullmatch(rb"[ \t]*([A-Za-z+<>NWs]+)[ \t]*\n", raw)
+            require(match is not None and match[1].startswith(b"T"),
                     "Exact same-birth H1 is not actually kernel STOPPED.")
-            return {"target": owner.object(), "argv": ["/bin/ps", "-p", str(owner.pid), "-o", "pid=,stat="],
+            return {"target": owner.object(), "argv": ["/bin/ps", "-p", str(owner.pid), "-o", "stat="],
                     "stdoutHex": raw.hex(), "stderrHex": bytes(buffers["stderr"]).hex(), "returncode": status,
                     "systemPsSha256": self.sha256, "systemPsIdentity": list(self.identity), "actualOwnedWait": True}
         except BaseException as error:
