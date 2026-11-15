@@ -606,3 +606,73 @@ def prune_admitted(registry: str, component: str, keep: int, *, bin_dir: str | N
         return {"component": component, "pruned": pruned, **retained}
 
     return with_mutation_lock(os.path.join(registry, component), change)
+
+
+DRIVER_LAUNCHER_LIMIT = 1024 * 1024
+
+
+def driver_route_bytes(path: Path) -> tuple[bytes, int] | None:
+    """Read one exact publisher route without following links or blocking."""
+    from .driver_admission import Refusal, physical
+
+    parent = physical(path.parent)
+    info = parent.lstat()
+    if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o022:
+        raise Refusal("Unsafe registered launcher directory.")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    try:
+        before = os.fstat(descriptor)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid()
+                or stat.S_IMODE(before.st_mode) & 0o022 or not before.st_mode & 0o111
+                or before.st_size > DRIVER_LAUNCHER_LIMIT):
+            raise Refusal("Unsafe registered Driver launcher.")
+        raw = bytearray()
+        while len(raw) <= DRIVER_LAUNCHER_LIMIT:
+            block = os.read(descriptor, min(65536, DRIVER_LAUNCHER_LIMIT + 1 - len(raw)))
+            if not block:
+                break
+            raw.extend(block)
+        after, named = os.fstat(descriptor), path.lstat()
+        if (len(raw) != before.st_size or len(raw) > DRIVER_LAUNCHER_LIMIT
+                or (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_size) !=
+                (after.st_dev, after.st_ino, after.st_mtime_ns, after.st_size)
+                or (named.st_dev, named.st_ino) != (before.st_dev, before.st_ino)):
+            raise Refusal("Driver launcher changed while reading.")
+        return bytes(raw), stat.S_IMODE(before.st_mode)
+    finally:
+        os.close(descriptor)
+
+
+def publish_driver_route(path: Path, expected: tuple[bytes, int] | None,
+                         desired: tuple[bytes, int] | None) -> None:
+    """Compare exact before bytes; fsync atomic executable publication/removal."""
+    from .driver_admission import Refusal, sync_directory, token
+
+    if driver_route_bytes(path) != expected:
+        raise Refusal("Registered Driver launcher changed during deployment.")
+    if desired is None:
+        if expected is not None:
+            path.unlink()
+            sync_directory(path.parent)
+        return
+    raw, mode = desired
+    if (len(raw) > DRIVER_LAUNCHER_LIMIT or mode & 0o022 or not mode & 0o111
+            or mode & ~0o777):
+        raise Refusal("Invalid staged Driver launcher.")
+    temporary = path.parent / ("." + path.name + "." + token())
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fchmod(stream.fileno(), mode)
+            os.fsync(stream.fileno())
+        if driver_route_bytes(path) != expected:
+            raise Refusal("Registered Driver launcher changed before publication.")
+        os.replace(temporary, path)
+        sync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)

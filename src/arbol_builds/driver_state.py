@@ -24,12 +24,15 @@ from .driver_admission import (
     Custody,
     Object,
     Refusal,
+    admission_fingerprint,
     archive_terminal,
     canonical,
     canonical_uuid,
     custody_loss,
     decode,
+    deployment_mutex,
     fields,
+    lock_identity,
     normal_control,
     physical,
     private_directory,
@@ -38,9 +41,11 @@ from .driver_admission import (
     read,
     read_bytes,
     reconcile,
+    remove,
     sha256,
     token,
     valid_hash,
+    valid_token,
     validate,
     without_authority,
 )
@@ -575,3 +580,360 @@ def drain(request: Request) -> Object:
             remaining = deadline - time.monotonic()
             if remaining > 0:
                 time.sleep(min(0.05, remaining))
+
+
+def _immutable(path: Path, raw: bytes, *, limit: int = LIMIT) -> None:
+    try:
+        existing = read_bytes(path, limit=limit)
+    except FileNotFoundError:
+        publish_bytes(path, raw, limit=limit)
+        return
+    if existing != raw:
+        raise Refusal("Immutable deployment evidence changed.")
+
+
+def _rollout_folder(registry: Path, session: str, checkpoint: str, *, create: bool = False) -> Path:
+    if not canonical_uuid(session) or not valid_token(checkpoint):
+        raise Refusal("Invalid deployment identity.")
+    folder = registry / ".driver-qualification"
+    for name in ("deployments", session, checkpoint):
+        folder = private_directory(folder / name, create=create)
+    return folder
+
+
+def _caller_assertion(raw: bytes, gate: Object) -> Object:
+    value = decode(raw)
+    fields(value, "version callers")
+    callers = value["callers"]
+    if not isinstance(callers, list):
+        raise Refusal("Invalid disabled-caller assertion.")
+    routes = {row["launcher"] for row in gate["components"]}
+    names: list[str] = []
+    for row in callers:
+        if (not isinstance(row, dict) or set(row) != {"name", "route", "disabled"}
+                or row["disabled"] is not True or row["route"] not in routes
+                or not isinstance(row["name"], str) or not row["name"]
+                or len(row["name"].encode("utf-8", "strict")) > 128
+                or any(ord(character) < 32 or ord(character) == 127 for character in row["name"])):
+            raise Refusal("Caller assertions contain only bounded names, registered routes and disabled true.")
+        names.append(row["name"])
+    if names != sorted(set(names)):
+        raise Refusal("Disabled callers must have distinct lexical names.")
+    return value
+
+
+def _qualified_candidates(authorities: list[Authority]) -> list[Payload]:
+    """Resolve declarations before staging; full acceptance follows installed hashes."""
+    payloads: list[Payload] = []
+    for authority in authorities:
+        qualification = authority.read("qualification")
+        if qualification["component"] != authority.component:
+            raise Refusal("Deployment qualification component mismatch.")
+        digest = qualification["acceptanceSha256"]
+        raw = read_bytes(authority.shared / "acceptances" / (digest + ".json"))
+        value = decode(raw)
+        if sha256(raw) != digest or not valid_hash(value.get("producerPayloadSha256")):
+            raise Refusal("Deployment acceptance digest mismatch.")
+        matches: list[Payload] = []
+        count = 0
+        for folder in (authority.registry / authority.component).iterdir():
+            count += 1
+            if count > 100000:
+                raise Refusal("Deployment registry exceeds its inventory bound.")
+            if BUILD_PATTERN.fullmatch(folder.name) is None:
+                continue
+            try:
+                descriptor = read_bytes(folder / SUBTREE / DESCRIPTOR)
+            except FileNotFoundError:
+                continue
+            if sha256(descriptor) == value["producerPayloadSha256"]:
+                matches.append(registered(authority.registry, authority.component, folder.name))
+        if len(matches) != 1:
+            raise Refusal("Exact accepted deployment payload is unavailable.")
+        payloads.append(matches[0])
+    return payloads
+
+
+def _rollout_record(path: Path) -> Object | None:
+    try:
+        value = read(path)
+    except FileNotFoundError:
+        return None
+    validate("deployment", value)
+    return value
+
+
+def _rollout_bindings(authorities: list[Authority], record: Object, *, allow_exclusive: bool = False) -> list[Object]:
+    rows: list[Object] = []
+    for authority, expected in zip(authorities, record["components"], strict=True):
+        control = authority.read("control")
+        if (control["session"] != record["session"] or control["epoch"] != expected["epoch"]
+                or control["phase"] not in (("draining", "exclusive") if allow_exclusive else ("draining",))):
+            raise Refusal("Deployment no longer has all four unchanged closed epochs.")
+        rows.append({"component": authority.component, "epoch": control["epoch"],
+                     "controlLock": lock_identity(authority, "control.lock"),
+                     "admissionLock": lock_identity(authority, "admission.lock"),
+                     "admissionsSha256": admission_fingerprint(authority)})
+    return rows
+
+
+def _verify_rollout(registry: Path, authorities: list[Authority], record: Object) -> tuple[Path, Object]:
+    folder = _rollout_folder(registry, record["session"], record["checkpoint"])
+    registry_digest = sha256(canonical(authorities[0].identity))
+    if record["registrySha256"] != registry_digest:
+        raise Refusal("Deployment registry identity changed.")
+    gate_raw, callers_raw = read_bytes(folder / "manifest.json"), read_bytes(folder / "callers.json")
+    gate = decode(gate_raw)
+    _caller_assertion(callers_raw, gate)
+    if any(row["component"] != expected["component"] or row["launcherSha256"] != expected["launcherSha256"]
+           for row, expected in zip(record["components"], gate["components"], strict=True)):
+        raise Refusal("Deployment component launcher hashes changed.")
+    if (sha256(gate_raw) != record["gateSha256"] or sha256(callers_raw) != record["callersSha256"]
+            or read_bytes(authorities[0].shared / "gate.json") != gate_raw
+            or verify_gate(registry).digest != record["gateSha256"]):
+        raise Refusal("Deployment gate/caller hashes changed.")
+    checkpoint = read(folder / "checkpoint.json")
+    fields(checkpoint, "version kind session checkpoint registrySha256 gateSha256 callersSha256 oldBoot components")
+    expected = {"version": 1, "kind": "driver-closed-checkpoint",
+                **{key: record[key] for key in ("session", "checkpoint", "registrySha256", "gateSha256", "callersSha256", "oldBoot")}}
+    if any(checkpoint.get(key) != value for key, value in expected.items()):
+        raise Refusal("Closed checkpoint identity changed.")
+    if checkpoint["components"] != _rollout_bindings(authorities, record):
+        raise Refusal("Closed authorities, lock inodes or normal admissions changed after checkpoint.")
+    return folder, checkpoint
+
+
+def _before_route(folder: Path, component: str, row: Object) -> tuple[bytes, int] | None:
+    if row["beforeSha256"] is None:
+        if row["beforeMode"] is not None:
+            raise Refusal("Invalid absent launcher before-image.")
+        return None
+    raw = read_bytes(folder / "before" / (component + ".launcher"), limit=1024 * 1024)
+    if sha256(raw) != row["beforeSha256"] or type(row["beforeMode"]) is not int:
+        raise Refusal("Launcher before-image changed.")
+    return raw, row["beforeMode"]
+
+
+def _stage_rollout(request: Request, gate: Object, callers_raw: bytes, provider: Payload,
+                   authorities: list[Authority], source_bytes: dict[str, bytes], old: Object | None,
+                   build_pins: ExitStack) -> Object:
+    from .launcher import default_record, read_records
+    from .service import driver_route_bytes
+
+    if old is not None and old["phase"] not in ("failed-closed", "complete"):
+        raise Refusal("Resume the existing deployment before starting another checkpoint.")
+    if old is not None and old["phase"] != "complete" and old["session"] != request.session:
+        raise Refusal("A different deployment session owns the closed fence.")
+    checkpoint, boot = token(), boot_uuid()
+    folder = _rollout_folder(request.registry, request.session, checkpoint, create=True)
+    before = private_directory(folder / "before", create=True)
+    staged = private_directory(folder / "staged", create=True)
+    gate_raw = canonical(gate)
+    _immutable(folder / "manifest.json", gate_raw)
+    _immutable(folder / "callers.json", callers_raw)
+    try:
+        old_gate = read_bytes(authorities[0].shared / "gate.json")
+    except FileNotFoundError:
+        old_gate = None
+    if old_gate is not None:
+        _immutable(before / "gate.json", old_gate)
+    rows: list[Object] = []
+    public: list[Object] = []
+    for authority, route in zip(authorities, gate["components"], strict=True):
+        control = authority.read("control")
+        if control["phase"] != "normal" and control["session"] != request.session:
+            raise Refusal("A different component maintenance session owns this deployment.")
+        old_route = driver_route_bytes(Path(route["launcher"]))
+        if old_route is not None:
+            _immutable(before / (authority.component + ".launcher"), old_route[0], limit=1024 * 1024)
+        selected = default_record(str(request.registry), read_records(str(request.registry), authority.component))
+        selection: Object = {"version": 1, "component": authority.component,
+                             "build": selected["build"] if selected is not None else None, "recordSha256": None}
+        if selected is not None:
+            descriptor = open_use_guard(str(request.registry), authority.component, selected["build"])
+            build_pins.callback(os.close, descriptor)
+            _use_current(authority, selected["build"], descriptor)
+            raw = read_bytes(request.registry / authority.component / selected["build"] / "build.json")
+            if decode(raw, exact=False) != selected or selected.get("prunedAt"):
+                raise Refusal("Selected Build changed before its deployment pin.")
+            selection["recordSha256"] = sha256(raw)
+            _immutable(before / (authority.component + ".build.json"), raw)
+        _immutable(before / (authority.component + ".selection.json"), canonical(selection))
+        _immutable(staged / authority.component, source_bytes[authority.component], limit=1024 * 1024)
+        rows.append({"component": authority.component, "beforeSha256": sha256(old_route[0]) if old_route else None,
+                     "beforeMode": old_route[1] if old_route else None, "selectionSha256": sha256(canonical(selection))})
+        public.append({"component": authority.component, "epoch": control["epoch"],
+                       "launcherSha256": route["launcherSha256"], "closed": True})
+    evidence = {"version": 1, "kind": "driver-rollout", "session": request.session, "checkpoint": checkpoint,
+                "providerPayloadSha256": provider.digest, "oldGateSha256": sha256(old_gate) if old_gate else None,
+                "components": rows}
+    _immutable(folder / "rollout.json", canonical(evidence))
+    # The required token identifies this staging attempt. It is not a usable
+    # checkpoint until checkpoint.json and awaiting-boot are durably verified.
+    record = {"version": 1, "kind": "driver-gate-deployment", "session": request.session,
+              "registrySha256": sha256(canonical(authorities[0].identity)), "gateSha256": sha256(gate_raw),
+              "callersSha256": sha256(callers_raw), "oldBoot": boot, "newBoot": None,
+              "phase": "staged", "components": public, "checkpoint": checkpoint}
+    validate("deployment", record)
+    # Preserve prior taint bytes before the new unknown pre-gate baseline.
+    for authority in authorities:
+        try:
+            taint = read_bytes(authority.folder / "taint.json")
+        except FileNotFoundError:
+            taint = None
+        if taint is not None:
+            _immutable(before / (authority.component + ".taint.json"), taint)
+        control = authority.read("control")
+        authority.write("control", {**control, "phase": "draining", "session": request.session})
+        authority.write("taint", {"version": 1, "component": authority.component, "epoch": control["epoch"],
+                                  "boot": boot, "reason": "initial-deployment", "invocation": token(), "payloadSha256": None})
+    # Reference publication is guarded by all exact Build SH pins at the caller.
+    publish(authorities[0].shared / "deployment.json", record)
+    return record
+
+
+def _rollback_rollout(registry: Path, authorities: list[Authority], record: Object) -> None:
+    from .service import driver_route_bytes, publish_driver_route
+
+    folder = _rollout_folder(registry, record["session"], record["checkpoint"])
+    if (folder / "checkpoint.json").exists():
+        raise Refusal("A durable checkpoint cannot roll back; restage a new closed boundary.")
+    evidence = read(folder / "rollout.json")
+    fields(evidence, "version kind session checkpoint providerPayloadSha256 oldGateSha256 components")
+    if (evidence["kind"] != "driver-rollout" or evidence["session"] != record["session"]
+            or evidence["checkpoint"] != record["checkpoint"] or not isinstance(evidence["components"], list)
+            or len(evidence["components"]) != len(COMPONENTS)):
+        raise Refusal("Invalid rollout before-image evidence.")
+    gate = read(folder / "manifest.json")
+    for authority, route, row in zip(authorities, gate["components"], evidence["components"], strict=True):
+        if row.get("component") != authority.component:
+            raise Refusal("Rollout before-image component changed.")
+        previous = _before_route(folder, authority.component, row)
+        current = driver_route_bytes(Path(route["launcher"]))
+        staged = read_bytes(folder / "staged" / authority.component, limit=1024 * 1024)
+        if sha256(staged) != route["launcherSha256"]:
+            raise Refusal("Staged launcher changed during rollback.")
+        if current == (staged, 0o755):
+            publish_driver_route(Path(route["launcher"]), current, previous)
+        elif current != previous:
+            raise Refusal("Changed launcher cannot be overwritten during rollback.")
+        # Deployment never edits Build records/default selection. Preserve their
+        # exact before-images; never overwrite a concurrent Build's metadata.
+        selection = read_bytes(folder / "before" / (authority.component + ".selection.json"))
+        if sha256(selection) != row["selectionSha256"]:
+            raise Refusal("Build selection evidence changed.")
+    gate_path = authorities[0].shared / "gate.json"
+    if evidence["oldGateSha256"] is None:
+        if gate_path.exists():
+            if sha256(read_bytes(gate_path)) != record["gateSha256"]:
+                raise Refusal("Changed gate cannot be removed by rollback.")
+            remove(gate_path)
+    else:
+        previous_raw = read_bytes(folder / "before" / "gate.json")
+        if sha256(previous_raw) != evidence["oldGateSha256"]:
+            raise Refusal("Prior gate evidence changed.")
+        current_raw = read_bytes(gate_path)
+        if current_raw not in (previous_raw, read_bytes(folder / "manifest.json")):
+            raise Refusal("Changed gate cannot be overwritten by rollback.")
+        publish_bytes(gate_path, previous_raw)
+
+
+@handler("deploy")
+def deploy(request: Request) -> Object:
+    from .service import driver_launcher_source, driver_route_bytes, publish_driver_route
+
+    provider = _provider(request)
+    if not Path(__file__).resolve().is_relative_to(provider.root):
+        raise Refusal("Deployment requires its exact immutable provider.")
+    gate_raw = read_bytes(physical(request.values["manifest"], directory=False))
+    gate = decode(gate_raw)
+    if gate["providerPayloadSha256"] != provider.digest:
+        raise Refusal("Deployment provider changed with its manifest.")
+    callers_raw = read_bytes(physical(request.values["callers"], directory=False))
+    _caller_assertion(callers_raw, gate)
+    sources: dict[str, bytes] = {}
+    for row in gate["components"]:
+        route = Path(row["launcher"])
+        if str(route) != row["launcher"] or route.name != row["component"]:
+            raise Refusal("Deployment requires exact canonical component routes.")
+        physical(route.parent)
+        raw = driver_launcher_source(str(request.registry), row["component"], str(route), provider)
+        if sha256(raw) != row["launcherSha256"]:
+            raise Refusal("Gate launcher hash differs from publisher-generated bytes.")
+        sources[row["component"]] = raw
+    with deployment_mutex(request.registry):
+        authorities = [Authority(request.registry, component) for component in COMPONENTS]
+        # A global independent lock serializes the initial stable inode creation.
+        for authority in authorities:
+            authority.initialize(request.session, token())
+        payloads = _qualified_candidates(authorities)
+        with pin_payloads(request.registry, [provider, *payloads]), ExitStack() as stack, ExitStack() as build_pins:
+            for authority in authorities:
+                stack.enter_context(authority.mutex())
+            path = authorities[0].shared / "deployment.json"
+            record = _rollout_record(path)
+            if record is not None and record["phase"] != "complete" and record["session"] != request.session:
+                raise Refusal("A different deployment owns the closed fence.")
+            same = (record is not None and record["session"] == request.session
+                    and record["gateSha256"] == sha256(gate_raw) and record["callersSha256"] == sha256(callers_raw))
+            if record is not None and record["phase"] not in ("failed-closed", "complete") and not same:
+                raise Refusal("Changed deployment inputs require a new closed rollout after failure.")
+            if same and record is not None and record["phase"] == "complete":
+                verify_gate(request.registry)
+                return {"version": 1, "session": request.session, "phase": "complete", "callersMayEnable": True}
+            if record is None or record["phase"] in ("failed-closed", "complete"):
+                record = _stage_rollout(request, gate, callers_raw, provider, authorities, sources, record, build_pins)
+            assert record is not None
+            folder = _rollout_folder(request.registry, request.session, record["checkpoint"])
+            try:
+                if record["phase"] in ("awaiting-boot", "boot-verified", "maintaining"):
+                    if record["phase"] == "awaiting-boot":
+                        _verify_rollout(request.registry, authorities, record)
+                    else:
+                        _rollout_bindings(authorities, record, allow_exclusive=True)
+                        verify_gate(request.registry)
+                    return {"version": 1, "session": request.session, "phase": record["phase"],
+                            "checkpoint": record["checkpoint"], "callersMayEnable": False}
+                evidence = read(folder / "rollout.json")
+                if evidence.get("providerPayloadSha256") != provider.digest:
+                    raise Refusal("Staged provider identity changed.")
+                _rollout_bindings(authorities, record)
+                publish_bytes(authorities[0].shared / "gate.json", gate_raw)
+                for authority, route, before in zip(authorities, gate["components"], evidence["components"], strict=True):
+                    staged = read_bytes(folder / "staged" / authority.component, limit=1024 * 1024)
+                    if staged != sources[authority.component] or sha256(staged) != route["launcherSha256"]:
+                        raise Refusal("Staged launcher identity changed.")
+                    target = Path(route["launcher"])
+                    current = driver_route_bytes(target)
+                    desired = (staged, 0o755)
+                    if current != desired:
+                        previous = _before_route(folder, authority.component, before)
+                        if current != previous:
+                            raise Refusal("Launcher changed after staging.")
+                        publish_driver_route(target, previous, desired)
+                if verify_gate(request.registry).digest != record["gateSha256"]:
+                    raise Refusal("Installed all-four gate differs from the staged tuple.")
+                for authority, payload in zip(authorities, payloads, strict=True):
+                    verify_acceptance(authority, payload)
+                record = {**record, "phase": "closed-installed"}
+                publish(path, record)
+                checkpoint_path = folder / "checkpoint.json"
+                if not checkpoint_path.exists():
+                    if boot_uuid() != record["oldBoot"]:
+                        raise Refusal("Kernel changed before the all-four checkpoint; restage closed.")
+                    checkpoint = {"version": 1, "kind": "driver-closed-checkpoint",
+                                  **{key: record[key] for key in ("session", "checkpoint", "registrySha256", "gateSha256", "callersSha256", "oldBoot")},
+                                  "components": _rollout_bindings(authorities, record)}
+                    _immutable(checkpoint_path, canonical(checkpoint))
+                _verify_rollout(request.registry, authorities, record)
+                record = {**record, "phase": "awaiting-boot"}
+                publish(path, record)
+                return {"version": 1, "session": request.session, "phase": "awaiting-boot",
+                        "checkpoint": record["checkpoint"], "callersMayEnable": False}
+            except BaseException:
+                # The public phase always remains closed. Only a pre-checkpoint
+                # failure can restore exact preserved bytes; no caller is enabled.
+                publish(path, {**record, "phase": "failed-closed"})
+                if not (folder / "checkpoint.json").exists():
+                    _rollback_rollout(request.registry, authorities, record)
+                raise

@@ -292,6 +292,15 @@ def validate(kind: str, value: Object) -> None:
     if kind == "deployment" and (value["kind"] != "driver-gate-deployment" or value["phase"] not in (
             "staged", "closed-installed", "awaiting-boot", "boot-verified", "maintaining", "complete", "failed-closed")):
         refuse()
+    if kind == "deployment":
+        rows = value["components"]
+        if not isinstance(rows, list) or len(rows) != len(COMPONENTS):
+            refuse()
+        for component, row in zip(COMPONENTS, rows, strict=True):
+            if (not isinstance(row, dict) or set(row) != {"component", "epoch", "launcherSha256", "closed"}
+                    or row["component"] != component or row["closed"] is not True
+                    or not valid_token(row["epoch"]) or not valid_hash(row["launcherSha256"])):
+                refuse()
 
 
 @dataclass(frozen=True)
@@ -750,3 +759,58 @@ def archive_terminal(authority: Authority, descriptor: int) -> None:
         private_directory(authority.folder / name, create=True)
     publish(journal_path, {**journal, "phase": "complete"})
     remove(journal_path)
+
+
+@contextmanager
+def deployment_mutex(registry: Path) -> Iterator[None]:
+    """Serialize first-time authority creation and resumable rollout publication.
+
+    This independent stable lock never substitutes for the four lexical short
+    control mutexes or component admission. No child/operator work runs under it.
+    """
+    shared = private_directory(registry / ".driver-qualification", create=True)
+    path = shared / "deployment.lock"
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        held = _regular(descriptor)
+        named = path.lstat()
+        if (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino):
+            refuse()
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        os.fsync(descriptor)
+        sync_directory(shared)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def lock_identity(authority: Authority, name: str) -> Object:
+    descriptor = authority.open_lock(name)
+    try:
+        info = os.fstat(descriptor)
+        return {"device": info.st_dev, "inode": info.st_ino}
+    finally:
+        os.close(descriptor)
+
+
+def admission_fingerprint(authority: Authority) -> str:
+    """All preexisting admission markers are bound; a later marker changes it."""
+    folder = authority.folder / "normal-admissions"
+    paths = _documents(folder) if os.path.lexists(folder) else []
+    hashes: list[Object] = []
+    for path in paths:
+        if not valid_token(path.name.removesuffix(".json")):
+            refuse()
+        raw = read_bytes(path)
+        value = decode(raw)
+        fields(value, "version kind component epoch boot invocation build payloadSha256 checkpoint")
+        if (value["kind"] != "driver-normal-admission" or value["component"] != authority.component
+                or value["invocation"] != path.name.removesuffix(".json")
+                or not valid_token(value["epoch"]) or not canonical_uuid(value["boot"])
+                or (value["payloadSha256"] is not None and not valid_hash(value["payloadSha256"]))
+                or (value["checkpoint"] is not None and not valid_token(value["checkpoint"]))):
+            refuse()
+        hashes.append({"name": path.name, "sha256": sha256(raw)})
+    # This is a hash input, not a protocol document or authority substituted by
+    # an empty directory. Existing bounded raw markers are preserved separately.
+    return sha256(canonical({"version": 1, "markers": hashes}))
