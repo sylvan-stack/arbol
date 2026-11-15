@@ -6,6 +6,7 @@ module opens no registry, state, process, socket or output directory.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import math
@@ -13,8 +14,11 @@ import os
 import re
 import selectors
 import signal
+import socket
 import stat
 import subprocess
+import termios
+import threading
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -293,3 +297,156 @@ class OwnedChild:
         code = self.process.wait(timeout=seconds)
         self.reaped = True
         return code
+
+
+class SocketBarrier:
+    """One reviewed helper checkpoint; a data socket never carries admission."""
+
+    def __init__(self, channel: socket.socket, *, case: str, action: str, window: str) -> None:
+        if (channel.family != socket.AF_UNIX or channel.type != socket.SOCK_STREAM or channel.fileno() < 3
+                or re.fullmatch(r"[0-9a-f]{32}", case, re.ASCII) is None):
+            raise ObservationFailed("Invalid separate actor control endpoint/case.")
+        actions = {"retain-label", "retain-auth", "drop-sidecar", "corrupt-sidecar", "drop-root", "corrupt-root",
+                   "late-auth", "late-usage", "late-run", "late-map", "late-progress", "late-history",
+                   "lease-hold", "create-stop", "recover-create"}
+        windows = {"none", "L1-result-ready", "H1-independent-lease", "C1-prepared-durable", "C2-record-durable",
+                   "C3-sidecar-durable", "C4-committed-durable", "C5-clear-durable", "J1-prepared-present",
+                   "J2-prepared-absent", "J3-committed-present", "J4-inconsistent"}
+        if action not in actions or window not in windows:
+            raise ObservationFailed("Unsupported literal actor action/window.")
+        if ((action.startswith("late-") and window != "L1-result-ready")
+                or (action == "lease-hold" and window != "H1-independent-lease")
+                or (action == "create-stop" and not window.startswith("C"))
+                or (action == "recover-create" and not window.startswith("J"))
+                or (action.startswith(("retain-", "drop-", "corrupt-")) and window != "none")):
+            raise ObservationFailed("Invalid literal actor window pairing.")
+        self.channel, self.case, self.action, self.window = channel, case, action, window
+        self.replied = False
+        self.checkpoint_seen = False
+        os.set_inheritable(channel.fileno(), False)
+        channel.settimeout(10)
+
+    def checkpoint(self) -> Object:
+        if self.checkpoint_seen or self.window == "none" or self.action == "recover-create":
+            raise ObservationFailed("This action accepts no further checkpoint.")
+        raw = bytearray()
+        deadline = time.monotonic() + 10
+        while len(raw) <= DOCUMENT_LIMIT:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ObservationFailed("Complete actor checkpoint exceeded its10sec bound.")
+            self.channel.settimeout(remaining)
+            part = self.channel.recv(1)
+            if not part:
+                raise ObservationFailed("Actor checkpoint closed before its bounded frame.")
+            raw.extend(part)
+            if part == b"\n":
+                break
+        if raw.count(b"\n") != 1 or not raw.endswith(b"\n"):
+            raise ObservationFailed("Checkpoint must be one bounded JSONLF frame.")
+        value = document(bytes(raw))
+        exact_fields(value, ("version", "kind", "case", "action", "window"))
+        if value != {"version": 1, "kind": "actor-ready", "case": self.case,
+                     "action": self.action, "window": self.window} or type(value["version"]) is not int:
+            raise ObservationFailed("Actor checkpoint does not match the fixed case.")
+        self.checkpoint_seen = True
+        return value
+
+    def reply(self, *, abort_io: bool = False) -> None:
+        if not self.checkpoint_seen or self.replied or (abort_io and self.action != "create-stop"):
+            raise ObservationFailed("Unsupported or repeated checkpoint response.")
+        if not (self.action.startswith("late-") or self.action in ("lease-hold", "create-stop")):
+            raise ObservationFailed("This action accepts no control response.")
+        self.channel.settimeout(10)
+        self.channel.sendall(canonical({"version": 1, "kind": "actor-control", "case": self.case,
+                                        "command": "abort-io" if abort_io else "continue"}))
+        self.replied = True
+
+    def close(self) -> None:
+        self.channel.close()
+
+
+def _claim_owned_terminal() -> None:
+    """Runs in the new child session, after Popen maps the owned slave onto0."""
+    fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
+
+class OwnedPTY:
+    """A newly owned PTY/session; never borrow or alter the owner's terminal."""
+
+    def __init__(self, argv: list[str], *, environment: Mapping[str, str], cwd: Path) -> None:
+        # Popen preexec is restricted to a single-threaded external controller.
+        if any(t is not threading.current_thread() and t.is_alive() for t in threading.enumerate()):
+            raise ObservationFailed("PTY setup cannot run beside live controller/ACK threads.")
+        master, slave = os.openpty()
+        self.master = master
+        os.set_inheritable(master, False)
+        os.set_inheritable(slave, False)
+        try:
+            self.process = subprocess.Popen(argv, env=dict(environment), cwd=cwd, close_fds=True,
+                                            stdin=slave, stdout=slave, stderr=slave, start_new_session=True,
+                                            preexec_fn=_claim_owned_terminal)
+        except BaseException:
+            os.close(master)
+            raise
+        finally:
+            os.close(slave)
+        self.owner = ExactProcess.read(process_identity(self.process.pid))
+        if not self.owner.live(parent=os.getpid()):
+            raise ObservationFailed("Owned PTY child identity is unavailable; no guessed kill.")
+        os.set_blocking(master, False)
+        self.reaped = False
+
+    def write(self, raw: bytes) -> None:
+        if len(raw) > DOCUMENT_LIMIT or not self.owner.live():
+            raise ObservationFailed("Invalid bounded PTY input or stale child.")
+        view = memoryview(raw)
+        deadline = time.monotonic() + 10
+        with selectors.DefaultSelector() as selector:
+            selector.register(self.master, selectors.EVENT_WRITE)
+            while view:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ObservationFailed("Owned PTY input backpressure exceeded its bound.")
+                if selector.select(remaining):
+                    try:
+                        written = os.write(self.master, view)
+                    except BlockingIOError:
+                        continue
+                    if written <= 0:
+                        raise ObservationFailed("PTY input closed before completion.")
+                    view = view[written:]
+
+    def read_until(self, marker: bytes, *, seconds: float = 20, limit: int = CAPTURE_LIMIT) -> bytes:
+        if not marker or not math.isfinite(seconds) or not 0 < seconds <= 120 or not 0 < limit <= CAPTURE_LIMIT:
+            raise ObservationFailed("Invalid bounded PTY observation.")
+        raw = bytearray()
+        deadline = time.monotonic() + seconds
+        with selectors.DefaultSelector() as selector:
+            selector.register(self.master, selectors.EVENT_READ)
+            while marker not in raw:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or len(raw) >= limit:
+                    raise ObservationFailed("PTY observation incomplete; preserve exact attempt.")
+                if selector.select(min(.1, remaining)):
+                    try:
+                        part = os.read(self.master, min(65536, limit + 1 - len(raw)))
+                    except BlockingIOError:
+                        continue
+                    if not part:
+                        raise ObservationFailed("PTY closed before independent readiness.")
+                    raw.extend(part)
+            return bytes(raw)
+
+    def signal(self, number: signal.Signals) -> None:
+        signal_verified(self.owner, number)
+
+    def reap(self, *, seconds: float = 20) -> int:
+        code = self.process.wait(timeout=seconds)
+        self.reaped = True
+        return code
+
+    def close(self) -> None:
+        if self.master >= 0:
+            descriptor, self.master = self.master, -1
+            os.close(descriptor)

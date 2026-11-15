@@ -15,7 +15,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Protocol
 
@@ -59,6 +59,7 @@ from arbol_builds.driver_admission import (
     token,
     valid_hash,
     valid_token,
+    validate,
 )
 from arbol_builds.driver_payload import (
     CandidateScope,
@@ -67,6 +68,7 @@ from arbol_builds.driver_payload import (
     _candidate_payload,
     _gate_document,
     _registered_payload,
+    request_binding,
     resolve_candidate,
 )
 from arbol_builds.driver_process import boot_uuid, process_identity
@@ -198,7 +200,12 @@ class Workspace:
     creator: ExactProcess
     registry_identity: Object
     bin_identity: Object
+    fixture_root_identity: Object
     origin_evidence_name: str
+
+    @property
+    def fixture_root(self) -> Path:
+        return self.registry.parent / "fixtures"
 
     @classmethod
     def create(cls, parent: Path, evidence: EvidenceRecorder) -> Workspace:
@@ -207,27 +214,32 @@ class Workspace:
         fixture = token()
         root = parent / ("subject-" + fixture)
         root.mkdir(mode=0o700)
-        registry, binary = root / "builds", root / "bin"
+        registry, binary, fixture_root = root / "builds", root / "bin", root / "fixtures"
         registry.mkdir(mode=0o700)
         binary.mkdir(mode=0o700)
+        fixture_root.mkdir(mode=0o700)
         sync_directory(root)
         sync_directory(parent)
         creator = ExactProcess.read(process_identity(os.getpid()))
         name = "workspace-origin.json"
         evidence.write(name, {"version": 1, "fixture": fixture, "registry": directory_identity(registry),
-                              "bin": directory_identity(binary), "creator": creator.object(),
+                              "bin": directory_identity(binary), "fixtureRoot": directory_identity(fixture_root),
+                              "creator": creator.object(),
                               "boot": boot_uuid(), "platform": platform_identity(), "emptyAtCreation": True})
-        return cls(registry, binary, fixture, creator, directory_identity(registry), directory_identity(binary), name)
+        return cls(registry, binary, fixture, creator, directory_identity(registry), directory_identity(binary),
+                   directory_identity(fixture_root), name)
 
     def verify(self, evidence: EvidenceRecorder) -> None:
         require(valid_token(self.fixture) and self.origin_evidence_name in evidence.files,
                 "Missing external new-workspace provenance.")
         origin = document(read_image(evidence.root / self.origin_evidence_name).raw)
         require(origin["fixture"] == self.fixture and origin["registry"] == self.registry_identity
-                and origin["bin"] == self.bin_identity and origin["creator"] == self.creator.object()
+                and origin["bin"] == self.bin_identity and origin["fixtureRoot"] == self.fixture_root_identity
+                and origin["creator"] == self.creator.object()
                 and origin["emptyAtCreation"] is True, "Workspace creation evidence differs.")
         require(directory_identity(self.registry) == self.registry_identity
-                and directory_identity(self.bin) == self.bin_identity, "Workspace physical identity changed.")
+                and directory_identity(self.bin) == self.bin_identity
+                and directory_identity(self.fixture_root) == self.fixture_root_identity, "Workspace physical identity changed.")
         require(origin["boot"] == boot_uuid() and origin["platform"] == platform_identity(),
                 "Fixture boot/platform changed; this is not a reset operation.")
 
@@ -298,6 +310,138 @@ def verify_marker_additions(authority: Authority, old: MarkerImage, current: Mar
 
 
 @dataclass(frozen=True)
+class CompletedReceipt:
+    """Original issuing bindings plus an actual external provider-finish witness."""
+
+    component: str
+    session: str
+    attempt: str
+    receipt_sha256: str
+    provider: TuplePin
+    producer: TuplePin
+    gate_sha256: str
+    acceptance_sha256: str
+    registry_identity: Object
+    observation: Path
+    observation_sha256: str
+    rebind_generations: tuple[str, ...] = ()
+
+
+def verify_completed_receipt(authority: Authority, proof: CompletedReceipt, *, current_epoch: str) -> Object:
+    from arbol_builds.driver_admission import canonical_uuid
+    require(proof.component == authority.component and canonical_uuid(proof.session) and valid_token(proof.attempt)
+            and proof.registry_identity == authority.identity, "Historical receipt scope differs.")
+    raw = read_bytes(authority.folder / "maintenance.json")
+    receipt = document(raw)
+    validate("maintenance", receipt)
+    require(raw == canonical(receipt) and digest(raw) == proof.receipt_sha256
+            and receipt["component"] == proof.component and receipt["session"] == proof.session
+            and receipt["gateSha256"] == proof.gate_sha256, "Retained canonical receipt changed.")
+    # Resolve the genuine issuing images, not the later selected gate/producer.
+    issuing_provider = proof.provider.verify(authority.registry)
+    issuing_producer = proof.producer.verify(authority.registry)
+    require(proof.provider.component == "arbol" and proof.producer.component == authority.component,
+            "Historical receipt issuing components differ.")
+    acceptance_raw = read_bytes(authority.shared / "acceptances" / (proof.acceptance_sha256 + ".json"))
+    acceptance = document(acceptance_raw)
+    exact_fields(acceptance, ("version", "kind", "status", "scope", "contract", "providerPayloadSha256",
+                              "producerPayloadSha256", "gateSha256", "platform", "evidenceSha256"))
+    require(digest(acceptance_raw) == proof.acceptance_sha256 and acceptance_raw == canonical(acceptance)
+            and type(acceptance["version"]) is int and acceptance["version"] == 1
+            and acceptance["kind"] == "driver-qualification" and acceptance["status"] in ("candidate", "qualified")
+            and acceptance["contract"] == "DRV-browser-identity-1"
+            and acceptance["scope"] == str(authority.registry)
+            and acceptance["providerPayloadSha256"] == issuing_provider.payload.digest
+            and acceptance["producerPayloadSha256"] == issuing_producer.payload.digest
+            and acceptance["gateSha256"] == proof.gate_sha256, "Historical issuing acceptance differs.")
+    folder = private_directory(authority.folder / "sessions" / proof.session)
+    history = private_directory(folder / "attempts" / proof.attempt)
+    require(not os.path.lexists(folder / "operation.json"), "An actual operation is still pending.")
+    context_raw = read_bytes(folder / "contexts" / (proof.attempt + ".json"))
+    request_raw = read_bytes(folder / "contexts" / (proof.attempt + ".request.json"))
+    context, binding = document(context_raw), document(request_raw)
+    validate("context", context)
+    request_binding(binding, context)
+    operation, result = read(history / "operation.json"), read(history / "result.json")
+    validate("operation", operation)
+    validate("result", result)
+    require(context_raw == read_bytes(history / "context.json") and request_raw == read_bytes(history / "request.json")
+            and read(folder / "result.json") == result, "Historical context/request/result pointers differ.")
+    require(context["component"] == proof.component and context["session"] == proof.session
+            and context["attempt"] == proof.attempt and context["epoch"] == receipt["epoch"]
+            and context["registry"] == str(authority.registry) and context["gateSha256"] == proof.gate_sha256
+            and context["payloadSha256"] == issuing_producer.payload.digest
+            and context["acceptanceSha256"] == proof.acceptance_sha256
+            and binding["build"] == proof.producer.build
+            and context["receiptSha256"] == digest(raw) and operation["receiptSha256"] == digest(raw),
+            "Receipt does not bind the actual issuing operation/context.")
+    require(all(operation.get(key) == value for key, value in context.items()),
+            "Historical operation is not the exact context chain.")
+    for key in ("component", "session", "epoch", "attempt", "operation", "payloadSha256", "generation"):
+        require(result[key] == context[key], "Actual result/context binding differs.")
+    require(result["stateDirectorySha256"] == digest(context["stateDirectory"].encode())
+            and result["backupSha256"] == operation["backupSha256"], "Actual result/backup/state binding differs.")
+    finish = read(history / "finish.json")
+    exact_fields(finish, ("version", "kind", "component", "session", "epoch", "attempt", "generation",
+                          "resultSha256", "contextSha256", "requestSha256", "markerSha256", "nextEpoch", "phase"))
+    require(type(finish["version"]) is int and finish["version"] == 1
+            and finish["kind"] == "driver-maintenance-finish" and finish["phase"] in ("ready", "complete")
+            and all(finish[key] == context[key] for key in ("component", "session", "epoch", "attempt", "generation"))
+            and finish["resultSha256"] == digest(canonical(result)) and finish["contextSha256"] == digest(context_raw)
+            and finish["requestSha256"] == digest(request_raw)
+            and valid_token(finish["nextEpoch"]) and finish["nextEpoch"] != receipt["epoch"],
+            "Historical finish is incomplete or bound to another attempt.")
+    marker_raw = read_bytes(history / "marker.json")
+    require(read_bytes(history / "finished-marker.json") == marker_raw
+            and finish["markerSha256"] == digest(marker_raw), "Finished marker archive differs.")
+    observed_image = read_image(proof.observation, limit=1024 * 1024)
+    require(observed_image.sha256 == proof.observation_sha256, "External actual finish observation changed.")
+    observed = document(observed_image.raw, limit=1024 * 1024)
+    exact_fields(observed, ("version", "kind", "component", "session", "attempt", "receiptSha256",
+                            "contextSha256", "requestSha256", "resultSha256", "markerSha256", "gateSha256",
+                            "providerPayloadSha256", "producerPayloadSha256", "acceptanceSha256", "registry",
+                            "providerProcess", "returncode", "reaped", "stdout", "normalFinishRetry", "targetState"))
+    require(type(observed["version"]) is int and observed["version"] == 1
+            and observed["kind"] == "abr38-actual-provider-finish" and observed["returncode"] == 0
+            and observed["reaped"] is True and observed["component"] == proof.component
+            and observed["session"] == proof.session and observed["attempt"] == proof.attempt
+            and observed["receiptSha256"] == digest(raw) and observed["registry"] == authority.identity
+            and observed["providerPayloadSha256"] == issuing_provider.payload.digest
+            and observed["producerPayloadSha256"] == issuing_producer.payload.digest
+            and observed["acceptanceSha256"] == proof.acceptance_sha256
+            and observed["gateSha256"] == proof.gate_sha256
+            and all(observed[key] == finish[key] for key in (
+                "contextSha256", "requestSha256", "resultSha256", "markerSha256")),
+            "Missing genuine issuing provider finish evidence.")
+    ExactProcess.read(observed["providerProcess"])
+    output = observed["stdout"]
+    require(isinstance(output, dict) and output.get("phase") == "normal"
+            and output.get("component") == proof.component and output.get("session") == proof.session,
+            "Actual provider did not acknowledge normal finish.")
+    require(finish["phase"] == "complete" or observed["normalFinishRetry"] is True,
+            "A ready journal alone is not an actual accepted normal finish retry.")
+    target = observed["targetState"]
+    exact_fields(target, ("stateDirectory", "formatSha256", "identitySha256", "maintenanceMarkerAbsent"))
+    require(target["stateDirectory"] == context["stateDirectory"]
+            and valid_hash(target["formatSha256"]) and valid_hash(target["identitySha256"])
+            and target["maintenanceMarkerAbsent"] is True, "Actual finish target-state observation is incomplete.")
+    epoch = finish["nextEpoch"]
+    for generation_hash in proof.rebind_generations:
+        require(valid_hash(generation_hash), "Invalid retained rebind lineage hash.")
+        generation_raw = read_bytes(authority.shared / "fixture-authority" / ("generation-" + generation_hash + ".json"),
+                                    limit=32 * 1024 * 1024)
+        require(digest(generation_raw) == generation_hash, "Retained rebind generation changed.")
+        generation = document(generation_raw, limit=32 * 1024 * 1024)
+        row = generation["controls"][authority.component]
+        require(generation["kind"] == "abr38-fixture-generation" and generation["registry"] == authority.identity
+                and row["beforeEpoch"] == epoch and valid_token(row["afterEpoch"]),
+                "Unexplained epoch lineage after actual finish.")
+        epoch = row["afterEpoch"]
+    require(epoch == current_epoch, "Retained receipt has no complete finish/rebind path to current epoch.")
+    return finish
+
+
+@dataclass(frozen=True)
 class Baseline:
     gate_bytes: bytes
     scopes: Mapping[str, CandidateScope]
@@ -308,6 +452,7 @@ class Baseline:
     generation_sha256: str
     boot: str
     platform: Object
+    receipts: Mapping[str, CompletedReceipt] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -322,11 +467,14 @@ class PreparedGroup:
     preparation_evidence_sha256: str
 
 
-def catalog_section[T](registry: Path, action: Callable[[], T]) -> T:
+def catalog_section[T](registry: Path, action: Callable[[], T], *, deadline: Deadline) -> T:
     """Use actual record serialization, never write a replacement build.json."""
     def enter(index: int) -> T:
         if index == len(ALL_COMPONENTS):
             return action()
+        # The actual reservation API has its own30sec bound; do not begin it
+        # with less than that left in the transaction budget.
+        require(deadline.remaining() >= 30, "Insufficient bounded record-reservation time.")
         return with_mutation_lock(str(registry / ALL_COMPONENTS[index]), lambda: enter(index + 1))
     return enter(0)
 
@@ -388,13 +536,19 @@ class FixtureAuthority:
             acceptances[component], hashes[component] = value, digest(canonical(value))
         return PreparedGroup(images, routes, before, gate, gate_raw, acceptances, hashes, preparation)
 
-    def _assert_no_special_authority(self) -> None:
+    def _assert_no_special_authority(self, old: Baseline | None = None) -> None:
         shared = self.workspace.registry / ".driver-qualification"
         for name in FORBIDDEN_AUTHORITY:
             require(not os.path.lexists(shared / name), "Existing deployment/recovery/checkpoint is not fixture genesis/rebind.")
         for authority in self.authorities.values():
-            for name in ("taint.json", "maintenance.json", "archive/custody-pending.json"):
-                require(not os.path.lexists(authority.folder / name), "Tainted, exclusive or pending authority cannot rebind.")
+            for name in ("taint.json", "archive/custody-pending.json"):
+                require(not os.path.lexists(authority.folder / name), "Tainted or pending authority cannot rebind.")
+            if os.path.lexists(authority.folder / "maintenance.json"):
+                require(old is not None and authority.component in old.receipts,
+                        "Maintenance is active/unresolved without independently bound completed evidence.")
+                assert old is not None
+                verify_completed_receipt(authority, old.receipts[authority.component],
+                                         current_epoch=old.epochs[authority.component])
 
     def _new_directories(self) -> None:
         for authority in self.authorities.values():
@@ -416,7 +570,7 @@ class FixtureAuthority:
                 "Old selected gate changed.")
         require(old.boot == boot_uuid() and old.platform == platform_identity(), "Boot/platform changed before rebind.")
         require(self._locks() == old.locks, "Stable authority lock inode changed.")
-        self._assert_no_special_authority()
+        self._assert_no_special_authority(old)
         for component, authority in self.authorities.items():
             require(authority.read("control") == {"version": 1, "phase": "normal", "session": None,
                                                   "epoch": old.epochs[component]}, "Old control lineage changed.")
@@ -443,7 +597,18 @@ class FixtureAuthority:
             with ExitStack() as old_guards:
                 if old is not None:
                     old_guards.enter_context(use_pins(self.workspace.registry, [image.pin for image in old.images.values()]))
-                return catalog_section(self.workspace.registry, lambda: self._publish(group, old, completed, deadline))
+                    retained_pins = {(pin.component, pin.build): pin for proof in old.receipts.values()
+                                     for pin in (proof.provider, proof.producer)}
+                    for pin in retained_pins.values():
+                        descriptor = open_use_guard(str(self.workspace.registry), pin.component, pin.build)
+                        old_guards.callback(os.close, descriptor)
+                        held = os.fstat(descriptor)
+                        named = (self.workspace.registry / pin.component / ".uses" / pin.build).lstat()
+                        require((held.st_dev, held.st_ino) == (named.st_dev, named.st_ino)
+                                and held.st_uid == os.getuid() and stat.S_IMODE(held.st_mode) == 0o600,
+                                "Historical issuing image guard differs.")
+                        pin.verify(self.workspace.registry)
+                return catalog_section(self.workspace.registry, lambda: self._publish(group, old, completed, deadline), deadline=deadline)
 
     def _validate_group(self, group: PreparedGroup, before: Mapping[str, MarkerImage],
                         epochs: Mapping[str, str], locks: Mapping[str, Object]) -> None:
@@ -496,7 +661,7 @@ class FixtureAuthority:
                 locks.enter_context(authority.mutex(seconds=min(20, deadline.remaining())))
             exclusive: dict[str, int] = {}
             try:
-                self._assert_no_special_authority()
+                self._assert_no_special_authority(old)
                 for component in COMPONENTS:
                     require(driver_route_bytes(self.workspace.bin / component) == group.before_routes[component],
                             "Conditional actual route before-image changed.")
@@ -612,8 +777,12 @@ class FixtureAuthority:
                             "Actual postcommit custody is not resolved.")
                     require(markers(authority) == before[component], "Postcommit marker inventory changed under EX.")
                 self.evidence.write("committed-generation.json", generation, limit=32 * 1024 * 1024)
+                retained = {} if old is None else {
+                    component: replace(proof, rebind_generations=(*proof.rebind_generations, generation_hash))
+                    for component, proof in old.receipts.items()
+                }
                 return Baseline(group.gate_bytes, scopes, before, stable_locks, group.images, epochs,
-                                generation_hash, str(generation["boot"]), generation["platform"])
+                                generation_hash, str(generation["boot"]), generation["platform"], retained)
             except BaseException:
                 # OLD partial closure leaves its exact OLD group, not a mixed NEW success.
                 # From withholding onward no partial NEW group may remain admitted.
@@ -648,6 +817,16 @@ class InventoryPhase:
         require(inventory_sha256 == self.inventory_sha256, "Inner phase inventory bytes differ.")
 
 
+@dataclass(frozen=True)
+class AdministrativeCapture:
+    component: str
+    command: str
+    session: str
+    arguments: Mapping[str, str]
+    before_control: Object
+    capture: Captured
+
+
 class WholeCheckController:
     """External no-SH owner: local runner status is never a complete check pass."""
 
@@ -658,6 +837,7 @@ class WholeCheckController:
         self.workspace, self.scope, self.evidence = workspace, scope, evidence
         self.reaped: list[OwnedChild] = []
         self.finished_external: set[str] = set()
+        self.last_administration: AdministrativeCapture | None = None
 
     def fixed_argv(self, component: str, build: str, selector: str, tail: Sequence[str] = ()) -> list[str]:
         require(component in COMPONENTS and selector in SELECTORS and BUILD.fullmatch(build) is not None,
@@ -778,18 +958,83 @@ class WholeCheckController:
                     and ("source" in arguments) == (operation == "restore")
                     and ("subscription" in arguments) == (operation == "identity-recover")
                     and arguments["build"] == self.scope.producer(component).build, "Wrong exact operation/Build.")
-        for key in ("state-dir", "backup", "source", "result"):
+        for key in ("state-dir", "backup", "source"):
             if key in arguments:
                 path = Path(arguments[key])
-                require(path.is_absolute() and path.is_relative_to(self.workspace.registry / ".driver-qualification/fixtures")
+                require(path.is_absolute() and path.is_relative_to(self.workspace.fixture_root)
                         and ".." not in path.parts, "Maintenance path escaped actual fixture scope.")
+        if command == "finish":
+            expected = Authority(self.workspace.registry, component).folder / "sessions" / session / "result.json"
+            require(arguments["result"] == str(expected), "Finish requires its exact actual session result, not a copy.")
         argv = [*self.scope.gate.provider.prefix, "driver-state", command, "--registry-dir", str(self.workspace.registry),
                 "--component", component, "--session", session]
         for key in sorted(arguments):
             argv.extend(("--" + key, arguments[key]))
+        authority = Authority(self.workspace.registry, component)
+        with authority.mutex():
+            before_control = authority.read("control")
         child = OwnedChild(argv, environment=without_authority(dict(environment)), cwd=self.workspace.registry)
         captured = self._collect_owned(child, seconds)
         require(captured.returncode == 0, "Actual administrative operation failed; preserve closed state.")
         result = document(captured.stdout)
         require("error" not in result, "Actual administrative operation refused.")
+        self.last_administration = AdministrativeCapture(component, command, session, dict(arguments),
+                                                          before_control, captured)
         return result
+
+
+    def completed_receipt(self, *, component: str, session: str, attempt: str,
+                          provider_pin: TuplePin, producer_pin: TuplePin) -> CompletedReceipt:
+        """Capture actual normal finish output, never manufacture a finish from its journal."""
+        observed = self.last_administration
+        require(observed is not None, "No actual administrative finish was observed.")
+        assert observed is not None
+        require(observed.component == component and observed.command == "finish" and observed.session == session
+                and observed.capture.returncode == 0
+                and any(child.reaped and child.owner == observed.capture.owner for child in self.reaped),
+                "The last actual reaped provider was not this finish.")
+        require(component in COMPONENTS and valid_token(attempt), "Invalid actual finish identity.")
+        authority = Authority(self.workspace.registry, component)
+        self.scope.recheck()
+        provider = provider_pin.verify(self.workspace.registry)
+        producer = producer_pin.verify(self.workspace.registry)
+        require(provider.payload == self.scope.gate.provider and producer.payload == self.scope.producer(component),
+                "Finish witness does not use its actual issuing images.")
+        raw = read_bytes(authority.folder / "maintenance.json")
+        receipt = document(raw)
+        validate("maintenance", receipt)
+        history = authority.folder / "sessions" / session / "attempts" / attempt
+        finish = read(history / "finish.json")
+        context = read(history / "context.json")
+        validate("context", context)
+        state = Path(context["stateDirectory"])
+        require(state.is_relative_to(self.workspace.fixture_root),
+                "Historical finish observation cannot read owner state.")
+        physical_owned(state, directory=True)
+        target: Object = {"stateDirectory": str(state), "formatSha256": digest(read_bytes(state / "format")),
+                           "identitySha256": digest(read_bytes(state / "identity.json")),
+                           "maintenanceMarkerAbsent": not os.path.lexists(state / "identity-maintenance.json")}
+        normal_retry = (observed.before_control["phase"] == "normal"
+                        and observed.before_control["session"] is None
+                        and observed.before_control["epoch"] == finish["nextEpoch"])
+        value: Object = {"version": 1, "kind": "abr38-actual-provider-finish", "component": component,
+                         "session": session, "attempt": attempt, "receiptSha256": digest(raw),
+                         **{key: finish[key] for key in (
+                             "contextSha256", "requestSha256", "resultSha256", "markerSha256")},
+                         "gateSha256": self.scope.gate.digest, "providerPayloadSha256": provider.payload.digest,
+                         "producerPayloadSha256": producer.payload.digest,
+                         "acceptanceSha256": context["acceptanceSha256"], "registry": authority.identity,
+                         "providerProcess": observed.capture.owner.object(), "returncode": observed.capture.returncode,
+                         "reaped": True, "stdout": document(observed.capture.stdout),
+                         "normalFinishRetry": normal_retry, "targetState": target}
+        name = "finish-" + digest(canonical(context))[:16] + ".json"
+        observation_hash = self.evidence.write(name, value)
+        proof = CompletedReceipt(component, session, attempt, digest(raw), provider_pin, producer_pin,
+                                 self.scope.gate.digest, context["acceptanceSha256"], authority.identity,
+                                 self.evidence.root / name, observation_hash)
+        with authority.mutex():
+            control = authority.read("control")
+            require(control["phase"] == "normal" and control["session"] is None,
+                    "Actual finish has not reopened normal control.")
+            verify_completed_receipt(authority, proof, current_epoch=control["epoch"])
+        return proof
