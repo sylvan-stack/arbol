@@ -520,6 +520,7 @@ from driver_identity_qualification import (
     require,
 )
 
+import arbol_builds.driver_admission as provider_admission
 import arbol_builds.driver_process as provider_process
 from arbol_builds.driver_admission import (
     Authority,
@@ -2911,6 +2912,7 @@ class TerminalSpanObservation:
 
 _MIMO_MAIN_COMPONENT = "arbol-mimo-driver"
 _MIMO_STUBBORN = "trap '' TERM; printf stubborn-start; sleep 60"
+_MIMO_ADMISSION_PROBE = ("subscriptions", "identity", "xiaomi")
 _MIMO_RECIPE_SOURCE = ("tests/native/support.py", "tests/native/test_public_lifecycle.py")
 _MIMO_PRODUCTION_SOURCE = ("src/arbol_mimo_driver/standin.py", "src/arbol_mimo_driver/runtime.py",
     "src/arbol_mimo_driver/ownership.py", "src/arbol_mimo_driver/adapters/watcher.py",
@@ -3425,6 +3427,19 @@ class MimoMainSubject:
         self._data(self.recipe.tool / "options.json", canonical(self.recipe.options()))
         self._data(self.recipe.request, canonical(self.recipe.request_value()))
         self._prep_call(attach, name="attach", end=min(self.full_end, time.monotonic() + 30))
+        probe_state = self.recipe.home / "normal-probe-state"
+        require(not os.path.lexists(probe_state), "Normal admission probe State must be genuinely absent.")
+        proof = self._prep_call(["--state-dir", str(probe_state), *_MIMO_ADMISSION_PROBE],
+                                name="normal-admission", end=min(self.full_end, time.monotonic() + 20))
+        observed = self._lifetime(probe_state)
+        require(type(proof.get("version")) is int
+                and proof == {"version": 1, "driver": "mimo", "subscription": "xiaomi", **observed["lifetime"]},
+                "Ordinary admission did not return the independently observed new Xiaomi lifetime.")
+        self.record["normalAdmissionProbe"] = {
+            "argv": self.preparation[-1]["argv"], "stateAbsentBefore": True,
+            "state": str(probe_state), "publicProof": proof, "independentState": observed,
+        }
+        self.record["providerAdmissionSource"] = self._provider_sources()
         self.native.verify(self.controller)
         manifest = document(read_image(self.recipe.tool / "fixture-manifest.json", limit=65536).raw, limit=65536)
         require(manifest.get("syntheticIdentity") is True and manifest.get("model") == "arbol-mimo-fixture"
@@ -3438,7 +3453,7 @@ class MimoMainSubject:
         self.record["recipe"] = self.recipe.receipt()
         self.record["fixtureManifest"] = manifest
         self.record["preparedStateInventory"] = tree_inventory(self.recipe.state)
-        self.record["preparedLifetime"] = self._lifetime()
+        self.record["preparedLifetime"] = self._lifetime(self.recipe.state)
         self.record["ownedDirectoryOrigins"] = self._directory_origins()
         self.controller.evidence.write("mimo-main-preparation.json", self.record, limit=32 * 1024 * 1024)
         self.prepared = True
@@ -3455,14 +3470,15 @@ class MimoMainSubject:
                               "mode": stat.S_IMODE(image.st_mode)}
         return origins
 
-    def _lifetime(self) -> Object:
-        root = read_image(self.recipe.state / "identity.json")
-        sidecar = read_image(self.recipe.state / "subscriptions/xiaomi/identity.json")
+    def _lifetime(self, state: Path) -> Object:
+        root = read_image(state / "identity.json")
+        sidecar = read_image(state / "subscriptions/xiaomi/identity.json")
         root_value, witness = document(root.raw), document(sidecar.raw)
         require(type(root_value.get("version")) is int and root_value["version"] == 1
                 and type(witness.get("version")) is int and witness["version"] == 1
+                and witness.get("state") == "active"
                 and valid_token(root_value.get("generation")) and valid_token(witness.get("witness"))
-                and read_image(self.recipe.state / "format").raw == b"2\n", "Actual public preparation did not establish genuine format2 proof.")
+                and read_image(state / "format").raw == b"2\n", "State did not establish genuine format-2 proof.")
         return {"rootImage": root.evidence(), "sidecarImage": sidecar.evidence(),
                 "lifetime": {"generation": root_value["generation"], "witness": witness["witness"]}}
 
@@ -3613,12 +3629,19 @@ class MimoMainSubject:
         assert self.view is not None and self.child is not None and self.original_control is not None
         state = self.recipe.home / "refused-state"
         require(not os.path.lexists(state), "Refusal State must be genuinely absent.")
+        expected_control = {**self.original_control, "phase": "draining", "session": self.session}
         with self.authority.mutex(seconds=max(.001, self.boundary_end - time.monotonic())):
-            require(self.authority.read("control") == {**self.original_control, "phase": "draining", "session": self.session},
+            require(self.authority.read("control") == expected_control,
                     "Genuine begin control changed before fresh-launch refusal.")
             before = _raw_authority_image(self.authority)
-        probe = OwnedChild(self._argv(["--state-dir", str(state), "subscriptions", "identity", "xiaomi"]),
-            environment=without_authority(self.environment), cwd=self.recipe.home)
+            phase_check = self._observe_draining_control()
+            require(self.authority.read("control") == expected_control and _raw_authority_image(self.authority) == before,
+                    "The independent control check changed the draining authority.")
+        argv = self._argv(["--state-dir", str(state), *_MIMO_ADMISSION_PROBE])
+        normal = self.record["normalAdmissionProbe"]
+        require(normal["argv"] == [*argv[:-4], normal["state"], *argv[-3:]] and normal["state"] != str(state),
+                "Draining and normal admission probes differ beyond their private State sibling.")
+        probe = OwnedChild(argv, environment=without_authority(self.environment), cwd=self.recipe.home)
         captured = _mimo_finite_data_call(probe, end=self.boundary_end)
         self.controller.reaped.append(probe)
         # Persist real bytes before any assertion on the public refusal result.
@@ -3626,8 +3649,11 @@ class MimoMainSubject:
             "argv": probe.process.args, "provider": probe.owner.object(), "providerActuallyReaped": probe.reaped,
             "returncode": captured.returncode, "stdoutHex": captured.stdout.hex(), "stderrHex": captured.stderr.hex()},
             limit=32 * 1024 * 1024)
-        require(probe.reaped and captured.returncode != 0 and not os.path.lexists(state),
-                "Fresh public Driver reached State or succeeded after genuine begin.")
+        expected_refusal = canonical({"error": {"code": "builds_failed",
+            "message": "Driver maintenance refused; preserve closed recovery authority."}})
+        require(probe.reaped and captured.returncode == 1 and captured.stdout == expected_refusal
+                and not captured.stderr and not os.path.lexists(state),
+                "Fresh public Driver did not return the provider refusal before reaching State.")
         with self.authority.mutex(seconds=max(.001, self.boundary_end - time.monotonic())):
             after = _raw_authority_image(self.authority)
             require(after == before, "Refused launch changed actual control/writers/handoffs/contexts/markers.")
@@ -3636,7 +3662,23 @@ class MimoMainSubject:
         require(time.monotonic() <= self.boundary_end, "Fresh refusal exceeded the original five-second boundary.")
         self.record["closedAdmissionRefusal"] = {"before": before, "after": after,
             "stateAbsentBeforeAndAfter": True, "providerActuallyReaped": probe.reaped,
+            "publicRefusalOnly": True, "independentSourceBoundCheck": phase_check,
             "metadataOrTerminalSynthesized": False}
+
+    def _observe_draining_control(self) -> Object:
+        """Check the real phase gate under the caller's short mutex."""
+        try:
+            normal_control(self.authority, candidate=self.controller.scope)
+        except Refusal as error:
+            trace = error.__traceback__
+            check = trace.tb_next if trace is not None else None
+            refusal = check.tb_next if check is not None else None
+            if (check is None or check.tb_frame.f_code is not normal_control.__code__
+                    or refusal is None or refusal.tb_frame.f_code is not provider_admission.refuse.__code__
+                    or refusal.tb_next is not None):
+                raise ObservationFailed("Draining control did not refuse directly at the admitted phase check.") from error
+            return {"function": normal_control.__qualname__, "line": check.tb_lineno, "directRefusal": True}
+        raise ObservationFailed("The pinned control check admitted new work while draining.")
 
     def ordinary_stop(self) -> None:
         require(self.begun and self.record.get("closedAdmissionRefusal") is not None
@@ -3675,8 +3717,6 @@ class MimoMainSubject:
         """
         import ast
 
-        import arbol_builds.driver_state as provider_state
-
         require(self.native.verify(self.controller) == self.source, "Exact native/source pins changed during the subject.")
         producer = self.controller.scope.producer(_MIMO_MAIN_COMPONENT)
         selected = {
@@ -3705,10 +3745,27 @@ class MimoMainSubject:
                                 "bodySha256": digest(b"".join(lines[node.lineno - 1:node.end_lineno]))}
             require(set(functions) == set(expected), "Missing source-defined cancellation/cleanup proof body.")
             paths[name] = {"image": image.evidence(), "staticBodies": functions}
+        provider_paths = self._provider_sources()
+        require(provider_paths == self.record["providerAdmissionSource"], "Pinned provider source changed after preparation.")
+        return {"producer": paths, "provider": provider_paths,
+            "reportConsumption": "SOURCE-COUPLED Runtime.cleanup -> Runs.verify_cleanup -> genuine terminal/clean proof -> retire/release_owned",
+            "normalOwnershipShutdownReturnedProven": False, "rawObservationsReceiptRetained": False,
+            "watcherMainOwnedWaitAndRequireTerminal": "STATIC call-path retention ONLY; invocation/success not established by cancelled subject",
+            "complementaryCompletedPredicateOwner": "ABR-38 step47; incomplete here"}
+
+    def _provider_sources(self) -> Object:
+        import arbol_builds.driver_state as provider_state
+
         provider = self.controller.scope.gate.provider
+        require(vars(provider_state)["Guardian"] is provider_process.Guardian
+                and vars(provider_process)["normal_control"] is normal_control
+                and normal_control is provider_admission.normal_control,
+                "The loaded candidate route does not use the observed control check.")
         actual = (provider_process.supervise, provider_process.Guardian._close_owned,
-                  provider_process.inspect, provider_state.begin, provider_state.drain, Authority.lease)
+                  provider_process.Guardian.admit, provider_process.inspect, provider_state.launch_candidate,
+                  provider_state.begin, provider_state.drain, normal_control, provider_admission.refuse, Authority.lease)
         provider_paths: Object = {}
+        bound_functions = 0
         for short in ("driver_process.py", "driver_state.py", "driver_admission.py"):
             path = provider.root / "src/arbol_builds" / short
             image = read_image(path, limit=1024 * 1024, private=False)
@@ -3731,11 +3788,9 @@ class MimoMainSubject:
                     names.append(method.__qualname__)
             require(bool(names), "Unbound actual provider source path.")
             provider_paths[short] = {"image": image.evidence(), "actualCodeObjects": names}
-        return {"producer": paths, "provider": provider_paths,
-            "reportConsumption": "SOURCE-COUPLED Runtime.cleanup -> Runs.verify_cleanup -> genuine terminal/clean proof -> retire/release_owned",
-            "normalOwnershipShutdownReturnedProven": False, "rawObservationsReceiptRetained": False,
-            "watcherMainOwnedWaitAndRequireTerminal": "STATIC call-path retention ONLY; invocation/success not established by cancelled subject",
-            "complementaryCompletedPredicateOwner": "ABR-38 step47; incomplete here"}
+            bound_functions += len(names)
+        require(bound_functions == len(actual), "An admission or settlement function lacks pinned provider source.")
+        return provider_paths
 
     def _resource_closure(self, *, end: float) -> Object:
         require(self.view is not None and time.monotonic() < end, "No retained original resources/deadline.")
@@ -3801,7 +3856,7 @@ class MimoMainSubject:
         sources = self._source_coupling()
         resources = self._resource_closure(end=observed_end)
         require(self._directory_origins() == self.record["ownedDirectoryOrigins"]
-                and self._lifetime() == self.record["preparedLifetime"],
+                and self._lifetime(self.recipe.state) == self.record["preparedLifetime"],
                 "Original private roots/proof changed during the cancelled subject.")
         # Read ORIGINAL State only: no fresh registry, copy, normal API recovery
         # call, source helper execution or report-polled race is introduced.
