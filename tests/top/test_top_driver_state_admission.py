@@ -3427,18 +3427,7 @@ class MimoMainSubject:
         self._data(self.recipe.tool / "options.json", canonical(self.recipe.options()))
         self._data(self.recipe.request, canonical(self.recipe.request_value()))
         self._prep_call(attach, name="attach", end=min(self.full_end, time.monotonic() + 30))
-        probe_state = self.recipe.home / "normal-probe-state"
-        require(not os.path.lexists(probe_state), "Normal admission probe State must be genuinely absent.")
-        proof = self._prep_call(["--state-dir", str(probe_state), *_MIMO_ADMISSION_PROBE],
-                                name="normal-admission", end=min(self.full_end, time.monotonic() + 20))
-        observed = self._lifetime(probe_state)
-        require(type(proof.get("version")) is int
-                and proof == {"version": 1, "driver": "mimo", "subscription": "xiaomi", **observed["lifetime"]},
-                "Ordinary admission did not return the independently observed new Xiaomi lifetime.")
-        self.record["normalAdmissionProbe"] = {
-            "argv": self.preparation[-1]["argv"], "stateAbsentBefore": True,
-            "state": str(probe_state), "publicProof": proof, "independentState": observed,
-        }
+        self.record["normalAdmissionProbe"] = self._normal_admission_probe()
         self.record["providerAdmissionSource"] = self._provider_sources()
         self.native.verify(self.controller)
         manifest = document(read_image(self.recipe.tool / "fixture-manifest.json", limit=65536).raw, limit=65536)
@@ -3458,6 +3447,37 @@ class MimoMainSubject:
         self.controller.evidence.write("mimo-main-preparation.json", self.record, limit=32 * 1024 * 1024)
         self.prepared = True
         return self.recipe.receipt()
+
+    def _normal_admission_probe(self) -> Object:
+        end = min(self.full_end, time.monotonic() + 20)
+        state = self.recipe.home / "normal-probe-state"
+        require(not os.path.lexists(state), "Normal admission probe State must be genuinely absent.")
+        proof = self._prep_call(["--state-dir", str(state), *_MIMO_ADMISSION_PROBE], name="normal-admission", end=end)
+        provider = self.controller.reaped[-1]
+        observed = self._lifetime(state)
+        require(type(proof.get("version")) is int
+                and proof == {"version": 1, "driver": "mimo", "subscription": "xiaomi", **observed["lifetime"]},
+                "Ordinary admission did not return the independently observed new Xiaomi lifetime.")
+        payload = self.controller.scope.producer(_MIMO_MAIN_COMPONENT)
+        with self.authority.mutex(seconds=max(.001, end - time.monotonic())):
+            custody = reconcile(self.authority, persist_unknown=False, candidate=self.controller.scope)
+            roots = [row for row in custody.writers if row["parent"] is None
+                     and {key: row[key] for key in ("pid", "startedAt")} == provider.owner.object()]
+            require(custody.resolved and provider.reaped and len(roots) == 1 and roots[0]["phase"] == "terminal",
+                    "The reaped normal probe does not own a unique terminal root in the actual custody graph.")
+            mains = [row for row in custody.handoffs if row["invocation"] == roots[0]["invocation"]
+                     and row["parent"] == roots[0]["writer"] and row["role"] == "main"]
+            require(len(mains) == 1, "Normal probe lacks its own accepted MAIN transfer.")
+            context, context_hash = self._public_context(mains[0], roots[0], role="main", entry=payload.descriptor["entry"])
+            main = ExactProcess.read(context["process"])
+            writer = read(writer_path(self.authority, context["invocation"], context["writer"]))
+            require(writer["phase"] == "terminal" and writer["contextSha256"] == context_hash
+                    and {key: writer[key] for key in ("pid", "startedAt")} == main.object() and not main.live(),
+                    "The normal probe's own MAIN did not close under its accepted context.")
+        require(time.monotonic() <= end, "Normal admission probe exceeded its preparation budget.")
+        return {"argv": provider.process.args, "stateAbsentBefore": True, "state": str(state),
+                "publicProof": proof, "independentState": observed, "providerActuallyReaped": provider.reaped,
+                "terminalRoot": roots[0], "acceptedMainHandoff": mains[0], "terminalMain": writer}
 
     def _directory_origins(self) -> Object:
         origins: Object = {}
@@ -3654,6 +3674,7 @@ class MimoMainSubject:
         require(probe.reaped and captured.returncode == 1 and captured.stdout == expected_refusal
                 and not captured.stderr and not os.path.lexists(state),
                 "Fresh public Driver did not return the provider refusal before reaching State.")
+        self.controller.scope.recheck()
         with self.authority.mutex(seconds=max(.001, self.boundary_end - time.monotonic())):
             after = _raw_authority_image(self.authority)
             require(after == before, "Refused launch changed actual control/writers/handoffs/contexts/markers.")
@@ -3673,7 +3694,9 @@ class MimoMainSubject:
             trace = error.__traceback__
             check = trace.tb_next if trace is not None else None
             refusal = check.tb_next if check is not None else None
+            phase_line = self.record["providerAdmissionSource"]["driver_admission.py"]["normalControlPhaseRefusalLine"]
             if (check is None or check.tb_frame.f_code is not normal_control.__code__
+                    or check.tb_lineno != phase_line
                     or refusal is None or refusal.tb_frame.f_code is not provider_admission.refuse.__code__
                     or refusal.tb_next is not None):
                 raise ObservationFailed("Draining control did not refuse directly at the admitted phase check.") from error
@@ -3789,6 +3812,14 @@ class MimoMainSubject:
             require(bool(names), "Unbound actual provider source path.")
             provider_paths[short] = {"image": image.evidence(), "actualCodeObjects": names}
             bound_functions += len(names)
+            if short == "driver_admission.py":
+                lines = image.raw.splitlines()
+                start = normal_control.__code__.co_firstlineno - 1
+                # The phase guard precedes deployment, taint and custody checks.
+                guard = b'    if control["phase"] != "normal" or (epoch is not None and control["epoch"] != epoch):'
+                guard_index = lines.index(guard, start, start + 8)
+                require(lines[guard_index + 1] == b"        refuse()", "Pinned phase guard no longer calls direct refusal.")
+                provider_paths[short]["normalControlPhaseRefusalLine"] = guard_index + 2
         require(bound_functions == len(actual), "An admission or settlement function lacks pinned provider source.")
         return provider_paths
 
