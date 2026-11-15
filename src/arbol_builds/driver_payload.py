@@ -343,6 +343,7 @@ class Gate:
     document: Object
     digest: str
     provider: Payload
+    candidate: CandidateScope | None = None
 
 
 def _registered_payload(registry: Path, component: str, build: str) -> tuple[Object, Payload]:
@@ -413,6 +414,20 @@ class CandidateScope:
     gate: Gate
     producers: tuple[Payload, ...]
     acceptances: tuple[tuple[str, str, Object], ...]
+
+    def recheck(self) -> None:
+        current = resolve_candidate(self.registry, self.component, self.build, self.acceptance_sha256)
+        if current != self:
+            refuse()
+
+    def registered(self, registry: Path, component: str, build: str) -> Payload:
+        if registry != self.registry:
+            refuse()
+        self.recheck()
+        payload = self.gate.provider if component == "arbol" else self.producer(component)
+        if payload.build != build:
+            refuse()
+        return payload
 
     def producer(self, component: str) -> Payload:
         for payload in self.producers:
@@ -537,7 +552,13 @@ def resolve_candidate(registry: Path, component: str, build: str, digest: str) -
     return scope
 
 
-def verify_gate(registry: Path) -> Gate:
+def verify_gate(registry: Path, *, candidate: CandidateScope | None = None) -> Gate:
+    if candidate is not None:
+        if registry != candidate.registry:
+            refuse()
+        candidate.recheck()
+        gate = candidate.gate
+        return Gate(gate.document, gate.digest, gate.provider, candidate)
     private_directory(registry)
     raw = read_bytes(registry / ".driver-qualification" / "gate.json")
     value = _gate_document(raw)
@@ -545,12 +566,19 @@ def verify_gate(registry: Path) -> Gate:
     return Gate(value, sha256(raw), provider)
 
 
-def verify_acceptance(authority: Authority, payload: Payload, *, digest: str | None = None) -> Object:
+def verify_acceptance(authority: Authority, payload: Payload, *, digest: str | None = None,
+                      candidate: CandidateScope | None = None) -> Object:
     """Check owner-trust metadata; never issue it or infer qualification from D."""
     import pwd
 
     if payload.root != authority.registry / authority.component / payload.build / SUBTREE:
         refuse()
+    if candidate is not None:
+        current = candidate.registered(authority.registry, authority.component, payload.build)
+        selected_digest, value = candidate.acceptance(authority.component)
+        if current != payload or (digest is not None and selected_digest != digest):
+            refuse()
+        return value
     qualification = authority.read("qualification")
     if qualification["component"] != authority.component:
         refuse()
@@ -583,7 +611,8 @@ def verify_acceptance(authority: Authority, payload: Payload, *, digest: str | N
 
 
 @contextmanager
-def pin_payloads(registry: Path, payloads: list[Payload]) -> Iterator[None]:
+def pin_payloads(registry: Path, payloads: list[Payload], *,
+                 candidate: CandidateScope | None = None) -> Iterator[None]:
     """Independently guard every exact tuple before publishing a durable reference.
 
     Call before control mutex acquisition. Closing these guards is safe only
@@ -607,7 +636,8 @@ def pin_payloads(registry: Path, payloads: list[Payload]) -> Iterator[None]:
             if (info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600
                     or (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino)):
                 refuse()
-            current = registered(registry, component, build)
+            current = (registered(registry, component, build) if candidate is None else
+                       candidate.registered(registry, component, build))
             if current.root != payload.root or current.digest != payload.digest:
                 refuse()
         yield
