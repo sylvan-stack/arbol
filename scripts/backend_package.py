@@ -16,6 +16,10 @@ sys.path.insert(0, str(ROOT / "src"))
 from arbol_backend.model import BUILD_ID, object_file, schema_compatibility  # noqa: E402
 
 MUTABLE = {"build.json", "build.log", "last-start", "package-manifest.json"}
+# M/D are generated after this outer provenance record settles. Only these
+# exact nested metadata files are omitted here; the provider inventories all
+# of its other bytes and excludes only its own two root metadata documents.
+PROVIDER_METADATA = {"driver-payload/driver-payload-manifest.json", "driver-payload/driver-capability.json"}
 
 
 def digest(path: Path) -> str:
@@ -44,7 +48,7 @@ def files(folder: Path) -> dict[str, str]:
         str(p.relative_to(folder)): digest(p)
         for p in sorted(folder.rglob("*"))
         if p.is_file()
-        and str(p.relative_to(folder)) not in MUTABLE
+        and str(p.relative_to(folder)) not in MUTABLE | PROVIDER_METADATA
         and p.suffix != ".pyc"
         and "__pycache__" not in p.parts
     }
@@ -151,6 +155,20 @@ def verify(folder: Path) -> None:
     if manifest.get("renderer") != {"path": "ui/elma", "build": record["build"],
             "bundleSha256": digest(folder / "ui/elma/bundle.json"), "designSystem": renderer["designSystem"]}:
         raise ValueError("The packaged renderer provenance changed.")
+    # The outer provenance has already authenticated the complete embedded
+    # verifier/source closure before importing it for the separate M/D check.
+    provider_root = folder / "driver-payload"
+    sys.path.insert(0, str(provider_root / "src"))
+    from arbol_builds.driver_payload import load
+    provider = load(provider_root, "arbol", record["build"])
+    source_record = manifest.get("source")
+    provenance = object_file(provider_root / "provider-provenance.json")
+    if (not isinstance(source_record, dict) or source_record.get("uncommittedChanges") is not False
+            or provider.descriptor["source"]["commit"] != source_record.get("commit")
+            or provenance.get("source") != provider.descriptor["source"]
+            or provenance.get("python") != manifest["python"]
+            or provenance.get("dependencies") != manifest["dependencies"]):
+        raise ValueError("The sealed provider differs from its exact packaged source/runtime provenance.")
     lock = tomllib.loads((folder / "uv.lock").read_text())
     pins = {p["name"]: p["version"] for p in lock["package"]}
     if any(pins.get(name) != version for name, version in manifest["dependencies"].items()):

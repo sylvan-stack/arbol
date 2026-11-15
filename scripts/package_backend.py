@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -48,6 +50,111 @@ def packaged_top(root: Path, inventory: list[dict[str, Any]]) -> set[str]:
         ) for cls in modules[relative].body):
             raise ValueError(f"Missing top-tier definition: {item['id']}")
     return set(modules) - {SOURCE_ONLY_TOP}
+
+
+def provider_handlers(root: Path) -> None:
+    """A partial source provider cannot be packaged as a complete capability."""
+    module = ast.parse((root / "src/arbol_builds/driver_state.py").read_bytes())
+    found: list[str] = []
+    for node in module.body:
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        for decorator in node.decorator_list:
+            if isinstance(decorator, ast.Call) and isinstance(decorator.func, ast.Name) and decorator.func.id == "handler":
+                if (len(decorator.args) != 1 or decorator.keywords or not isinstance(decorator.args[0], ast.Constant)
+                        or not isinstance(decorator.args[0].value, str)):
+                    raise ValueError("The provider handler declarations must be fixed strings.")
+                found.append(decorator.args[0].value)
+    if sorted(found) != ["begin", "deploy", "drain", "execute", "finish", "status"]:
+        raise ValueError("The sealed provider requires exactly all six fixed handlers.")
+
+
+def freeze_provider(folder: Path) -> None:
+    for directory, directories, files in os.walk(folder, topdown=False, followlinks=False):
+        for name in (*files, *directories):
+            path = Path(directory) / name
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                continue
+            if stat.S_ISDIR(info.st_mode):
+                path.chmod(0o555)
+            elif stat.S_ISREG(info.st_mode):
+                path.chmod(0o555 if info.st_mode & 0o111 else 0o444)
+            else:
+                raise ValueError("The provider cannot contain special files.")
+    folder.chmod(0o700)
+
+
+def stage_provider(root: Path, folder: Path, provenance: dict[str, Any]) -> tuple[str, str]:
+    """Copy independent bytes, never links to the mutable Backend runtime."""
+    provider_handlers(root)
+    identity = provenance["source"]
+    if identity.get("uncommittedChanges") is not False:
+        raise ValueError("A sealed provider requires clean committed source.")
+    commit = identity["commit"]
+    tree = subprocess.check_output(["git", "rev-parse", commit + "^{tree}"], cwd=root, text=True, timeout=10).strip()
+    allocated = json.loads((folder / "build.json").read_text())
+    if (not isinstance(allocated.get("source"), dict) or allocated["source"].get("commit") != commit
+            or allocated["source"].get("uncommittedChanges") is not False):
+        raise ValueError("The allocated Build and sealed provider source must agree.")
+    provider = folder / "driver-payload"
+    provider.mkdir(mode=0o700)
+    # Copy the hash-pinned interpreter and the already installed hash-locked
+    # dependencies. copytree creates independent regular files; internal links
+    # keep their exact relative spelling and are checked by complete M later.
+    shutil.copytree(folder / "runtime", provider / "runtime", symlinks=True)
+    for package_name in ("arbol_builds", "arbol_installation"):
+        # Export the exact committed package files. Ignored/untracked source
+        # files cannot silently become code attributed to this source commit.
+        prefix = "src/" + package_name + "/"
+        names = subprocess.check_output(["git", "ls-tree", "-r", "--name-only", commit, "--", prefix],
+                                        cwd=root, text=True, timeout=10).splitlines()
+        if not names:
+            raise ValueError("The provider source package is missing.")
+        for name in names:
+            relative = Path(name)
+            if not name.startswith(prefix) or relative.is_absolute() or ".." in relative.parts:
+                raise ValueError("The committed provider source path is unsafe.")
+            original = root / relative
+            if not stat.S_ISREG(original.lstat().st_mode):
+                raise ValueError("Provider source inputs must be regular files.")
+            raw = subprocess.check_output(["git", "show", commit + ":" + name], cwd=root, timeout=10)
+            if original.read_bytes() != raw:
+                raise ValueError("The committed provider source changed during packaging.")
+            output = provider / relative
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(raw)
+            shutil.copymode(original, output)
+    (provider / "bin").mkdir()
+    from arbol_builds import driver_bootstrap
+    # Reject a cached/source-root generator from a different checkout revision.
+    generator_folder = Path(driver_bootstrap.__file__).resolve().parent
+    for name in ("driver_bootstrap.py", "driver_admission.py", "driver_payload.py"):
+        if (generator_folder / name).read_bytes() != (provider / "src/arbol_builds" / name).read_bytes():
+            raise ValueError("The provider generator differs from its committed copied verifier.")
+    entry_body = subprocess.check_output(["git", "show", commit + ":bin/driver_state_entry.py"], cwd=root, timeout=10)
+    if (generator_folder.parents[1] / "bin/driver_state_entry.py").read_bytes() != entry_body:
+        raise ValueError("The provider entry body differs from the committed source.")
+    entry = driver_bootstrap.render_provider_entry()
+    compile(entry, "bin/driver_state_entry.py", "exec")
+    (provider / "bin/driver_state_entry.py").write_bytes(entry)
+    (provider / "provider-provenance.json").write_text(json.dumps({
+        "version": 1, "kind": "driver-provider-provenance", "source": {"commit": commit, "tree": tree},
+        "python": provenance["python"], "dependencies": provenance["dependencies"],
+    }, sort_keys=True, separators=(",", ":")) + "\n")
+    if source(root) != identity:
+        raise ValueError("The source identity changed while staging the provider.")
+    freeze_provider(provider)
+    return commit, tree
+
+
+def finish_provider(folder: Path, commit: str, tree: str) -> None:
+    """Outer provenance is settled; M/D introduce no reciprocal digest edge."""
+    from arbol_builds.driver_payload import emit
+    emit(folder / "driver-payload", component="arbol", build=json.loads((folder / "build.json").read_text())["build"],
+         commit=commit, tree=tree, interpreter="runtime/python/bin/python3.14", entry="bin/driver_state_entry.py",
+         helpers=[], import_roots=["runtime/python/lib/python3.14", "runtime/python/lib/python3.14/lib-dynload",
+                                   "runtime/site-packages", "src"])
 
 
 def package(root: Path = ROOT) -> Path:
@@ -146,29 +253,29 @@ def package(root: Path = ROOT) -> Path:
         timeout=120,
     )
     renderer = package_elma(root, folder / "ui/elma", record["build"])
-    write_manifest(
-        folder,
-        {
-            "format": 1,
-            "component": "arbol",
-            "entry": "bin/arbol",
-            "schemaCompatibility": record["schemaCompatibility"],
-            "build": record["build"],
-            "packageVersion": record["packageVersion"],
-            "source": source(root),
-            "dependencies": dependencies,
-            "python": {
-                "version": pinned["version"],
-                "target": architecture,
-                "archiveSha256": pinned["distributions"][architecture]["sha256"],
-                "executable": "runtime/python/bin/python3.14",
-                "sha256": digest(interpreter),
-            },
-            "baselineSha256": baseline,
-            "renderer": {"path": "ui/elma", "build": record["build"], "bundleSha256": digest(folder / "ui/elma/bundle.json"),
-                         "designSystem": renderer["designSystem"]},
+    provenance: dict[str, Any] = {
+        "format": 1,
+        "component": "arbol",
+        "entry": "bin/arbol",
+        "schemaCompatibility": record["schemaCompatibility"],
+        "build": record["build"],
+        "packageVersion": record["packageVersion"],
+        "source": source(root),
+        "dependencies": dependencies,
+        "python": {
+            "version": pinned["version"],
+            "target": architecture,
+            "archiveSha256": pinned["distributions"][architecture]["sha256"],
+            "executable": "runtime/python/bin/python3.14",
+            "sha256": digest(interpreter),
         },
-    )
+        "baselineSha256": baseline,
+        "renderer": {"path": "ui/elma", "build": record["build"], "bundleSha256": digest(folder / "ui/elma/bundle.json"),
+                     "designSystem": renderer["designSystem"]},
+    }
+    commit, tree = stage_provider(root, folder, provenance)
+    write_manifest(folder, provenance)
+    finish_provider(folder, commit, tree)
     verify(folder)
     return folder
 
