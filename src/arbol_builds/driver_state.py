@@ -366,7 +366,8 @@ def _maintenance_error() -> None:
 
 def provider_entry(descriptor: Object) -> None:
     """Called only by the sealed immutable script after isolated M/D verification."""
-    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    if signal.getsignal(signal.SIGINT) is signal.default_int_handler:
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
     standard_descriptors()
     signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT, signal.SIGTERM})
     try:
