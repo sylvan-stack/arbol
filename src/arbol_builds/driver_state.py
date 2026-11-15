@@ -25,6 +25,7 @@ from .driver_admission import (
     Object,
     Refusal,
     admission_fingerprint,
+    archive_boot_custody,
     archive_terminal,
     canonical,
     canonical_uuid,
@@ -478,7 +479,8 @@ def begin(request: Request) -> Object:
             # Closing happens before custody inspection. Unknown obligations
             # retain their taint and same epoch; begin never cancels work.
             archive_pending = os.path.lexists(authority.folder / "archive" / "custody-pending.json")
-            reconcile(authority, control=control, persist_unknown=not archive_pending)
+            if not _boot_recovery_pending(authority):
+                reconcile(authority, control=control, persist_unknown=not archive_pending)
             _tainted(authority)
             return {"version": 1, "component": request.component, "session": request.session,
                     "phase": control["phase"]}
@@ -531,6 +533,7 @@ def drain(request: Request) -> Object:
     sent: set[tuple[int, str]] = set()
     with _component(request) as (authority, payload, gate):
         boot = boot_uuid()
+        _recover_boot(request, boot, deadline)
         while True:
             lease = -1
             with authority.mutex(seconds=max(0, deadline - time.monotonic())):
@@ -663,17 +666,28 @@ def _rollout_record(path: Path) -> Object | None:
     return value
 
 
-def _rollout_bindings(authorities: list[Authority], record: Object, *, allow_exclusive: bool = False) -> list[Object]:
+def _rollout_bindings(authorities: list[Authority], record: Object, *, allow_exclusive: bool = False,
+                      recovering: bool = False) -> list[Object]:
     rows: list[Object] = []
     for authority, expected in zip(authorities, record["components"], strict=True):
         control = authority.read("control")
         if (control["session"] != record["session"] or control["epoch"] != expected["epoch"]
                 or control["phase"] not in (("draining", "exclusive") if allow_exclusive else ("draining",))):
             raise Refusal("Deployment no longer has all four unchanged closed epochs.")
+        archived = authority.folder / "boot-archive" / record["checkpoint"] / "normal-admissions"
+        if recovering and os.path.lexists(archived):
+            active = authority.folder / "normal-admissions"
+            if os.path.lexists(active):
+                private_directory(active)
+                if next(active.iterdir(), None) is not None:
+                    raise Refusal("A new normal admission invalidates the boot checkpoint.")
+            admissions_digest = admission_fingerprint(authority, folder=archived)
+        else:
+            admissions_digest = admission_fingerprint(authority)
         rows.append({"component": authority.component, "epoch": control["epoch"],
                      "controlLock": lock_identity(authority, "control.lock"),
                      "admissionLock": lock_identity(authority, "admission.lock"),
-                     "admissionsSha256": admission_fingerprint(authority)})
+                     "admissionsSha256": admissions_digest})
     return rows
 
 
@@ -698,7 +712,10 @@ def _verify_rollout(registry: Path, authorities: list[Authority], record: Object
                 **{key: record[key] for key in ("session", "checkpoint", "registrySha256", "gateSha256", "callersSha256", "oldBoot")}}
     if any(checkpoint.get(key) != value for key, value in expected.items()):
         raise Refusal("Closed checkpoint identity changed.")
-    if checkpoint["components"] != _rollout_bindings(authorities, record):
+    recovery = _recovery_journal(folder, record)
+    if checkpoint["components"] != _rollout_bindings(
+            authorities, record, allow_exclusive=record["phase"] in ("boot-verified", "maintaining"),
+            recovering=recovery is not None):
         raise Refusal("Closed authorities, lock inodes or normal admissions changed after checkpoint.")
     return folder, checkpoint
 
@@ -890,8 +907,12 @@ def deploy(request: Request) -> Object:
                     if record["phase"] == "awaiting-boot":
                         _verify_rollout(request.registry, authorities, record)
                     else:
-                        _rollout_bindings(authorities, record, allow_exclusive=True)
-                        verify_gate(request.registry)
+                        _verify_rollout(request.registry, authorities, record)
+                        recovery = _recovery_journal(folder, record)
+                        if recovery is None or recovery["phase"] != "complete":
+                            raise Refusal("Verified boot phase lacks completed recovery evidence.")
+                        for authority in authorities:
+                            _verify_boot_archive(authority, record, record["newBoot"])
                     return {"version": 1, "session": request.session, "phase": record["phase"],
                             "checkpoint": record["checkpoint"], "callersMayEnable": False}
                 evidence = read(folder / "rollout.json")
@@ -937,3 +958,156 @@ def deploy(request: Request) -> Object:
                 if not (folder / "checkpoint.json").exists():
                     _rollback_rollout(request.registry, authorities, record)
                 raise
+
+
+def _recovery_journal(folder: Path, record: Object) -> Object | None:
+    try:
+        value = read(folder / "recovery.json")
+    except FileNotFoundError:
+        return None
+    fields(value, "version kind session checkpoint oldBoot newBoot phase components")
+    if (value["kind"] != "driver-boot-recovery" or value["phase"] not in ("prepared", "complete")
+            or any(value[key] != record[key] for key in ("session", "checkpoint", "oldBoot"))
+            or not canonical_uuid(value["newBoot"]) or value["newBoot"] == value["oldBoot"]
+            or (record["newBoot"] is not None and value["newBoot"] != record["newBoot"])
+            or not isinstance(value["components"], list) or len(value["components"]) != len(COMPONENTS)):
+        raise Refusal("Boot recovery journal identity changed.")
+    for component, row in zip(COMPONENTS, value["components"], strict=True):
+        if (not isinstance(row, dict) or set(row) != {"component", "phase"}
+                or row["component"] != component or row["phase"] not in ("pending", "archived")):
+            raise Refusal("Boot recovery journal component changed.")
+    if value["phase"] == "complete" and any(row["phase"] != "archived" for row in value["components"]):
+        raise Refusal("Incomplete boot recovery cannot claim completion.")
+    return value
+
+
+def _boot_recovery_pending(authority: Authority) -> bool:
+    record = _rollout_record(authority.shared / "deployment.json")
+    if record is None or record["phase"] != "awaiting-boot":
+        return False
+    folder = _rollout_folder(authority.registry, record["session"], record["checkpoint"])
+    return _recovery_journal(folder, record) is not None
+
+
+def _recover_boot(request: Request, current_boot: str, deadline: float) -> None:
+    """Production drain-only path: current_boot comes solely from boot_uuid().
+
+    There is no command option, environment override or simulated boot provider.
+    This proves only old local process termination on the qualified platform;
+    Driver metadata/vendor recovery and continuity checks remain independent.
+    """
+    if not canonical_uuid(current_boot):
+        raise Refusal("Kernel boot identity is unavailable.")
+    shared = request.registry / ".driver-qualification"
+    observed = _rollout_record(shared / "deployment.json")
+    if observed is None or observed["phase"] == "complete":
+        return
+    if observed["session"] != request.session:
+        raise Refusal("A different closed deployment owns boot recovery.")
+    if observed["phase"] not in ("awaiting-boot", "boot-verified", "maintaining"):
+        raise Refusal("Complete or restage the closed deployment before drain.")
+    if current_boot == observed["oldBoot"]:
+        raise Refusal("A genuine kernel boot transition after the closed checkpoint is required.")
+    with deployment_mutex(request.registry):
+        authorities = [Authority(request.registry, component) for component in COMPONENTS]
+        payloads = _qualified_candidates(authorities)
+        gate = verify_gate(request.registry)
+        with pin_payloads(request.registry, [gate.provider, *payloads]), ExitStack() as stack:
+            for authority in authorities:
+                stack.enter_context(authority.mutex(seconds=max(0, deadline - time.monotonic())))
+            record = _rollout_record(shared / "deployment.json")
+            if record != observed:
+                raise Refusal("Deployment changed during boot recovery.")
+            folder = _rollout_folder(request.registry, record["session"], record["checkpoint"])
+            journal = _recovery_journal(folder, record)
+            if journal is not None and journal["newBoot"] != current_boot:
+                publish(shared / "deployment.json", {**record, "phase": "failed-closed"})
+                raise Refusal("Kernel changed again during recovery; restage a fresh closed boundary.")
+            if record["newBoot"] is not None and journal is None:
+                raise Refusal("Published boot recovery has no matching private journal.")
+            try:
+                _verify_rollout(request.registry, authorities, record)
+                for authority, payload in zip(authorities, payloads, strict=True):
+                    verify_acceptance(authority, payload)
+                if record["phase"] in ("boot-verified", "maintaining"):
+                    if (journal is None or journal["phase"] != "complete" or record["newBoot"] != current_boot):
+                        raise Refusal("Boot verification lacks its exact completed archive chain.")
+                    for authority in authorities:
+                        _verify_boot_archive(authority, record, current_boot)
+                    return
+                # Acquire every independent EX lease before publishing/clearing
+                # any old obligation. New-boot holders remain unresolved.
+                leases: list[int] = []
+                for authority in authorities:
+                    descriptor = authority.lease(exclusive=True)
+                    stack.callback(os.close, descriptor)
+                    leases.append(descriptor)
+                if journal is None:
+                    journal = {"version": 1, "kind": "driver-boot-recovery",
+                               **{key: record[key] for key in ("session", "checkpoint", "oldBoot")},
+                               "newBoot": current_boot, "phase": "prepared",
+                               "components": [{"component": component, "phase": "pending"} for component in COMPONENTS]}
+                    _immutable(folder / "recovery.json", canonical(journal))
+                record = {**record, "newBoot": current_boot}
+                publish(shared / "deployment.json", record)
+                for index, (authority, descriptor) in enumerate(zip(authorities, leases, strict=True)):
+                    archive_boot_custody(authority, descriptor, record, current_boot)
+                    _verify_boot_archive(authority, record, current_boot)
+                    rows = [dict(row) for row in journal["components"]]
+                    rows[index]["phase"] = "archived"
+                    journal = {**journal, "components": rows}
+                    publish(folder / "recovery.json", journal)
+                _verify_rollout(request.registry, authorities, record)
+                journal = {**journal, "phase": "complete"}
+                publish(folder / "recovery.json", journal)
+                publish(shared / "deployment.json", {**record, "phase": "boot-verified"})
+            except BlockingIOError:
+                # Existing independent leases are not failure/termination proof.
+                # Preserve the same recoverable checkpoint for a later call.
+                raise Refusal("An independent component lease still blocks boot recovery.") from None
+            except Exception:
+                # A prepared journal can resume a crash. Invalid evidence is
+                # never converted into an empty successful receipt.
+                raise
+
+
+def _verify_boot_archive(authority: Authority, record: Object, current_boot: str) -> None:
+    destination = private_directory(authority.folder / "boot-archive" / record["checkpoint"])
+    inventory = read(destination / "inventory.json")
+    fields(inventory, "version kind component session checkpoint oldBoot newBoot entries")
+    complete = read(destination / "complete.json")
+    if (inventory["kind"] != "driver-boot-custody" or inventory["component"] != authority.component
+            or any(inventory[key] != record[key] for key in ("session", "checkpoint", "oldBoot"))
+            or inventory["newBoot"] != current_boot
+            or complete != {"version": 1, "kind": "driver-boot-custody-complete",
+                            "inventorySha256": sha256(canonical(inventory))}):
+        raise Refusal("Completed boot archive identity changed.")
+    names = ("writers", "handoffs", "normal-admissions", "archive", "taint.json", "maintenance.json")
+    if not isinstance(inventory["entries"], list) or len(inventory["entries"]) != len(names):
+        raise Refusal("Boot archive inventory changed.")
+    for name, row in zip(names, inventory["entries"], strict=True):
+        if (not isinstance(row, dict) or set(row) != {"name", "present", "device", "inode", "sha256"}
+                or row["name"] != name or type(row["present"]) is not bool):
+            raise Refusal("Boot archive entry changed.")
+        target = destination / name
+        if row["present"]:
+            if (type(row["device"]) is not int or row["device"] < 0
+                    or type(row["inode"]) is not int or row["inode"] < 0):
+                raise Refusal("Boot archive entry identity is invalid.")
+            info = target.lstat()
+            if (info.st_dev, info.st_ino) != (row["device"], row["inode"]):
+                raise Refusal("Boot archive entry identity changed.")
+            if name in names[:4]:
+                private_directory(target)
+                if row["sha256"] is not None:
+                    raise Refusal("Invalid directory archive hash.")
+            elif not valid_hash(row["sha256"]) or sha256(read_bytes(target)) != row["sha256"]:
+                raise Refusal("Boot archive metadata bytes changed.")
+        elif (any(row[key] is not None for key in ("device", "inode", "sha256")) or os.path.lexists(target)):
+            raise Refusal("Absent boot archive entry changed.")
+    for name in ("writers", "handoffs", "normal-admissions"):
+        folder = private_directory(authority.folder / name)
+        if next(folder.iterdir(), None) is not None:
+            raise Refusal("Unexpected post-checkpoint writer/admission remains fenced.")
+    if os.path.lexists(authority.folder / "taint.json"):
+        raise Refusal("A new custody taint cannot be cleared by an old boot checkpoint.")

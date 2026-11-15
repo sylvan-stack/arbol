@@ -293,6 +293,11 @@ def validate(kind: str, value: Object) -> None:
             "staged", "closed-installed", "awaiting-boot", "boot-verified", "maintaining", "complete", "failed-closed")):
         refuse()
     if kind == "deployment":
+        if (value["phase"] in ("boot-verified", "maintaining", "complete")
+                and (not canonical_uuid(value["newBoot"]) or value["newBoot"] == value["oldBoot"])):
+            refuse()
+        if value["phase"] in ("staged", "closed-installed") and value["newBoot"] is not None:
+            refuse()
         rows = value["components"]
         if not isinstance(rows, list) or len(rows) != len(COMPONENTS):
             refuse()
@@ -793,9 +798,9 @@ def lock_identity(authority: Authority, name: str) -> Object:
         os.close(descriptor)
 
 
-def admission_fingerprint(authority: Authority) -> str:
+def admission_fingerprint(authority: Authority, *, folder: Path | None = None) -> str:
     """All preexisting admission markers are bound; a later marker changes it."""
-    folder = authority.folder / "normal-admissions"
+    folder = authority.folder / "normal-admissions" if folder is None else folder
     paths = _documents(folder) if os.path.lexists(folder) else []
     hashes: list[Object] = []
     for path in paths:
@@ -814,3 +819,102 @@ def admission_fingerprint(authority: Authority) -> str:
     # This is a hash input, not a protocol document or authority substituted by
     # an empty directory. Existing bounded raw markers are preserved separately.
     return sha256(canonical({"version": 1, "markers": hashes}))
+
+
+def archive_boot_custody(authority: Authority, descriptor: int, record: Object, new_boot: str) -> None:
+    """Under all four closed mutexes/EX leases after verified genuine boot change.
+
+    Preserve opaque old custody trees by same-filesystem rename. Empty replacement
+    directories are a consequence of that authorized boundary, never lifetime proof.
+    Driver state/vendor journals, guard inodes and per-session operations stay put.
+    """
+    _exclusive(authority, descriptor)
+    control = authority.read("control")
+    if (control["phase"] != "draining" or control["session"] != record["session"]
+            or not canonical_uuid(new_boot) or new_boot == record["oldBoot"]):
+        refuse()
+    base = private_directory(authority.folder / "boot-archive", create=True)
+    destination = private_directory(base / record["checkpoint"], create=True)
+    inventory_path = destination / "inventory.json"
+    names = ("writers", "handoffs", "normal-admissions", "archive", "taint.json", "maintenance.json")
+    directories = set(names[:4])
+    try:
+        inventory = read(inventory_path)
+    except FileNotFoundError:
+        rows: list[Object] = []
+        for name in names:
+            source, target = authority.folder / name, destination / name
+            if os.path.lexists(target):
+                refuse()
+            present = os.path.lexists(source)
+            row: Object = {"name": name, "present": present, "device": None, "inode": None, "sha256": None}
+            if present:
+                if name in directories:
+                    private_directory(source)
+                else:
+                    raw = read_bytes(source)
+                    row["sha256"] = sha256(raw)
+                    if name == "taint.json":
+                        taint = decode(raw)
+                        validate("taint", taint)
+                        if (taint["component"] != authority.component or taint["epoch"] != control["epoch"]
+                                or taint["boot"] != record["oldBoot"]):
+                            refuse()
+                info = source.lstat()
+                row.update(device=info.st_dev, inode=info.st_ino)
+            elif name in ("writers", "handoffs", "archive", "taint.json"):
+                refuse()
+            rows.append(row)
+        inventory = {"version": 1, "kind": "driver-boot-custody", "component": authority.component,
+                     "session": record["session"], "checkpoint": record["checkpoint"],
+                     "oldBoot": record["oldBoot"], "newBoot": new_boot, "entries": rows}
+        publish(inventory_path, inventory)
+    fields(inventory, "version kind component session checkpoint oldBoot newBoot entries")
+    if (inventory["kind"] != "driver-boot-custody" or inventory["component"] != authority.component
+            or any(inventory[key] != record[key] for key in ("session", "checkpoint", "oldBoot"))
+            or inventory["newBoot"] != new_boot or not isinstance(inventory["entries"], list)
+            or len(inventory["entries"]) != len(names)):
+        refuse()
+    complete_path = destination / "complete.json"
+    completed = os.path.lexists(complete_path)
+    complete = {"version": 1, "kind": "driver-boot-custody-complete", "inventorySha256": sha256(canonical(inventory))}
+    if completed and read(complete_path) != complete:
+        refuse()
+    for name, row in zip(names, inventory["entries"], strict=True):
+        if (not isinstance(row, dict) or set(row) != {"name", "present", "device", "inode", "sha256"}
+                or row["name"] != name or type(row["present"]) is not bool):
+            refuse()
+        source, target = authority.folder / name, destination / name
+        if not row["present"]:
+            if any(row[key] is not None for key in ("device", "inode", "sha256")) or os.path.lexists(target):
+                refuse()
+        else:
+            if (not natural(row["device"]) or not natural(row["inode"])
+                    or (name in directories and row["sha256"] is not None)
+                    or (name not in directories and not valid_hash(row["sha256"]))):
+                refuse()
+            current = target if os.path.lexists(target) else source
+            info = current.lstat()
+            if (info.st_dev, info.st_ino) != (row["device"], row["inode"]):
+                refuse()
+            if name in directories:
+                private_directory(current)
+            elif sha256(read_bytes(current)) != row["sha256"]:
+                refuse()
+            if current == source:
+                if completed:
+                    refuse()
+                os.rename(source, target)
+                sync_directory(destination)
+                sync_directory(authority.folder)
+        if os.path.lexists(source):
+            if not completed or name not in directories:
+                refuse()
+            private_directory(source)
+            if next(source.iterdir(), None) is not None:
+                refuse()
+    if not completed:
+        publish(complete_path, complete)
+    for name in names[:4]:
+        private_directory(authority.folder / name, create=True)
+    sync_directory(authority.folder)
