@@ -594,6 +594,26 @@ def _retention_component(authority: Authority, refs: dict[str, set[str]]) -> boo
         if count > MAX_ENTRIES or not canonical_uuid(session.name):
             refuse()
         private_directory(session)
+        contexts = session / "contexts"
+        if os.path.lexists(contexts):
+            for path, value in _retention_records(contexts):
+                is_request = path.name.endswith(".request.json")
+                attempt = path.name.removesuffix(".request.json" if is_request else ".json")
+                if not valid_token(attempt) or path.parent != contexts:
+                    refuse()
+                context = read(contexts / (attempt + ".json")) if is_request else value
+                validate("context", context)
+                if (context["component"] != authority.component or context["session"] != session.name
+                        or context["attempt"] != attempt):
+                    refuse()
+                if is_request:
+                    request_binding(value, context)
+                archived = session / "attempts" / attempt / ("request.json" if is_request else "context.json")
+                if control["phase"] == "normal" and archived.exists() and read(archived) == value:
+                    continue
+                refs[authority.component].add(context["payloadSha256"])
+                _retention_acceptance(authority.shared, authority.component, context["acceptanceSha256"],
+                                      refs, authority.registry)
         operation = session / "operation.json"
         active = operation.exists()
         records: list[tuple[Path, Object]] = []
@@ -614,6 +634,16 @@ def _retention_component(authority: Authority, refs: dict[str, set[str]]) -> boo
                 if path.name in ("operation.json", "result.json"):
                     validate("operation" if path.name == "operation.json" else "result", value)
                     records.append((path, value))
+                elif path.name in ("context.json", "request.json"):
+                    context = read(path.parent / "context.json") if path.name == "request.json" else value
+                    validate("context", context)
+                    if context["component"] != authority.component or context["session"] != session.name:
+                        refuse()
+                    if path.name == "request.json":
+                        request_binding(value, context)
+                    refs[authority.component].add(context["payloadSha256"])
+                    _retention_acceptance(authority.shared, authority.component, context["acceptanceSha256"],
+                                          refs, authority.registry)
         for path, value in records:
             if value["component"] != authority.component or not valid_hash(value["payloadSha256"]):
                 refuse()
@@ -706,3 +736,177 @@ def retention_status(registry: str, component: str, number: str) -> str | None:
     if value.all_builds or number in value.builds:
         return "inUse"
     return None
+
+
+METADATA_ROOTS = ("format", "identity.json", "identity-maintenance.json", "identity-upgrade.json")
+SUBSCRIPTION = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\Z", re.ASCII)
+MAINTENANCE_OPERATIONS = frozenset(("upgrade", "identity-reset", "restore", "identity-recover"))
+
+
+def metadata_name(value: object) -> str:
+    if not isinstance(value, str):
+        refuse()
+    if value in METADATA_ROOTS:
+        return value
+    parts = value.split("/")
+    if (len(parts) != 3 or parts[0] != "subscriptions" or SUBSCRIPTION.fullmatch(parts[1]) is None
+            or parts[2] not in ("identity.json", "identity-pending.json")):
+        refuse()
+    return value
+
+
+def metadata_marker(value: Object) -> Object:
+    fields(value, "version component session epoch operation attempt payloadSha256 generation phase sourceSha256 backupSha256")
+    if (value["component"] not in COMPONENTS or not canonical_uuid(value["session"])
+            or value["operation"] not in MAINTENANCE_OPERATIONS or value["phase"] not in ("pending", "complete")
+            or any(not valid_token(value[key]) for key in ("epoch", "attempt", "generation"))
+            or any(not valid_hash(value[key]) for key in ("payloadSha256", "backupSha256"))
+            or (value["sourceSha256"] is not None and not valid_hash(value["sourceSha256"]))
+            or (value["sourceSha256"] is not None) != (value["operation"] == "restore")):
+        refuse()
+    return value
+
+
+def metadata_upgrade(value: Object) -> Object:
+    fields(value, "version from to generation backup backupSha256")
+    if (type(value["from"]) is not int or value["from"] != 1
+            or type(value["to"]) is not int or value["to"] != 2
+            or not valid_token(value["generation"]) or not valid_hash(value["backupSha256"])):
+        refuse()
+    canonical_path(value["backup"])
+    return value
+
+
+def canonical_path(value: object) -> str:
+    """Lexical validation only; retention never reads a Driver state/backup tree."""
+    if (not isinstance(value, str) or not value or "\0" in value or not os.path.isabs(value)
+            or os.path.normpath(value) != value or value.startswith("//")
+            or len(value.encode("utf-8", "strict")) > LIMIT):
+        refuse()
+    return value
+
+
+def request_binding(value: Object, context: Object) -> None:
+    validate("context", context)
+    names = ("version kind component session epoch attempt payloadSha256 acceptanceSha256 contextSha256 "
+             "build stateDirectory operation backup source")
+    if context["operation"] == "identity-recover":
+        names += " subscription"
+    fields(value, names)
+    if (value["kind"] != "driver-maintenance-request" or not valid_hash(value["contextSha256"])
+            or value["contextSha256"] != sha256(canonical(context))
+            or not isinstance(value["build"], str) or BUILD.fullmatch(value["build"]) is None
+            or any(value[key] != context[key] for key in (
+                "component", "session", "epoch", "attempt", "payloadSha256", "acceptanceSha256", "stateDirectory", "operation"))):
+        refuse()
+    for key in ("stateDirectory", "backup"):
+        canonical_path(value[key])
+    if (value["source"] is not None) != (context["operation"] == "restore"):
+        refuse()
+    if value["source"] is not None:
+        canonical_path(value["source"])
+    if context["operation"] == "identity-recover" and (
+            value["subscription"] != context["subscription"] or not isinstance(value["subscription"], str)
+            or SUBSCRIPTION.fullmatch(value["subscription"]) is None):
+        refuse()
+
+
+def metadata_document(name: str, raw: bytes) -> Object:
+    name = metadata_name(name)
+    value = decode(raw)
+    if name == "identity.json":
+        fields(value, "version generation")
+        if not valid_token(value["generation"]):
+            refuse()
+    elif name.endswith("/identity.json"):
+        fields(value, "version witness state")
+        if not valid_token(value["witness"]) or value["state"] not in ("active", "retired"):
+            refuse()
+    elif name.endswith("/identity-pending.json"):
+        fields(value, "version operation witness phase")
+        if (value["operation"] not in ("create", "remove") or not valid_token(value["witness"])
+                or value["phase"] not in ("prepared", "committed")):
+            refuse()
+    elif name == "identity-upgrade.json":
+        metadata_upgrade(value)
+    elif name == "identity-maintenance.json":
+        metadata_marker(value)
+    else:
+        refuse()
+    return value
+
+
+@dataclass(frozen=True)
+class MetadataBackup:
+    directory: Path
+    manifest: Object
+    digest: str
+    contents: dict[str, bytes | None]
+
+
+def metadata_backup(directory: Path, *, source: bool = False) -> MetadataBackup:
+    """Verify only the exact bounded metadata entry, never arbitrary backup files."""
+    private_directory(directory)
+    raw = read_bytes(directory / "manifest.json", limit=MANIFEST_LIMIT)
+    manifest = decode(raw, limit=MANIFEST_LIMIT)
+    fields(manifest, "version kind format files")
+    if (manifest["kind"] != "driver-identity-backup"
+            or (manifest["format"] is not None and (type(manifest["format"]) is not int or manifest["format"] not in (1, 2)))
+            or not isinstance(manifest["files"], list) or len(manifest["files"]) > MAX_ENTRIES):
+        refuse()
+    expected = {"manifest.json"}
+    contents: dict[str, bytes | None] = {}
+    prior = b""
+    size = len(raw)
+    for row in manifest["files"]:
+        if not isinstance(row, dict) or set(row) != {"path", "present", "size", "sha256"}:
+            refuse()
+        name = metadata_name(row["path"])
+        if (name.encode("utf-8") <= prior or type(row["present"]) is not bool
+                or not natural(row["size"]) or row["size"] > LIMIT):
+            refuse()
+        prior = name.encode("utf-8")
+        if not row["present"]:
+            if row["size"] != 0 or row["sha256"] is not None:
+                refuse()
+            contents[name] = None
+            continue
+        if not valid_hash(row["sha256"]):
+            refuse()
+        content = read_bytes(directory / name, limit=min(LIMIT, MANIFEST_LIMIT - size))
+        if len(content) != row["size"] or sha256(content) != row["sha256"]:
+            refuse()
+        size += len(content)
+        contents[name] = content
+        expected.add(name)
+        expected.update("/".join(name.split("/")[:index]) for index in range(1, len(name.split("/"))))
+    if not set(METADATA_ROOTS) <= contents.keys():
+        refuse()
+    format_raw = contents["format"]
+    number = {b"1": 1, b"2": 2}.get(format_raw.strip()) if format_raw is not None else None
+    if number != manifest["format"] or (source and number not in (1, 2)):
+        refuse()
+    actual: set[str] = set()
+
+    def visit(folder: Path) -> None:
+        for path in folder.iterdir():
+            name = path.relative_to(directory).as_posix()
+            if name not in expected or len(actual) >= MAX_ENTRIES * 3 + 1:
+                refuse()
+            actual.add(name)
+            info = path.lstat()
+            if stat.S_ISDIR(info.st_mode):
+                private_directory(path)
+                visit(path)
+            elif not stat.S_ISREG(info.st_mode):
+                refuse()
+    visit(directory)
+    if actual != expected:
+        refuse()
+    if source:
+        if number == 2 and contents["identity.json"] is None:
+            refuse()
+        for name, source_bytes in contents.items():
+            if source_bytes is not None and name != "format":
+                metadata_document(name, source_bytes)
+    return MetadataBackup(directory, manifest, sha256(raw), contents)

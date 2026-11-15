@@ -24,6 +24,7 @@ from .driver_admission import (
     Custody,
     Object,
     Refusal,
+    _exclusive,
     admission_fingerprint,
     archive_boot_custody,
     archive_terminal,
@@ -54,10 +55,16 @@ from .driver_payload import (
     DESCRIPTOR,
     SUBTREE,
     Gate,
+    MetadataBackup,
     Payload,
     load,
+    metadata_backup,
+    metadata_document,
+    metadata_marker,
+    metadata_upgrade,
     pin_payloads,
     registered,
+    request_binding,
     resolve_provider,
     verify_acceptance,
     verify_gate,
@@ -1111,3 +1118,311 @@ def _verify_boot_archive(authority: Authority, record: Object, current_boot: str
             raise Refusal("Unexpected post-checkpoint writer/admission remains fenced.")
     if os.path.lexists(authority.folder / "taint.json"):
         raise Refusal("A new custody taint cannot be cleared by an old boot checkpoint.")
+
+
+@dataclass
+class Prepared:
+    request: Request
+    authority: Authority
+    payload: Payload
+    gate: Gate
+    descriptor: int
+    folder: Path
+    context_path: Path
+    context: Object
+    binding: Object
+    operation: Object
+    cached_result: Object | None
+
+
+def _state_format(directory: Path, *, restore: bool = False) -> int | None:
+    try:
+        raw = read_bytes(directory / "format")
+    except FileNotFoundError:
+        if restore:
+            return None
+        raise Refusal("Maintenance requires existing supported Driver state.") from None
+    spelling = raw.strip()
+    if re.fullmatch(rb"[1-9][0-9]*", spelling) and spelling not in (b"1", b"2"):
+        raise Refusal("Driver state is newer than this maintenance provider.")
+    number = {b"1": 1, b"2": 2}.get(spelling)
+    if number is None and not restore:
+        raise Refusal("Driver state format is malformed.")
+    return number
+
+
+def _root_generation(directory: Path) -> str:
+    value = read(directory / "identity.json")
+    fields(value, "version generation")
+    if not valid_token(value["generation"]):
+        raise Refusal("Driver root identity is malformed.")
+    return str(value["generation"])
+
+
+def _separate_metadata_roots(registry: Path, state: Path, backup: Path, source: Path | None) -> None:
+    paths = [state, backup, *([source] if source is not None else [])]
+    for index, path in enumerate(paths):
+        if path.is_relative_to(registry) or registry.is_relative_to(path):
+            raise Refusal("Driver state/backup roots must be outside the private registry.")
+        for other in paths[:index]:
+            if path.is_relative_to(other) or other.is_relative_to(path):
+                raise Refusal("Driver state/source/output roots must be disjoint.")
+
+
+def _session_folder(authority: Authority, session: str) -> Path:
+    folder = private_directory(authority.folder / "sessions" / session, create=True)
+    for name in ("contexts", "attempts"):
+        private_directory(folder / name, create=True)
+    return folder
+
+
+def _context_from_operation(operation: Object) -> Object:
+    validate("operation", operation)
+    context = {key: value for key, value in operation.items() if key not in ("phase", "sourceSha256", "backupSha256")}
+    validate("context", context)
+    return context
+
+
+def _read_optional(path: Path, kind: str) -> Object | None:
+    try:
+        value = read(path)
+    except FileNotFoundError:
+        return None
+    validate(kind, value)
+    return value
+
+
+def _attempt_history(folder: Path, context: Object, *, operation: Object | None = None,
+                     result: Object | None = None) -> Path:
+    """Preserve an exact predecessor before replacing any active pointer."""
+    attempt = context["attempt"]
+    if not valid_token(attempt):
+        raise Refusal("Invalid previous maintenance attempt.")
+    destination = private_directory(folder / "attempts" / attempt, create=True)
+    context_raw = read_bytes(folder / "contexts" / (attempt + ".json"))
+    if decode(context_raw) != context:
+        raise Refusal("Previous immutable context changed.")
+    binding_raw = read_bytes(folder / "contexts" / (attempt + ".request.json"))
+    request_binding(decode(binding_raw), context)
+    _immutable(destination / "context.json", context_raw)
+    _immutable(destination / "request.json", binding_raw)
+    if operation is not None:
+        if _context_from_operation(operation) != context:
+            raise Refusal("Previous operation/context mismatch.")
+        _immutable(destination / "operation.json", canonical(operation))
+    if result is not None:
+        validate("result", result)
+        if (any(result[key] != context[key] for key in ("component", "session", "epoch", "attempt", "operation", "payloadSha256", "generation"))
+                or result["stateDirectorySha256"] != sha256(context["stateDirectory"].encode("utf-8"))
+                or not valid_hash(result["backupSha256"])
+                or (context["operation"] == "identity-recover" and result["subscription"] != context["subscription"])
+                or (operation is not None and result["backupSha256"] != operation["backupSha256"])):
+            raise Refusal("Previous result/context mismatch.")
+        _immutable(destination / "result.json", canonical(result))
+    return destination
+
+
+def _make_binding(request: Request, context: Object, payload: Payload, backup: Path, source: Path | None) -> Object:
+    value = {"version": 1, "kind": "driver-maintenance-request",
+             **{key: context[key] for key in ("component", "session", "epoch", "attempt", "payloadSha256", "acceptanceSha256", "stateDirectory", "operation")},
+             "contextSha256": sha256(canonical(context)), "build": payload.build,
+             "backup": str(backup), "source": str(source) if source is not None else None}
+    if context["operation"] == "identity-recover":
+        value["subscription"] = request.values["subscription"]
+    request_binding(value, context)
+    return value
+
+
+def _closed_attempt(authority: Authority, request: Request, payload: Payload, gate: Gate,
+                    descriptor: int) -> tuple[Object, str]:
+    _recheck(authority, payload, gate)
+    _exclusive(authority, descriptor)
+    control = _control(authority, request.session, closed=True)
+    if control["phase"] != "exclusive" or _tainted(authority):
+        raise Refusal("Exclusive drained admission is required before execution.")
+    custody = reconcile(authority, control=control)
+    if not custody.resolved:
+        raise Refusal("Unresolved metadata custody remains fenced.")
+    deployment = _rollout_record(authority.shared / "deployment.json")
+    if deployment is not None and deployment["phase"] != "complete" and (
+            deployment["session"] != request.session or deployment["phase"] not in ("boot-verified", "maintaining")):
+        raise Refusal("All-four deployment has not verified its closed boot boundary.")
+    raw = read_bytes(authority.folder / "maintenance.json")
+    receipt = decode(raw)
+    validate("maintenance", receipt)
+    expected = {"version": 1, "kind": "driver-state-maintenance", "component": request.component,
+                "session": request.session, "epoch": control["epoch"], "phase": "exclusive", "gateSha256": gate.digest}
+    if receipt != expected:
+        raise Refusal("Maintenance receipt does not match current exclusive admission.")
+    return control, sha256(raw)
+
+
+def _predecessor(directory: Path, folder: Path) -> None:
+    try:
+        marker = metadata_marker(read(directory / "identity-maintenance.json"))
+    except FileNotFoundError:
+        return
+    if marker["phase"] != "complete":
+        raise Refusal("Resume the exact pending attempt or explicitly restore verified metadata.")
+    history = folder / "attempts" / marker["attempt"]
+    previous = read(history / "result.json")
+    validate("result", previous)
+    operation = read(history / "operation.json")
+    context = _context_from_operation(operation)
+    if (any(context[key] != marker[key] for key in ("component", "session", "epoch", "operation", "attempt", "payloadSha256", "generation"))
+            or operation["sourceSha256"] != marker["sourceSha256"] or operation["backupSha256"] != marker["backupSha256"]):
+        raise Refusal("Completed predecessor lacks its exact operation/marker chain.")
+    if (any(previous[key] != marker[key] for key in ("component", "session", "epoch", "operation", "attempt", "payloadSha256", "generation", "backupSha256"))
+            or previous["stateDirectorySha256"] != sha256(str(directory).encode("utf-8"))):
+        raise Refusal("Completed predecessor lacks its exact preserved result.")
+
+
+def _fresh_generation(request: Request, state: Path, source: MetadataBackup | None) -> str:
+    operation = request.values["operation"]
+    number = _state_format(state, restore=operation == "restore")
+    if operation == "restore":
+        assert source is not None
+        previous: set[str] = set()
+        if source.contents["identity.json"] is not None:
+            previous.add(str(metadata_document("identity.json", source.contents["identity.json"])["generation"]))
+        try:
+            previous.add(_root_generation(state))
+        except (OSError, ValueError):
+            pass  # The child preserves malformed current metadata before replacement.
+        generation = token()
+        while generation in previous:
+            generation = token()
+        return generation
+    journal_path = state / "identity-upgrade.json"
+    if os.path.lexists(journal_path):
+        raise Refusal("Resume the exact original conversion attempt or explicitly restore metadata.")
+    if number == 2:
+        current = _root_generation(state)
+        if operation != "identity-reset":
+            return current
+        generation = token()
+        while generation == current:
+            generation = token()
+        return generation
+    if operation != "upgrade" or number != 1:
+        raise Refusal("This maintenance operation requires valid format 2.")
+    return token()
+
+
+@contextmanager
+def prepare_execute(request: Request) -> Iterator[Prepared]:
+    """No child or state mutation: bind a recoverable attempt under a live EX lease."""
+    with _component(request) as (authority, payload, gate):
+        if request.values["build"] != payload.build:
+            raise Refusal("Execute requires the exact selected qualified Build.")
+        state = private_directory(physical(request.values["state-dir"]))
+        backup = private_directory(physical(request.values["backup"]))
+        source_path = private_directory(physical(request.values["source"])) if "source" in request.values else None
+        _separate_metadata_roots(request.registry, state, backup, source_path)
+        descriptor = -1
+        try:
+            with authority.mutex():
+                descriptor = authority.lease(exclusive=True)
+                control, receipt_digest = _closed_attempt(authority, request, payload, gate, descriptor)
+            # The independent EX admission spans bounded metadata verification,
+            # immutable reference publication, future child, and acknowledgement.
+            source = metadata_backup(source_path, source=True) if source_path is not None else None
+            source_digest = source.digest if source is not None else None
+            with authority.mutex():
+                current, current_receipt = _closed_attempt(authority, request, payload, gate, descriptor)
+                if current != control or current_receipt != receipt_digest:
+                    raise Refusal("Exclusive admission changed during attempt preparation.")
+                folder = _session_folder(authority, request.session)
+                pending = _read_optional(folder / "operation.json", "operation")
+                result = _read_optional(folder / "result.json", "result")
+                old_context: Object | None = None
+                old_operation: Object | None = None
+                if pending is not None:
+                    old_operation = pending
+                    old_context = _context_from_operation(pending)
+                elif result is not None:
+                    old_context = read(folder / "contexts" / (result["attempt"] + ".json"))
+                    validate("context", old_context)
+                    old_operation = read(folder / "attempts" / result["attempt"] / "operation.json")
+                    if _context_from_operation(old_operation) != old_context:
+                        raise Refusal("Completed attempt lacks its exact preserved operation.")
+                resume = False
+                binding: Object
+                if old_context is not None:
+                    binding = read(folder / "contexts" / (old_context["attempt"] + ".request.json"))
+                    request_binding(binding, old_context)
+                    same_selector = (old_context["stateDirectory"] == str(state)
+                                     and old_context["operation"] == request.values["operation"]
+                                     and (old_context["operation"] != "identity-recover"
+                                          or old_context["subscription"] == request.values.get("subscription")))
+                    incoming = _make_binding(request, old_context, payload, backup, source_path) if same_selector else None
+                    same = (binding == incoming and same_selector
+                            and old_context["component"] == request.component and old_context["session"] == request.session
+                            and old_context["epoch"] == control["epoch"] and old_context["gateSha256"] == gate.digest
+                            and old_context["payloadSha256"] == payload.digest and old_context["registry"] == str(request.registry)
+                            and old_context["receiptSha256"] == receipt_digest
+                            and old_context["acceptanceSha256"] == authority.read("qualification")["acceptanceSha256"])
+                    if same:
+                        assert old_operation is not None
+                        if old_operation["sourceSha256"] != source_digest:
+                            raise Refusal("Resumed source manifest changed.")
+                        context, operation = old_context, dict(old_operation)
+                        resume = True
+                    else:
+                        if old_context["stateDirectory"] != str(state):
+                            raise Refusal("Complete the current target before selecting another state directory.")
+                        if pending is not None and request.values["operation"] != "restore":
+                            raise Refusal("Only explicit restore may abandon a different pending attempt.")
+                        _attempt_history(folder, old_context, operation=old_operation, result=result)
+                if not resume:
+                    if next(backup.iterdir(), None) is not None:
+                        raise Refusal("A fresh maintenance attempt requires an empty private output archive.")
+                    if request.values["operation"] != "restore":
+                        _predecessor(state, folder)
+                    generation = _fresh_generation(request, state, source)
+                    context = {"version": 1, "kind": "driver-state-context", "component": request.component,
+                               "session": request.session, "epoch": control["epoch"], "gateSha256": gate.digest,
+                               "payloadSha256": payload.digest, "stateDirectory": str(state),
+                               "operation": request.values["operation"], "attempt": token(), "receiptSha256": receipt_digest,
+                               "registry": str(request.registry), "acceptanceSha256": authority.read("qualification")["acceptanceSha256"],
+                               "generation": generation}
+                    if context["operation"] == "identity-recover":
+                        context["subscription"] = request.values["subscription"]
+                    validate("context", context)
+                    operation = {**context, "phase": "pending", "sourceSha256": source_digest, "backupSha256": None}
+                    binding = _make_binding(request, context, payload, backup, source_path)
+                else:
+                    _state_format(state, restore=context["operation"] == "restore")
+                    before = backup / "before" / "manifest.json"
+                    if os.path.lexists(before):
+                        archive = metadata_backup(backup / "before")
+                        if operation["backupSha256"] not in (None, archive.digest):
+                            raise Refusal("Resumed immutable before-manifest changed.")
+                        operation["backupSha256"] = archive.digest
+                    elif operation["backupSha256"] is not None:
+                        raise Refusal("Resumed immutable before-manifest is missing.")
+                    if context["operation"] == "upgrade" and os.path.lexists(state / "identity-upgrade.json"):
+                        journal = metadata_upgrade(read(state / "identity-upgrade.json"))
+                        if (journal["generation"] != context["generation"] or journal["backup"] != str(backup)
+                                or journal["backupSha256"] != operation["backupSha256"]):
+                            raise Refusal("Original conversion journal/generation/archive mismatch.")
+                    if context["operation"] == "identity-recover" and (
+                            _state_format(state) != 2 or _root_generation(state) != context["generation"]):
+                        raise Refusal("Identity recovery root generation changed.")
+                validate("operation", operation)
+                context_path = folder / "contexts" / (context["attempt"] + ".json")
+                # Exact Build pins are already held by _component; they precede
+                # this mutex and every new durable context/request/operation ref.
+                _immutable(context_path, canonical(context))
+                _immutable(folder / "contexts" / (context["attempt"] + ".request.json"), canonical(binding))
+                if not resume and result is not None:
+                    remove(folder / "result.json")
+                    result = None
+                if result is None or pending is not None:
+                    publish(folder / "operation.json", operation)
+                prepared = Prepared(request, authority, payload, gate, descriptor, folder, context_path,
+                                    context, binding, operation, result)
+            yield prepared
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
