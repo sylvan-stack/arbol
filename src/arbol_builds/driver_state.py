@@ -369,7 +369,6 @@ def provider_entry(descriptor: Object) -> None:
     if signal.getsignal(signal.SIGINT) is signal.default_int_handler:
         signal.signal(signal.SIGINT, signal.SIG_DFL)
     standard_descriptors()
-    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT, signal.SIGTERM})
     try:
         root = Path(__file__).resolve().parents[2]
         provider = load(root, "arbol", descriptor["build"])
@@ -391,6 +390,7 @@ def provider_entry(descriptor: Object) -> None:
             raise SystemExit(result)
         if arguments[:1] != ["driver-state"]:
             raise Refusal("Invalid immutable provider command.")
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT, signal.SIGTERM})
         from .config import locations
         request = parse_request(arguments[1:], locations().registry)
         selected = _provider(request)
