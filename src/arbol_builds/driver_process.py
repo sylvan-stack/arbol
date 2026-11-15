@@ -56,7 +56,7 @@ from .driver_admission import (
 )
 
 if TYPE_CHECKING:
-    from .driver_payload import Payload
+    from .driver_payload import CandidateScope, Payload
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _MAX_SECONDS = 253402300799
@@ -257,12 +257,14 @@ class Guardian:
     acceptance_sha256: str
     lease: int
     build_use: int
+    candidate: CandidateScope | None = None
     handoff: str | None = None
     child_owner: Object | None = None
     transferred: bool = False
 
     @classmethod
-    def admit(cls, authority: Authority, payload: Payload) -> Guardian:
+    def admit(cls, authority: Authority, payload: Payload, *,
+              candidate: CandidateScope | None = None) -> Guardian:
         from .driver_payload import registered, verify_acceptance
         from .launcher import open_use_guard
 
@@ -275,19 +277,20 @@ class Guardian:
         lease = -1
         guardian: Guardian | None = None
         try:
-            current = registered(authority.registry, payload.component, payload.build)
+            current = (registered(authority.registry, payload.component, payload.build) if candidate is None else
+                       candidate.registered(authority.registry, payload.component, payload.build))
             if current.root != payload.root or current.digest != payload.digest:
                 refuse()
-            verify_acceptance(authority, payload)
+            verify_acceptance(authority, payload, candidate=candidate)
             acceptance = authority.read("qualification")["acceptanceSha256"]
             owner = process_identity(os.getpid())
             boot = boot_uuid()
             with authority.mutex():
-                control = normal_control(authority)
+                control = normal_control(authority, candidate=candidate)
                 lease = authority.lease()
                 invocation, writer = token(), token()
                 guardian = cls(authority, payload, invocation, writer, control["epoch"], boot,
-                               owner, acceptance, lease, build_use)
+                               owner, acceptance, lease, build_use, candidate=candidate)
                 private_directory(authority.folder / "writers" / invocation, create=True)
                 row = guardian._bootstrap_writer()
                 validate("writer", row)
@@ -317,7 +320,7 @@ class Guardian:
             if control["epoch"] != self.epoch:
                 refuse()
         else:
-            normal_control(self.authority, epoch=self.epoch)
+            normal_control(self.authority, epoch=self.epoch, candidate=self.candidate)
         named = (self.authority.folder / "admission.lock").lstat()
         held = os.fstat(self.lease)
         if (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino):
@@ -325,7 +328,7 @@ class Guardian:
         if (boot_uuid() != self.boot or process_identity(os.getpid()) != self.owner
                 or read_writer(self.authority, self.invocation, self.writer) != self._bootstrap_writer()):
             refuse()
-        verify_acceptance(self.authority, self.payload, digest=self.acceptance_sha256)
+        verify_acceptance(self.authority, self.payload, digest=self.acceptance_sha256, candidate=self.candidate)
 
     def _close_owned(self) -> None:
         # Closing independent descriptions cannot unlock an acknowledged child.
