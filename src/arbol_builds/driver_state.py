@@ -681,7 +681,8 @@ def _rollout_record(path: Path) -> Object | None:
 
 
 def _rollout_bindings(authorities: list[Authority], record: Object, *, allow_exclusive: bool = False,
-                      recovering: bool = False, reopening: Object | None = None) -> list[Object]:
+                      recovering: bool = False, reopening: Object | None = None,
+                      allow_normal_activity: bool = False) -> list[Object]:
     rows: list[Object] = []
     for authority, expected in zip(authorities, record["components"], strict=True):
         control = authority.read("control")
@@ -698,9 +699,13 @@ def _rollout_bindings(authorities: list[Authority], record: Object, *, allow_exc
             active = authority.folder / "normal-admissions"
             if os.path.lexists(active):
                 private_directory(active)
-                if next(active.iterdir(), None) is not None:
+                if not allow_normal_activity and next(active.iterdir(), None) is not None:
                     raise Refusal("A new normal admission invalidates the boot checkpoint.")
             admissions_digest = admission_fingerprint(authority, folder=archived)
+        elif recovering and allow_normal_activity:
+            # A verified completed inventory binds the originally absent marker
+            # directory; later normal admissions never reuse its boot authority.
+            admissions_digest = sha256(canonical({"version": 1, "markers": []}))
         else:
             admissions_digest = admission_fingerprint(authority)
         rows.append({"component": authority.component, "epoch": expected["epoch"],
@@ -711,7 +716,9 @@ def _rollout_bindings(authorities: list[Authority], record: Object, *, allow_exc
 
 
 def _verify_rollout(registry: Path, authorities: list[Authority], record: Object, *,
-                    reopening: Object | None = None) -> tuple[Path, Object]:
+                    reopening: Object | None = None, allow_normal_activity: bool = False) -> tuple[Path, Object]:
+    if allow_normal_activity and record["phase"] != "complete":
+        raise Refusal("A pending boot/reopen boundary cannot admit normal activity.")
     folder = _rollout_folder(registry, record["session"], record["checkpoint"])
     registry_digest = sha256(canonical(authorities[0].identity))
     if record["registrySha256"] != registry_digest:
@@ -735,7 +742,7 @@ def _verify_rollout(registry: Path, authorities: list[Authority], record: Object
     recovery = _recovery_journal(folder, record)
     if checkpoint["components"] != _rollout_bindings(
             authorities, record, allow_exclusive=record["phase"] in ("boot-verified", "maintaining"),
-            recovering=recovery is not None, reopening=reopening):
+            recovering=recovery is not None, reopening=reopening, allow_normal_activity=allow_normal_activity):
         raise Refusal("Closed authorities, lock inodes or normal admissions changed after checkpoint.")
     return folder, checkpoint
 
@@ -1092,7 +1099,7 @@ def _recover_boot(request: Request, current_boot: str, deadline: float) -> None:
                 raise
 
 
-def _verify_boot_archive(authority: Authority, record: Object, current_boot: str) -> None:
+def _verify_boot_archive(authority: Authority, record: Object, current_boot: str, *, allow_normal: bool = False) -> None:
     destination = private_directory(authority.folder / "boot-archive" / record["checkpoint"])
     inventory = read(destination / "inventory.json")
     fields(inventory, "version kind component session checkpoint oldBoot newBoot entries")
@@ -1128,10 +1135,12 @@ def _verify_boot_archive(authority: Authority, record: Object, current_boot: str
             raise Refusal("Absent boot archive entry changed.")
     for name in ("writers", "handoffs", "normal-admissions"):
         folder = private_directory(authority.folder / name)
-        if next(folder.iterdir(), None) is not None:
+        if not allow_normal and next(folder.iterdir(), None) is not None:
             raise Refusal("Unexpected post-checkpoint writer/admission remains fenced.")
     if os.path.lexists(authority.folder / "taint.json"):
-        raise Refusal("A new custody taint cannot be cleared by an old boot checkpoint.")
+        taint = authority.read("taint")
+        if not allow_normal or taint["component"] != authority.component or taint["reason"] != "legacy":
+            raise Refusal("A new custody taint cannot be cleared by an old boot checkpoint.")
 
 
 @dataclass
@@ -1816,8 +1825,11 @@ def _verified_complete(registry: Path, authorities: list[Authority], payloads: l
     reopening = _reopen_record(folder, record)
     if record["phase"] != "complete" or reopening is None or reopening["phase"] != "complete":
         raise Refusal("All-four normal completion has no exact durable journal.")
-    _verify_rollout(registry, authorities, record, reopening=reopening)
+    for authority in authorities:
+        _verify_boot_archive(authority, record, record["newBoot"], allow_normal=True)
+    _verify_rollout(registry, authorities, record, reopening=reopening, allow_normal_activity=True)
     for authority, payload, row in zip(authorities, payloads, reopening["components"], strict=True):
+        normal_control(authority)
         verify_acceptance(authority, payload)
         request = _completion_request(registry, record["session"], authority)
         prepared = _finish_inputs(request, authority, payload, gate, -1)
