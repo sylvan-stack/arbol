@@ -1,4 +1,4 @@
-"""Prospective real admission cases; no registration, CLI or execution on import.
+"""Prospective real admission cases and one fixed external caller; no execution on import.
 
 The later admitted outer check supplies a genuinely new registered subject per
 case.  This is not a path/selector exposed to Driver callers.  Inputs are actual
@@ -7,6 +7,476 @@ The external observer holds no subject Session/SH.  Full-body admission is pendi
 """
 
 from __future__ import annotations
+
+
+# This fixed standalone branch precedes EVERY testing/application import. Library
+# mode below remains a prospective case module, never an arbitrary CLI dispatcher.
+def _fixed_guardian_caller() -> int:
+    import _frozen_importlib
+    import sys
+
+    if _frozen_importlib.FrozenImporter.find_spec("os") is None:
+        raise SystemExit("Frozen caller bootstrap unavailable.")
+    import os
+
+    def check(value: bool, message: str) -> None:
+        if not value:
+            raise ValueError(message)
+
+    check(len(sys.argv) == 1 and sys.flags.isolated == 1 and sys.flags.no_site == 1
+          and sys.flags.no_user_site == 1 and sys.flags.safe_path and sys.dont_write_bytecode,
+          "Fixed caller needs zero arguments and the isolated interpreter flags.")
+    check(os.__spec__ is not None and os.__spec__.origin == "frozen"
+          and os.path.__spec__ is not None and os.path.__spec__.origin == "frozen", "Caller os must be frozen.")
+    provider_root = os.path.abspath(sys.executable)
+    for _ in range(4):
+        provider_root = os.path.dirname(provider_root)
+    check(os.path.realpath(provider_root, strict=True) == provider_root, "Provider root is not physical.")
+
+    def inside(value: str) -> bool:
+        return (isinstance(value, str) and os.path.isabs(value)
+                and (os.path.realpath(value) == provider_root
+                     or os.path.realpath(value).startswith(provider_root + os.sep)))
+
+    check(bool(sys.path) and all(inside(value) for value in (sys.executable, sys.prefix, sys.base_prefix,
+                                         sys.exec_prefix, sys.base_exec_prefix, *sys.path)),
+          "Initial interpreter/import prefix escaped the actual provider runtime.")
+    check(os.path.realpath(sys.executable, strict=True)
+          == os.path.realpath(provider_root + "/runtime/python/bin/python3.14", strict=True),
+          "Caller interpreter is not the actual provider interpreter.")
+    info = os.lstat(provider_root)
+    check(info.st_uid == os.getuid() and info.st_mode & 0o7777 == 0o700, "Provider root is not private.")
+    count = 0
+    for parent, directories, files in os.walk(provider_root, followlinks=False):
+        for name in directories + files:
+            count += 1
+            check(count <= 100002, "Provider import inventory exceeded its bound.")
+            path = os.path.join(parent, name)
+            item = os.lstat(path)
+            check(item.st_uid == os.getuid(), "Provider import owner differs.")
+            kind = item.st_mode & 0o170000
+            if kind == 0o120000:
+                check(not os.path.isabs(os.readlink(path)) and inside(os.path.realpath(path, strict=True)),
+                      "Unsafe provider runtime link before bundled stdlib import.")
+            else:
+                check(kind in (0o100000, 0o040000), "Unsafe provider runtime object before imports.")
+
+    # The complete bundled tree was physically confined before these bundled
+    # standard-library imports; application code remains unavailable until M/D.
+    import base64
+    import fcntl
+    import hashlib
+    import json
+    import re
+    import select
+    import signal
+    import stat
+    import time
+    import unicodedata
+    from pathlib import Path
+    from typing import Any
+    from unittest.mock import patch
+
+    def hashed(raw: bytes) -> str:
+        return hashlib.sha256(raw).hexdigest()
+
+    def regular(path: str, limit: int, *, mode: int | None = None) -> bytes:
+        check(os.path.realpath(os.path.dirname(path), strict=True) == os.path.dirname(path), "Nonphysical file parent.")
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        try:
+            before = os.fstat(descriptor)
+            check(stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid() and before.st_size <= limit
+                  and (mode is None or stat.S_IMODE(before.st_mode) == mode), "Unsafe fixed caller input file.")
+            raw = bytearray()
+            while len(raw) <= limit:
+                part = os.read(descriptor, min(65536, limit + 1 - len(raw)))
+                if not part:
+                    break
+                raw.extend(part)
+            after, named = os.fstat(descriptor), os.lstat(path)
+            check(len(raw) <= limit and len(raw) == before.st_size
+                  and (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_mode)
+                  == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_mode)
+                  and (after.st_dev, after.st_ino) == (named.st_dev, named.st_ino), "Fixed caller input changed.")
+            return bytes(raw)
+        finally:
+            os.close(descriptor)
+
+    def pairs(values: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in values:
+            check(key not in result, "Duplicate caller JSON field.")
+            result[key] = value
+        return result
+
+    def parsed(raw: bytes) -> dict[str, Any]:
+        value = json.loads(raw.decode("utf-8", "strict"), object_pairs_hook=pairs,
+                           parse_constant=lambda _: (_ for _ in ()).throw(ValueError("Nonfinite caller JSON.")))
+        check(isinstance(value, dict), "Caller expected one object.")
+        return dict(value)
+
+    def keys(value: dict[str, Any], names: str) -> None:
+        check(set(value) == set(names.split()), "Unknown or missing fixed caller field.")
+
+    def encoded(value: dict[str, Any]) -> bytes:
+        return (json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+                + "\n").encode()
+
+    def relative(name: Any) -> str:
+        check(isinstance(name, str) and bool(name) and "\\" not in name and "\0" not in name
+              and not name.startswith("/") and all(part not in ("", ".", "..") for part in name.split("/")),
+              "Unsafe provider relative name.")
+        return str(name)
+
+    manifest_raw = regular(provider_root + "/driver-payload-manifest.json", 32 * 1024 * 1024, mode=0o600)
+    descriptor_raw = regular(provider_root + "/driver-capability.json", 4096, mode=0o600)
+    manifest, declaration = parsed(manifest_raw), parsed(descriptor_raw)
+    keys(manifest, "version kind files")
+    keys(declaration, "version kind component build source interpreter entry helpers importRoots payloadManifestSha256 capabilities")
+    check(type(manifest["version"]) is int and manifest["version"] == 1
+          and manifest["kind"] == "driver-payload-manifest" and isinstance(manifest["files"], list)
+          and len(manifest["files"]) <= 100000 and manifest_raw == encoded(manifest), "Invalid canonical provider M.")
+    check(type(declaration["version"]) is int and declaration["version"] == 1
+          and declaration["component"] == "arbol" and declaration["payloadManifestSha256"] == hashed(manifest_raw)
+          and descriptor_raw == encoded(declaration)
+          and declaration["interpreter"] == "runtime/python/bin/python3.14", "Invalid canonical provider D.")
+    inventory: list[dict[str, Any]] = []
+    names: set[str] = set()
+    for parent, directories, files in os.walk(provider_root, followlinks=False):
+        for name in directories + files:
+            path = os.path.join(parent, name)
+            local = os.path.relpath(path, provider_root).replace(os.sep, "/")
+            if local in ("driver-payload-manifest.json", "driver-capability.json"):
+                continue
+            check(len(inventory) < 100000 and unicodedata.normalize("NFC", local) not in names,
+                  "Ambiguous or excessive provider inventory.")
+            names.add(unicodedata.normalize("NFC", local))
+            item = os.lstat(path)
+            row: dict[str, Any] = {"path": local, "mode": stat.S_IMODE(item.st_mode),
+                                   "size": 0, "sha256": None, "target": None}
+            if stat.S_ISDIR(item.st_mode):
+                row["type"] = "directory"
+            elif stat.S_ISREG(item.st_mode):
+                raw = regular(path, 1024 * 1024 * 1024)
+                row.update(type="file", size=len(raw), sha256=hashed(raw))
+            else:
+                check(stat.S_ISLNK(item.st_mode), "Unexpected provider object.")
+                target = os.readlink(path)
+                raw_target = target.encode("utf-8", "strict")
+                check(bool(raw_target) and len(raw_target) <= 4096 and not os.path.isabs(target)
+                      and inside(os.path.realpath(path, strict=True)), "Unconfined provider link.")
+                row.update(type="symlink", size=len(raw_target), sha256=hashed(raw_target), target=target)
+            inventory.append(row)
+    inventory.sort(key=lambda row: str(row["path"]).encode())
+    check(inventory == manifest["files"], "Actual complete provider inventory differs from M.")
+    # Reject directory-link traversal cycles before any application import.
+    nodes = {"", *(row["path"] for row in inventory if row["type"] == "directory")}
+    edges: dict[str, set[str]] = {str(name): set() for name in nodes}
+    for row in inventory:
+        path = Path(provider_root) / row["path"]
+        link_target: str | None = None
+        if row["type"] == "directory":
+            link_target = row["path"]
+        elif row["type"] == "symlink" and path.resolve(strict=True).is_dir():
+            link_target = path.resolve(strict=True).relative_to(provider_root).as_posix()
+            link_target = "" if link_target == "." else link_target
+        if link_target is not None:
+            parent = Path(row["path"]).parent.as_posix()
+            parent = "" if parent == "." else parent
+            check(parent in edges and link_target in edges, "Invalid provider link graph.")
+            edges[parent].add(link_target)
+    degree = {name: 0 for name in edges}
+    for targets in edges.values():
+        for target in targets:
+            degree[target] += 1
+    pending = [name for name, degree_value in degree.items() if degree_value == 0]
+    visited = 0
+    while pending:
+        name = pending.pop()
+        visited += 1
+        for target in edges[name]:
+            degree[target] -= 1
+            if degree[target] == 0:
+                pending.append(target)
+    check(visited == len(nodes), "Provider directory-link cycle.")
+    check(isinstance(declaration["importRoots"], list) and bool(declaration["importRoots"]), "Missing provider import roots.")
+    roots = [os.path.join(provider_root, relative(name)) for name in declaration["importRoots"]]
+    check(all(inside(path) and os.path.isdir(path) for path in roots), "Unconfined provider import root.")
+    sys.path[:] = roots
+    control: list[int] = []
+    child: Any = None
+    child_owner: dict[str, Any] | None = None
+    guardian: Any = None
+    outputs: list[str] = []
+    case_deadline = time.monotonic() + 60
+
+    def output_bounds() -> None:
+        check(time.monotonic() < case_deadline and all(os.stat(path).st_size <= 1024 * 1024 for path in outputs),
+              "Fixed caller deadline/public output bound exceeded.")
+
+    def frame_in(seconds: float) -> dict[str, Any]:
+        deadline = min(case_deadline, time.monotonic() + seconds)
+        data = bytearray()
+        while len(data) <= 16384:
+            output_bounds()
+            remaining = deadline - time.monotonic()
+            check(remaining > 0, "Caller control timed out.")
+            if not select.select([control[0]], [], [], min(.05, remaining))[0]:
+                continue
+            part = os.read(control[0], 1)
+            check(bool(part), "Unexpected caller-control EOF; not a death observation.")
+            data.extend(part)
+            if part == b"\n":
+                check(len(data) <= 16384, "Oversized caller frame.")
+                return parsed(bytes(data))
+        raise ValueError("Oversized caller control frame.")
+
+    def frame_out(value: dict[str, Any]) -> None:
+        raw = encoded(value)
+        check(len(raw) <= 16384, "Oversized caller output frame.")
+        deadline = min(case_deadline, time.monotonic() + 5)
+        view = memoryview(raw)
+        while view:
+            output_bounds()
+            check(time.monotonic() < deadline, "Caller output backpressure timed out.")
+            if select.select([], [control[1]], [], .05)[1]:
+                count = os.write(control[1], view)
+                check(count > 0, "Caller output closed.")
+                view = view[count:]
+
+    def directory(path: str) -> dict[str, Any]:
+        check(os.path.realpath(path, strict=True) == path, "Subject path is not physical.")
+        item = os.lstat(path)
+        check(stat.S_ISDIR(item.st_mode) and item.st_uid == os.getuid()
+              and stat.S_IMODE(item.st_mode) == 0o700, "Subject directory is not exclusively private.")
+        return {"path": path, "device": item.st_dev, "inode": item.st_ino}
+
+    def context_token(value: Any) -> bool:
+        if not isinstance(value, str) or re.fullmatch(r"[A-Za-z0-9_-]{43}", value, re.ASCII) is None:
+            return False
+        raw = base64.urlsafe_b64decode(value + "=")
+        return len(raw) == 32 and base64.urlsafe_b64encode(raw).decode().rstrip("=") == value
+
+    try:
+        for descriptor in (0, 1, 2):
+            check(stat.S_ISFIFO(os.fstat(descriptor).st_mode), "Caller control must be independently owned pipes.")
+            duplicate = fcntl.fcntl(descriptor, fcntl.F_DUPFD_CLOEXEC, 3)
+            check(duplicate >= 3 and not os.get_inheritable(duplicate), "Caller control descriptor not isolated.")
+            control.append(duplicate)
+        initial = frame_in(10)
+        keys(initial, "version kind case window subjectSha256")
+        check(type(initial["version"]) is int and initial["version"] == 1 and initial["kind"] == "guardian-class-case"
+              and isinstance(initial["case"], str) and re.fullmatch(r"[0-9a-f]{32}", initial["case"], re.ASCII) is not None
+              and initial["window"] in ("G-ready-return", "G-go-return", "G-started-return")
+              and isinstance(initial["subjectSha256"], str)
+              and re.fullmatch(r"[0-9a-f]{64}", initial["subjectSha256"], re.ASCII) is not None,
+              "Unsupported closed caller case grammar.")
+        check(not select.select([control[0]], [], [], 0)[0], "Extra initial caller frame.")
+        cwd = os.path.realpath(os.getcwd(), strict=True)
+        subject_raw = regular(cwd + "/guardian-class-subject.json", 16384, mode=0o600)
+        check(hashed(subject_raw) == initial["subjectSha256"], "Fixed subject preparation hash differs.")
+        subject = parsed(subject_raw)
+        keys(subject, "version kind case cwd registry fixtureRoot outputRoot source tuples build acceptanceSha256 boot")
+        check(type(subject["version"]) is int and subject["version"] == 1
+              and subject["kind"] == "abr38-guardian-class-subject" and subject["case"] == initial["case"]
+              and subject["cwd"] == directory(cwd) and subject["registry"] == directory(cwd + "/builds")
+              and subject["fixtureRoot"] == directory(cwd + "/fixtures")
+              and subject["outputRoot"] == directory(cwd + "/guardian-class-output"),
+              "Wrong actual subject preparation identity.")
+        check(not os.listdir(cwd + "/guardian-class-output"), "Caller output root is not fresh.")
+        own_entry = os.path.realpath(__file__, strict=True)
+        frozen_root = os.path.dirname(os.path.dirname(os.path.dirname(own_entry)))
+        check(own_entry == frozen_root + "/tests/top/test_top_driver_state_admission.py", "Not the one fixed caller entry.")
+        source = subject["source"]
+        keys(source, "repository branch commit tree porcelain entrySha256")
+        check(source["repository"] == frozen_root and source["porcelain"] == ""
+              and isinstance(source["branch"], str) and bool(source["branch"])
+              and all(isinstance(source[key], str) and re.fullmatch(r"[0-9a-f]{40}", source[key], re.ASCII)
+                      for key in ("commit", "tree"))
+              and source["entrySha256"] == hashed(regular(own_entry, 1024 * 1024)),
+              "Pinned frozen committed caller input differs.")
+        # The no-SH outer observer independently reads/rechecks the actual Git
+        # facts before Popen; this caller never fabricates/repairs them or runs a
+        # Git/tool/module chosen by control data. Its sole test closure is itself.
+        check(isinstance(subject["tuples"], list) and len(subject["tuples"]) == 5,
+              "Missing exact prepared tuple group before application import.")
+        provider_pins = [row for row in subject["tuples"] if isinstance(row, dict) and row.get("component") == "arbol"]
+        check(len(provider_pins) == 1, "Missing original prepared provider pin.")
+        provider_pin = provider_pins[0]
+        keys(provider_pin, "component build sourceCommit sourceTree payloadSha256 manifestSha256")
+        check(provider_pin == {"component": "arbol", "build": declaration["build"],
+                              "sourceCommit": declaration["source"]["commit"],
+                              "sourceTree": declaration["source"]["tree"], "payloadSha256": hashed(descriptor_raw),
+                              "manifestSha256": hashed(manifest_raw)},
+              "Provider M/D differs from the independently hash-bound preparation before application import.")
+        from arbol_builds.driver_admission import (
+            Authority,
+            normal_context,
+            read,
+            read_bytes,
+            reconcile,
+            without_authority,
+        )
+        from arbol_builds.driver_payload import _registered_payload, load, pin_payloads, resolve_candidate
+        from arbol_builds.driver_process import Frames, Guardian, boot_uuid, matches, process_identity
+
+        actual_provider = load(Path(provider_root), "arbol", declaration["build"])
+        module_file = sys.modules[Guardian.__module__].__file__
+        check(isinstance(module_file, str), "Actual Guardian has no physical module file.")
+        assert isinstance(module_file, str)
+        check(actual_provider.digest == hashed(descriptor_raw)
+              and str(Path(module_file).resolve()) == provider_root + "/src/arbol_builds/driver_process.py",
+              "Caller did not import the exact packaged Guardian.")
+        check(subject["boot"] == boot_uuid(), "Actual subject boot differs.")
+        registry = Path(cwd) / "builds"
+        scope = resolve_candidate(registry, "arbol-codex-driver", subject["build"], subject["acceptanceSha256"])
+        check(scope.gate.provider == actual_provider and isinstance(subject["tuples"], list)
+              and len(subject["tuples"]) == 5, "Wrong complete actual subject tuple group.")
+        payloads = [scope.gate.provider, *scope.producers]
+        expected: dict[str, dict[str, Any]] = {}
+        for row in subject["tuples"]:
+            keys(row, "component build sourceCommit sourceTree payloadSha256 manifestSha256")
+            check(row["component"] not in expected, "Duplicate real tuple pin.")
+            expected[row["component"]] = row
+        check(set(expected) == {payload.component for payload in payloads}, "Missing actual component tuple.")
+        for payload in payloads:
+            row = expected[payload.component]
+            record, current = _registered_payload(registry, payload.component, payload.build)
+            check(current == payload and record["source"]["uncommittedChanges"] is False
+                  and row == {"component": payload.component, "build": payload.build,
+                              "sourceCommit": payload.descriptor["source"]["commit"],
+                              "sourceTree": payload.descriptor["source"]["tree"], "payloadSha256": payload.digest,
+                              "manifestSha256": payload.descriptor["payloadManifestSha256"]}, "Actual immutable tuple pin differs.")
+        state = Path(cwd) / "fixtures/guardian-class-state"
+        check(not os.path.lexists(state), "Caller cannot reuse or pre-read an existing State.")
+        for name in ("public.stdout", "public.stderr"):
+            outputs.append(cwd + "/guardian-class-output/" + name)
+        null = os.open(os.devnull, os.O_RDONLY | os.O_CLOEXEC)
+        public_fds: list[int] = []
+        try:
+            for path in outputs:
+                public_fds.append(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600))
+            for source_fd, destination in ((null, 0), (public_fds[0], 1), (public_fds[1], 2)):
+                os.dup2(source_fd, destination)
+        finally:
+            os.close(null)
+            for descriptor in public_fds:
+                os.close(descriptor)
+        check(all(not os.get_inheritable(descriptor) for descriptor in control), "Control leaked into child inheritance.")
+        authority = Authority(registry, "arbol-codex-driver")
+        with authority.mutex():
+            custody = reconcile(authority, persist_unknown=False, candidate=scope)
+            check(custody.resolved and not custody.writers and not custody.handoffs,
+                  "Caller subject is not new healthy actual custody.")
+        prepared_child: Any = None
+        boundary_seen = False
+
+        def prepared(process: Any, identity: dict[str, Any]) -> None:
+            nonlocal child, child_owner, prepared_child
+            check(prepared_child is None and process.pid == identity["pid"]
+                  and matches(identity, parent=os.getpid()), "Actual prepared child identity differs.")
+            child, child_owner, prepared_child = process, dict(identity), process
+
+        def boundary(window: str, value: dict[str, Any]) -> None:
+            nonlocal boundary_seen
+            if window != initial["window"]:
+                return
+            check(not boundary_seen and child_owner is not None and guardian is not None,
+                  "Repeated or unowned caller boundary.")
+            boundary_seen = True
+            assert child_owner is not None
+            context_path = authority.folder / "handoffs" / (guardian.handoff + ".context.json")
+            raw = read_bytes(context_path)
+            context = parsed(raw)
+            normal_context(context)
+            actual_caller = process_identity(os.getpid())
+            check(context["parent"] == {"writer": guardian.writer, **actual_caller}
+                  and context["process"] == child_owner and context["entry"] == scope.producer("arbol-codex-driver").descriptor["entry"]
+                  and value["contextSha256"] == hashed(raw) and context["registry"] == str(registry)
+                  and all(context_token(context[key]) for key in ("invocation", "writer", "handoff", "nonce")),
+                  "Boundary does not bind its real context, child and actual caller.")
+            with authority.mutex():
+                root = read(authority.folder / "writers" / guardian.invocation / (guardian.writer + ".json"))
+                check(root["phase"] == "active" and root["pid"] == actual_caller["pid"]
+                      and root["startedAt"] == actual_caller["startedAt"], "Root transfer was already terminal.")
+            frame_out({"version": 1, "kind": "guardian-class-ready", "case": initial["case"], "window": window,
+                       "invocation": guardian.invocation, "writer": guardian.writer, "epoch": guardian.epoch,
+                       "handoff": context["handoff"], "contextSha256": hashed(raw),
+                       "caller": actual_caller, "child": child_owner})
+            frame_out({"version": 1, "kind": "guardian-class-boundary", "case": initial["case"], "window": window,
+                       "contextSha256": hashed(raw), "handoff": context["handoff"],
+                       "caller": actual_caller, "child": child_owner})
+            # No kill command: a death case is externally observed SIGKILL only.
+            continuation = frame_in(10)
+            keys(continuation, "version kind case command")
+            check(continuation == {"version": 1, "kind": "guardian-class-control", "case": initial["case"],
+                                   "command": "continue"} and type(continuation["version"]) is int,
+                  "Unsupported caller control command.")
+            check(not select.select([control[0]], [], [], 0)[0], "Extra caller continuation frame.")
+
+        original_send, original_receive = Frames.send, Frames.receive
+
+        def actual_send(frames: Frames, value: dict[str, Any]) -> None:
+            original_send(frames, value)
+            if value["type"] == "go":
+                boundary("G-go-return", value)
+
+        def actual_receive(frames: Frames) -> dict[str, Any]:
+            value = original_receive(frames)
+            if value["type"] == "ready":
+                boundary("G-ready-return", value)
+            elif value["type"] == "started":
+                boundary("G-started-return", value)
+            return value
+
+        with pin_payloads(registry, payloads, candidate=scope):
+            guardian = Guardian.admit(authority, scope.producer("arbol-codex-driver"), candidate=scope)
+            with patch.object(Frames, "send", actual_send), patch.object(Frames, "receive", actual_receive):
+                guardian.spawn_main(["--state-dir", str(state), "subscriptions", "identity", "chatgpt"],
+                                    environment=without_authority(dict(os.environ)), prepared=prepared)
+            check(boundary_seen and guardian.transferred and child is not None, "Positive control did not really transfer.")
+            while child.poll() is None:
+                output_bounds()
+                time.sleep(.01)
+            check(child.wait(timeout=1) == 0, "Positive-control actual child failed.")
+            output_bounds()
+            with authority.mutex():
+                custody = reconcile(authority, persist_unknown=False, candidate=scope)
+                check(custody.resolved and custody.active == custody.pending == 0
+                      and all(row["phase"] == "terminal" for row in custody.writers), "Positive custody did not actually finish.")
+                descriptor = authority.lease(exclusive=True)
+                os.close(descriptor)
+            # Positive control has no third protocol frame; observer reads actual
+            # exit/status/custody and separate public files after reaping us.
+            return 0
+    except BaseException:
+        if guardian is not None and not guardian.transferred:
+            try:
+                guardian.abort()
+            except BaseException:
+                pass  # Preserve the existing unresolved subject; never repair it.
+        if child is not None:
+            try:
+                if child.poll() is None and child_owner is not None and matches(child_owner):
+                    os.kill(child_owner["pid"], signal.SIGCONT)
+                    os.kill(child_owner["pid"], signal.SIGTERM)
+                child.wait(timeout=20)
+            except BaseException:
+                pass
+        if len(control) == 3:
+            os.write(control[2], b"Fixed Guardian caller failed; preserve its subject and raw evidence.\n")
+        raise
+    finally:
+        for descriptor in control:
+            os.close(descriptor)
+
+
+if __name__ == "__main__":
+    raise SystemExit(_fixed_guardian_caller())
+
+# Imports intentionally follow the standalone exit: the caller never imports
+# testing modules or widens the verified provider's declared importRoots.
+# ruff: noqa: E402
 
 import os
 import signal
@@ -491,8 +961,7 @@ def begin_vs_independently_admitted_write(subject: AdmissionSubject) -> None:
         child.cleanup()
 
 
-# Late ready/go/started Guardian-parent SIGKILL remains an explicit unimplemented
-# trigger until an admitted independent subject controller route is established.
-# Killing this external whole-check controller/Suite, arbitrary -c/module/path
-# dispatch, timing-only polling, orderly error-as-death and synthetic terminal
-# metadata are not substitutes.  Step4 is not complete on these bodies alone.
+# Historical partial4824481 had no supported late parent-death caller. Published
+# DRV6e1 now permits the separate fixed caller above; its outer case/oracle bodies
+# and complete independent admission remain current7.2/47/53 work. No runtime
+# evidence or completion follows from authoring this prospective source.
