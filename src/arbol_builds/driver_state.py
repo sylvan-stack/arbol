@@ -69,7 +69,14 @@ from .driver_payload import (
     verify_acceptance,
     verify_gate,
 )
-from .driver_process import Guardian, boot_uuid, request_cancellation, supervise
+from .driver_process import (
+    AdministrativeOutput,
+    Guardian,
+    boot_uuid,
+    request_cancellation,
+    run_administrative,
+    supervise,
+)
 from .launcher import BUILD_PATTERN, Record, launch, open_use_guard, standard_descriptors, write_all
 
 
@@ -1426,3 +1433,27 @@ def prepare_execute(request: Request) -> Iterator[Prepared]:
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
+
+
+def supervise_execute(prepared: Prepared) -> AdministrativeOutput:
+    """Invoke no child until exact durable context/request/pending tuples recheck."""
+    if prepared.cached_result is not None:
+        raise Refusal("Validate the durable result instead of replaying a completed child.")
+
+    def check() -> None:
+        authority = prepared.authority
+        with authority.mutex():
+            control, receipt_digest = _closed_attempt(authority, prepared.request, prepared.payload,
+                                                      prepared.gate, prepared.descriptor)
+            deployment = _rollout_record(authority.shared / "deployment.json")
+            if deployment is not None and deployment["registrySha256"] != sha256(canonical(authority.identity)):
+                raise Refusal("Administrative registry identity changed.")
+            if (control["epoch"] != prepared.context["epoch"] or receipt_digest != prepared.context["receiptSha256"]
+                    or read(prepared.context_path) != prepared.context
+                    or read(prepared.folder / "contexts" / (prepared.context["attempt"] + ".request.json")) != prepared.binding
+                    or read(prepared.folder / "operation.json") != prepared.operation):
+                raise Refusal("Administrative attempt changed before spawn.")
+            request_binding(prepared.binding, prepared.context)
+
+    return run_administrative(prepared.payload, prepared.context, prepared.binding, prepared.descriptor,
+                              prepared.context_path, check)

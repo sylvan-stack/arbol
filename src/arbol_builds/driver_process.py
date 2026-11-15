@@ -11,6 +11,7 @@ import ctypes
 import errno
 import os
 import re
+import selectors
 import signal
 import socket
 import struct
@@ -21,6 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
+from pathlib import Path
 from types import FrameType
 from typing import TYPE_CHECKING, Any, NoReturn
 
@@ -688,3 +690,156 @@ def request_cancellation(authority: Authority, custody: Custody, sent: set[tuple
             except ProcessLookupError:
                 pass
         sent.add(key)
+
+
+@dataclass(frozen=True)
+class AdministrativeOutput:
+    stdout: bytes
+    returncode: int
+
+
+def administrative_argv(payload: Payload, context: Object, binding: Object) -> list[str]:
+    """Only the four agreed administrative rows, never caller-provided child argv."""
+    from .driver_payload import request_binding
+
+    request_binding(binding, context)
+    if (payload.component != context["component"] or payload.digest != context["payloadSha256"]
+            or payload.build != binding["build"]):
+        refuse()
+    receipt = str(Path(context["registry"]) / context["component"] / ".driver-admission" / "maintenance.json")
+    common = [*payload.prefix, "--state-dir", context["stateDirectory"], "state"]
+    tail = ["--confirm-quiescent", "--maintenance", receipt, "--backup", binding["backup"]]
+    operation = context["operation"]
+    if operation == "upgrade":
+        return [*common, "upgrade", "--from-format", "1", *tail]
+    if operation == "identity-reset":
+        return [*common, "identity-reset", *tail]
+    if operation == "restore":
+        return [*common, "restore", "--source", binding["source"], "--backup", binding["backup"],
+                "--confirm-quiescent", "--maintenance", receipt]
+    if operation == "identity-recover":
+        return [*common, "identity-recover", "--subscription", context["subscription"], "--retire", *tail]
+    refuse()
+
+
+def _signal_administrative(child: subprocess.Popen[bytes], owner: Object | None, number: int) -> None:
+    # No group/descendant traversal or unverified kill. An exited unreaped child
+    # belongs to Popen's wait handle; a live signal still requires exact start.
+    if child.poll() is None and owner is not None and matches(owner):
+        try:
+            os.kill(owner["pid"], number)
+        except ProcessLookupError:
+            pass
+
+
+def run_administrative(payload: Payload, context: Object, binding: Object, descriptor: int,
+                       context_path: Path, check: Callable[[], None]) -> AdministrativeOutput:
+    """Retain parent EX and pass only a duplicate of that same locked OFD.
+
+    Administrative JSON is privately captured and bounded, not relayed. The
+    normal launcher/TTY path does not use this offline-only supervisor. Every
+    failure leaves the already-published attempt/control unchanged for recovery.
+    """
+    from .driver_admission import MAINTENANCE_CONTEXT, MAINTENANCE_FD
+
+    if descriptor < 3 or os.get_inheritable(descriptor):
+        refuse()
+    argv = administrative_argv(payload, context, binding)
+    # Fail unsupported process identity before spawn, never after state effects
+    # merely because a coarse PID-only fallback could not be established.
+    process_identity(os.getpid())
+    duplicate = -1
+    child: subprocess.Popen[bytes] | None = None
+    owner: Object | None = None
+    received: set[int] = set()
+    previous: dict[int, Any] = {}
+    interrupted = overflow = False
+    cancellation: float | None = None
+    killed: float | None = None
+    exited: float | None = None
+    stdout = bytearray()
+    totals = {"stdout": 0, "stderr": 0}
+
+    def requested(number: int, frame: FrameType | None) -> None:
+        received.add(number)
+
+    try:
+        for signal_number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT):
+            prior = signal.getsignal(signal_number)
+            if prior != signal.SIG_IGN:
+                previous[signal_number] = signal.signal(signal_number, requested)
+        check()
+        if received:
+            refuse()
+        duplicate = os.dup(descriptor)
+        if duplicate < 3:
+            refuse()
+        os.set_inheritable(duplicate, True)
+        environment = {**without_authority(os.environ.copy()), MAINTENANCE_FD: str(duplicate),
+                       MAINTENANCE_CONTEXT: str(context_path)}
+        child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 env=environment, pass_fds=(duplicate,), close_fds=True, process_group=0)
+        os.close(duplicate)
+        duplicate = -1
+        try:
+            owner = process_identity(child.pid)
+        except (OSError, ValueError, RuntimeError):
+            if child.poll() is None:
+                # No trustworthy signal target exists. Close our copies only;
+                # the child's inherited EX and durable pending attempt survive.
+                raise
+        assert child.stdout is not None and child.stderr is not None
+        with selectors.DefaultSelector() as selector:
+            for name, stream in (("stdout", child.stdout), ("stderr", child.stderr)):
+                os.set_blocking(stream.fileno(), False)
+                selector.register(stream, selectors.EVENT_READ, name)
+            while selector.get_map() or child.poll() is None:
+                now = time.monotonic()
+                if received:
+                    interrupted = True
+                    pending_signals = sorted(received)
+                    received.clear()
+                    for requested_number in pending_signals:
+                        _signal_administrative(child, owner, requested_number)
+                    if cancellation is None:
+                        cancellation = now
+                if overflow and cancellation is None:
+                    _signal_administrative(child, owner, signal.SIGTERM)
+                    cancellation = now
+                if cancellation is not None and now - cancellation >= 5 and child.poll() is None and killed is None:
+                    _signal_administrative(child, owner, signal.SIGKILL)
+                    killed = now
+                if killed is not None and now - killed >= 5 and child.poll() is None:
+                    refuse()  # Kernel-stuck/unknown child keeps its lease; no reopen.
+                if child.poll() is not None:
+                    exited = now if exited is None else exited
+                    if selector.get_map() and now - exited >= 5:
+                        refuse()  # A retained pipe is not a helper-lifetime oracle.
+                for event, _mask in selector.select(0.05):
+                    try:
+                        block = os.read(event.fd, 65536)
+                    except BlockingIOError:
+                        continue
+                    if not block:
+                        selector.unregister(event.fileobj)
+                        continue
+                    name = event.data
+                    totals[name] = min(LIMIT + 1, totals[name] + len(block))
+                    if totals[name] > LIMIT:
+                        overflow = True
+                    elif name == "stdout" and not overflow:
+                        stdout.extend(block)
+            returncode = child.wait()
+        if interrupted or overflow or returncode != 0 or not stdout:
+            refuse()
+        return AdministrativeOutput(bytes(stdout), returncode)
+    finally:
+        if duplicate >= 0:
+            os.close(duplicate)
+        if child is not None:
+            for pipe in (child.stdout, child.stderr):
+                if pipe is not None:
+                    pipe.close()
+        for restore_number, prior in previous.items():
+            signal.signal(restore_number, prior)
+        # Never LOCK_UN or close the caller's original exclusive description.
