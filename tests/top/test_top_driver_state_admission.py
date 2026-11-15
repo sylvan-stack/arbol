@@ -500,7 +500,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1623,6 +1623,50 @@ def complete_main_admission_inventory(subjects: Mapping[str, AdmissionSubject], 
         guardian_class_window(subjects[window_class + "-positive"], frozen, window=window_class, kill=False)
 
 
+def _fixed_sleep_image() -> Object:
+    """Bounded fixed root-owned OS image; never an owned-fixture read or dispatch."""
+    path = Path("/bin/sleep")
+    require(os.uname().sysname == "Darwin" and path.resolve(strict=True) == path
+            and path.parent.resolve(strict=True) == path.parent,
+            "Fixed supported physical OS executable is unavailable.")
+    end, limit = time.monotonic() + 2, 16 * 1024 * 1024
+    file_keys = ("st_dev", "st_ino", "st_mode", "st_uid", "st_nlink", "st_size", "st_mtime_ns")
+    parent_keys = ("st_dev", "st_ino", "st_mode", "st_uid", "st_mtime_ns")
+    with ExitStack() as owned:
+        parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+        owned.callback(os.close, parent_fd)
+        parent = os.fstat(parent_fd)
+        require(stat.S_ISDIR(parent.st_mode) and parent.st_uid == 0 and not parent.st_mode & 0o022,
+                "Unsafe fixed root-owned OS executable directory.")
+        fd = os.open("sleep", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=parent_fd)
+        owned.callback(os.close, fd)
+        before = os.fstat(fd)
+        require(stat.S_ISREG(before.st_mode) and before.st_uid == 0 and before.st_nlink == 1
+                and not before.st_mode & 0o022 and bool(before.st_mode & 0o111)
+                and 0 < before.st_size <= limit, "Unsafe fixed root-owned OS executable image.")
+        raw = bytearray()
+        for _ in range(limit // 65536 + 2):
+            require(time.monotonic() < end, "Fixed OS executable observation exceeded its bound.")
+            part = os.read(fd, min(65536, limit + 1 - len(raw)))
+            if not part:
+                break
+            raw.extend(part)
+            require(len(raw) <= limit, "Fixed OS executable image exceeds its bound.")
+        else:
+            raise ObservationFailed("Fixed OS executable read-count bound exceeded.")
+        after, named = os.fstat(fd), os.stat("sleep", dir_fd=parent_fd, follow_symlinks=False)
+        parent_after, parent_named = os.fstat(parent_fd), path.parent.lstat()
+        require(len(raw) == before.st_size and time.monotonic() < end
+                and all(getattr(before, key) == getattr(after, key) == getattr(named, key) for key in file_keys)
+                and all(getattr(parent, key) == getattr(parent_after, key) == getattr(parent_named, key) for key in parent_keys),
+                "Fixed OS executable or parent changed during original-fd/named/hash observation.")
+        return {"path": str(path), "device": before.st_dev, "inode": before.st_ino, "uid": 0,
+                "mode": stat.S_IMODE(before.st_mode), "nlink": 1, "size": before.st_size,
+                "mtimeNs": before.st_mtime_ns, "sha256": digest(bytes(raw)),
+                "parent": {"path": str(path.parent), "device": parent.st_dev, "inode": parent.st_ino,
+                           "uid": 0, "mode": stat.S_IMODE(parent.st_mode), "mtimeNs": parent.st_mtime_ns}}
+
+
 def provider_stale_owner_refuses(controller: WholeCheckController, baseline: Baseline, *,
                                   component: str, provider_source_sha256: str) -> Object:
     """Distinct NEGATIVE inspect-result fault at the real shared signal boundary.
@@ -1652,7 +1696,7 @@ def provider_stale_owner_refuses(controller: WholeCheckController, baseline: Bas
                                    provider_process.SignalBridge.prepared, provider_process.supervise)),
             "Actual provider class/public call path differs from the admitted sealed source.")
     executable = Path("/bin/sleep")
-    tool = read_image(executable, limit=16 * 1024 * 1024, private=False)
+    tool = _fixed_sleep_image()
     info = executable.lstat()
     require(executable.resolve(strict=True) == executable and stat.S_ISREG(info.st_mode)
             and info.st_uid == 0 and not info.st_mode & 0o022 and bool(info.st_mode & 0o111)
@@ -1666,7 +1710,7 @@ def provider_stale_owner_refuses(controller: WholeCheckController, baseline: Bas
     terminal: provider_process.Terminal | None = None
     original: BaseException | None = None
     observation: Object = {"kind": "abr38-provider-stale-owner-negative-read-boundary",
-        "component": component, "providerSource": source.evidence(), "harmlessProgram": tool.evidence(),
+        "component": component, "providerSource": source.evidence(), "harmlessProgram": tool,
         "publicRouteExecuted": False, "kernelPidReuseObserved": False, "signalAttempts": attempts}
 
     def remaining() -> float:
@@ -1683,8 +1727,9 @@ def provider_stale_owner_refuses(controller: WholeCheckController, baseline: Bas
         # process or provider context is attached to these two fixed children.
         for name in ("owned-target", "unrelated-owned-survivor"):
             remaining()
-            require(read_image(executable, limit=16 * 1024 * 1024, private=False) == tool,
+            require(_fixed_sleep_image() == tool,
                     "Fixed harmless program changed before spawn.")
+            remaining()
             process = subprocess.Popen([str(executable), "60"], env=without_authority({}),
                 cwd=controller.workspace.registry, close_fds=True, start_new_session=True,
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
