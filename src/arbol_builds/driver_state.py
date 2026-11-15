@@ -11,8 +11,8 @@ import re
 import signal
 import stat
 import sys
-from collections.abc import Callable
-from contextlib import ExitStack
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +24,7 @@ from .driver_admission import (
     Refusal,
     canonical,
     canonical_uuid,
+    decode,
     fields,
     normal_control,
     physical,
@@ -32,6 +33,7 @@ from .driver_admission import (
     publish_bytes,
     read,
     read_bytes,
+    reconcile,
     sha256,
     token,
     valid_hash,
@@ -41,6 +43,7 @@ from .driver_admission import (
 from .driver_payload import (
     DESCRIPTOR,
     SUBTREE,
+    Gate,
     Payload,
     load,
     pin_payloads,
@@ -381,3 +384,98 @@ def provider_entry(descriptor: Object) -> None:
         _maintenance_error()
         raise SystemExit(1) from None
     raise SystemExit(0)
+
+
+@contextmanager
+def _component(request: Request) -> Iterator[tuple[Authority, Payload, Gate]]:
+    """Exact qualified payload only; source declarations grant no authority."""
+    authority = Authority(request.registry, request.component)
+    gate = verify_gate(request.registry)
+    if not Path(__file__).resolve().is_relative_to(gate.provider.root):
+        raise Refusal("Use the verified immutable maintenance provider.")
+    qualification = authority.read("qualification")
+    if qualification["component"] != request.component:
+        raise Refusal("Qualification component mismatch.")
+    digest = qualification["acceptanceSha256"]
+    raw = read_bytes(authority.shared / "acceptances" / (digest + ".json"))
+    acceptance = decode(raw)
+    producer_digest = acceptance.get("producerPayloadSha256")
+    if sha256(raw) != digest or not valid_hash(producer_digest):
+        raise Refusal("Invalid qualification tuple.")
+    found: list[Payload] = []
+    count = 0
+    for folder in (request.registry / request.component).iterdir():
+        count += 1
+        if count > 100000:
+            raise Refusal("Registry exceeds its bounded tuple inventory.")
+        if BUILD_PATTERN.fullmatch(folder.name) is None:
+            continue
+        try:
+            raw = read_bytes(folder / SUBTREE / DESCRIPTOR)
+        except FileNotFoundError:
+            continue
+        if sha256(raw) == producer_digest:
+            found.append(registered(request.registry, request.component, folder.name))
+    if len(found) != 1:
+        raise Refusal("The exact accepted Driver payload is unavailable.")
+    payload = found[0]
+    with pin_payloads(request.registry, [gate.provider, payload]):
+        verify_acceptance(authority, payload, digest=digest)
+        yield authority, payload, gate
+
+
+def _recheck(authority: Authority, payload: Payload, gate: Gate) -> None:
+    verify_acceptance(authority, payload)
+    if verify_gate(authority.registry).digest != gate.digest:
+        raise Refusal("Maintenance gate changed during verification.")
+
+
+def _control(authority: Authority, session: str, *, closed: bool = False) -> Object:
+    control = authority.read("control")
+    if ((control["phase"] != "normal" and control["session"] != session)
+            or (closed and control["phase"] == "normal")):
+        raise Refusal("A different or unopened maintenance session owns this component.")
+    return control
+
+
+def _tainted(authority: Authority) -> bool:
+    try:
+        value = authority.read("taint")
+    except FileNotFoundError:
+        return False
+    if value["component"] != authority.component:
+        raise Refusal("Taint component mismatch.")
+    return True
+
+
+def _status(request: Request, authority: Authority, control: Object) -> Object:
+    # Status never publishes taint, closes admission, signals or touches state.
+    custody = reconcile(authority, control=control, persist_unknown=False)
+    return {"version": 1, "component": request.component, "session": request.session,
+            "phase": control["phase"], "custody": {"active": custody.active, "pending": custody.pending,
+                                                     "unknown": custody.unknown, "tainted": _tainted(authority)}}
+
+
+@handler("begin")
+def begin(request: Request) -> Object:
+    with _component(request) as (authority, payload, gate):
+        with authority.mutex():
+            _recheck(authority, payload, gate)
+            control = _control(authority, request.session)
+            if control["phase"] == "normal":
+                control = {**control, "phase": "draining", "session": request.session}
+                authority.write("control", control)
+            # Closing happens before custody inspection. Unknown obligations
+            # retain their taint and same epoch; begin never cancels work.
+            reconcile(authority, control=control)
+            _tainted(authority)
+            return {"version": 1, "component": request.component, "session": request.session,
+                    "phase": control["phase"]}
+
+
+@handler("status")
+def status(request: Request) -> Object:
+    with _component(request) as (authority, payload, gate):
+        with authority.mutex():
+            _recheck(authority, payload, gate)
+            return _status(request, authority, _control(authority, request.session))

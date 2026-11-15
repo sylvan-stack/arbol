@@ -552,7 +552,7 @@ def _custody_payload(authority: Authority, digest: str) -> Object:
     return matches[0]
 
 
-def reconcile(authority: Authority, *, control: Object | None = None) -> Custody:
+def reconcile(authority: Authority, *, control: Object | None = None, persist_unknown: bool = True) -> Custody:
     """Under control mutex: inspect obligations, never infer terminal from death.
 
     Every preexisting helper is checked against its exact original admitted
@@ -673,7 +673,8 @@ def reconcile(authority: Authority, *, control: Object | None = None) -> Custody
                     refuse()
     except (OSError, ValueError, TypeError, KeyError, RuntimeError):
         unknown = True
-        custody_loss(authority, invocation=token(), epoch=control["epoch"], boot=boot, payload_sha256=None)
+        if persist_unknown:
+            custody_loss(authority, invocation=token(), epoch=control["epoch"], boot=boot, payload_sha256=None)
     return Custody(tuple(writers.values()), tuple(handoffs.values()), active, pending, unknown)
 
 
