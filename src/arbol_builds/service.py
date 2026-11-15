@@ -168,7 +168,6 @@ def early_driver_signals(source: bytes) -> bytes:
 def driver_launcher_source(registry: str, component: str, route: str, provider: Payload) -> bytes:
     """Stage exact gate bytes; this function never installs or issues acceptance."""
     from .driver_admission import COMPONENTS, physical
-    from .driver_bootstrap import render_prefix
     from .driver_payload import SUBTREE, load
 
     registry_path = physical(registry)
@@ -183,19 +182,12 @@ def driver_launcher_source(registry: str, component: str, route: str, provider: 
             or os.path.realpath(target.parent) != str(target.parent)):
         raise ValueError("A Driver gate route must name its canonical registered launcher.")
     interpreter, _, entry = verified.prefix
-    try:
-        first = shebang(interpreter)
-    except ValueError:
-        # The default registry contains spaces. A fixed quoted exec tuple is
-        # the contract's fallback, with no PATH search or caller shell program.
-        words = [interpreter, "-ISB", entry, "--driver-launch", str(registry_path), component, str(target)]
-        command = "exec " + " ".join(shlex.quote(word) for word in words) + ' "$@"\n'
-        return ("#!/bin/sh\n" + DRIVER_LAUNCHER_MARK + "\n" + command).encode("utf-8")
-    prefix = early_driver_signals(render_prefix(component="arbol", root=expected,
-                                                build=verified.build).encode("utf-8"))
-    call = ("\nfrom arbol_builds.driver_state import launch_gated\n"
-            f"sys.exit(launch_gated({str(registry_path)!r}, {component!r}, {str(target)!r}, sys.argv[1:]))\n")
-    return first.encode("utf-8") + b"\n" + DRIVER_LAUNCHER_MARK.encode("ascii") + b"\n" + prefix + call.encode("utf-8")
+    # This route always executes the exact M-inventoried sealed provider entry.
+    # It never renders trusted bootstrap bytes from mutable source/installed
+    # library modules. This is the same fixed literal wrapper used for spaces.
+    words = [interpreter, "-ISB", entry, "--driver-launch", str(registry_path), component, str(target)]
+    command = "exec " + " ".join(shlex.quote(word) for word in words) + ' "$@"\n'
+    return ("#!/bin/sh\n" + DRIVER_LAUNCHER_MARK + "\n" + command).encode("utf-8")
 
 
 def _keep_driver_gate(bin_folder: str, registry: str, component: str) -> bool:
@@ -224,7 +216,112 @@ def _keep_driver_gate(bin_folder: str, registry: str, component: str) -> bool:
     row = next(row for row in verified.document["components"] if row["component"] == component)
     if not marked or str(physical(path, directory=False)) != row["launcher"]:
         raise Refusal("Driver gate refresh requires an explicit closed verified deployment.")
+    _driver_gate_authority(physical(registry), component)
+    if verify_gate(physical(registry)).digest != verified.digest:
+        raise Refusal("Driver gate changed during preservation preflight.")
     return True
+
+
+def _driver_gate_authority(registry: Path, component: str) -> None:
+    """Read-only preserve preflight, never initial deployment or acceptance issuance."""
+    from .driver_admission import Authority, Refusal, decode, read_bytes, sha256, valid_hash
+    from .driver_payload import BUILD, DESCRIPTOR, SUBTREE, registered, verify_acceptance
+
+    authority = Authority(registry, component)
+    with authority.mutex(seconds=0):
+        authority.read("control")
+        for name in ("control.lock", "admission.lock"):
+            descriptor = authority.open_lock(name)  # create=False; no lease/unlock/publication.
+            os.close(descriptor)
+        qualification = authority.read("qualification")
+        if qualification["component"] != component:
+            raise Refusal("Driver gate qualification component changed.")
+        digest = qualification["acceptanceSha256"]
+        raw = read_bytes(authority.shared / "acceptances" / (digest + ".json"))
+        value = decode(raw)
+        if sha256(raw) != digest or not valid_hash(value.get("producerPayloadSha256")):
+            raise Refusal("Driver gate acceptance digest changed.")
+        matches = []
+        count = 0
+        for folder in (registry / component).iterdir():
+            count += 1
+            if count > 100000:
+                raise Refusal("Driver gate registry exceeds its bounded inventory.")
+            if BUILD.fullmatch(folder.name) is None:
+                continue
+            root = folder / SUBTREE
+            # A genuine legacy Build has no payload root. Existing unsafe roots
+            # remain errors; do not broadly swallow Refusal or manufacture D.
+            if not os.path.lexists(root):
+                continue
+            try:
+                descriptor_raw = read_bytes(root / DESCRIPTOR)
+            except FileNotFoundError:
+                continue
+            if sha256(descriptor_raw) == value["producerPayloadSha256"]:
+                matches.append(registered(registry, component, folder.name))
+        if len(matches) != 1:
+            raise Refusal("The exact qualified gate payload is unavailable.")
+        verify_acceptance(authority, matches[0], digest=digest)
+        taint = authority.folder / "taint.json"
+        if os.path.lexists(taint) and authority.read("taint")["component"] != component:
+            raise Refusal("Driver gate taint component changed.")
+
+
+def driver_gate_identity(path: Path) -> tuple[str, str] | None:
+    """Recognize old inline and exact-entry gates without executing their bytes.
+
+    A marked but damaged gate refuses. Unmarked legacy/non-Driver files retain
+    the installer's existing classification behavior.
+    """
+    from .driver_admission import COMPONENTS, Refusal, physical
+
+    if path.name not in COMPONENTS:
+        return None
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        prefix = os.read(descriptor, 1024)
+    finally:
+        os.close(descriptor)
+    if DRIVER_LAUNCHER_MARK.encode("ascii") not in prefix.splitlines()[:3]:
+        return None
+    found = driver_route_bytes(path)
+    if found is None:
+        raise Refusal("Registered Driver gate disappeared.")
+    try:
+        text = found[0].decode("utf-8", "strict")
+        lines = text.rstrip("\n").split("\n")
+        if len(lines) < 3 or lines[1] != DRIVER_LAUNCHER_MARK:
+            raise ValueError
+        if lines[0] == "#!/bin/sh":
+            words = shlex.split("\n".join(lines[2:]), posix=True)
+            if (len(words) != 9 or words[0] != "exec" or words[2] != "-ISB"
+                    or words[4] != "--driver-launch" or words[8] != "$@"):
+                raise ValueError
+            registry, component, route = words[5:8]
+        else:
+            outer = ast.parse(lines[-1], mode="eval").body
+            if not isinstance(outer, ast.Call) or len(outer.args) != 1:
+                raise ValueError
+            inner = outer.args[0]
+            if (not isinstance(inner, ast.Call) or not isinstance(inner.func, ast.Name)
+                    or inner.func.id != "launch_gated" or len(inner.args) != 4):
+                raise ValueError
+            registry, component, route = (ast.literal_eval(node) for node in inner.args[:3])
+        if (not isinstance(registry, str) or not os.path.isabs(registry) or component != path.name
+                or not isinstance(route, str) or str(physical(path, directory=False)) != route):
+            raise ValueError
+        if not _keep_driver_gate(str(path.parent), registry, component):
+            raise ValueError
+        return registry, component
+    except (OSError, UnicodeError, SyntaxError, TypeError, ValueError):
+        raise Refusal("Registered Driver gate is malformed or its authority is missing/changed.") from None
 
 
 def shebang(python: str) -> str:

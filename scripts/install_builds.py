@@ -35,7 +35,15 @@ sys.path.insert(0, str(ROOT / "src"))
 from arbol_builds.cli import options  # noqa: E402
 from arbol_builds.config import locations  # noqa: E402
 from arbol_builds.launcher import ROOT_COMPONENTS, TRUNKS, json_line, write_all  # noqa: E402
-from arbol_builds.service import LAUNCHER_MARK, SIGINT_LINE, atomic_write, shebang, write_launcher  # noqa: E402
+from arbol_builds.service import (  # noqa: E402
+    LAUNCHER_MARK,
+    SIGINT_LINE,
+    _keep_driver_gate,
+    atomic_write,
+    driver_gate_identity,
+    shebang,
+    write_launcher,
+)
 
 USAGE = "Usage: uv run --no-sync python scripts/install_builds.py [--bin-dir <folder>]"
 NODE_LAUNCH = re.compile(r'launch\(("(?:[^"\\\n]|\\.)*"), ("(?:[^"\\\n]|\\.)*"), process\.argv\.slice\(2\)\);')
@@ -166,6 +174,9 @@ def install_schema_reader(library: Path, python: Path) -> None:
 
 def served(path: Path) -> tuple[str, str] | None:
     """The registry and component of a launcher written by this tool or by the earlier Node.js tool."""
+    gated = driver_gate_identity(path)
+    if gated is not None:
+        return gated
     try:
         if path.is_symlink() or not path.is_file() or path.stat().st_size > LAUNCHER_LIMIT:
             return None
@@ -205,6 +216,17 @@ def served(path: Path) -> tuple[str, str] | None:
     return registry, path.name
 
 
+def preflight_launchers(folder: Path) -> None:
+    if not folder.exists():
+        return
+    for path in sorted(folder.iterdir()):
+        found = served(path)
+        if found is not None:
+            # Legacy Driver scripts tied to an existing gate/control cannot be
+            # silently refreshed into a bypass either. No authority is created.
+            _keep_driver_gate(str(folder), found[0], found[1])
+
+
 def install(args: list[str]) -> dict[str, object]:
     words, values = options(args, ["--bin-dir"])
     if words:
@@ -218,10 +240,14 @@ def install(args: list[str]) -> dict[str, object]:
     except ValueError:
         raise ValueError(f"arbol-builds cannot be installed in {folder}: the programs it writes name their Python "
                          "in their first line, which cannot hold a space or a '#', nor a long path.") from None
+    # Recognize and verify every existing gated Driver before runtime/library,
+    # package/tool writes or cleanup. Marked malformed routes refuse here.
+    preflight_launchers(folder)
     library.mkdir(parents=True, exist_ok=True)
     with open(library / ".install.lock", "w") as lock:
         # One install at a time; leftovers of an install that was stopped are removed first.
         fcntl.flock(lock, fcntl.LOCK_EX)
+        preflight_launchers(folder)
         for leftover in [*library.glob("runtime/.unpacking-*"),
                          *(path for name in PACKAGES for path in library.glob(f".{name}-*"))]:
             shutil.rmtree(leftover, ignore_errors=True)
