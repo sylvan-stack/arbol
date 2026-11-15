@@ -19,7 +19,10 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn
+
+if TYPE_CHECKING:
+    from .driver_payload import CandidateScope
 
 Object = dict[str, Any]
 COMPONENTS = tuple(f"arbol-{name}-driver" for name in ("claude", "codex", "mimo", "pi"))
@@ -469,7 +472,8 @@ def read_handoff(authority: Authority, handoff: str) -> Object:
     return value
 
 
-def normal_control(authority: Authority, *, epoch: str | None = None) -> Object:
+def normal_control(authority: Authority, *, epoch: str | None = None,
+                   candidate: CandidateScope | None = None) -> Object:
     """Caller holds the mutex. A durable closed deployment overrides normal controls."""
     control = authority.read("control")
     if control["phase"] != "normal" or (epoch is not None and control["epoch"] != epoch):
@@ -487,7 +491,7 @@ def normal_control(authority: Authority, *, epoch: str | None = None) -> Object:
     if taint is not None:
         if taint["component"] != authority.component or taint["reason"] != "legacy":
             refuse()
-    if not reconcile(authority, control=control).unknown:
+    if not reconcile(authority, control=control, candidate=candidate).unknown:
         return control
     refuse()
 
@@ -541,7 +545,8 @@ def _documents(folder: Path, *, limit: int = 100000) -> list[Path]:
     return sorted(found)
 
 
-def _custody_payload(authority: Authority, digest: str) -> Object:
+def _custody_payload(authority: Authority, digest: str, *,
+                     candidate: CandidateScope | None = None) -> Object:
     from .driver_payload import BUILD, optional_descriptor, registered
 
     if not valid_hash(digest):
@@ -558,14 +563,16 @@ def _custody_payload(authority: Authority, digest: str) -> Object:
         if raw is None:
             continue
         if sha256(raw) == digest:
-            matches.append(registered(authority.registry, authority.component, folder.name).descriptor)
+            payload = (registered(authority.registry, authority.component, folder.name) if candidate is None else
+                       candidate.registered(authority.registry, authority.component, folder.name))
+            matches.append(payload.descriptor)
     if len(matches) != 1:
         refuse()
     return matches[0]
 
 
 def reconcile(authority: Authority, *, control: Object | None = None, persist_unknown: bool = True,
-              boot: str | None = None) -> Custody:
+              boot: str | None = None, candidate: CandidateScope | None = None) -> Custody:
     """Under control mutex: inspect obligations, never infer terminal from death.
 
     Every preexisting helper is checked against its exact original admitted
@@ -573,6 +580,8 @@ def reconcile(authority: Authority, *, control: Object | None = None, persist_un
     """
     from .driver_process import boot_uuid, identity_record, matches
 
+    if candidate is not None and candidate.registry != authority.registry:
+        refuse()
     control = authority.read("control") if control is None else control
     boot = boot_uuid() if boot is None else boot
     if not canonical_uuid(boot):
@@ -638,9 +647,12 @@ def reconcile(authority: Authority, *, control: Object | None = None, persist_un
                     refuse()
             elif child is None:
                 refuse()
+            if (candidate is not None
+                    and value["acceptanceSha256"] != candidate.acceptance(authority.component)[0]):
+                refuse()  # Never retarget an old pending/accepted handoff to a new selection.
             payload = payloads.get(value["payloadSha256"])
             if payload is None:
-                payload = _custody_payload(authority, value["payloadSha256"])
+                payload = _custody_payload(authority, value["payloadSha256"], candidate=candidate)
                 payloads[value["payloadSha256"]] = payload
             allowed = [payload["entry"]] if value["role"] == "main" else payload["helpers"]
             if value["entry"] not in allowed:
