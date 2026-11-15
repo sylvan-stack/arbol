@@ -16,6 +16,7 @@ import signal
 import stat
 import sys  # noqa: F401  (the line arbol-builds appends calls sys.exit)
 import time
+from collections.abc import Callable
 from typing import Any
 
 type Record = dict[str, Any]
@@ -390,7 +391,8 @@ def close_build_use(fd: int | None) -> None:
 
 
 def launch(registry: str, component: str, args: list[str], *, schema: tuple[int, int] | None = None,
-           schema_error: tuple[str, str] | None = None) -> int:
+           schema_error: tuple[str, str] | None = None,
+           driver_launch: Callable[[str, str, Record, list[str], str, int | None], int] | None = None) -> int:
     """Choose the Build and replace this process with its program; return a status only when it cannot."""
     standard_descriptors()
     # A Ctrl-C while the Build is being chosen ends the launcher quietly, as it would end the Build;
@@ -436,6 +438,10 @@ def launch(registry: str, component: str, args: list[str], *, schema: tuple[int,
         # Python ignores these two signals when it starts; a direct start would leave them at their default.
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
         signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
+        if driver_launch is not None:
+            if component not in ("arbol-claude-driver", "arbol-codex-driver", "arbol-mimo-driver", "arbol-pi-driver"):
+                raise OSError("Driver admission applies only to the four registered Drivers.")
+            return driver_launch(registry, component, selected, args, entry, use_descriptor)
         # Browser-private selection context, never a public command option. Overwrite
         # a caller copy. Other components retain their exact environment behavior.
         if component == "arbol-browser":
