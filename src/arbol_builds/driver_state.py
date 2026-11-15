@@ -665,7 +665,7 @@ def _tainted(authority: Authority) -> bool:
 def _status(request: Request, authority: Authority, control: Object, custody: Custody | None = None) -> Object:
     # Status never publishes taint, closes admission, signals or touches state.
     if custody is None:
-        custody = reconcile(authority, control=control, persist_unknown=False)
+        custody = reconcile(authority, control=control, persist_unknown=False, candidate=request.candidate)
     return {"version": 1, "component": request.component, "session": request.session,
             "phase": control["phase"], "custody": {"active": custody.active, "pending": custody.pending,
                                                      "unknown": custody.unknown, "tainted": _tainted(authority)}}
@@ -684,7 +684,7 @@ def begin(request: Request) -> Object:
             # retain their taint and same epoch; begin never cancels work.
             archive_pending = os.path.lexists(authority.folder / "archive" / "custody-pending.json")
             if not _boot_recovery_pending(authority, control, candidate=request.candidate):
-                reconcile(authority, control=control, persist_unknown=not archive_pending)
+                reconcile(authority, control=control, persist_unknown=not archive_pending, candidate=request.candidate)
             _tainted(authority)
             return {"version": 1, "component": request.component, "session": request.session,
                     "phase": control["phase"]}
@@ -753,7 +753,7 @@ def drain(request: Request) -> Object:
                     # interpreting absent active directories. No taint is cleared.
                     if lease >= 0 and os.path.lexists(authority.folder / "archive" / "custody-pending.json"):
                         archive_terminal(authority, lease)
-                    custody = reconcile(authority, control=control, boot=boot)
+                    custody = reconcile(authority, control=control, boot=boot, candidate=request.candidate)
                     if lease >= 0 and not custody.resolved and not custody.unknown:
                         # A registered live writer without any independent SH
                         # lease is custody loss, never evidence of quiescence.
@@ -768,7 +768,7 @@ def drain(request: Request) -> Object:
                             raise Refusal("Maintenance control changed during drain.")
                         # The acquired EX description excludes every writer;
                         # recheck the exact graph before archival/receipt.
-                        custody = reconcile(authority, control=current, boot=boot)
+                        custody = reconcile(authority, control=current, boot=boot, candidate=request.candidate)
                         if not custody.resolved or _tainted(authority):
                             raise Refusal("Custody remains unresolved under exclusive admission.")
                         if custody.writers or custody.handoffs:
@@ -1478,7 +1478,7 @@ def _closed_attempt(authority: Authority, request: Request, payload: Payload, ga
     control = _control(authority, request.session, closed=True)
     if control["phase"] != "exclusive" or _tainted(authority):
         raise Refusal("Exclusive drained admission is required before execution.")
-    custody = reconcile(authority, control=control)
+    custody = reconcile(authority, control=control, candidate=gate.candidate)
     if not custody.resolved:
         raise Refusal("Unresolved metadata custody remains fenced.")
     deployment = _rollout_record(authority.shared / "deployment.json")
@@ -2021,9 +2021,11 @@ def _reopen_record(folder: Path, record: Object) -> Object | None:
     return value
 
 
-def _completion_request(registry: Path, session: str, authority: Authority) -> Request:
+def _completion_request(registry: Path, session: str, authority: Authority, *,
+                        candidate: CandidateScope | None = None) -> Request:
     path = authority.folder / "sessions" / session / "result.json"
-    return Request("finish", registry, {"component": authority.component, "session": session, "result": str(path)})
+    return Request("finish", registry, {"component": authority.component, "session": session, "result": str(path)},
+                   candidate=candidate)
 
 
 def _reopen_row(prepared: Prepared, journal: Object) -> Object:
@@ -2045,9 +2047,9 @@ def _verified_complete(registry: Path, authorities: list[Authority], payloads: l
     _verify_rollout(registry, authorities, record, reopening=reopening, allow_normal_activity=True,
                     candidate=gate.candidate)
     for authority, payload, row in zip(authorities, payloads, reopening["components"], strict=True):
-        normal_control(authority)
+        normal_control(authority, candidate=gate.candidate)
         verify_acceptance(authority, payload, candidate=gate.candidate)
-        request = _completion_request(registry, record["session"], authority)
+        request = _completion_request(registry, record["session"], authority, candidate=gate.candidate)
         prepared = _finish_inputs(request, authority, payload, gate, -1)
         journal = _finish_record(prepared)
         if journal is None or _reopen_row(prepared, journal) != row:
@@ -2103,7 +2105,7 @@ def _complete_deployment(request: Request) -> Object | None:
             for authority, payload, descriptor in zip(authorities, payloads, leases, strict=True):
                 verify_acceptance(authority, payload, candidate=gate.candidate)
                 _exclusive(authority, descriptor)
-                prepared = _finish_inputs(_completion_request(request.registry, request.session, authority),
+                prepared = _finish_inputs(_completion_request(request.registry, request.session, authority, candidate=gate.candidate),
                                           authority, payload, gate, descriptor)
                 journal = _finish_record(prepared)
                 if journal is None or journal["phase"] not in ("ready", "complete"):
@@ -2119,7 +2121,7 @@ def _complete_deployment(request: Request) -> Object | None:
                     raise Refusal("A completed component finish cannot authorize rolled-back control.")
                 if reopening is not None and reopening["phase"] == "complete" and control != normal:
                     raise Refusal("A completed reopen journal cannot authorize rolled-back control.")
-                custody = reconcile(authority, control=control)
+                custody = reconcile(authority, control=control, candidate=gate.candidate)
                 if not custody.resolved or _tainted(authority):
                     raise Refusal("All-four completion still has unresolved custody.")
                 if _archive_observation(prepared) != prepared.operation["backupSha256"]:
@@ -2148,7 +2150,8 @@ def _complete_deployment(request: Request) -> Object | None:
                 publish(prepared.folder / "attempts" / journal["attempt"] / "finish.json", {**journal, "phase": "complete"})
             for prepared, _journal in prepared_all:
                 _pending_scope(prepared.context, marker_absent=True)
-                if not reconcile(prepared.authority, control=prepared.authority.read("control")).resolved or _tainted(prepared.authority):
+                if not reconcile(prepared.authority, control=prepared.authority.read("control"),
+                                 candidate=prepared.gate.candidate).resolved or _tainted(prepared.authority):
                     raise Refusal("Custody changed before the global complete commit.")
             publish(folder / "reopen.json", {**reopening, "phase": "complete"})
             completed = {**record, "phase": "complete"}
