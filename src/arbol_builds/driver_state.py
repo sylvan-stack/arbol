@@ -66,6 +66,7 @@ from .driver_payload import (
     pin_payloads,
     registered,
     request_binding,
+    resolve_candidate,
     resolve_provider,
     verify_acceptance,
     verify_gate,
@@ -213,6 +214,38 @@ def launch_gated(registry: str, component: str, route: str, arguments: list[str]
         return launch_selected(reg, comp, record, args, entry, guard, route=route)
 
     return launch(registry, component, arguments, driver_launch=admitted)
+
+
+def launch_candidate(provider: Payload, arguments: list[str]) -> int:
+    """The three fixed isolated selectors; no launcher policy or legacy fallback."""
+    if (len(arguments) < 6 or arguments[0] != "--qualification-launch"
+            or arguments[2] not in COMPONENTS or BUILD_PATTERN.fullmatch(arguments[3]) is None
+            or arguments[5] != "--"):
+        raise Refusal("Invalid fixed candidate dispatch.")
+    registry = physical(arguments[1])
+    component, build, selector, tail = arguments[2], arguments[3], arguments[4], arguments[6:]
+    if (selector not in ("driver", "build-unit", "build-native")
+            or (selector != "driver" and tail)
+            or (selector == "build-native" and component != "arbol-mimo-driver")):
+        raise Refusal("Invalid fixed candidate selector.")
+    authority = Authority(registry, component)
+    qualification = authority.read("qualification")
+    scope = resolve_candidate(registry, component, build, qualification["acceptanceSha256"])
+    if scope.gate.provider.root != provider.root or scope.gate.provider.digest != provider.digest:
+        raise Refusal("Candidate provider differs from its exact sealed tuple.")
+    payload = scope.producer(component)
+    with pin_payloads(registry, [provider, payload], candidate=scope):
+        guardian = Guardian.admit(authority, payload, candidate=scope)
+        try:
+            with authority.mutex():
+                control = normal_control(authority, epoch=guardian.epoch, candidate=scope)
+                _admission_marker(authority, control, invocation=guardian.invocation,
+                                  build=payload.build, payload=payload.digest, boot=guardian.boot)
+        except BaseException:
+            guardian.abort()
+            raise
+        mode = {"build-unit": "unit", "build-native": "native"}.get(selector)
+        return supervise(guardian, tail, gate_kind=mode)
 
 
 def guarded_publication[T](registry: Path, payloads: list[Payload], authorities: list[Authority],
@@ -388,6 +421,8 @@ def provider_entry(descriptor: Object) -> None:
             with pin_payloads(registry, [provider]):
                 result = launch_gated(str(registry), arguments[2], arguments[3], arguments[4:])
             raise SystemExit(result)
+        if arguments[:1] == ["--qualification-launch"]:
+            raise SystemExit(launch_candidate(provider, arguments))
         if arguments[:1] != ["driver-state"]:
             raise Refusal("Invalid immutable provider command.")
         signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT, signal.SIGTERM})
