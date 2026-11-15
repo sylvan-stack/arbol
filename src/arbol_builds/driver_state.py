@@ -435,10 +435,10 @@ def _component(request: Request) -> Iterator[tuple[Authority, Payload, Gate]]:
             raise Refusal("Registry exceeds its bounded tuple inventory.")
         if BUILD_PATTERN.fullmatch(folder.name) is None:
             continue
-        raw = optional_descriptor(folder)
-        if raw is None:
+        descriptor = optional_descriptor(folder)
+        if descriptor is None:
             continue
-        if sha256(raw) == producer_digest:
+        if sha256(descriptor) == producer_digest:
             found.append(registered(request.registry, request.component, folder.name))
     if len(found) != 1:
         raise Refusal("The exact accepted Driver payload is unavailable.")
