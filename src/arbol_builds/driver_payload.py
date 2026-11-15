@@ -345,21 +345,32 @@ class Gate:
     provider: Payload
 
 
-def registered(registry: Path, component: str, build: str) -> Payload:
-    """Resolve exactly one registered Build without accepting a current-source path."""
-    from .launcher import named_runnable, valid_record
+def _registered_payload(registry: Path, component: str, build: str) -> tuple[Object, Payload]:
+    """Read one physical registered image, without assigning launch authority."""
+    from .launcher import executable_entry, valid_record
 
     if component not in (*COMPONENTS, "arbol") or BUILD.fullmatch(build) is None:
         refuse()
     private_directory(registry)
     folder = private_directory(registry / component / build)
     record = decode(read_bytes(folder / "build.json"), exact=False)
-    if not valid_record(record, component, build) or not named_runnable(str(registry), record):
+    if (not valid_record(record, component, build) or record.get("prunedAt")
+            or executable_entry(str(folder), record.get("entry")) is None):
         refuse()
     payload = load(folder / SUBTREE, component, build)
     source = record.get("source")
     if (not isinstance(source, dict) or source.get("commit") != payload.descriptor["source"]["commit"]
             or source.get("uncommittedChanges") is not False):
+        refuse()
+    return record, payload
+
+
+def registered(registry: Path, component: str, build: str) -> Payload:
+    """Resolve exactly one registered Build under unchanged named selection."""
+    from .launcher import named_runnable
+
+    record, payload = _registered_payload(registry, component, build)
+    if not named_runnable(str(registry), record):
         refuse()
     return payload
 
