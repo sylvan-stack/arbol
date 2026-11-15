@@ -165,7 +165,7 @@ def early_driver_signals(source: bytes) -> bytes:
     return future + SIGINT_LINE.encode("ascii") + b"\n" + source[len(future):]
 
 
-def driver_launcher_source(registry: str, component: str, route: str, provider: "Payload") -> bytes:
+def driver_launcher_source(registry: str, component: str, route: str, provider: Payload) -> bytes:
     """Stage exact gate bytes; this function never installs or issues acceptance."""
     from .driver_admission import COMPONENTS, physical
     from .driver_bootstrap import render_prefix
