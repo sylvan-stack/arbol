@@ -45,7 +45,7 @@ from top.driver_state_support import (
 Operation = Literal["upgrade", "identity-reset", "restore", "identity-recover"]
 Fault = Literal["no-fd", "wrong-inode", "separate-description", "receipt", "state", "operation",
                 "context-copy", "epoch", "attempt", "payload"]
-Mode = Literal["observe", "before-spawn", "before-ack", "cached", "unsafe-source-parent"] | Fault
+Mode = Literal["observe", "before-spawn", "before-ack", "cached", "unsafe-source-parent", "retirement"] | Fault
 _OPERATIONS = {"upgrade", "identity-reset", "restore", "identity-recover"}
 _CONTEXT_FAULTS = {"epoch", "attempt", "payload"}
 _ROOT_METADATA = {"format", "identity.json", "identity-maintenance.json", "identity-upgrade.json"}
@@ -64,7 +64,7 @@ import json
 import os
 import sys
 
-entry, mode, replacement, *arguments = sys.argv[1:]
+entry, mode, replacement, retirement_program, *arguments = sys.argv[1:]
 if arguments[:2] != ['driver-state', 'execute']:
     raise SystemExit(96)
 sys.argv[:] = [entry, *arguments]
@@ -121,6 +121,8 @@ class ObservedProcesses:
                 argv[argv.index('state') + 1] = 'identity-reset'
                 index = argv.index('--from-format')
                 del argv[index:index + 2]
+            if mode == 'retirement':
+                argv = [*argv[:2], '-c', retirement_program, replacement, *argv[2:]]
             # Context-field faults are applied and independently observed by
             # the outer controller while this process waits at the barrier.
             child = self.module.Popen(argv, **options)
@@ -162,6 +164,57 @@ def observe(frame_object, event, value):
         frame({'phase': 'before-ack', 'ackHex': local['data'].hex()}, wait=True)
 
 sys.setprofile(observe)
+with open(entry, 'rb') as packaged:
+    source = compile(packaged.read(), entry, 'exec')
+exec(source, vars(sys.modules['__main__']))
+"""
+
+_RETIREMENT_OBSERVER = """\
+import json
+import os
+import sys
+
+configuration, entry, *arguments = sys.argv[1:]
+sys.argv[:] = [entry, *arguments]
+sys.modules['__main__'].__file__ = entry
+with open(configuration, 'rb') as data:
+    config = json.load(data)
+root = os.path.dirname(os.path.dirname(entry))
+journal = config['journal']
+
+def inspect_removal(event, args):
+    if event != 'os.remove':
+        return
+    name, descriptor = os.fsdecode(args[0]), args[1]
+    if name != journal:
+        if name != 'identity-pending.json' or descriptor < 0:
+            return
+        named, held = os.lstat(os.path.dirname(journal)), os.fstat(descriptor)
+        if (named.st_dev, named.st_ino) != (held.st_dev, held.st_ino):
+            return
+    frame = sys._getframe(1)
+    sites = []
+    while frame is not None and len(sites) < 32:
+        source = frame.f_code.co_filename
+        if source.startswith(root + os.sep):
+            sites.append([source[len(root) + 1:], frame.f_code.co_name, frame.f_lineno])
+        frame = frame.f_back
+    def raw(path):
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        with os.fdopen(fd, 'rb') as stream:
+            content = stream.read(4097)
+        if not 0 < len(content) <= 4096:
+            raise RuntimeError('Unexpected journal observation size.')
+        return content.hex()
+    evidence = {'pid': os.getpid(), 'parentPid': os.getppid(), 'sites': sites,
+                'journal': raw(journal), 'sidecar': raw(config['sidecar'])}
+    descriptor = os.open(config['evidence'], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, 'wb') as output:
+        output.write((json.dumps(evidence, sort_keys=True, separators=(',', ':')) + '\\n').encode())
+        output.flush()
+        os.fsync(output.fileno())
+
+sys.addaudithook(inspect_removal)
 with open(entry, 'rb') as packaged:
     source = compile(packaged.read(), entry, 'exec')
 exec(source, vars(sys.modules['__main__']))
@@ -329,8 +382,9 @@ class Maintenance:
         argv = child.process.args
         assert isinstance(argv, list)
         self.controller.evidence.write(name + "-" + self.session + ".json", {
-            "argv": argv if argv[2] != "-c" else argv[4:],
+            "argv": argv if argv[2] != "-c" else [*argv[4:7], *argv[8:]],
             "observerSha256": digest(_OBSERVER.encode()) if argv[2] == "-c" else None,
+            "retirementObserverSha256": digest(_RETIREMENT_OBSERVER.encode()) if argv[2] == "-c" and argv[5] == "retirement" else None,
             "process": result.owner.object(), "reaped": child.reaped, "exit": result.returncode,
             "stdoutHex": result.stdout.hex(), "stderrHex": result.stderr.hex(),
         })
@@ -453,6 +507,8 @@ class Maintenance:
             argv[argv.index("state") + 1] = "identity-reset"
             index = argv.index("--from-format")
             del argv[index:index + 2]
+        if mode == "retirement":
+            argv = [*argv[:2], "-c", _RETIREMENT_OBSERVER, replacement, *argv[2:]]
         require(frame["argv"] == argv and frame["passFds"] == passed and frame["context"] == context
                 and type(frame["pid"]) is int and frame["pid"] > 0 and ended["pid"] == frame["pid"]
                 and type(ended["reapedExit"]) is int,
@@ -476,16 +532,24 @@ class Maintenance:
             _write_new(path, b"")
         return str(path)
 
-    def execute_observed(self, request: Execute, mode: Mode, *, unsafe_parent: Path | None = None) -> Object:
+    def execute_observed(self, request: Execute, mode: Mode, *, unsafe_parent: Path | None = None,
+                         retirement: Path | None = None) -> Object:
         request.verify(self.controller)
         self.controller.require_finished_graph(self.component)
         require(mode != "operation" or request.operation == "upgrade", "Operation substitution needs the exact upgrade row.")
         require((unsafe_parent is not None) == (mode == "unsafe-source-parent"), "Unsafe parent observation scope differs.")
+        require((retirement is not None) == (mode == "retirement"), "Retirement observation scope differs.")
         self.controller.scope.recheck()
         replacement = self._fault_input(request, mode)
+        if retirement is not None:
+            require(retirement.is_relative_to(self.controller.workspace.fixture_root) and request.operation == "identity-recover",
+                    "Retirement observer escaped its exact recovery fixture.")
+            physical_owned(retirement, directory=False)
+            replacement = str(retirement)
         provider = self.controller.scope.gate.provider
         interpreter, isolation, entry = provider.prefix
         child = OwnedChild([interpreter, isolation, "-c", _OBSERVER, entry, mode, replacement,
+                            _RETIREMENT_OBSERVER if retirement is not None else "",
                             *self.argv("execute", request.arguments(self.payload.build))],
                            cwd=self.controller.workspace.registry, environment=self.environment)
         boundary = _Boundary(child, self.controller)
@@ -567,12 +631,17 @@ class Maintenance:
                     sync_directory(original.parent)
 
             self.lease(blocked=False)
-            if mode == "observe":
+            if mode in ("observe", "retirement"):
                 require(captured.returncode == 0 and not captured.stderr and ended["reapedExit"] == 0
                         and document(captured.stdout) == self._execute_reply(),
                         "Exact packaged provider/child dispatch did not complete.")
                 result = self.verify_result(request)
                 self._verify_child_output(ended, result)
+                if retirement is not None:
+                    config = document(read_image(retirement).raw)
+                    frame = document(read_image(Path(config["evidence"])).raw)
+                    require(frame["pid"] == launched["pid"] and frame["parentPid"] == captured.owner.pid,
+                            "Journal unlink observation does not belong to the actual reaped administrative child.")
                 return result
             require(captured.returncode == 1 and not captured.stderr and document(captured.stdout) == _PROVIDER_REFUSAL
                     and ended["reapedExit"] == 1 and ended["acceptedStdoutHex"] is None,
@@ -671,13 +740,13 @@ class Maintenance:
                 "Original active result or captured substituted bytes were lost.")
 
     def admitted_proof(self, state: Path, subscription: str, *, expectation: str | None = None,
-                       refused: bool = False, name: str) -> Object:
+                       expected_error: Literal["in_use", "internal"] | None = None, name: str) -> Object:
         self.controller.require_finished_graph(self.component)
         tail = ["--state-dir", str(state), "subscriptions", "identity", subscription]
         if expectation is not None:
             tail.extend(("--expect", expectation))
         capture = self.capture(self.controller.fixed_argv(self.component, self.payload.build, "driver", tail), name)
-        require(capture.returncode == (1 if refused else 0) and not capture.stderr,
+        require(capture.returncode == (0 if expected_error is None else 1) and not capture.stderr,
                 "Fresh admitted identity operation returned the wrong status.")
         self.controller.require_finished_graph(self.component)
         with self.authority.mutex():
@@ -691,9 +760,9 @@ class Maintenance:
                      and row["entry"] == self.payload.descriptor["entry"]]
             require(len(mains) == 1, "Proof lacks its actual accepted MAIN route.")
         result = document(capture.stdout)
-        if refused:
-            require(expectation is not None and set(result) == {"error"} and isinstance(result["error"], dict)
-                    and result["error"].get("code") == "in_use", "A stale identity was not refused as a proof mismatch.")
+        if expected_error is not None:
+            require(set(result) == {"error"} and isinstance(result["error"], dict)
+                    and result["error"].get("code") == expected_error, "The admitted proof returned the wrong refusal.")
             return result
         require(result.get("subscription") == subscription and type(result.get("version")) is int
                 and result.get("version") == 1 and result.get("driver") == self.component.removeprefix("arbol-").removesuffix("-driver")
@@ -794,7 +863,8 @@ class MetadataArchive:
         require(set(value) == {"version", "kind", "format", "files"}
                 and type(value["version"]) is int and value["version"] == 1
                 and value["kind"] == "driver-identity-backup" and isinstance(value["files"], list)
-                and len(value["files"]) <= 100000, "Invalid metadata-only archive manifest.")
+                and len(value["files"]) <= 100000 and canonical(value, limit=_MANIFEST_LIMIT) == manifest.raw,
+                "Invalid or noncanonical metadata-only archive manifest.")
         files: dict[str, bytes | None] = {}
         expected = {"manifest.json": "file"}
         prior = b""
@@ -941,7 +1011,7 @@ def metadata_only_restore(subject: Maintenance, request: Execute, *, source_form
         os.close(fd)
 
     stale = previous["generation"] + "." + previous["witness"]
-    subject.admitted_proof(request.state, subscription, expectation=stale, refused=True, name="old-restore-proof-refusal")
+    subject.admitted_proof(request.state, subscription, expectation=stale, expected_error="in_use", name="old-restore-proof-refusal")
     fresh = subject.admitted_proof(request.state, subscription, name="after-restore-proof")
     expected = fresh["generation"] + "." + fresh["witness"]
     require(fresh["generation"] == result["generation"]
@@ -1063,3 +1133,160 @@ def unsafe_source_only_archive_parent(subject: Maintenance, request: Execute, *,
         "fault": fault, "state": expected, "decoy": expected_decoy, "sourceManifestSha256": source.sha256,
         "context": context, "closed": closed,
     })
+
+
+def _pending_path(state: Path, subscription: str) -> Path:
+    path = f"subscriptions/{subscription}/identity-pending.json"
+    require(_SUBSCRIPTION_METADATA.fullmatch(path) is not None, "Invalid recovery fixture Subscription.")
+    return state / path
+
+
+def _remove_journal(path: Path) -> tuple[bytes, str]:
+    raw = read_image(path).raw
+    value = document(raw)
+    require(set(value) == {"version", "operation", "witness", "phase"}
+            and type(value["version"]) is int and value["version"] == 1
+            and value["operation"] == "remove" and value["phase"] == "prepared"
+            and valid_token(value["witness"]), "Expected the owned prepared-remove journal.")
+    return raw, str(value["witness"])
+
+
+def _retirement_source(subject: Maintenance, observation: Object) -> list[Object]:
+    component = subject.component.removeprefix("arbol-").replace("-", "_")
+    module = "arbol_" + component
+    sites = observation["sites"]
+    require(isinstance(sites, list) and 0 < len(sites) < 32, "Missing actual sealed retirement stack.")
+    expected_site = ("identity.py", "retire_pending") if component == "codex_driver" else ("maintenance.py", "recover")
+    matching: list[Object] = []
+    for site in sites:
+        require(isinstance(site, list) and len(site) == 3 and isinstance(site[0], str)
+                and isinstance(site[1], str) and type(site[2]) is int and site[2] > 0,
+                "Malformed real retirement stack frame.")
+        path = Path(site[0])
+        if (path.name, site[1]) != expected_site or path.parent.name != module:
+            continue
+        require(not path.is_absolute() and ".." not in path.parts, "Retirement site escaped the accepted producer.")
+        image = read_image(subject.payload.root / path, limit=_MANIFEST_LIMIT, private=False)
+        require(site[2] <= len(image.raw.splitlines()), "Reported retirement frame is outside its immutable source.")
+        matching.append({"site": site, "image": image.evidence()})
+    require(len(matching) == 1, "Real unlink did not come from the sealed producer's selected recovery site.")
+    return matching
+
+
+def targeted_pending_recovery(subject: Maintenance, request: Execute, *, other_subscription: str,
+                              previous_proof: Mapping[str, str]) -> Object:
+    """Recover one genuinely prepared local journal and keep the other fenced."""
+    request.verify(subject.controller)
+    selected = request.subscription
+    require(request.operation == "identity-recover" and selected is not None and selected != other_subscription
+            and not tree_inventory(request.backup), "Targeted recovery requires two distinct local journal subjects.")
+    assert selected is not None
+    target = _pending_path(request.state, selected)
+    other = _pending_path(request.state, other_subscription)
+    selected_raw, old_witness = _remove_journal(target)
+    other_raw, other_witness = _remove_journal(other)
+    require(old_witness != other_witness and previous_proof["subscription"] == selected
+            and previous_proof["witness"] == old_witness, "Prepared journals are not bound to the original lost lifetime.")
+    sidecar = target.with_name("identity.json")
+    old_sidecar = read_image(sidecar)
+    require(document(old_sidecar.raw) == {"version": 1, "state": "active", "witness": old_witness},
+            "The selected journal does not own the earlier active sidecar.")
+    other_image = read_image(other)
+    other_sidecar = read_image(other.with_name("identity.json"))
+    require(document(other_sidecar.raw) == {"version": 1, "state": "active", "witness": other_witness},
+            "The unrelated journal does not bind its original active sidecar.")
+    root = read_image(request.state / "identity.json")
+    protected = _nonmetadata_state(request.state)
+    require(document(root.raw)["generation"] == previous_proof["generation"],
+            "The original selected proof came from another root generation.")
+
+    observation_root = subject.controller.workspace.fixture_root / ("retirement-" + subject.session)
+    observation_root.mkdir(mode=0o700)
+    config = observation_root / "observer.json"
+    observation_path = observation_root / "before-unlink.json"
+    _write_new(config, canonical({"journal": str(target), "sidecar": str(sidecar), "evidence": str(observation_path)}))
+    closed = subject.open()
+    result = subject.execute_observed(request, "retirement", retirement=config)
+
+    before_unlink = document(read_image(observation_path).raw)
+    source = _retirement_source(subject, before_unlink)
+    retired = canonical({"version": 1, "state": "retired", "witness": old_witness})
+    require(before_unlink["journal"] == selected_raw.hex() and before_unlink["sidecar"] == retired.hex()
+            and not os.path.lexists(target) and read_image(sidecar).raw == retired
+            and read_image(other) == other_image and read_image(other_sidecar.path) == other_sidecar
+            and read_image(root.path) == root and result["generation"] == previous_proof["generation"],
+            "Actual retirement did not precede unlink or changed the unrelated journal and generation.")
+    archive = MetadataArchive.read(request.backup / "before")
+    require(archive.sha256 == result["backupSha256"]
+            and archive.files[target.relative_to(request.state).as_posix()] == selected_raw
+            and archive.files[other.relative_to(request.state).as_posix()] == other_raw
+            and _nonmetadata_state(request.state) == protected,
+            "Targeted recovery failed to preserve both original journals or changed record/native metadata.")
+
+    subject.finish(request, result)
+    require(read_image(other) == other_image and read_image(other_sidecar.path) == other_sidecar
+            and _nonmetadata_state(request.state) == protected,
+            "Operation-relative finish changed an unrelated journal or record.")
+    stale = previous_proof["generation"] + "." + old_witness
+    subject.admitted_proof(request.state, selected, expectation=stale, expected_error="in_use", name="retired-proof-refusal")
+    fresh = subject.admitted_proof(request.state, selected, name="fresh-recovery-proof")
+    expected = fresh["generation"] + "." + fresh["witness"]
+    require(fresh["generation"] == result["generation"] and fresh["witness"] != old_witness
+            and subject.admitted_proof(request.state, selected, expectation=expected, name="restart-recovery-proof") == fresh,
+            "A freshly admitted invocation did not use the newly materialized lifetime.")
+    subject.admitted_proof(request.state, other_subscription, expected_error="internal", name="unrelated-pending-refusal")
+    require(not os.path.lexists(target) and read_image(other) == other_image and read_image(other_sidecar.path) == other_sidecar,
+            "A normally admitted proof consumed or relabelled the unrelated journal.")
+    evidence = {"result": result, "archiveSha256": archive.sha256, "closedBefore": closed,
+                "beforeUnlink": before_unlink, "sealedSource": source, "oldProof": dict(previous_proof),
+                "freshProof": fresh, "preservedOther": other_image.evidence()}
+    subject.controller.evidence.write("targeted-recovery-" + subject.session + ".json", evidence)
+    return evidence
+
+
+FinishFault = Literal["unrelated-pending", "malformed-journal", "root-journal"]
+
+
+def refuse_finish_with_pending(subject: Maintenance, request: Execute, *, affected_subscription: str,
+                               fault: FinishFault, observed_journal: bytes) -> None:
+    """Inject a bounded fault on a separate subject after its real result."""
+    request.verify(subject.controller)
+    pending = _pending_path(request.state, affected_subscription)
+    physical_owned(pending.parent, directory=True)
+    require(not os.path.lexists(pending), "Finish refusal needs a fresh dedicated injected pending path.")
+    source = document(observed_journal)
+    require(set(source) == {"version", "operation", "witness", "phase"}
+            and type(source["version"]) is int and source["version"] == 1 and source["operation"] == "remove"
+            and source["phase"] == "prepared" and valid_token(source["witness"]),
+            "Finish refusal must use the exact observed prepared-journal shape.")
+    if fault == "unrelated-pending":
+        require(request.operation in ("upgrade", "identity-reset", "restore"),
+                "A genuine successful targeted finish permits unrelated well-formed journals.")
+    else:
+        require(request.operation == "identity-recover" and affected_subscription != request.subscription,
+                "Use targeted recovery to distinguish malformed/root evidence from a well-formed unrelated journal.")
+    closed = subject.open()
+    result = subject.execute_observed(request, "observe")
+    if fault == "root-journal":
+        pending = request.state / "identity-upgrade.json"
+        raw = canonical({"version": 1, "from": 1, "to": 2, "generation": result["generation"],
+                         "backup": str(request.backup), "backupSha256": result["backupSha256"]})
+    else:
+        raw = observed_journal if fault == "unrelated-pending" else b"{malformed journal"
+    require(not os.path.lexists(pending), "Finish refusal would overwrite real pending evidence.")
+    _write_new(pending, raw)
+    unchanged = read_image(pending)
+    subject.refuse_finish(request, session=subject.session, result=subject.result, name="pending-finish-refusal")
+    require(subject.authority.read("control") == closed and read_image(pending) == unchanged,
+            "Refused finish did not preserve the exact pending journal and original closed control.")
+
+    probe = request.backup.parent / ("closed-state-" + subject.session)
+    require(probe.is_relative_to(subject.controller.workspace.fixture_root) and not os.path.lexists(probe),
+            "Closed launch probe needs genuinely absent private State.")
+    before = subject.preserve("before-closed-proof", request)
+    argv = subject.controller.fixed_argv(subject.component, subject.payload.build, "driver",
+                                         ["--state-dir", str(probe), "subscriptions", "identity", affected_subscription])
+    capture = subject.capture(argv, "pending-closed-proof")
+    require(capture.returncode == 1 and not capture.stderr and document(capture.stdout) == _PROVIDER_REFUSAL
+            and before == subject.image(request) and not os.path.lexists(probe),
+            "The still-closed provider admitted a normal proof or changed the original result.")
