@@ -389,6 +389,11 @@ def _fixed_guardian_caller() -> int:
             raw = read_bytes(context_path)
             context = parsed(raw)
             normal_context(context)
+            keys(value, "version type handoff nonce contextSha256 challenge")
+            check(type(value["version"]) is int and value["version"] == 1
+                  and value["type"] == {"G-ready-return": "ready", "G-go-return": "go", "G-started-return": "started"}[window]
+                  and value["handoff"] == context["handoff"] and value["nonce"] == context["nonce"]
+                  and context_token(value["challenge"]), "Actual peer/send frame is not the exact finite boundary.")
             actual_caller = process_identity(os.getpid())
             check(context["parent"] == {"writer": guardian.writer, **actual_caller}
                   and context["process"] == child_owner and context["entry"] == scope.producer("arbol-codex-driver").descriptor["entry"]
@@ -399,6 +404,10 @@ def _fixed_guardian_caller() -> int:
                 root = read(authority.folder / "writers" / guardian.invocation / (guardian.writer + ".json"))
                 check(root["phase"] == "active" and root["pid"] == actual_caller["pid"]
                       and root["startedAt"] == actual_caller["startedAt"], "Root transfer was already terminal.")
+                actual_handoff = read(authority.folder / "handoffs" / (context["handoff"] + ".json"))
+                check(actual_handoff["phase"] == ("pending" if window == "G-ready-return" else "accepted")
+                      and (window == "G-ready-return" or actual_handoff["challenge"] == value["challenge"]),
+                      "Actual durable pending/accepted challenge boundary differs.")
             frame_out({"version": 1, "kind": "guardian-class-ready", "case": initial["case"], "window": window,
                        "invocation": guardian.invocation, "writer": guardian.writer, "epoch": guardian.epoch,
                        "handoff": context["handoff"], "contextSha256": hashed(raw),
@@ -479,6 +488,7 @@ if __name__ == "__main__":
 # ruff: noqa: E402
 
 import os
+import selectors
 import signal
 import struct
 import subprocess
@@ -492,13 +502,14 @@ from pathlib import Path
 from typing import Literal
 from unittest.mock import patch
 
-from driver_identity_qualification import Baseline, Workspace, require
+from driver_identity_qualification import Baseline, CompletedLaunch, FixtureAuthority, Workspace, require
 
 import arbol_builds.driver_process as provider_process
 from arbol_builds.driver_admission import (
     Authority,
     Refusal,
     canonical,
+    normal_context,
     normal_control,
     publish,
     read,
@@ -506,11 +517,15 @@ from arbol_builds.driver_admission import (
     reconcile,
     sha256,
     token,
+    valid_hash,
+    valid_token,
+    validate,
     without_authority,
     writer_path,
 )
 from arbol_builds.driver_process import Frames, Guardian, process_identity
 from top.driver_state_support import (
+    Captured,
     EvidenceRecorder,
     ExactProcess,
     Object,
@@ -518,8 +533,11 @@ from top.driver_state_support import (
     OwnedChild,
     digest,
     document,
+    exact_fields,
     physical_owned,
+    read_image,
     signal_verified,
+    sync_directory,
     tree_inventory,
 )
 
@@ -528,6 +546,21 @@ ContextFault = Literal["context-hash", "registry", "epoch", "own-parent", "entry
 GoFault = Literal["nonce", "challenge", "context-hash", "replay"]
 CancellationWindow = Literal["offer", "ready", "go", "started"]
 _NEGATIVE_SERIALIZATION = threading.Lock()
+
+
+def _collect_real(child: OwnedChild, *, seconds: float, cleanup_seconds: float = 20) -> Captured:
+    try:
+        return child.collect(seconds=seconds)
+    except BaseException:
+        try:
+            child.request_stop()
+        except (ObservationFailed, OSError):
+            pass  # Identity refusal never becomes a guessed signal.
+        try:
+            child.wait_owned(seconds=cleanup_seconds)
+        except subprocess.TimeoutExpired:
+            pass  # Preserve unresolved owned custody and the original failure.
+        raise
 
 
 @dataclass(frozen=True)
@@ -965,3 +998,524 @@ def begin_vs_independently_admitted_write(subject: AdmissionSubject) -> None:
 # DRV6e1 now permits the separate fixed caller above; its outer case/oracle bodies
 # and complete independent admission remain current7.2/47/53 work. No runtime
 # evidence or completion follows from authoring this prospective source.
+
+
+ClassWindow = Literal["G-ready-return", "G-go-return", "G-started-return"]
+
+
+@dataclass(frozen=True)
+class FrozenCaller:
+    root: Path
+    commit: str
+    tree: str
+    entry_sha256: str
+
+    @property
+    def entry(self) -> Path:
+        return self.root / "tests/top/test_top_driver_state_admission.py"
+
+    def verify(self, subject: AdmissionSubject) -> Object:
+        """Read OWN real Git facts; never create/edit a checkout or clean flag."""
+        physical_owned(self.root, directory=True)
+        def git(*arguments: str) -> str:
+            result = subprocess.run(["/usr/bin/git", "--no-optional-locks", "-C", str(self.root), *arguments],
+                                    env=without_authority(dict(subject.environment)), capture_output=True, timeout=5, check=False)
+            require(result.returncode == 0 and len(result.stdout) <= 65536 and len(result.stderr) <= 4096,
+                    "Cannot establish actual frozen Git input facts.")
+            return result.stdout.decode("utf-8", "strict").rstrip("\n")
+        require(git("rev-parse", "--show-toplevel") == str(self.root) and git("rev-parse", "HEAD") == self.commit
+                and git("rev-parse", "HEAD^{tree}") == self.tree
+                and git("status", "--porcelain=v1") == "", "Frozen caller source is not its own clean exact Git input.")
+        provider = subject.baseline.images["arbol"].pin
+        require(self.commit == provider.commit and self.tree == provider.tree,
+                "This final tuple must use its own exact committed caller source, not an auxiliary source pass.")
+        image = read_image(self.entry, limit=1024 * 1024, private=False)
+        require(image.sha256 == self.entry_sha256, "Fixed frozen caller entry bytes differ.")
+        return {"repository": str(self.root), "branch": git("rev-parse", "--abbrev-ref", "HEAD"),
+                "commit": self.commit, "tree": self.tree, "porcelain": "", "entrySha256": image.sha256}
+
+
+@dataclass(frozen=True)
+class PublicCoupling:
+    """Actual sealed candidate-entry observation plus preserved route source facts.
+
+    This is not an ordinary working-launcher execution. That distinct observation
+    belongs to final working-cohort coupling below, avoiding a fake working B.
+    """
+
+    provider_payload: str
+    producer_payload: str
+    guardian_sha256: str
+    provider_entry_sha256: str
+    gate_sha256: str
+    route_sha256: str
+    context_sha256: str
+    invocation: str
+    handoff: str
+    observation: Path
+    observation_sha256: str
+
+    def verify(self, subject: AdmissionSubject) -> None:
+        scope = subject.baseline.scopes[COMPONENT]
+        provider, producer = scope.gate.provider, scope.producer(COMPONENT)
+        image = read_image(self.observation, limit=1024 * 1024)
+        require(image.sha256 == self.observation_sha256 and document(image.raw, limit=1024 * 1024)["kind"]
+                == "abr38-actual-sealed-candidate-coupling", "Actual public coupling observation changed.")
+        require(provider.digest == self.provider_payload and producer.digest == self.producer_payload
+                and scope.gate.digest == self.gate_sha256
+                and read_image(provider.root / "src/arbol_builds/driver_process.py", private=False).sha256 == self.guardian_sha256
+                and read_image(provider.root / provider.descriptor["entry"], private=False).sha256 == self.provider_entry_sha256
+                and read_image(subject.workspace.bin / COMPONENT, private=False).sha256 == self.route_sha256,
+                "Class caller and actual sealed provider/route no longer bind the same packaged implementation.")
+        # The genuine healthy rebind has archived the original terminal trees,
+        # preserving raw public context/entries. Do not copy a record to active.
+        matches_context: list[Path] = []
+        for group in (subject.authority.folder / "archive").iterdir():
+            if group.is_dir() and group.name.startswith("custody-"):
+                path = group / "handoffs" / (self.handoff + ".context.json")
+                if os.path.lexists(path):
+                    matches_context.append(path)
+        require(len(matches_context) == 1 and digest(read_bytes(matches_context[0])) == self.context_sha256,
+                "Actual original public context is not uniquely preserved in its real archive.")
+
+
+def prepare_sealed_candidate_coupling(subject: AdmissionSubject) -> tuple[AdmissionSubject, PublicCoupling]:
+    """Execute the real sealed candidate entry, then honestly archive/rebind healthy.
+
+    Actual creation/maintenance of the fixture is prospective body work, not an
+    initializer invocation authorized during source authoring. No Build record is
+    copied/promoted and the preparation cannot qualify a later changed tuple.
+    """
+    subject.verify_unused()
+    scope = subject.baseline.scopes[COMPONENT]
+    state = subject.workspace.fixture_root / "public-coupling-state"
+    require(not os.path.lexists(state), "Public coupling State is not fresh.")
+    argv = [*scope.gate.provider.prefix, "--qualification-launch", str(subject.workspace.registry), COMPONENT,
+            scope.producer(COMPONENT).build, "driver", "--", "--state-dir", str(state),
+            "subscriptions", "identity", "chatgpt"]
+    public = OwnedChild(argv, environment=without_authority(dict(subject.environment)), cwd=subject.workspace.registry)
+    captured = _collect_real(public, seconds=40)
+    require(captured.returncode == 0 and public.reaped, "Actual sealed public candidate entry did not complete.")
+    proof = document(captured.stdout)
+    root = document(read_bytes(state / "identity.json"))
+    sidecar = document(read_bytes(state / "subscriptions/chatgpt/identity.json"))
+    require("error" not in proof and proof["generation"] == root["generation"] and proof["witness"] == sidecar["witness"],
+            "Public identity output is not its independently persisted actual local proof.")
+    with subject.authority.mutex():
+        custody = reconcile(subject.authority, persist_unknown=False, candidate=scope)
+        roots = [row for row in custody.writers if row["parent"] is None
+                 and {key: row[key] for key in ("pid", "startedAt")} == captured.owner.object()]
+        require(custody.resolved and custody.active == custody.pending == 0 and len(roots) == 1
+                and all(row["phase"] == "terminal" for row in custody.writers), "Public actual custody did not finish.")
+        invocation = roots[0]["invocation"]
+        handoffs = [row for row in custody.handoffs if row["invocation"] == invocation and row["role"] == "main"]
+        require(len(handoffs) == 1 and handoffs[0]["phase"] == "accepted"
+                and handoffs[0]["entry"] == scope.producer(COMPONENT).descriptor["entry"], "Public actual child entry differs.")
+        handoff = handoffs[0]
+        context_raw = read_bytes(subject.authority.folder / "handoffs" / (handoff["handoff"] + ".context.json"))
+        context = document(context_raw)
+        normal_context(context)
+        require(digest(context_raw) == handoff["contextSha256"]
+                and context["parent"] == {"writer": roots[0]["writer"], **captured.owner.object()}
+                and context["registry"] == str(subject.workspace.registry), "Actual public context/process coupling differs.")
+        marker_path = subject.authority.folder / "normal-admissions" / (invocation + ".json")
+        marker_hash = digest(read_bytes(marker_path))
+        descriptor = subject.authority.lease(exclusive=True)
+        os.close(descriptor)
+    provider = scope.gate.provider
+    guardian_hash = read_image(provider.root / "src/arbol_builds/driver_process.py", private=False).sha256
+    entry_hash = read_image(provider.root / provider.descriptor["entry"], private=False).sha256
+    route_hash = read_image(subject.workspace.bin / COMPONENT, private=False).sha256
+    name = "public-coupling.json"
+    observed_hash = subject.evidence.write(name, {"version": 1, "kind": "abr38-actual-sealed-candidate-coupling",
+            "scope": str(subject.workspace.registry), "actualArgv": argv, "provider": captured.owner.object(),
+            "returncode": captured.returncode, "reaped": public.reaped, "stdout": proof, "context": context,
+            "contextSha256": digest(context_raw), "providerPayloadSha256": provider.digest,
+            "producerPayloadSha256": scope.producer(COMPONENT).digest, "providerEntrySha256": entry_hash,
+            "guardianSha256": guardian_hash, "routeSourceSha256": route_hash, "gateSha256": scope.gate.digest,
+            "ordinaryRenderedRouteExecuted": False})
+    launch = CompletedLaunch(COMPONENT, invocation, marker_hash, name, captured.owner)
+    previous_state = tree_inventory(state)
+    # A genuinely new transaction recorder first retains verified original
+    # workspace lineage, then the actual immutable public launch witness.
+    transaction = EvidenceRecorder(subject.evidence.root.parent, "coupling-authority-" + uuid.uuid4().hex)
+    authority = FixtureAuthority(subject.workspace, transaction)
+    transaction.write(name, document(read_bytes(subject.evidence.root / name, limit=1024 * 1024), limit=1024 * 1024))
+    baseline = authority.apply([subject.baseline.images[component].pin for component in subject.baseline.images],
+                               old=subject.baseline, completed=[launch])
+    require(tree_inventory(state) == previous_state, "Healthy registry rebind altered the actual public State.")
+    renewed = AdmissionSubject(subject.workspace, baseline, subject.evidence, subject.environment)
+    coupling = PublicCoupling(provider.digest, scope.producer(COMPONENT).digest, guardian_hash, entry_hash,
+                              scope.gate.digest, route_hash, digest(context_raw), invocation, handoff["handoff"],
+                              subject.evidence.root / name, observed_hash)
+    renewed.verify_unused()
+    coupling.verify(renewed)
+    return renewed, coupling
+
+
+class CallerPipe:
+    """Owned fixed caller Popen and independently bounded stdio control observer."""
+
+    def __init__(self, subject: AdmissionSubject, frozen: FrozenCaller, window: ClassWindow) -> None:
+        subject.verify_unused()
+        require(window in ("G-ready-return", "G-go-return", "G-started-return"), "Unknown fixed class window.")
+        source = frozen.verify(subject)
+        self.subject, self.window = subject, window
+        self.case = uuid.uuid4().hex
+        parent = subject.workspace.registry.parent
+        require(not os.path.lexists(parent / "guardian-class-subject.json"), "Subject preparation cannot be reused.")
+        (parent / "guardian-class-output").mkdir(mode=0o700)
+        data: Object = {"version": 1, "kind": "abr38-guardian-class-subject", "case": self.case,
+                       "cwd": {"path": str(parent), "device": parent.stat().st_dev, "inode": parent.stat().st_ino},
+                       "registry": subject.workspace.registry_identity,
+                       "fixtureRoot": subject.workspace.fixture_root_identity,
+                       "outputRoot": {"path": str(parent / "guardian-class-output"),
+                                      "device": (parent / "guardian-class-output").stat().st_dev,
+                                      "inode": (parent / "guardian-class-output").stat().st_ino},
+                       "source": source, "tuples": [{"component": image.pin.component, "build": image.pin.build,
+                            "sourceCommit": image.pin.commit, "sourceTree": image.pin.tree,
+                            "payloadSha256": image.payload.digest,
+                            "manifestSha256": image.payload.descriptor["payloadManifestSha256"]}
+                            for image in subject.baseline.images.values()],
+                       "build": subject.baseline.images[COMPONENT].pin.build,
+                       "acceptanceSha256": subject.baseline.scopes[COMPONENT].acceptance_sha256,
+                       "boot": subject.baseline.boot}
+        raw = canonical(data)
+        require(len(raw) <= 16384, "Fixed subject document exceeds its finite bound.")
+        descriptor = os.open(parent / "guardian-class-subject.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            count = os.write(descriptor, raw)
+            require(count == len(raw), "Incomplete subject preparation publication.")
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        sync_directory(parent)
+        provider = subject.baseline.scopes[COMPONENT].gate.provider
+        self.argv = [str(provider.root / provider.descriptor["interpreter"]), "-ISB", str(frozen.entry)]
+        self.process = subprocess.Popen(self.argv, cwd=parent, env=without_authority(dict(subject.environment)),
+                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True)
+        self.channels = selectors.DefaultSelector()
+        observed_owner: ExactProcess | None = None
+        try:
+            self.owner = ExactProcess.read(process_identity(self.process.pid))
+            observed_owner = self.owner
+            require(self.owner.live(parent=os.getpid()), "Actual fixed caller birth/parent is unverified.")
+            self.deadline = time.monotonic() + 60
+            self.buffer = bytearray()
+            self.raw_stdout = bytearray()
+            self.diagnostics = bytearray()
+            self.reaped = False
+            assert self.process.stdout is not None and self.process.stderr is not None and self.process.stdin is not None
+            for name_channel, pipe in (("control", self.process.stdout), ("diagnostic", self.process.stderr)):
+                os.set_blocking(pipe.fileno(), False)
+                self.channels.register(pipe, selectors.EVENT_READ, name_channel)
+            os.set_blocking(self.process.stdin.fileno(), False)
+            self.send({"version": 1, "kind": "guardian-class-case", "case": self.case,
+                       "window": window, "subjectSha256": digest(raw)})
+        except BaseException:
+            if observed_owner is not None and observed_owner.live(parent=os.getpid()):
+                signal_verified(observed_owner, signal.SIGTERM)
+            for owned_pipe in (self.process.stdin, self.process.stdout, self.process.stderr):
+                if owned_pipe is not None:
+                    owned_pipe.close()
+            try:
+                self.process.wait(timeout=25)
+            except subprocess.TimeoutExpired:
+                pass  # No guessed-PID escalation or fabricated closure.
+            self.channels.close()
+            raise
+
+    def output_bounds(self) -> None:
+        require(time.monotonic() < self.deadline, "Complete caller case exceeded60 seconds.")
+        for name in ("public.stdout", "public.stderr"):
+            path = self.subject.workspace.registry.parent / "guardian-class-output" / name
+            if os.path.lexists(path):
+                read_image(path, limit=1024 * 1024)
+
+    def send(self, value: Object) -> None:
+        assert self.process.stdin is not None
+        raw = canonical(value)
+        require(len(raw) <= 16384, "Oversized observer control message.")
+        limit = min(self.deadline, time.monotonic() + 5)
+        view = memoryview(raw)
+        with selectors.DefaultSelector() as writer:
+            writer.register(self.process.stdin, selectors.EVENT_WRITE)
+            while view:
+                self.output_bounds()
+                require(time.monotonic() < limit, "Owned caller control input backpressure timed out.")
+                if writer.select(.05):
+                    count = os.write(self.process.stdin.fileno(), view)
+                    require(count > 0, "Owned caller control closed.")
+                    view = view[count:]
+
+    def pump(self, seconds: float) -> None:
+        self.output_bounds()
+        for key, _ in self.channels.select(seconds):
+            raw = os.read(key.fd, 32769)
+            if not raw:
+                self.channels.unregister(key.fileobj)
+            elif key.data == "diagnostic":
+                self.diagnostics.extend(raw)
+                require(len(self.diagnostics) <= 4096, "Caller diagnostics exceeded4KiB.")
+            else:
+                self.raw_stdout.extend(raw)
+                self.buffer.extend(raw)
+                require(len(self.raw_stdout) <= 32768 and len(self.buffer) <= 32768,
+                        "Unexpected/oversized caller control output.")
+
+    def frame(self) -> Object:
+        limit = min(self.deadline, time.monotonic() + 20)
+        while b"\n" not in self.buffer:
+            require(time.monotonic() < limit and bool(self.channels.get_map()), "No complete real caller boundary frame.")
+            self.pump(.05)
+        raw, _, remainder = self.buffer.partition(b"\n")
+        self.buffer[:] = remainder
+        require(len(raw) + 1 <= 16384, "Oversized real caller frame.")
+        return document(bytes(raw) + b"\n", limit=16384)
+
+    def wait(self, *, seconds: float = 25) -> int:
+        limit = min(self.deadline, time.monotonic() + seconds)
+        while self.process.poll() is None or self.channels.get_map():
+            require(time.monotonic() < limit, "Owned caller wait/reap exceeded its finite bound.")
+            self.pump(.05)
+        result = self.process.wait(timeout=1)
+        self.reaped = True
+        require(not self.buffer, "Extra/truncated caller control frame after actual exit.")
+        return result
+
+    def close(self) -> None:
+        self.channels.close()
+        for pipe in (self.process.stdin, self.process.stdout, self.process.stderr):
+            if pipe is not None:
+                pipe.close()
+
+
+def guardian_class_window(subject: AdmissionSubject, frozen: FrozenCaller, *, window: ClassWindow, kill: bool) -> None:
+    """Actual fixed caller death or separate real positive control, never a fake ACK."""
+    subject, coupling = prepare_sealed_candidate_coupling(subject)
+    caller = CallerPipe(subject, frozen, window)
+    child_identity: ExactProcess | None = None
+    try:
+        ready, boundary = caller.frame(), caller.frame()
+        observed_at = time.monotonic()
+        exact_fields(ready, ("version", "kind", "case", "window", "invocation", "writer", "epoch", "handoff",
+                             "contextSha256", "caller", "child"))
+        exact_fields(boundary, ("version", "kind", "case", "window", "contextSha256", "handoff", "caller", "child"))
+        require(type(ready["version"]) is int and ready["version"] == 1
+                and type(boundary["version"]) is int and boundary["version"] == 1
+                and all(valid_token(ready[key]) for key in ("invocation", "writer", "epoch", "handoff"))
+                and valid_hash(ready["contextSha256"])
+                and ready["kind"] == "guardian-class-ready" and boundary["kind"] == "guardian-class-boundary"
+                and boundary == {key: ready[key] for key in boundary if key != "kind"}
+                    | {"kind": "guardian-class-boundary"}
+                and ready["case"] == caller.case and ready["window"] == window
+                and ready["caller"] == caller.owner.object() and caller.owner.live(parent=os.getpid()),
+                "Caller boundary frame does not bind the actual independently owned Popen.")
+        child_identity = ExactProcess.read(ready["child"])
+        require(child_identity.live(parent=caller.owner.pid), "Caller frame child is not its exact real direct child.")
+        authority = subject.authority
+        with authority.mutex():
+            raw = read_bytes(authority.folder / "handoffs" / (ready["handoff"] + ".context.json"))
+            context = document(raw)
+            normal_context(context)
+            root = read(writer_path(authority, ready["invocation"], ready["writer"]))
+            handoff = read(authority.folder / "handoffs" / (ready["handoff"] + ".json"))
+            child_writer = read(writer_path(authority, ready["invocation"], context["writer"]))
+            validate("writer", root)
+            validate("writer", child_writer)
+            validate("handoff", handoff)
+            scope_now = subject.baseline.scopes[COMPONENT]
+            require(context["component"] == root["component"] == child_writer["component"] == COMPONENT
+                    and context["payloadSha256"] == root["payloadSha256"] == child_writer["payloadSha256"] == scope_now.producer(COMPONENT).digest
+                    and context["epoch"] == root["epoch"] == child_writer["epoch"] == subject.baseline.epochs[COMPONENT]
+                    and context["boot"] == root["boot"] == child_writer["boot"] == subject.baseline.boot
+                    and context["acceptanceSha256"] == handoff["acceptanceSha256"] == scope_now.acceptance_sha256
+                    and child_writer["parent"] == root["writer"] and child_writer["contextSha256"] == digest(raw)
+                    and {key: child_writer[key] for key in ("pid", "startedAt")} == child_identity.object()
+                    and handoff["role"] == "main" and handoff["entry"] == context["entry"]
+                    and handoff["invocation"] == ready["invocation"] and handoff["nonce"] == context["nonce"],
+                    "Actual boundary failed independent tuple/epoch/boot/acceptance/writer bindings.")
+            require(digest(raw) == ready["contextSha256"] and context["parent"] == {"writer": ready["writer"], **caller.owner.object()}
+                    and context["process"] == child_identity.object() and context["registry"] == str(subject.workspace.registry)
+                    and context["entry"] == subject.baseline.scopes[COMPONENT].producer(COMPONENT).descriptor["entry"]
+                    and root["phase"] == "active" and root["pid"] == caller.owner.pid and root["startedAt"] == caller.owner.started_at
+                    and handoff["phase"] == ("pending" if window == "G-ready-return" else "accepted")
+                    and child_writer["phase"] in ("active", "terminal"), "Actual durable boundary differs from the claimed frame.")
+        coupling.verify(subject)
+        state = subject.workspace.fixture_root / "guardian-class-state"
+        state_before = tree_inventory(state) if os.path.lexists(state) else None
+        require(time.monotonic() - observed_at < 5 and caller.owner.live(parent=os.getpid()), "Exact kill/continue validation window expired.")
+        if kill:
+            signal_verified(caller.owner, signal.SIGKILL)
+            code = caller.wait()
+            require(code == -signal.SIGKILL and caller.reaped, "No actual SIGKILL/reap of the fixed caller.")
+            with authority.mutex():
+                custody = reconcile(authority, candidate=subject.baseline.scopes[COMPONENT])
+                original_root = read(writer_path(authority, ready["invocation"], ready["writer"]))
+                require(custody.unknown and original_root["phase"] == "active", "Actual parent death became fabricated terminal/quiescence.")
+                try:
+                    normal_control(authority, candidate=subject.baseline.scopes[COMPONENT])
+                except Refusal:
+                    pass
+                else:
+                    raise ObservationFailed("Unknown real parent death still admits normal work.")
+            # Probe the actual independent lock after parent death. Success means
+            # no remaining SH description; it never means terminal/known custody.
+            with authority.mutex():
+                try:
+                    lease = authority.lease(exclusive=True)
+                except BlockingIOError:
+                    independent_lease = "still-held"
+                else:
+                    os.close(lease)
+                    independent_lease = "released-but-unknown"
+            probe_state = subject.workspace.fixture_root / "guardian-refusal-state"
+            require(not os.path.lexists(probe_state), "Refusal probe State is not fresh.")
+            marker_before = tree_inventory(authority.folder / "normal-admissions")
+            with authority.mutex():
+                writers_before = {(row["invocation"], row["writer"]) for row in custody.writers}
+                handoffs_before = {row["handoff"] for row in custody.handoffs}
+            for selector in ("driver", "build-unit"):
+                tail = ["--state-dir", str(probe_state), "subscriptions", "identity", "chatgpt"] if selector == "driver" else []
+                scope = subject.baseline.scopes[COMPONENT]
+                argv = [*scope.gate.provider.prefix, "--qualification-launch", str(subject.workspace.registry), COMPONENT,
+                        scope.producer(COMPONENT).build, selector, "--", *tail]
+                remaining = min(10, caller.deadline - time.monotonic() - 20)
+                require(remaining > 0, "No finite caller-case budget left for refusal and owned cleanup.")
+                rejected = OwnedChild(argv, environment=without_authority(dict(subject.environment)), cwd=subject.workspace.registry)
+                result = _collect_real(rejected, seconds=remaining,
+                                       cleanup_seconds=min(20, max(.001, caller.deadline - time.monotonic())))
+                require(rejected.reaped and result.returncode != 0 and not os.path.lexists(probe_state),
+                        "Real normal/helper route accepted unknown custody or touched unadmitted State.")
+                with authority.mutex():
+                    current = reconcile(authority, persist_unknown=False, candidate=scope)
+                    require(current.unknown and {(row["invocation"], row["writer"]) for row in current.writers} == writers_before
+                            and {row["handoff"] for row in current.handoffs} == handoffs_before,
+                            "Refusal attempt created a new writer/handoff before admission.")
+                require(tree_inventory(authority.folder / "normal-admissions") == marker_before,
+                        "Refused normal/helper attempt published a new admission marker.")
+        else:
+            caller.send({"version": 1, "kind": "guardian-class-control", "case": caller.case, "command": "continue"})
+            require(caller.wait() == 0 and caller.reaped, "Actual positive caller/child transfer did not finish.")
+            with authority.mutex():
+                custody = reconcile(authority, persist_unknown=False, candidate=subject.baseline.scopes[COMPONENT])
+                require(custody.resolved and custody.active == custody.pending == 0
+                        and all(row["phase"] == "terminal" for row in custody.writers), "Positive transfer did not publish real full terminal custody.")
+                lease = authority.lease(exclusive=True)
+                os.close(lease)
+            independent_lease = "genuinely-finished"
+        subject.evidence.write("guardian-class-outcome.json", {"version": 1, "kind": "abr38-guardian-class-window",
+            "window": window, "case": caller.case, "actualCallerArgv": caller.argv, "caller": caller.owner.object(),
+            "child": child_identity.object(), "actualCallerReturncode": caller.process.returncode, "reaped": caller.reaped,
+            "kill": kill, "ready": ready, "boundary": boundary, "independentLease": independent_lease,
+            "stateBeforeKillOrContinue": state_before, "stateAfter": tree_inventory(state) if os.path.lexists(state) else None,
+            "publicCouplingSha256": coupling.observation_sha256, "publicLateBinaryDeathObserved": False,
+            "controlStdoutSha256": digest(bytes(caller.raw_stdout)), "diagnosticsSha256": digest(bytes(caller.diagnostics))},
+            limit=32 * 1024 * 1024)
+    finally:
+        if caller.process.poll() is None and caller.owner.live():
+            signal_verified(caller.owner, signal.SIGTERM)
+            try:
+                caller.wait()
+            except (ObservationFailed, subprocess.TimeoutExpired):
+                pass
+        if kill and child_identity is not None and child_identity.live():
+            # Owned observed descendant, not an arbitrary group or a reap claim:
+            # after its parent dies it may be adopted by the OS, not this process.
+            signal_verified(child_identity, signal.SIGCONT)
+            signal_verified(child_identity, signal.SIGTERM)
+            deadline = min(caller.deadline, time.monotonic() + 20)
+            while child_identity.live() and time.monotonic() < deadline:
+                time.sleep(.01)
+            # Kernel disappearance is NOT terminal custody; unknown remains.
+        caller.close()
+
+
+def final_working_rendered_route_coupling(subject: AdmissionSubject) -> None:
+    """FINAL unchanged working-cohort70 oracle, never an own-unit assertion.
+
+    Its absence cannot be skipped/deferred inside a unit case and called a full
+    unit pass. The own-unit case above owes actual sealed candidate entry + exact
+    class/runtime/context coupling, with route hashes as SOURCE evidence only.
+    This separately allocated qualification function requires actual final
+    working records and executes the rendered ordinary route for that same tuple.
+    Failed/unpruned auxiliaries can be legitimately named-runnable in production;
+    this deliberate working requirement is the final qualification domain only.
+    """
+    subject.workspace.verify(subject.evidence)
+    scope = subject.baseline.scopes[COMPONENT]
+    scope.recheck()
+    for image in subject.baseline.images.values():
+        current = image.pin.verify(subject.workspace.registry)
+        require(current.record["status"] == "working", "Final cohort ordinary-route proof awaits each real own full gate.")
+    state = subject.workspace.fixture_root / "final-ordinary-route-state"
+    require(not os.path.lexists(state), "Final ordinary route needs a fresh named disposable State.")
+    before_routes = {component: read_image(subject.workspace.bin / component, private=False).sha256
+                     for component in subject.baseline.scopes}
+    before_gate = digest(read_bytes(subject.workspace.registry / ".driver-qualification/gate.json"))
+    argv = [str(subject.workspace.bin / COMPONENT), "-v", scope.producer(COMPONENT).build,
+            "--state-dir", str(state), "subscriptions", "identity", "chatgpt"]
+    normal = OwnedChild(argv, environment=without_authority(dict(subject.environment)), cwd=subject.workspace.registry)
+    captured = _collect_real(normal, seconds=40)
+    require(normal.reaped and captured.returncode == 0, "Actual final rendered ordinary route did not complete.")
+    proof = document(captured.stdout)
+    require(proof["generation"] == document(read_bytes(state / "identity.json"))["generation"]
+            and proof["witness"] == document(read_bytes(state / "subscriptions/chatgpt/identity.json"))["witness"],
+            "Final ordinary proof does not bind actual independently persisted identity.")
+    with subject.authority.mutex():
+        custody = reconcile(subject.authority, persist_unknown=False, candidate=scope)
+        roots = [row for row in custody.writers if row["parent"] is None
+                 and {key: row[key] for key in ("pid", "startedAt")} == captured.owner.object()]
+        require(custody.resolved and custody.active == custody.pending == 0 and len(roots) == 1,
+                "Final ordinary caller/context custody is not actually complete.")
+        main = [row for row in custody.handoffs if row["invocation"] == roots[0]["invocation"] and row["role"] == "main"]
+        require(len(main) == 1 and main[0]["phase"] == "accepted"
+                and main[0]["entry"] == scope.producer(COMPONENT).descriptor["entry"], "Final ordinary child is another entry.")
+        raw = read_bytes(subject.authority.folder / "handoffs" / (main[0]["handoff"] + ".context.json"))
+        context = document(raw)
+        normal_context(context)
+        require(context["parent"] == {"writer": roots[0]["writer"], **captured.owner.object()}
+                and digest(raw) == main[0]["contextSha256"], "Final ordinary process/context coupling differs.")
+        descriptor = subject.authority.lease(exclusive=True)
+        os.close(descriptor)
+    require(before_gate == scope.gate.digest == digest(read_bytes(subject.workspace.registry / ".driver-qualification/gate.json"))
+            and before_routes == {component: read_image(subject.workspace.bin / component, private=False).sha256
+                                  for component in subject.baseline.scopes}, "Final ordinary proof changed the exact gate/routes.")
+    subject.evidence.write("final-ordinary-route.json", {"version": 1, "kind": "abr38-final-working-cohort-ordinary-route",
+            "domain": "final-cohort70-only", "actualArgv": argv, "provider": captured.owner.object(), "reaped": normal.reaped,
+            "returncode": captured.returncode, "stdout": proof, "context": context, "contextSha256": digest(raw),
+            "providerPayloadSha256": scope.gate.provider.digest, "producerPayloadSha256": scope.producer(COMPONENT).digest,
+            "guardianSha256": read_image(scope.gate.provider.root / "src/arbol_builds/driver_process.py", private=False).sha256,
+            "gateSha256": before_gate, "routeSha256": before_routes[COMPONENT], "ordinaryRenderedRouteExecuted": True})
+
+
+MAIN_CONTEXT_FAULTS: tuple[ContextFault, ...] = ("context-hash", "registry", "epoch", "own-parent", "entry", "payload", "acceptance", "nonce")
+MAIN_GO_FAULTS: tuple[GoFault, ...] = ("nonce", "challenge", "context-hash", "replay")
+MAIN_CANCELLATIONS: tuple[CancellationWindow, ...] = ("offer", "ready", "go", "started")
+MAIN_CLASS_WINDOWS: tuple[ClassWindow, ...] = ("G-ready-return", "G-go-return", "G-started-return")
+MAIN_CASE_IDS = frozenset({*("context-" + fault for fault in MAIN_CONTEXT_FAULTS),
+                          *("go-" + fault for fault in MAIN_GO_FAULTS),
+                          *("cancel-" + window for window in MAIN_CANCELLATIONS), "begin-admitted-write",
+                          *(window + suffix for window in MAIN_CLASS_WINDOWS for suffix in ("-death", "-positive"))})
+
+
+def complete_main_admission_inventory(subjects: Mapping[str, AdmissionSubject], frozen: FrozenCaller) -> None:
+    """Whole static main inventory, with no filter, optional skip or runtime path dispatch.
+
+    The later admitted fixture constructor must supply every independent subject
+    through honest registered tuple preparation, preserving all Build histories.
+    This API constructs no registry/catalogue records and launders no tainted State.
+    Independent helper-after-parent-death remains the separate current8 inventory.
+    """
+    require(set(subjects) == MAIN_CASE_IDS and len({subject.workspace.registry for subject in subjects.values()}) == len(subjects),
+            "Main admission needs every fixed case and genuinely independent subjects.")
+    for fault in MAIN_CONTEXT_FAULTS:
+        wrong_context_refuses_before_ready(subjects["context-" + fault], fault)
+    for fault_go in MAIN_GO_FAULTS:
+        wrong_go_or_replay_refuses_before_state(subjects["go-" + fault_go], fault_go)
+    for window_cancel in MAIN_CANCELLATIONS:
+        cancel_at_real_wire_boundary(subjects["cancel-" + window_cancel], window_cancel)
+    begin_vs_independently_admitted_write(subjects["begin-admitted-write"])
+    for window_class in MAIN_CLASS_WINDOWS:
+        guardian_class_window(subjects[window_class + "-death"], frozen, window=window_class, kill=True)
+        guardian_class_window(subjects[window_class + "-positive"], frozen, window=window_class, kill=False)
