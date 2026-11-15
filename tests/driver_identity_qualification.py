@@ -12,6 +12,7 @@ import os
 import re
 import stat
 import subprocess
+import sys
 import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -24,6 +25,8 @@ from top.driver_state_support import (
     Captured,
     EvidenceRecorder,
     ExactProcess,
+    FileImage,
+    HelperSpanCollector,
     Object,
     ObservationFailed,
     OwnedChild,
@@ -1144,6 +1147,102 @@ class InventoryPhase:
         require(inventory_sha256 == self.inventory_sha256, "Inner phase inventory bytes differ.")
 
 
+_H1_CASES = {component: ("tests/test_subscription_identity.py" if component == "arbol-mimo-driver"
+                       else "tests/top/test_top_subscription_identity.py")
+             + "::HelperSpanTests.test_helper_independent_lease" for component in COMPONENTS}
+_H1_FILES = {"phase-report.json": 1024 * 1024, "local-results.json": 1024 * 1024,
+             "helper-span.json": 16 * 1024, "actor-ready.json": 4096, ".fixture-owner.json": 4096}
+
+
+def _span_ids(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list) or not 0 < len(value) <= 4096:
+        raise ObservationFailed("Invalid full H1 inventory list.")
+    result: list[str] = []
+    for item in value:
+        require(isinstance(item, str) and 0 < len(item.encode("utf-8", "strict")) <= 512,
+                "Invalid bounded inventory identity.")
+        result.append(item)
+    require(len(set(result)) == len(result), "Duplicate H1 inventory identity.")
+    return tuple(result)
+
+
+def _span_document(raw: bytes, *, limit: int) -> Object:
+    value = document(raw, limit=limit)
+    require(raw == evidence_bytes(value, limit=limit), "H1 report is not exact canonical JSONLF.")
+    return value
+
+
+@dataclass(frozen=True)
+class H1Schedule:
+    """Static admitted full UNIT order, never a selection received over control.
+
+    The gate adapter's source admission supplies its actual prescribed order;
+    the observer separately proves exact full membership from packaged inventory.
+    Native remains its distinct complete original Mimo gate, not a unit filter.
+    """
+
+    phase: InventoryPhase
+    order: tuple[str, ...]
+    gate_source_sha256: str
+
+    def verify(self, payload: Payload) -> bytes:
+        require(payload.component in COMPONENTS and valid_hash(self.gate_source_sha256), "Invalid H1 source schedule.")
+        require(_span_ids(list(self.order)) == self.order and frozenset(self.order) == self.phase.selected_ids
+                and self.order[-1] == _H1_CASES[payload.component]
+                and "H1-span-completion" in self.phase.required_external_ids, "H1 is not the fixed final full-unit case.")
+        raw = read_image(payload.root / "test-tiers.json", limit=1024 * 1024, private=False).raw
+        require(digest(raw) == self.phase.inventory_sha256, "Actual packaged inventory hash differs.")
+        source = read_image(payload.root / "scripts/check_build.py", limit=1024 * 1024, private=False)
+        require(source.sha256 == self.gate_source_sha256
+                and "scripts/check_build.py" in payload.descriptor["helpers"]
+                and "tests/identity_actor.py" in payload.descriptor["helpers"], "Actual runner/helper source grant differs.")
+        inventory = document(raw, limit=1024 * 1024)
+        require(isinstance(inventory.get("tests"), list), "Actual inventory lacks its fixed tests array.")
+        selected: list[str] = []
+        all_top: list[str] = []
+        for row in inventory["tests"]:
+            require(isinstance(row, dict), "Malformed actual inventory entry.")
+            if row.get("tier") != "top":
+                continue
+            require(row.get("status") == "active", "A mandatory original top entry is disabled.")
+            name = row.get("test" if payload.component == "arbol-mimo-driver" else "id")
+            _span_ids([name])
+            all_top.append(name)
+            # EXACT unchanged Mimo unit/native split in its original full gate;
+            # no caller prefix, selector, filter or prepare-only subset exists.
+            if payload.component != "arbol-mimo-driver" or name.startswith("tests/test_"):
+                selected.append(name)
+        require(len(set(all_top)) == len(all_top) and set(selected) == set(self.order)
+                and len(selected) == len(self.order), "H1 schedule omits/adds an actual full-unit top entry.")
+        return raw
+
+
+@dataclass(frozen=True)
+class H1View:
+    """Verified report/process/source binding, NOT permission to signal a claim."""
+
+    component: str
+    case: str
+    root: Path
+    root_identity: Object
+    images: Mapping[str, FileImage]
+    suite: ExactProcess
+    helper: ExactProcess
+    suite_context: Object
+    helper_context: Object
+    suite_context_sha256: str
+    helper_context_sha256: str
+    admission_lock: Object
+    custody: Object
+
+    def recheck_files(self) -> None:
+        require(directory_identity(self.root) == self.root_identity, "H1 fixture root was replaced.")
+        for name, old in self.images.items():
+            current = read_image(self.root / name, limit=_H1_FILES[name])
+            require(current == old and (self.root / name).lstat().st_nlink == 1,
+                    "Immutable H1 report/owner/ready evidence was changed or linked.")
+
+
 @dataclass(frozen=True)
 class AdministrativeCapture:
     component: str
@@ -1216,6 +1315,276 @@ class WholeCheckController:
             self.finished_external.add(observation.case_id)
         require(self.finished_external == set(phase.required_external_ids), "An external assertion remains pending.")
         self.require_finished_graph(component)
+
+    def verify_h1_ready(self, component: str, *, baseline: Baseline, child: OwnedChild,
+                        case: str, schedule: H1Schedule, ready_raw: bytes) -> H1View:
+        """Read only owned fixture bytes AFTER exact real runtime/M-D validation.
+
+        No State/Accounts/native API, authority borrowing, report trust flag or
+        raw metadata read before the actual candidate/source verification.
+        """
+        self.workspace.verify(self.evidence)
+        self.scope.recheck()
+        require(component in COMPONENTS and self.scope == baseline.scopes[component]
+                and digest(baseline.gate_bytes) == self.scope.gate.digest
+                and re.fullmatch(r"[0-9a-f]{32}", case, re.ASCII) is not None,
+                "H1 subject/case is not the exact original fixture group.")
+        payload = self.scope.producer(component)
+        inventory_raw = schedule.verify(payload)
+        require(not child.reaped and child.owner.live(parent=os.getpid()), "H1 provider is not actually owned/live.")
+        ready = _span_document(ready_raw, limit=4096)
+        exact_fields(ready, ("version", "kind", "case", "reportSha256"))
+        require(type(ready["version"]) is int and ready["version"] == 1
+                and ready["kind"] == "helper-span-ready" and ready["case"] == case
+                and valid_hash(ready["reportSha256"]), "Wrong finite H1 ready frame.")
+        authority = Authority(self.workspace.registry, component)
+        with authority.mutex():
+            for expected_identity in baseline.authority_identities.values():
+                directory = Path(expected_identity["path"])
+                identity = directory_identity(directory)
+                info = physical_owned(directory, directory=True)
+                require({**identity, "uid": info.st_uid, "mode": stat.S_IMODE(info.st_mode)} == expected_identity,
+                        "Original fixture/shared/component authority directory changed.")
+            require(lock_identity(authority, "admission.lock") == baseline.locks[component]["admission"]
+                    and lock_identity(authority, "control.lock") == baseline.locks[component]["control"],
+                    "Original physical H1 authority/locks changed.")
+            control = normal_control(authority, epoch=baseline.epochs[component], candidate=self.scope)
+            require(control["epoch"] == baseline.epochs[component] and boot_uuid() == baseline.boot,
+                    "H1 control epoch/actual boot changed.")
+            custody = reconcile(authority, persist_unknown=False, candidate=self.scope)
+            require(not custody.unknown and custody.active == 2 and custody.pending == 0,
+                    "H1 does not have exactly active Suite + independent helper.")
+            roots = [row for row in custody.writers if row["parent"] is None]
+            require(len(roots) == 1 and roots[0]["phase"] == "terminal"
+                    and {key: roots[0][key] for key in ("pid", "startedAt")} == child.owner.object(),
+                    "Actual fixed provider/root transfer differs from owned Popen.")
+            roots_context = [row for row in custody.handoffs if row["parent"] == roots[0]["writer"]
+                             and row["invocation"] == roots[0]["invocation"]]
+            require(len(roots_context) == 1, "Ambiguous actual whole-unit Suite transfer.")
+            suite_handoff = roots_context[0]
+            require(suite_handoff["role"] == "helper" and suite_handoff["entry"] == "scripts/check_build.py"
+                    and suite_handoff["phase"] == "accepted", "Suite is not the fixed admitted unit helper.")
+            suite_raw = read_bytes(authority.folder / "handoffs" / (suite_handoff["handoff"] + ".context.json"))
+            suite_context = document(suite_raw)
+            normal_context(suite_context)
+            require(roots[0] == {"version": 1, "invocation": suite_context["invocation"],
+                "writer": suite_context["parent"]["writer"], "parent": None, "component": component,
+                "epoch": baseline.epochs[component], "payloadSha256": payload.digest, "boot": baseline.boot,
+                **child.owner.object(), "phase": "terminal", "contextSha256": None},
+                "Original provider root differs from independent exact process/tuple/epoch/boot bindings.")
+            require(valid_token(suite_context["invocation"]), "Invalid actual H1 invocation token.")
+            root = self.workspace.registry / ".driver-qualification/fixtures" / suite_context["invocation"] / case
+            root_identity = directory_identity(root)
+            images: dict[str, FileImage] = {}
+            for name, limit in _H1_FILES.items():
+                images[name] = read_image(root / name, limit=limit)
+                require((root / name).lstat().st_nlink == 1, "Hard-linked H1 fixture evidence is forbidden.")
+            owner = _span_document(images[".fixture-owner.json"].raw, limit=4096)
+            require(owner == {"version": 1, "case": case, "component": component,
+                              "invocation": suite_context["invocation"], "parentWriter": suite_context["writer"],
+                              "payloadSha256": payload.digest} and type(owner["version"]) is int,
+                    "H1 physical fixture owner differs from actual Suite.")
+            base = _span_document(images["phase-report.json"].raw, limit=1024 * 1024)
+            exact_fields(base, ("version", "kind", "component", "build", "payloadSha256", "invocation", "writer",
+                                "contextSha256", "selected", "pendingExternal", "inventorySha256"))
+            require(type(base["version"]) is int and base["version"] == 1
+                    and base["kind"] == "abr38-inner-phase-only" and base["component"] == component
+                    and base["build"] == payload.build and base["payloadSha256"] == payload.digest
+                    and base["invocation"] == suite_context["invocation"] and base["writer"] == suite_context["writer"]
+                    and base["contextSha256"] == digest(suite_raw), "Original base report does not bind actual Suite.")
+            selected, pending = _span_ids(base["selected"]), _span_ids(base["pendingExternal"])
+            schedule.phase.validate(selected, pending, base["inventorySha256"])
+            require(selected == schedule.order and digest(inventory_raw) == base["inventorySha256"],
+                    "Base report shortened/reordered the actual full local schedule.")
+            local = _span_document(images["local-results.json"].raw, limit=1024 * 1024)
+            exact_fields(local, ("version", "kind", "component", "inventorySha256", "selectedSha256", "h1CaseId", "rows"))
+            require(type(local["version"]) is int and local["version"] == 1
+                    and local["kind"] == "abr38-helper-span-local-results" and local["component"] == component
+                    and local["inventorySha256"] == base["inventorySha256"]
+                    and local["selectedSha256"] == digest(evidence_bytes(list(selected), limit=1024 * 1024))
+                    and local["h1CaseId"] == _H1_CASES[component]
+                    and isinstance(local["rows"], list) and len(local["rows"]) == len(selected),
+                    "Local-results identity/full-order/hash differs.")
+            for expected_id, row in zip(selected, local["rows"], strict=True):
+                require(isinstance(row, dict), "Invalid bounded local-result row.")
+                exact_fields(row, ("id", "localStatus", "helperSpanStatus", "resultSha256"))
+                require(row["id"] == expected_id and valid_hash(row["resultSha256"]),
+                        "Local result is missing/duplicated/reordered/unexecuted.")
+                require((row["localStatus"], row["helperSpanStatus"]) ==
+                        (("h1-preconditions-done", "pending") if expected_id == _H1_CASES[component]
+                         else ("passed", "not-applicable")),
+                        "Failed/skipped/unavailable/pending local work cannot arm H1 or a complete check.")
+            report = _span_document(images["helper-span.json"].raw, limit=16 * 1024)
+            exact_fields(report, ("version", "kind", "case", "component", "phaseReportSha256", "localResultsSha256",
+                                  "inventorySha256", "suite", "helper", "actorReadySha256", "admissionLock", "pendingExternal"))
+            require(type(report["version"]) is int and report["version"] == 1
+                    and report["kind"] == "abr38-preterminal-helper-span" and report["case"] == case
+                    and report["component"] == component and images["helper-span.json"].sha256 == ready["reportSha256"]
+                    and report["phaseReportSha256"] == images["phase-report.json"].sha256
+                    and report["localResultsSha256"] == images["local-results.json"].sha256
+                    and report["actorReadySha256"] == images["actor-ready.json"].sha256
+                    and report["inventorySha256"] == base["inventorySha256"]
+                    and _span_ids(report["pendingExternal"]) == pending
+                    and report["admissionLock"] == baseline.locks[component]["admission"],
+                    "Supplemental H1 report does not bind immutable original artifacts/scope.")
+            require(isinstance(report["admissionLock"], dict), "Invalid original H1 lock identity object.")
+            exact_fields(report["admissionLock"], ("device", "inode"))
+            require(type(report["admissionLock"]["device"]) is int and report["admissionLock"]["device"] >= 0
+                    and type(report["admissionLock"]["inode"]) is int and report["admissionLock"]["inode"] > 0,
+                    "H1 lock identity must use actual nonboolean device/inode integers.")
+            actor_ready = _span_document(images["actor-ready.json"].raw, limit=4096)
+            require(actor_ready == {"version": 1, "kind": "actor-ready", "case": case,
+                                    "action": "lease-hold", "window": "H1-independent-lease"}
+                    and type(actor_ready["version"]) is int, "Actual actor-ready is not the fixed H1 frame.")
+            # Selector is bound by the authored fixed local case, never received
+            # as a command/path/dispatch choice over any outer control channel.
+            require(isinstance(report["suite"], dict) and isinstance(report["helper"], dict),
+                    "Invalid fixed H1 producer/participant objects.")
+            exact_fields(report["suite"], ("invocation", "writer", "contextSha256", "pid", "startedAt"))
+            exact_fields(report["helper"], ("entry", "invocation", "writer", "handoff", "contextSha256", "pid", "startedAt"))
+            helper_id = report["helper"]["handoff"]
+            require(valid_token(helper_id), "Invalid canonical helper handoff token.")
+            helper_raw = read_bytes(authority.folder / "handoffs" / (helper_id + ".context.json"))
+            helper_context = document(helper_raw)
+            normal_context(helper_context)
+            contexts = ((suite_context, suite_raw, suite_handoff, "scripts/check_build.py"),
+                        (helper_context, helper_raw, read(authority.folder / "handoffs" / (helper_id + ".json")),
+                         "tests/identity_actor.py"))
+            participants: list[ExactProcess] = []
+            for context, raw, handoff, entry in contexts:
+                validate("handoff", handoff)
+                expected_parent = roots[0] if entry == "scripts/check_build.py" else read(
+                    authority.folder / "writers" / suite_context["invocation"] / (suite_context["writer"] + ".json"))
+                require(context["role"] == "helper" and context["registry"] == str(self.workspace.registry)
+                        and context["registrySha256"] == digest(canonical(authority.identity))
+                        and context["component"] == component and context["epoch"] == baseline.epochs[component]
+                        and context["boot"] == baseline.boot and context["invocation"] == roots[0]["invocation"]
+                        and context["payloadSha256"] == payload.digest
+                        and context["acceptanceSha256"] == self.scope.acceptance_sha256 and context["entry"] == entry
+                        and context["parent"] == {"writer": expected_parent["writer"],
+                                                **{key: expected_parent[key] for key in ("pid", "startedAt")}},
+                        "Actual helper context does not bind fixed parent/entry/tuple/epoch/boot/acceptance.")
+                require(handoff == {"version": 1, "handoff": context["handoff"], "component": component,
+                    "invocation": context["invocation"], "parent": context["parent"]["writer"], "child": context["writer"],
+                    "epoch": context["epoch"], "payloadSha256": payload.digest, "phase": "accepted", "nonce": context["nonce"],
+                    "contextSha256": digest(raw), "role": "helper", "entry": entry,
+                    "acceptanceSha256": self.scope.acceptance_sha256, "challenge": handoff["challenge"]}
+                        and valid_token(handoff["challenge"]), "Actual accepted ready/go/started handoff differs.")
+                writer = read(authority.folder / "writers" / context["invocation"] / (context["writer"] + ".json"))
+                expected_writer = {"version": 1, "invocation": context["invocation"], "writer": context["writer"],
+                    "parent": context["parent"]["writer"], "component": component, "epoch": context["epoch"],
+                    "payloadSha256": payload.digest, "boot": baseline.boot, **context["process"],
+                    "phase": "active", "contextSha256": digest(raw)}
+                require(writer == expected_writer, "Actual H1 participant is not still ACTIVE with the original context.")
+                participant = ExactProcess.read(context["process"])
+                require(participant.live(parent=context["parent"]["pid"]), "Actual H1 kernel birth/direct-parent differs.")
+                participants.append(participant)
+            suite, helper = participants
+            require(report["suite"] == {"invocation": suite_context["invocation"], "writer": suite_context["writer"],
+                                        "contextSha256": digest(suite_raw), **suite.object()}
+                    and report["helper"] == {"entry": "tests/identity_actor.py", "invocation": helper_context["invocation"],
+                        "writer": helper_context["writer"], "handoff": helper_context["handoff"],
+                        "contextSha256": digest(helper_raw), **helper.object()}, "H1 claimed participants are not actual verified processes.")
+            for writer in custody.writers:
+                if writer["writer"] in (roots[0]["writer"], suite_context["writer"], helper_context["writer"]):
+                    continue
+                require(writer["phase"] == "terminal" and not ExactProcess.read(
+                    {key: writer[key] for key in ("pid", "startedAt")}).live(),
+                    "Another metadata helper is not genuinely finished before H1 span.")
+            view = H1View(component, case, root, root_identity, images, suite, helper, suite_context, helper_context,
+                          digest(suite_raw), digest(helper_raw), lock_identity(authority, "admission.lock"),
+                          {"writers": list(custody.writers), "handoffs": list(custody.handoffs)})
+            view.recheck_files()
+        self.scope.recheck()
+        view.recheck_files()
+        require(child.owner.live(parent=os.getpid()) and suite.live(parent=child.owner.pid)
+                and helper.live(parent=suite.pid), "H1 process ownership changed during complete report validation.")
+        return view
+
+    def run_h1_positive(self, component: str, *, baseline: Baseline, case: str, schedule: H1Schedule,
+                        environment: Mapping[str, str], observations: Sequence[DeferredObservation], seconds: float) -> None:
+        """Complete original local unit inventory AND every deferred assertion.
+
+        Active-loss STOP/kill proof belongs to the separate admission case; this
+        positive coordinator cannot substitute for it or terminal-close proof.
+        """
+        require(not self.reaped and not self.finished_external, "Each H1 check needs its own fresh external controller.")
+        self.workspace.verify(self.evidence)
+        self.scope.recheck()
+        require(component in COMPONENTS and math.isfinite(seconds) and 20 < seconds <= 7200,
+                "Invalid exact whole H1 unit budget.")
+        require(self.scope == baseline.scopes[component] and digest(baseline.gate_bytes) == self.scope.gate.digest
+                and re.fullmatch(r"[0-9a-f]{32}", case, re.ASCII) is not None,
+                "H1 launch needs the exact original baseline/case before any spawn.")
+        schedule.verify(self.scope.producer(component))
+        require(len({item.case_id for item in observations}) == len(observations)
+                and {item.case_id for item in observations} == set(schedule.phase.required_external_ids),
+                "H1 check lacks a complete static external assertion allocation.")
+        from arbol_builds.driver_admission import without_authority
+        child = OwnedChild(self.fixed_argv(component, self.scope.producer(component).build, "build-unit"),
+                           environment=without_authority(dict(environment)), cwd=self.workspace.registry)
+        try:
+            collector = HelperSpanCollector(child, case=case, seconds=seconds)
+        except BaseException as setup_error:
+            # The actual owned provider already exists. Even collector setup or
+            # resource failure must independently attempt stop AND real wait.
+            try:
+                child.request_stop()
+            except BaseException as error:
+                setup_error.add_note("H1 setup owned stop: " + type(error).__name__)
+            try:
+                child.wait_owned(seconds=20)
+            except BaseException as error:
+                setup_error.add_note("H1 setup owned wait: " + type(error).__name__)
+            for stream in (child.process.stdin, child.process.stdout, child.process.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except BaseException as error:
+                        setup_error.add_note("H1 setup endpoint: " + type(error).__name__)
+            raise
+        try:
+            with collector:
+                ready_raw = collector.ready()
+                view = self.verify_h1_ready(component, baseline=baseline, child=child, case=case,
+                                            schedule=schedule, ready_raw=ready_raw)
+                self.evidence.write("h1-verified-preterminal.json", {"component": component, "case": case,
+                    "provider": child.owner.object(), "suite": view.suite.object(), "helper": view.helper.object(),
+                    "suiteContextSha256": view.suite_context_sha256, "helperContextSha256": view.helper_context_sha256,
+                    "admissionLock": view.admission_lock, "custody": view.custody,
+                    "reports": {name: image.evidence() for name, image in view.images.items()},
+                    "readyObservedAt": collector.ready_observed_at})
+                current = self.verify_h1_ready(component, baseline=baseline, child=child, case=case,
+                                               schedule=schedule, ready_raw=ready_raw)
+                require(current == view, "H1 reports/custody/ownership changed immediately before continue.")
+                collector.continue_after_validation(report_sha256=view.images["helper-span.json"].sha256)
+                captured = collector.finish_positive()
+                require(child.reaped and captured.returncode == 0 and not view.helper.live() and not view.suite.live(),
+                        "Positive H1 actual helper/Suite/provider lifetimes did not finish.")
+                self.reaped.append(child)
+                self.require_finished_graph(component)
+                context, context_hash = self._runner_context(component, child)
+                require(context == view.suite_context and context_hash == view.suite_context_sha256,
+                        "Finished whole runner is another actual Suite/context.")
+                view.recheck_files()  # Provisional reports cannot be rewritten as whole success.
+                # In particular the statically admitted H1-span-completion
+                # observer must establish actual direct-child wait/result/ACK
+                # source evidence and every resource, not merely PID absence or
+                # a reported boolean. This is no dynamically dispatched wire ID.
+                for observation in observations:
+                    observation.observe(self)
+                    self.finished_external.add(observation.case_id)
+                require(self.finished_external == set(schedule.phase.required_external_ids),
+                        "H1 positive check returned with a deferred assertion pending.")
+                self.require_finished_graph(component)
+        finally:
+            original = sys.exception()
+            try:
+                self.evidence.write("h1-interactive-capture.json", collector.raw_observation(), limit=4 * 1024 * 1024)
+            except BaseException as error:
+                if original is None:
+                    raise
+                original.add_note("Private H1 raw evidence unavailable: " + type(error).__name__)
 
     def _collect_owned(self, child: OwnedChild, seconds: float) -> Captured:
         try:
