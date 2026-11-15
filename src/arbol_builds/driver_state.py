@@ -58,7 +58,9 @@ from .driver_payload import (
     Gate,
     MetadataBackup,
     Payload,
+    _candidate_acceptance,
     _candidate_payload,
+    _registered_payload,
     load,
     metadata_backup,
     metadata_document,
@@ -277,6 +279,7 @@ class Request:
     registry: Path
     values: dict[str, str]
     candidate: CandidateScope | None = None
+    stage: CandidateStage | None = None
 
     @property
     def component(self) -> str:
@@ -285,6 +288,53 @@ class Request:
     @property
     def session(self) -> str:
         return self.values["session"]
+
+
+@dataclass(frozen=True)
+class CandidateStage:
+    """Deployment input only: never accepted by Guardian or normal admission.
+
+    The existing deploy command authenticates emitted bytes before installation;
+    execution_scope additionally requires every actual installed route to match.
+    """
+
+    request: Request
+    gate: Object
+    provider: Payload
+    producers: tuple[Payload, ...]
+    acceptances: tuple[tuple[str, str, Object], ...]
+    component: str
+    build: str
+    digest: str
+
+    def recheck(self) -> None:
+        if _candidate_stage(self.request) != self:
+            raise Refusal("Candidate staged deployment inputs changed.")
+
+    def execution_scope(self) -> CandidateScope:
+        self.recheck()
+        scope = resolve_candidate(self.request.registry, self.component, self.build, self.digest)
+        if (scope.gate.document != self.gate or scope.gate.provider != self.provider
+                or scope.producers != self.producers or scope.acceptances != self.acceptances):
+            raise Refusal("Installed candidate gate differs from its staged inputs.")
+        return scope
+
+    @contextmanager
+    def pins(self, payloads: list[Payload]) -> Iterator[None]:
+        """Pin only verified staging images; this does not grant child admission."""
+        expected = {(p.component, p.build): p for p in (self.provider, *self.producers)}
+        with ExitStack() as stack:
+            for payload in sorted(payloads, key=lambda p: (p.component, p.build)):
+                if expected.get((payload.component, payload.build)) != payload:
+                    raise Refusal("Unbound candidate staging image.")
+                descriptor = open_use_guard(str(self.request.registry), payload.component, payload.build)
+                stack.callback(os.close, descriptor)
+                if payload.component == "arbol":
+                    _use_provider_guard(self.request.registry, payload.build, descriptor)
+                else:
+                    _use_current(Authority(self.request.registry, payload.component), payload.build, descriptor)
+            self.recheck()
+            yield
 
 
 # Each reviewed operation leaf installs only its fixed handler. Packaging checks
@@ -344,10 +394,84 @@ def parse_request(arguments: list[str], default_registry: str) -> Request:
     return Request(name, registry, values)
 
 
+def _candidate_stage(request: Request) -> CandidateStage | None:
+    """Exact emitted-source validation for deploy, prior to actual route hashes."""
+    if request.command != "deploy":
+        raise Refusal("Candidate staging belongs only to deploy.")
+    selections: list[tuple[str, str, Object]] = []
+    for component in COMPONENTS:
+        authority = Authority(request.registry, component)
+        digest = authority.read("qualification")["acceptanceSha256"]
+        raw = read_bytes(authority.shared / "acceptances" / (digest + ".json"))
+        value = decode(raw)
+        if sha256(raw) != digest:
+            raise Refusal("Staged candidate acceptance changed.")
+        selections.append((component, digest, value))
+    if not any(value.get("status") == "candidate" for _, _, value in selections):
+        return None
+    # The shared validator refuses installed scope and checks every full schema,
+    # selection hash and platform before a raw tuple may become a staging pin.
+    accepted = tuple((component, *_candidate_acceptance(request.registry, component)) for component in COMPONENTS)
+    gate_raw = read_bytes(physical(request.values["manifest"], directory=False))
+    gate = decode(gate_raw)
+    fields(gate, "version kind providerPayloadSha256 components")
+    if (gate["kind"] != "driver-gate" or not valid_hash(gate["providerPayloadSha256"])
+            or not isinstance(gate["components"], list) or len(gate["components"]) != len(COMPONENTS)):
+        raise Refusal("Invalid staged candidate gate.")
+    provider = _candidate_payload(request.registry, "arbol", gate["providerPayloadSha256"])
+    from .service import driver_launcher_source
+    routes: set[str] = set()
+    for component, row in zip(COMPONENTS, gate["components"], strict=True):
+        if (not isinstance(row, dict) or set(row) != {"component", "launcher", "launcherSha256"}
+                or row["component"] != component or not isinstance(row["launcher"], str)
+                or not valid_hash(row["launcherSha256"]) or row["launcher"] in routes):
+            raise Refusal("Invalid staged candidate route.")
+        routes.add(row["launcher"])
+        expected = driver_launcher_source(str(request.registry), component, row["launcher"], provider)
+        if sha256(expected) != row["launcherSha256"]:
+            raise Refusal("Candidate gate differs from the exact emitted provider route.")
+    producers: list[Payload] = []
+    selected: tuple[str, str, str] | None = None
+    for component, digest, value in accepted:
+        if (value["gateSha256"] != sha256(gate_raw)
+                or value["providerPayloadSha256"] != provider.digest):
+            raise Refusal("Candidate staging acceptance/gate mismatch.")
+        payload = _candidate_payload(request.registry, component, value["producerPayloadSha256"])
+        record, _ = _registered_payload(request.registry, component, payload.build)
+        if record["status"] == "building" and value["status"] != "candidate":
+            raise Refusal("Building staging producer lacks candidate acceptance.")
+        producers.append(payload)
+        if selected is None and value["status"] == "candidate":
+            selected = (component, payload.build, digest)
+    if selected is None:
+        raise Refusal("Candidate deployment lost its selected candidate.")
+    return CandidateStage(request, gate, provider, tuple(producers), accepted, *selected)
+
+
+def _execution_scope(request: Request) -> CandidateScope | None:
+    return request.stage.execution_scope() if request.stage is not None else request.candidate
+
+
+def _request_gate(request: Request) -> Gate:
+    return verify_gate(request.registry, candidate=_execution_scope(request))
+
+
+@contextmanager
+def _request_pins(request: Request, payloads: list[Payload]) -> Iterator[None]:
+    if request.stage is not None:
+        if request.command != "deploy":
+            raise Refusal("Staged images do not grant ordinary operation authority.")
+        with request.stage.pins(payloads):
+            yield
+    else:
+        with pin_payloads(request.registry, payloads, candidate=request.candidate):
+            yield
+
+
 def _request_scope(request: Request) -> Request:
     """Select candidate metadata only for the explicit administrative route."""
     if request.command == "deploy":
-        return request  # Staged/installed verification is handled by deploy.
+        return replace(request, stage=_candidate_stage(request))
     authority = Authority(request.registry, request.component)
     qualification = authority.read("qualification")
     digest = qualification["acceptanceSha256"]
@@ -366,8 +490,13 @@ def _request_scope(request: Request) -> Request:
 
 
 def _provider(request: Request) -> Payload:
+    if request.stage is not None:
+        if request.command != "deploy":
+            raise Refusal("Staged provider cannot serve ordinary operations.")
+        request.stage.recheck()
+        return request.stage.provider
     if request.command != "deploy":
-        return verify_gate(request.registry, candidate=request.candidate).provider
+        return _request_gate(request).provider
     # Deployment must bootstrap before new launcher bytes are installed. This
     # resolves only the exact registered provider; deployment separately verifies
     # closed routes, acceptance and checkpoint before any state operation.
@@ -391,7 +520,7 @@ def command(arguments: list[str], default_registry: str) -> int:
     try:
         request = _request_scope(parse_request(arguments, default_registry))
         provider = _provider(request)
-        with pin_payloads(request.registry, [provider], candidate=request.candidate):
+        with _request_pins(request, [provider]):
             # Preserve this process's Build pin across exec until the one-shot
             # provider exits, including initial deployment before a gate pin.
             descriptor = open_use_guard(str(request.registry), "arbol", provider.build)
@@ -455,7 +584,7 @@ def provider_entry(descriptor: Object) -> None:
         selected = _provider(request)
         if selected.root != provider.root or selected.digest != provider.digest:
             raise Refusal("Maintenance provider differs from the exact registered tuple.")
-        with pin_payloads(request.registry, [provider], candidate=request.candidate):
+        with _request_pins(request, [provider]):
             # Future source leaves register their reviewed fixed operations. A
             # partial source tree is never a publishable provider payload.
             function = HANDLERS.get(request.command)
@@ -554,7 +683,7 @@ def begin(request: Request) -> Object:
             # Closing happens before custody inspection. Unknown obligations
             # retain their taint and same epoch; begin never cancels work.
             archive_pending = os.path.lexists(authority.folder / "archive" / "custody-pending.json")
-            if not _boot_recovery_pending(authority, control):
+            if not _boot_recovery_pending(authority, control, candidate=request.candidate):
                 reconcile(authority, control=control, persist_unknown=not archive_pending)
             _tainted(authority)
             return {"version": 1, "component": request.component, "session": request.session,
@@ -700,8 +829,15 @@ def _caller_assertion(raw: bytes, gate: Object) -> Object:
     return value
 
 
-def _qualified_candidates(authorities: list[Authority]) -> list[Payload]:
+def _qualified_candidates(authorities: list[Authority], *, candidate: CandidateScope | None = None,
+                          stage: CandidateStage | None = None) -> list[Payload]:
     """Resolve declarations before staging; full acceptance follows installed hashes."""
+    if stage is not None:
+        if [a.component for a in authorities] != list(COMPONENTS) or any(
+                a.registry != stage.request.registry for a in authorities):
+            raise Refusal("Candidate staging authority set changed.")
+        stage.recheck()
+        return list(stage.producers)
     payloads: list[Payload] = []
     for authority in authorities:
         qualification = authority.read("qualification")
@@ -724,7 +860,8 @@ def _qualified_candidates(authorities: list[Authority]) -> list[Payload]:
             if descriptor is None:
                 continue
             if sha256(descriptor) == value["producerPayloadSha256"]:
-                matches.append(registered(authority.registry, authority.component, folder.name))
+                matches.append(registered(authority.registry, authority.component, folder.name) if candidate is None else
+                               candidate.registered(authority.registry, authority.component, folder.name))
         if len(matches) != 1:
             raise Refusal("Exact accepted deployment payload is unavailable.")
         payloads.append(matches[0])
@@ -776,7 +913,8 @@ def _rollout_bindings(authorities: list[Authority], record: Object, *, allow_exc
 
 
 def _verify_rollout(registry: Path, authorities: list[Authority], record: Object, *,
-                    reopening: Object | None = None, allow_normal_activity: bool = False) -> tuple[Path, Object]:
+                    reopening: Object | None = None, allow_normal_activity: bool = False,
+                    candidate: CandidateScope | None = None) -> tuple[Path, Object]:
     if allow_normal_activity and record["phase"] != "complete":
         raise Refusal("A pending boot/reopen boundary cannot admit normal activity.")
     folder = _rollout_folder(registry, record["session"], record["checkpoint"])
@@ -791,7 +929,7 @@ def _verify_rollout(registry: Path, authorities: list[Authority], record: Object
         raise Refusal("Deployment component launcher hashes changed.")
     if (sha256(gate_raw) != record["gateSha256"] or sha256(callers_raw) != record["callersSha256"]
             or read_bytes(authorities[0].shared / "gate.json") != gate_raw
-            or verify_gate(registry).digest != record["gateSha256"]):
+            or verify_gate(registry, candidate=candidate).digest != record["gateSha256"]):
         raise Refusal("Deployment gate/caller hashes changed.")
     checkpoint = read(folder / "checkpoint.json")
     fields(checkpoint, "version kind session checkpoint registrySha256 gateSha256 callersSha256 oldBoot components")
@@ -970,8 +1108,8 @@ def deploy(request: Request) -> Object:
         # A global independent lock serializes the initial stable inode creation.
         for authority in authorities:
             authority.initialize(request.session, token())
-        payloads = _qualified_candidates(authorities)
-        with pin_payloads(request.registry, [provider, *payloads]), ExitStack() as stack, ExitStack() as build_pins:
+        payloads = _qualified_candidates(authorities, candidate=request.candidate, stage=request.stage)
+        with _request_pins(request, [provider, *payloads]), ExitStack() as stack, ExitStack() as build_pins:
             for authority in authorities:
                 stack.enter_context(authority.mutex())
             path = authorities[0].shared / "deployment.json"
@@ -983,7 +1121,7 @@ def deploy(request: Request) -> Object:
             if record is not None and record["phase"] not in ("failed-closed", "complete") and not same:
                 raise Refusal("Changed deployment inputs require a new closed rollout after failure.")
             if same and record is not None and record["phase"] == "complete":
-                _verified_complete(request.registry, authorities, payloads, verify_gate(request.registry), record)
+                _verified_complete(request.registry, authorities, payloads, _request_gate(request), record)
                 return {"version": 1, "session": request.session, "phase": "complete", "callersMayEnable": True}
             if record is None or record["phase"] in ("failed-closed", "complete"):
                 record = _stage_rollout(request, gate, callers_raw, provider, authorities, sources, record, build_pins)
@@ -992,10 +1130,10 @@ def deploy(request: Request) -> Object:
             try:
                 if record["phase"] in ("awaiting-boot", "boot-verified", "maintaining"):
                     if record["phase"] == "awaiting-boot":
-                        _verify_rollout(request.registry, authorities, record)
+                        _verify_rollout(request.registry, authorities, record, candidate=_execution_scope(request))
                     else:
                         reopening = _reopen_record(folder, record)
-                        _verify_rollout(request.registry, authorities, record, reopening=reopening)
+                        _verify_rollout(request.registry, authorities, record, reopening=reopening, candidate=_execution_scope(request))
                         recovery = _recovery_journal(folder, record)
                         if recovery is None or recovery["phase"] != "complete":
                             raise Refusal("Verified boot phase lacks completed recovery evidence.")
@@ -1020,10 +1158,10 @@ def deploy(request: Request) -> Object:
                         if current != previous:
                             raise Refusal("Launcher changed after staging.")
                         publish_driver_route(target, previous, desired)
-                if verify_gate(request.registry).digest != record["gateSha256"]:
+                if _request_gate(request).digest != record["gateSha256"]:
                     raise Refusal("Installed all-four gate differs from the staged tuple.")
                 for authority, payload in zip(authorities, payloads, strict=True):
-                    verify_acceptance(authority, payload)
+                    verify_acceptance(authority, payload, candidate=_execution_scope(request))
                 record = {**record, "phase": "closed-installed"}
                 publish(path, record)
                 checkpoint_path = folder / "checkpoint.json"
@@ -1034,7 +1172,7 @@ def deploy(request: Request) -> Object:
                                   **{key: record[key] for key in ("session", "checkpoint", "registrySha256", "gateSha256", "callersSha256", "oldBoot")},
                                   "components": _rollout_bindings(authorities, record)}
                     _immutable(checkpoint_path, canonical(checkpoint))
-                _verify_rollout(request.registry, authorities, record)
+                _verify_rollout(request.registry, authorities, record, candidate=_execution_scope(request))
                 record = {**record, "phase": "awaiting-boot"}
                 publish(path, record)
                 return {"version": 1, "session": request.session, "phase": "awaiting-boot",
@@ -1069,7 +1207,8 @@ def _recovery_journal(folder: Path, record: Object) -> Object | None:
     return value
 
 
-def _boot_recovery_pending(authority: Authority, control: Object) -> bool:
+def _boot_recovery_pending(authority: Authority, control: Object, *,
+                           candidate: CandidateScope | None = None) -> bool:
     """Preserve a verified closed checkpoint before its first recovery journal.
 
     The caller holds this component mutex; rollout mutation/recovery requires
@@ -1083,7 +1222,7 @@ def _boot_recovery_pending(authority: Authority, control: Object) -> bool:
         raise Refusal("Pending boot recovery has a different closed session.")
     authorities = [authority if component == authority.component else Authority(authority.registry, component)
                    for component in COMPONENTS]
-    folder, _ = _verify_rollout(authority.registry, authorities, record)
+    folder, _ = _verify_rollout(authority.registry, authorities, record, candidate=candidate)
     journal = _recovery_journal(folder, record)
     if record["newBoot"] is not None and journal is None:
         raise Refusal("Published boot recovery has no matching private journal.")
@@ -1114,9 +1253,9 @@ def _recover_boot(request: Request, current_boot: str, deadline: float) -> None:
         raise Refusal("A genuine kernel boot transition after the closed checkpoint is required.")
     with deployment_mutex(request.registry):
         authorities = [Authority(request.registry, component) for component in COMPONENTS]
-        payloads = _qualified_candidates(authorities)
-        gate = verify_gate(request.registry)
-        with pin_payloads(request.registry, [gate.provider, *payloads]), ExitStack() as stack:
+        payloads = _qualified_candidates(authorities, candidate=request.candidate, stage=request.stage)
+        gate = _request_gate(request)
+        with _request_pins(request, [gate.provider, *payloads]), ExitStack() as stack:
             for authority in authorities:
                 stack.enter_context(authority.mutex(seconds=max(0, deadline - time.monotonic())))
             record = _rollout_record(shared / "deployment.json")
@@ -1130,9 +1269,9 @@ def _recover_boot(request: Request, current_boot: str, deadline: float) -> None:
             if record["newBoot"] is not None and journal is None:
                 raise Refusal("Published boot recovery has no matching private journal.")
             try:
-                _verify_rollout(request.registry, authorities, record)
+                _verify_rollout(request.registry, authorities, record, candidate=_execution_scope(request))
                 for authority, payload in zip(authorities, payloads, strict=True):
-                    verify_acceptance(authority, payload)
+                    verify_acceptance(authority, payload, candidate=gate.candidate)
                 if record["phase"] in ("boot-verified", "maintaining"):
                     if (journal is None or journal["phase"] != "complete" or record["newBoot"] != current_boot):
                         raise Refusal("Boot verification lacks its exact completed archive chain.")
@@ -1161,7 +1300,7 @@ def _recover_boot(request: Request, current_boot: str, deadline: float) -> None:
                     rows[index]["phase"] = "archived"
                     journal = {**journal, "components": rows}
                     publish(folder / "recovery.json", journal)
-                _verify_rollout(request.registry, authorities, record)
+                _verify_rollout(request.registry, authorities, record, candidate=_execution_scope(request))
                 journal = {**journal, "phase": "complete"}
                 publish(folder / "recovery.json", journal)
                 publish(shared / "deployment.json", {**record, "phase": "boot-verified"})
@@ -1903,10 +2042,11 @@ def _verified_complete(registry: Path, authorities: list[Authority], payloads: l
         raise Refusal("All-four normal completion has no exact durable journal.")
     for authority in authorities:
         _verify_boot_archive(authority, record, record["newBoot"], allow_normal=True)
-    _verify_rollout(registry, authorities, record, reopening=reopening, allow_normal_activity=True)
+    _verify_rollout(registry, authorities, record, reopening=reopening, allow_normal_activity=True,
+                    candidate=gate.candidate)
     for authority, payload, row in zip(authorities, payloads, reopening["components"], strict=True):
         normal_control(authority)
-        verify_acceptance(authority, payload)
+        verify_acceptance(authority, payload, candidate=gate.candidate)
         request = _completion_request(registry, record["session"], authority)
         prepared = _finish_inputs(request, authority, payload, gate, -1)
         journal = _finish_record(prepared)
@@ -1927,11 +2067,11 @@ def _complete_deployment(request: Request) -> Object | None:
     pending_status = {"phase": "exclusive", "deployment": "awaiting-components", "callersMayEnable": False}
     with deployment_mutex(request.registry):
         authorities = [Authority(request.registry, name) for name in COMPONENTS]
-        payloads = _qualified_candidates(authorities)
-        gate = verify_gate(request.registry)
+        payloads = _qualified_candidates(authorities, candidate=request.candidate, stage=request.stage)
+        gate = _request_gate(request)
         if not Path(__file__).resolve().is_relative_to(gate.provider.root):
             raise Refusal("All-four completion requires the exact immutable provider.")
-        with pin_payloads(request.registry, [gate.provider, *payloads]), ExitStack() as stack:
+        with _request_pins(request, [gate.provider, *payloads]), ExitStack() as stack:
             for authority in authorities:
                 stack.enter_context(authority.mutex())
             record = _rollout_record(shared / "deployment.json")
@@ -1943,7 +2083,7 @@ def _complete_deployment(request: Request) -> Object | None:
                 raise Refusal("Deployment changed before completion.")
             folder = _rollout_folder(request.registry, record["session"], record["checkpoint"])
             reopening = _reopen_record(folder, record)
-            _verify_rollout(request.registry, authorities, record, reopening=reopening)
+            _verify_rollout(request.registry, authorities, record, reopening=reopening, candidate=_execution_scope(request))
             for authority in authorities:
                 session = authority.folder / "sessions" / request.session
                 if not (session / "result.json").exists() or os.path.lexists(session / "operation.json"):
@@ -1961,7 +2101,7 @@ def _complete_deployment(request: Request) -> Object | None:
             rows: list[Object] = []
             prepared_all: list[tuple[Prepared, Object]] = []
             for authority, payload, descriptor in zip(authorities, payloads, leases, strict=True):
-                verify_acceptance(authority, payload)
+                verify_acceptance(authority, payload, candidate=gate.candidate)
                 _exclusive(authority, descriptor)
                 prepared = _finish_inputs(_completion_request(request.registry, request.session, authority),
                                           authority, payload, gate, descriptor)
@@ -2014,7 +2154,7 @@ def _complete_deployment(request: Request) -> Object | None:
             completed = {**record, "phase": "complete"}
             # Verify the exact desired controls and unchanged gate before this
             # sole global admission commit. No caller command is ever executed.
-            _verify_rollout(request.registry, authorities, record, reopening=reopening)
+            _verify_rollout(request.registry, authorities, record, reopening=reopening, candidate=_execution_scope(request))
             publish(shared / "deployment.json", completed)
             return _verified_complete(request.registry, authorities, payloads, gate, completed)
 
