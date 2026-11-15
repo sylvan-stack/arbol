@@ -7,6 +7,7 @@ import os
 import re
 import selectors
 import signal
+import stat
 import time
 import uuid
 from collections.abc import Callable, Mapping
@@ -44,7 +45,7 @@ from top.driver_state_support import (
 Operation = Literal["upgrade", "identity-reset", "restore", "identity-recover"]
 Fault = Literal["no-fd", "wrong-inode", "separate-description", "receipt", "state", "operation",
                 "context-copy", "epoch", "attempt", "payload"]
-Mode = Literal["observe", "before-spawn", "before-ack", "cached"] | Fault
+Mode = Literal["observe", "before-spawn", "before-ack", "cached", "unsafe-source-parent"] | Fault
 _OPERATIONS = {"upgrade", "identity-reset", "restore", "identity-recover"}
 _CONTEXT_FAULTS = {"epoch", "attempt", "payload"}
 _ROOT_METADATA = {"format", "identity.json", "identity-maintenance.json", "identity-upgrade.json"}
@@ -369,14 +370,15 @@ class Maintenance:
         require(self.call("drain", {}).get("phase") == "exclusive", "Actual drain did not reach exclusive.")
         self.lease(blocked=False)
 
-    def image(self, request: Execute) -> Object:
+    def image(self, request: Execute, *, unsafe_parent: Path | None = None) -> Object:
+        state = _snapshot(request.state) if unsafe_parent is None else _unsafe_parent_image(request.state, unsafe_parent)
         return {"control": self.authority.read("control"), "receipt": read_image(self.receipt).raw.hex(),
-                "authority": _snapshot(self.authority.folder), "state": _snapshot(request.state),
+                "authority": _snapshot(self.authority.folder), "state": state,
                 "backup": _snapshot(request.backup),
                 "source": _snapshot(request.source) if request.source is not None else None}
 
-    def preserve(self, name: str, request: Execute) -> Object:
-        value = self.image(request)
+    def preserve(self, name: str, request: Execute, *, unsafe_parent: Path | None = None) -> Object:
+        value = self.image(request, unsafe_parent=unsafe_parent)
         self.controller.evidence.write(name + "-" + self.session + ".json", value)
         return value
 
@@ -474,10 +476,11 @@ class Maintenance:
             _write_new(path, b"")
         return str(path)
 
-    def execute_observed(self, request: Execute, mode: Mode) -> Object:
+    def execute_observed(self, request: Execute, mode: Mode, *, unsafe_parent: Path | None = None) -> Object:
         request.verify(self.controller)
         self.controller.require_finished_graph(self.component)
         require(mode != "operation" or request.operation == "upgrade", "Operation substitution needs the exact upgrade row.")
+        require((unsafe_parent is not None) == (mode == "unsafe-source-parent"), "Unsafe parent observation scope differs.")
         self.controller.scope.recheck()
         replacement = self._fault_input(request, mode)
         provider = self.controller.scope.gate.provider
@@ -497,7 +500,7 @@ class Maintenance:
                 return self.verify_result(request)
             spawn = boundary.frame("spawn")
             context_path = self._verify_spawn(request, spawn)
-            before = self.preserve("pre-child-" + mode, request)
+            before = self.preserve("pre-child-" + mode, request, unsafe_parent=unsafe_parent)
             if mode == "before-spawn":
                 captured = boundary.kill()
                 self.record(mode, child, captured)
@@ -574,11 +577,11 @@ class Maintenance:
             require(captured.returncode == 1 and not captured.stderr and document(captured.stdout) == _PROVIDER_REFUSAL
                     and ended["reapedExit"] == 1 and ended["acceptedStdoutHex"] is None,
                     "Substituted input was not refused by the actual child and packaged supervisor.")
-            require(self.image(request) == before and not os.path.lexists(self.result),
+            require(self.image(request, unsafe_parent=unsafe_parent) == before and not os.path.lexists(self.result),
                     "Rejected child changed the pending attempt, custody, State or before archive.")
             if mode == "state":
                 require(not _snapshot(Path(replacement))["entries"], "The rejected substitute State was modified.")
-            self.preserve("after-refusal-" + mode, request)
+            self.preserve("after-refusal-" + mode, request, unsafe_parent=unsafe_parent)
             return document(read_image(context_path).raw)
         finally:
             boundary.close()
@@ -948,3 +951,115 @@ def metadata_only_restore(subject: Maintenance, request: Execute, *, source_form
                    "oldProof": previous, "newProof": fresh, "protectedState": state, "nativeHome": native}
     subject.controller.evidence.write("restore-finished-" + subject.session + ".json", observation)
     return observation
+
+
+UnsafeParent = Literal["symlink", "nonprivate-directory", "regular-file"]
+
+
+def _unsafe_parent_image(state: Path, unsafe: Path) -> Object:
+    """Capture the exact bad entry without traversing it or ignoring siblings."""
+    subscriptions = state / "subscriptions"
+    require(unsafe.parent == subscriptions, "Unexpected unsafe path outside the selected Subscription parent.")
+    root = directory_identity(state)
+    parent = directory_identity(subscriptions)
+    entries: dict[str, Object] = {}
+    for folder in (state, subscriptions):
+        for path in sorted(folder.iterdir()):
+            if path in (subscriptions, unsafe):
+                continue
+            info = path.lstat()
+            entries[path.relative_to(state).as_posix()] = (_snapshot(path) if stat.S_ISDIR(info.st_mode)
+                                                           else read_image(path).evidence())
+    info = unsafe.lstat()
+    require(info.st_uid == os.getuid(), "Unsafe test entry is no longer owned by the subject.")
+    label = unsafe.relative_to(state).as_posix()
+    fault: Object = {"device": info.st_dev, "inode": info.st_ino, "owner": info.st_uid, "mode": info.st_mode}
+    if stat.S_ISLNK(info.st_mode):
+        fault["link"] = os.readlink(unsafe)
+    elif stat.S_ISREG(info.st_mode):
+        fault["bytesHex"] = read_image(unsafe).raw.hex()
+    else:
+        require(stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o755 and not any(unsafe.iterdir()),
+                "Substituted directory changed or is unexpectedly private.")
+    return {"root": root, "subscriptions": parent, "safeEntries": entries, "faultPath": label, "fault": fault}
+
+
+def _source_only_parent(subject: Maintenance, request: Execute, subscription: str) -> tuple[MetadataArchive, Path]:
+    request.verify(subject.controller)
+    require(subject.component in ("arbol-claude-driver", "arbol-mimo-driver")
+            and request.operation == "restore" and request.source is not None
+            and _metadata_name(f"subscriptions/{subscription}/identity.json")
+            and not tree_inventory(request.backup),
+            "Source-only absence needs an isolated Claude or Mimo restore fixture.")
+    assert request.source is not None
+    parent = request.state / "subscriptions" / subscription
+    physical_owned(parent.parent, directory=True)
+    require(not os.path.lexists(parent), "Source-only Subscription unexpectedly already exists in the target State.")
+    source = MetadataArchive.read(request.source)
+    names = {f"subscriptions/{subscription}/{name}" for name in ("identity.json", "identity-pending.json")}
+    require(source.format == 2 and names <= set(source.files) and all(source.files[name] is None for name in names),
+            "The verified archive must explicitly introduce both absent rows.")
+    require(not os.path.lexists(request.source / "subscriptions" / subscription),
+            "The source already contains a physical path for its absence rows.")
+    return source, parent
+
+
+def source_only_archive_absence(subject: Maintenance, request: Execute, *, subscription: str) -> Object:
+    source, parent = _source_only_parent(subject, request, subscription)
+    assert request.source is not None
+    before = _nonmetadata_state(request.state)
+    exact_source = _snapshot(request.source)
+    closed = subject.open()
+    result = subject.execute_observed(request, "observe")
+    archive_dir = request.backup / "before"
+    archive = MetadataArchive.read(archive_dir)
+    names = tuple(f"subscriptions/{subscription}/{name}" for name in ("identity.json", "identity-pending.json"))
+    require(all(name in archive.files and archive.files[name] is None for name in names)
+            and archive.sha256 == result["backupSha256"]
+            and not os.path.lexists(archive_dir / "subscriptions" / subscription)
+            and not os.path.lexists(parent) and _nonmetadata_state(request.state) == before,
+            "Before-image did not record exact union-path absence or restore created a Subscription parent/record.")
+    subject.finish(request, result)
+    require(not os.path.lexists(parent) and _nonmetadata_state(request.state) == before
+            and MetadataArchive.read(archive_dir) == archive and _snapshot(request.source) == exact_source,
+            "Finish changed the observed absence, before archive, source, or records.")
+    evidence = {"closed": closed, "result": result, "beforeManifestSha256": archive.sha256,
+                "sourceManifestSha256": source.sha256, "absentRows": names,
+                "beforeManifest": document(archive.raw, limit=_MANIFEST_LIMIT)}
+    subject.controller.evidence.write("source-only-absence-" + subject.session + ".json", evidence)
+    return evidence
+
+
+def unsafe_source_only_archive_parent(subject: Maintenance, request: Execute, *, subscription: str,
+                                       fault: UnsafeParent) -> None:
+    """On a distinct fixture the real child refuses an unsafe existing parent."""
+    source, parent = _source_only_parent(subject, request, subscription)
+    assert request.source is not None
+    exact_source = _snapshot(request.source)
+    closed = subject.open()
+    decoy: Path | None = None
+    if fault == "symlink":
+        decoy = subject.controller.workspace.fixture_root / ("parent-decoy-" + subject.session)
+        decoy.mkdir(mode=0o700)
+        _write_new(decoy / "record.json", b'{"privateFixtureSentinel":true}\n')
+        parent.symlink_to(decoy, target_is_directory=True)
+    elif fault == "nonprivate-directory":
+        parent.mkdir(mode=0o700)
+        parent.chmod(0o755)
+    else:
+        require(fault == "regular-file", "Unexpected source-only parent substitution.")
+        _write_new(parent, b"ABR-38 wrong Subscription parent\n")
+    sync_directory(parent.parent)
+    expected = _unsafe_parent_image(request.state, parent)
+    expected_decoy = _snapshot(decoy) if decoy is not None else None
+    context = subject.execute_observed(request, "unsafe-source-parent", unsafe_parent=parent)
+    require(context["operation"] == "restore" and context["session"] == subject.session
+            and subject.authority.read("control") == closed and not tree_inventory(request.backup)
+            and not os.path.lexists(subject.result) and _unsafe_parent_image(request.state, parent) == expected
+            and (decoy is None or _snapshot(decoy) == expected_decoy)
+            and MetadataArchive.read(request.source) == source and _snapshot(request.source) == exact_source,
+            "Unsafe existing parent was accepted as absence or refusal modified its protected evidence.")
+    subject.controller.evidence.write("unsafe-source-parent-" + subject.session + ".json", {
+        "fault": fault, "state": expected, "decoy": expected_decoy, "sourceManifestSha256": source.sha256,
+        "context": context, "closed": closed,
+    })
