@@ -224,7 +224,7 @@ def _keep_driver_gate(bin_folder: str, registry: str, component: str) -> bool:
 
 def _driver_gate_authority(registry: Path, component: str) -> None:
     """Read-only preserve preflight, never initial deployment or acceptance issuance."""
-    from .driver_admission import Authority, Refusal, decode, read_bytes, sha256, valid_hash
+    from .driver_admission import Authority, Refusal, decode, private_directory, read_bytes, sha256, valid_hash
     from .driver_payload import BUILD, DESCRIPTOR, SUBTREE, registered, verify_acceptance
 
     authority = Authority(registry, component)
@@ -249,6 +249,7 @@ def _driver_gate_authority(registry: Path, component: str) -> None:
                 raise Refusal("Driver gate registry exceeds its bounded inventory.")
             if BUILD.fullmatch(folder.name) is None:
                 continue
+            private_directory(folder)
             root = folder / SUBTREE
             # A genuine legacy Build has no payload root. Existing unsafe roots
             # remain errors; do not broadly swallow Refusal or manufacture D.
