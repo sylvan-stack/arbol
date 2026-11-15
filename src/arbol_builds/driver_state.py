@@ -916,8 +916,8 @@ def deploy(request: Request) -> Object:
             if record is not None and record["phase"] not in ("failed-closed", "complete") and not same:
                 raise Refusal("Changed deployment inputs require a new closed rollout after failure.")
             if same and record is not None and record["phase"] == "complete":
-                verified = _verified_complete(request.registry, authorities, payloads, verify_gate(request.registry), record)
-                return {"version": 1, "session": request.session, **verified}
+                _verified_complete(request.registry, authorities, payloads, verify_gate(request.registry), record)
+                return {"version": 1, "session": request.session, "phase": "complete", "callersMayEnable": True}
             if record is None or record["phase"] in ("failed-closed", "complete"):
                 record = _stage_rollout(request, gate, callers_raw, provider, authorities, sources, record, build_pins)
             assert record is not None
