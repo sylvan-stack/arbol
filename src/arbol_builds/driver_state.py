@@ -1613,3 +1613,158 @@ def execute(request: Request) -> Object:
     with prepare_execute(request) as prepared:
         output = None if prepared.cached_result is not None else supervise_execute(prepared)
         return settle_execute(prepared, output)
+
+
+def _finish_inputs(request: Request, authority: Authority, payload: Payload, gate: Gate,
+                   descriptor: int) -> Prepared:
+    folder = private_directory(authority.folder / "sessions" / request.session)
+    path = physical(request.values["result"], directory=False)
+    if path != folder / "result.json":
+        raise Refusal("Finish requires the exact active session result path.")
+    result = read(path)
+    validate("result", result)
+    context_path = folder / "contexts" / (result["attempt"] + ".json")
+    context = read(context_path)
+    validate("context", context)
+    binding = read(folder / "contexts" / (result["attempt"] + ".request.json"))
+    request_binding(binding, context)
+    history = folder / "attempts" / result["attempt"]
+    operation = read(history / "operation.json")
+    if (read(history / "context.json") != context or read(history / "request.json") != binding
+            or _context_from_operation(operation) != context or not valid_hash(operation["backupSha256"])
+            or result != _result_value(context, operation["backupSha256"])
+            or context["component"] != request.component or context["session"] != request.session
+            or context["registry"] != str(request.registry) or context["gateSha256"] != gate.digest
+            or context["payloadSha256"] != payload.digest or binding["build"] != payload.build
+            or context["acceptanceSha256"] != authority.read("qualification")["acceptanceSha256"]):
+        raise Refusal("Finish result/context/payload does not match the current qualified tuple.")
+    if os.path.lexists(folder / "operation.json"):
+        raise Refusal("A pending operation must settle before finish.")
+    return Prepared(request, authority, payload, gate, descriptor, folder, context_path, context,
+                    binding, operation, result)
+
+
+def _finish_record(prepared: Prepared) -> Object | None:
+    if prepared.cached_result is None:
+        raise Refusal("Finish requires a durable current result.")
+    path = prepared.folder / "attempts" / prepared.context["attempt"] / "finish.json"
+    try:
+        value = read(path)
+    except FileNotFoundError:
+        return None
+    fields(value, "version kind component session epoch attempt generation resultSha256 contextSha256 requestSha256 markerSha256 nextEpoch phase")
+    if (value["kind"] != "driver-maintenance-finish"
+            or value["phase"] not in ("prepared", "marker-archived", "ready", "complete")
+            or any(value[key] != prepared.context[key] for key in ("component", "session", "epoch", "attempt", "generation"))
+            or value["resultSha256"] != sha256(canonical(prepared.cached_result))
+            or value["contextSha256"] != sha256(canonical(prepared.context))
+            or value["requestSha256"] != sha256(canonical(prepared.binding))
+            or not valid_hash(value["markerSha256"]) or not valid_token(value["nextEpoch"])
+            or value["nextEpoch"] == value["epoch"]):
+        raise Refusal("Finish journal is not the exact current result/archive chain.")
+    return value
+
+
+def _finish_marker(prepared: Prepared, journal: Object | None) -> tuple[bytes, bool]:
+    state = private_directory(physical(prepared.context["stateDirectory"]))
+    destination = prepared.folder / "attempts" / prepared.context["attempt"]
+    acknowledged = read_bytes(destination / "marker.json")
+    _complete_marker(prepared.context, prepared.operation, prepared.operation["backupSha256"], acknowledged)
+    try:
+        raw = read_bytes(state / "identity-maintenance.json")
+    except FileNotFoundError:
+        if journal is None:
+            raise Refusal("Marker removal has no matching durable finish intent.") from None
+        raw = read_bytes(destination / "finished-marker.json")
+        if raw != acknowledged or sha256(raw) != journal["markerSha256"]:
+            raise Refusal("Removed marker lacks its exact finished archive.") from None
+        return raw, False
+    if raw != acknowledged or (journal is not None and sha256(raw) != journal["markerSha256"]):
+        raise Refusal("A later/damaged marker cannot consume this result.")
+    return raw, True
+
+
+def _finish_status(prepared: Prepared, phase: str) -> Object:
+    return {"version": 1, "component": prepared.context["component"], "session": prepared.context["session"],
+            "phase": phase}
+
+
+def _normal_finish_retry(prepared: Prepared, control: Object, journal: Object | None) -> Object:
+    # A finished retry is read-only: it never fences new normal work or reuses
+    # an older result to reopen a later epoch/session.
+    if (journal is None or journal["phase"] not in ("ready", "complete")
+            or control != {"version": 1, "phase": "normal", "session": None, "epoch": journal["nextEpoch"]}):
+        raise Refusal("Old result cannot reopen a later maintenance session.")
+    state = private_directory(physical(prepared.context["stateDirectory"]))
+    raw = read_bytes(prepared.folder / "attempts" / prepared.context["attempt"] / "finished-marker.json")
+    if sha256(raw) != journal["markerSha256"]:
+        raise Refusal("Finished marker archive changed.")
+    _complete_marker(prepared.context, prepared.operation, prepared.operation["backupSha256"], raw)
+    if (_state_format(state) != 2 or _root_generation(state) != prepared.context["generation"]
+            or os.path.lexists(state / "identity-maintenance.json") or os.path.lexists(state / "identity-upgrade.json")):
+        raise Refusal("Target changed after the exact finished epoch.")
+    return _finish_status(prepared, "normal")
+
+
+@handler("finish")
+def finish(request: Request) -> Object:
+    with _component(request) as (authority, payload, gate):
+        descriptor = -1
+        try:
+            with authority.mutex():
+                _recheck(authority, payload, gate)
+                control = authority.read("control")
+                prepared = _finish_inputs(request, authority, payload, gate, descriptor)
+                journal = _finish_record(prepared)
+                if control["phase"] == "normal":
+                    return _normal_finish_retry(prepared, control, journal)
+                descriptor = authority.lease(exclusive=True)
+                prepared.descriptor = descriptor
+                current, receipt = _closed_attempt(authority, request, payload, gate, descriptor)
+                deployment = _rollout_record(authority.shared / "deployment.json")
+                if (current["epoch"] != prepared.context["epoch"] or receipt != prepared.context["receiptSha256"]
+                        or (deployment is not None and deployment["registrySha256"] != sha256(canonical(authority.identity)))
+                        or (journal is not None and journal["phase"] == "complete")):
+                    raise Refusal("Exclusive finish authority changed or was rolled back.")
+                digest = _archive_observation(prepared)
+                if digest != prepared.operation["backupSha256"]:
+                    raise Refusal("Finish before-manifest changed.")
+                marker_raw, present = _finish_marker(prepared, journal)
+                if present:
+                    _pending_scope(prepared.context)
+                else:
+                    _pending_scope(prepared.context, marker_absent=True)
+                destination = prepared.folder / "attempts" / prepared.context["attempt"]
+                if journal is None:
+                    assert prepared.cached_result is not None
+                    next_epoch = token()
+                    while next_epoch == current["epoch"]:
+                        next_epoch = token()
+                    journal = {"version": 1, "kind": "driver-maintenance-finish",
+                               **{key: prepared.context[key] for key in ("component", "session", "epoch", "attempt", "generation")},
+                               "resultSha256": sha256(canonical(prepared.cached_result)),
+                               "contextSha256": sha256(canonical(prepared.context)), "requestSha256": sha256(canonical(prepared.binding)),
+                               "markerSha256": sha256(marker_raw), "nextEpoch": next_epoch, "phase": "prepared"}
+                    publish(destination / "finish.json", journal)
+                _immutable(destination / "finished-marker.json", marker_raw)
+                journal = {**journal, "phase": "marker-archived"}
+                publish(destination / "finish.json", journal)
+                state = Path(prepared.context["stateDirectory"])
+                if present:
+                    if read_bytes(state / "identity-maintenance.json") != marker_raw:
+                        raise Refusal("Complete marker changed before removal.")
+                    remove(state / "identity-maintenance.json")
+                _pending_scope(prepared.context, marker_absent=True)
+                # A ready intent is durable before normal publication. A crash
+                # after publication retries by matching this one nextEpoch only.
+                journal = {**journal, "phase": "ready"}
+                publish(destination / "finish.json", journal)
+                deployment = _rollout_record(authority.shared / "deployment.json")
+                if deployment is not None and deployment["phase"] != "complete":
+                    return {**_finish_status(prepared, "exclusive"), "deployment": "awaiting-components", "callersMayEnable": False}
+                authority.write("control", {"version": 1, "phase": "normal", "session": None, "epoch": journal["nextEpoch"]})
+                publish(destination / "finish.json", {**journal, "phase": "complete"})
+                return _finish_status(prepared, "normal")
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
