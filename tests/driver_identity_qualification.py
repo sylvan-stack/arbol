@@ -10,6 +10,7 @@ import fcntl
 import math
 import os
 import re
+import signal
 import stat
 import subprocess
 import sys
@@ -36,6 +37,7 @@ from top.driver_state_support import (
     exact_fields,
     physical_owned,
     read_image,
+    signal_verified,
     sync_directory,
     tree_inventory,
 )
@@ -1543,40 +1545,51 @@ class WholeCheckController:
                     except BaseException as error:
                         setup_error.add_note("H1 setup endpoint: " + type(error).__name__)
             raise
+        view: H1View | None = None
         try:
             with collector:
-                ready_raw = collector.ready()
-                view = self.verify_h1_ready(component, baseline=baseline, child=child, case=case,
-                                            schedule=schedule, ready_raw=ready_raw)
-                self.evidence.write("h1-verified-preterminal.json", {"component": component, "case": case,
-                    "provider": child.owner.object(), "suite": view.suite.object(), "helper": view.helper.object(),
-                    "suiteContextSha256": view.suite_context_sha256, "helperContextSha256": view.helper_context_sha256,
-                    "admissionLock": view.admission_lock, "custody": view.custody,
-                    "reports": {name: image.evidence() for name, image in view.images.items()},
-                    "readyObservedAt": collector.ready_observed_at})
-                current = self.verify_h1_ready(component, baseline=baseline, child=child, case=case,
-                                               schedule=schedule, ready_raw=ready_raw)
-                require(current == view, "H1 reports/custody/ownership changed immediately before continue.")
-                collector.continue_after_validation(report_sha256=view.images["helper-span.json"].sha256)
-                captured = collector.finish_positive()
-                require(child.reaped and captured.returncode == 0 and not view.helper.live() and not view.suite.live(),
-                        "Positive H1 actual helper/Suite/provider lifetimes did not finish.")
-                self.reaped.append(child)
-                self.require_finished_graph(component)
-                context, context_hash = self._runner_context(component, child)
-                require(context == view.suite_context and context_hash == view.suite_context_sha256,
-                        "Finished whole runner is another actual Suite/context.")
-                view.recheck_files()  # Provisional reports cannot be rewritten as whole success.
-                # In particular the statically admitted H1-span-completion
-                # observer must establish actual direct-child wait/result/ACK
-                # source evidence and every resource, not merely PID absence or
-                # a reported boolean. This is no dynamically dispatched wire ID.
-                for observation in observations:
-                    observation.observe(self)
-                    self.finished_external.add(observation.case_id)
-                require(self.finished_external == set(schedule.phase.required_external_ids),
-                        "H1 positive check returned with a deferred assertion pending.")
-                self.require_finished_graph(component)
+                try:
+                    ready_raw = collector.ready()
+                    view = self.verify_h1_ready(component, baseline=baseline, child=child, case=case,
+                                                schedule=schedule, ready_raw=ready_raw)
+                    self.evidence.write("h1-verified-preterminal.json", {"component": component, "case": case,
+                        "provider": child.owner.object(), "suite": view.suite.object(), "helper": view.helper.object(),
+                        "suiteContextSha256": view.suite_context_sha256, "helperContextSha256": view.helper_context_sha256,
+                        "admissionLock": view.admission_lock, "custody": view.custody,
+                        "reports": {name: image.evidence() for name, image in view.images.items()},
+                        "readyObservedAt": collector.ready_observed_at})
+                    current = self.verify_h1_ready(component, baseline=baseline, child=child, case=case,
+                                                   schedule=schedule, ready_raw=ready_raw)
+                    require(current == view, "H1 reports/custody/ownership changed immediately before continue.")
+                    collector.continue_after_validation(report_sha256=view.images["helper-span.json"].sha256)
+                    captured = collector.finish_positive()
+                    require(child.reaped and captured.returncode == 0 and not view.helper.live() and not view.suite.live(),
+                            "Positive H1 actual helper/Suite/provider lifetimes did not finish.")
+                    self.reaped.append(child)
+                    self.require_finished_graph(component)
+                    context, context_hash = self._runner_context(component, child)
+                    require(context == view.suite_context and context_hash == view.suite_context_sha256,
+                            "Finished whole runner is another actual Suite/context.")
+                    view.recheck_files()  # Provisional reports cannot be rewritten as whole success.
+                    # In particular the statically admitted H1-span-completion
+                    # observer must establish actual direct-child wait/result/ACK
+                    # source evidence and every resource, not merely PID absence or
+                    # a reported boolean. This is no dynamically dispatched wire ID.
+                    for observation in observations:
+                        observation.observe(self)
+                        self.finished_external.add(observation.case_id)
+                    require(self.finished_external == set(schedule.phase.required_external_ids),
+                            "H1 positive check returned with a deferred assertion pending.")
+                    self.require_finished_graph(component)
+                except BaseException as span_error:
+                    if view is not None:
+                        try:
+                            self._cleanup_h1_failure(collector, view, span_error)
+                        except BaseException as cleanup:
+                            span_error.add_note("H1 participant cleanup failed: " + type(cleanup).__name__
+                                                + "; unresolved verified targets: "
+                                                + repr({"suite": view.suite.object(), "helper": view.helper.object()}))
+                    raise
         finally:
             original = sys.exception()
             try:
@@ -1585,6 +1598,89 @@ class WholeCheckController:
                 if original is None:
                     raise
                 original.add_note("Private H1 raw evidence unavailable: " + type(error).__name__)
+
+    def _cleanup_h1_failure(self, collector: HelperSpanCollector, view: H1View,
+                            original: BaseException) -> None:
+        """Cancel verified descendants and the owned provider under one deadline."""
+        end = min(collector.end, time.monotonic() + 20)
+        collector.end = end  # Context unwind cannot begin a second cleanup budget.
+        targets = {"suite": view.suite, "helper": view.helper}
+        errors: list[str] = []
+        states: dict[str, bool | None] = {}
+        attempted: dict[str, bool] = {}
+        stdin = collector.child.process.stdin
+        if stdin is not None:
+            try:
+                stdin.close()  # Failure EOF; never a positive Suite continue.
+            except BaseException as error:
+                errors.append("failure-input:" + type(error).__name__)
+
+        def observe(name: str, owner: ExactProcess) -> bool | None:
+            try:
+                # Orphan adoption is legitimate: only the retained PID/birth
+                # gates this observation, never the former parent's liveness.
+                return owner.live()
+            except BaseException as error:
+                errors.append(name + "-identity:" + type(error).__name__)
+                return None
+
+        for name, owner in targets.items():
+            attempted[name] = False
+            states[name] = observe(name, owner)
+            if states[name] is True:
+                attempted[name] = True
+                try:
+                    signal_verified(owner, signal.SIGTERM)  # Fresh birth check at send.
+                except BaseException as error:
+                    errors.append(name + "-stop:" + type(error).__name__)
+        child = collector.child
+        try:
+            child.request_stop()
+        except BaseException as error:
+            errors.append("provider-stop:" + type(error).__name__)
+        # Join the actual provider in short bounded waits while independently
+        # observing each descendant. No descendant is waitpid/reap eligible here.
+        while True:
+            for name, owner in targets.items():
+                if states[name] is True:
+                    states[name] = observe(name, owner)
+            remaining = end - time.monotonic()
+            # Leave the last poll slice to the collector's real owned wait and
+            # independent endpoint-closure attempts under this same deadline.
+            if remaining <= .05 or (child.reaped and all(value is not True for value in states.values())):
+                break
+            if not child.reaped:
+                try:
+                    child.wait_owned(seconds=min(.05, remaining))
+                except subprocess.TimeoutExpired:
+                    pass
+                except BaseException as error:
+                    errors.append("provider-wait:" + type(error).__name__)
+                    break
+            else:
+                try:
+                    time.sleep(min(.05, remaining))
+                except BaseException as error:
+                    errors.append("participant-observation-wait:" + type(error).__name__)
+                    break
+        try:
+            provider_cleanup = collector.abort()  # Same end; always closes owned endpoints.
+        except BaseException as error:
+            errors.append("provider-cleanup:" + type(error).__name__)
+            provider_cleanup = {"providerReaped": child.reaped, "cleanupUnresolved": True}
+        observation: Object = {"participants": {name: {**owner.object(),
+            "sameBirthLive": states[name], "termAttempted": attempted[name],
+            "unresolved": states[name] is not False} for name, owner in targets.items()},
+            "providerCleanup": provider_cleanup, "errors": errors,
+            "budgetExpired": time.monotonic() >= end,
+            "observerReapedDescendant": False, "custodyResolutionClaimed": False}
+        # Keep verified targets/errors in the original failure even when the
+        # private evidence store itself is the reason the span failed.
+        original.add_note("Verified H1 failure cleanup: " + repr(observation))
+        try:
+            self.evidence.write("h1-failed-participants.json", observation)
+        except BaseException as error:
+            original.add_note("Private H1 participant evidence unavailable: " + type(error).__name__)
 
     def _collect_owned(self, child: OwnedChild, seconds: float) -> Captured:
         try:
