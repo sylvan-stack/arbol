@@ -3,6 +3,7 @@
 import ast
 import json
 import os
+import shlex
 import shutil
 import signal
 import stat
@@ -13,13 +14,14 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from arbol_installation.admission import Admission, AdmissionRefusal, runtime_folder
 
 from .config import Locations, default_repository, description, load_json
 from .launcher import (
     BUILD_PATTERN,
+    DRIVER_LAUNCHER_MARK,
     LONE_SURROGATE,
     TRUNKS,
     Record,
@@ -38,6 +40,9 @@ from .launcher import (
 from .mutation import make_dirs, with_mutation_lock
 from .schema_state import SCHEMA_ERRORS, SchemaState, read_schema
 from .trunk_launcher import chosen
+
+if TYPE_CHECKING:
+    from .driver_payload import Payload
 
 PACKAGE = os.path.dirname(os.path.abspath(__file__))
 # The shared Trunk launcher embeds the registry reader, the schema reader and the selector.
@@ -152,6 +157,76 @@ def launcher_source(registry: str, component: str, python: str) -> bytes:
     return f"{first}\n{LAUNCHER_MARK}\n{SIGINT_LINE}\n{body}\n{call}\n".encode("utf-8", "surrogateescape")
 
 
+def early_driver_signals(source: bytes) -> bytes:
+    """Keep the existing built-in-only SIGINT prelude before sealed verification."""
+    future = b"from __future__ import annotations\n"
+    if not source.startswith(future):
+        raise ValueError("The sealed provider prefix must begin with its annotations declaration.")
+    return future + SIGINT_LINE.encode("ascii") + b"\n" + source[len(future):]
+
+
+def driver_launcher_source(registry: str, component: str, route: str, provider: "Payload") -> bytes:
+    """Stage exact gate bytes; this function never installs or issues acceptance."""
+    from .driver_admission import COMPONENTS, physical
+    from .driver_bootstrap import render_prefix
+    from .driver_payload import SUBTREE, load
+
+    registry_path = physical(registry)
+    if component not in COMPONENTS or provider.component != "arbol":
+        raise ValueError("A Driver gate requires its exact immutable Arbol provider.")
+    expected = registry_path / "arbol" / provider.build / SUBTREE
+    verified = load(expected, "arbol", provider.build)
+    if provider.root != expected or provider.digest != verified.digest:
+        raise ValueError("The fixed provider payload does not match the registered gate.")
+    target = Path(route)
+    if (not target.is_absolute() or target.name != component
+            or os.path.realpath(target.parent) != str(target.parent)):
+        raise ValueError("A Driver gate route must name its canonical registered launcher.")
+    interpreter, _, entry = verified.prefix
+    try:
+        first = shebang(interpreter)
+    except ValueError:
+        # The default registry contains spaces. A fixed quoted exec tuple is
+        # the contract's fallback, with no PATH search or caller shell program.
+        words = [interpreter, "-ISB", entry, "--driver-launch", str(registry_path), component, str(target)]
+        command = "exec " + " ".join(shlex.quote(word) for word in words) + ' "$@"\n'
+        return ("#!/bin/sh\n" + DRIVER_LAUNCHER_MARK + "\n" + command).encode("utf-8")
+    prefix = early_driver_signals(render_prefix(component="arbol", root=expected,
+                                                build=verified.build).encode("utf-8"))
+    call = ("\nfrom arbol_builds.driver_state import launch_gated\n"
+            f"sys.exit(launch_gated({str(registry_path)!r}, {component!r}, {str(target)!r}, sys.argv[1:]))\n")
+    return first.encode("utf-8") + b"\n" + DRIVER_LAUNCHER_MARK.encode("ascii") + b"\n" + prefix + call.encode("utf-8")
+
+
+def _keep_driver_gate(bin_folder: str, registry: str, component: str) -> bool:
+    """Ordinary build/install refresh is never a Driver gate downgrade path."""
+    from .driver_admission import COMPONENTS, Refusal, physical
+    from .driver_payload import verify_gate
+
+    if component not in COMPONENTS:
+        return False
+    path = Path(bin_folder) / component
+    marked = False
+    if os.path.lexists(path):
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 1024 * 1024:
+            raise Refusal("Cannot replace an unsafe registered Driver launcher.")
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            marked = DRIVER_LAUNCHER_MARK.encode("ascii") in os.read(descriptor, 1024).splitlines()[:3]
+        finally:
+            os.close(descriptor)
+    gate = Path(registry) / ".driver-qualification" / "gate.json"
+    control = Path(registry) / component / ".driver-admission"
+    if not (marked or os.path.lexists(gate) or os.path.lexists(control)):
+        return False
+    verified = verify_gate(physical(registry))
+    row = next(row for row in verified.document["components"] if row["component"] == component)
+    if not marked or str(physical(path, directory=False)) != row["launcher"]:
+        raise Refusal("Driver gate refresh requires an explicit closed verified deployment.")
+    return True
+
+
 def shebang(python: str) -> str:
     """The first line that starts a program with this Python, or a refusal when the line cannot name it."""
     first = f"#!{python} -ISB"
@@ -164,6 +239,8 @@ def shebang(python: str) -> str:
 
 def write_launcher(bin_folder: str, registry: str, component: str, python: str | None = None) -> None:
     """Write the launcher, started by the Python that runs this tool unless another is named."""
+    if _keep_driver_gate(bin_folder, registry, component):
+        return
     source = launcher_source(registry, component, python or sys.executable)
     os.makedirs(bin_folder, exist_ok=True)
     atomic_write(os.path.join(bin_folder, component), source, 0o755)

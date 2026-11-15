@@ -21,6 +21,8 @@ from typing import Any
 
 type Record = dict[str, Any]
 
+DRIVER_LAUNCHER_MARK = "# arbol-builds Driver gate (DRV-6.21): fixed immutable provider; deploy only."
+
 COMPONENT_PATTERN = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*")
 BUILD_PATTERN = re.compile(r"[1-9a-f][0-9a-f]*")
 # A Trunk is the component arbol-trunk/<code name>; arbol-trunk alone is the folder of the Trunks (RCT-0).
