@@ -492,6 +492,7 @@ import selectors
 import signal
 import struct
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -551,15 +552,17 @@ _NEGATIVE_SERIALIZATION = threading.Lock()
 def _collect_real(child: OwnedChild, *, seconds: float, cleanup_seconds: float = 20) -> Captured:
     try:
         return child.collect(seconds=seconds)
-    except BaseException:
+    except BaseException as original:
         try:
             child.request_stop()
-        except (ObservationFailed, OSError):
-            pass  # Identity refusal never becomes a guessed signal.
+        except BaseException as error:
+            original.add_note("Owned stop unavailable: " + type(error).__name__)
         try:
             child.wait_owned(seconds=cleanup_seconds)
-        except subprocess.TimeoutExpired:
-            pass  # Preserve unresolved owned custody and the original failure.
+        except BaseException as error:
+            # Preserve unresolved owned custody and the ORIGINAL capture error;
+            # a stop/identity/close failure cannot suppress the actual wait.
+            original.add_note("Owned wait unavailable: " + type(error).__name__)
         raise
 
 
@@ -963,7 +966,7 @@ def begin_vs_independently_admitted_write(subject: AdmissionSubject) -> None:
         argv = [*scope.gate.provider.prefix, "driver-state", "begin", "--registry-dir", str(subject.workspace.registry),
                 "--component", COMPONENT, "--session", session]
         begin = OwnedChild(argv, environment=without_authority(dict(subject.environment)), cwd=subject.workspace.registry)
-        captured = begin.collect(seconds=30)
+        captured = _collect_real(begin, seconds=30)
         require(captured.returncode == 0 and begin.reaped and document(captured.stdout)["phase"] == "draining",
                 "Actual begin did not close normal admission while preserving the accepted child.")
         with subject.authority.mutex():
@@ -1192,15 +1195,22 @@ class CallerPipe:
         sync_directory(parent)
         provider = subject.baseline.scopes[COMPONENT].gate.provider
         self.argv = [str(provider.root / provider.descriptor["interpreter"]), "-ISB", str(frozen.entry)]
-        self.process = subprocess.Popen(self.argv, cwd=parent, env=without_authority(dict(subject.environment)),
-                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True)
         self.channels = selectors.DefaultSelector()
+        try:
+            self.process = subprocess.Popen(self.argv, cwd=parent, env=without_authority(dict(subject.environment)),
+                                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True)
+        except BaseException:
+            self.channels.close()
+            raise
         observed_owner: ExactProcess | None = None
         try:
             self.owner = ExactProcess.read(process_identity(self.process.pid))
             observed_owner = self.owner
             require(self.owner.live(parent=os.getpid()), "Actual fixed caller birth/parent is unverified.")
-            self.deadline = time.monotonic() + 60
+            # Work cannot consume the reserved cleanup budget. The complete
+            # caller case remains bounded60sec, including20sec failure cleanup.
+            self.case_end = time.monotonic() + 60
+            self.deadline = self.case_end - 20
             self.buffer = bytearray()
             self.raw_stdout = bytearray()
             self.diagnostics = bytearray()
@@ -1212,17 +1222,20 @@ class CallerPipe:
             os.set_blocking(self.process.stdin.fileno(), False)
             self.send({"version": 1, "kind": "guardian-class-case", "case": self.case,
                        "window": window, "subjectSha256": digest(raw)})
-        except BaseException:
-            if observed_owner is not None and observed_owner.live(parent=os.getpid()):
-                signal_verified(observed_owner, signal.SIGTERM)
-            for owned_pipe in (self.process.stdin, self.process.stdout, self.process.stderr):
-                if owned_pipe is not None:
-                    owned_pipe.close()
+        except BaseException as original:
+            try:
+                if observed_owner is not None and observed_owner.live(parent=os.getpid()):
+                    signal_verified(observed_owner, signal.SIGTERM)
+            except BaseException as error:
+                original.add_note("Owned caller constructor stop unavailable: " + type(error).__name__)
+            try:
+                self.close()
+            except BaseException as error:
+                original.add_note("Owned caller constructor endpoints unavailable: " + type(error).__name__)
             try:
                 self.process.wait(timeout=25)
-            except subprocess.TimeoutExpired:
-                pass  # No guessed-PID escalation or fabricated closure.
-            self.channels.close()
+            except BaseException as error:
+                original.add_note("Owned caller constructor wait unavailable: " + type(error).__name__)
             raise
 
     def output_bounds(self) -> None:
@@ -1284,10 +1297,75 @@ class CallerPipe:
         return result
 
     def close(self) -> None:
-        self.channels.close()
+        errors: list[str] = []
+        try:
+            self.channels.close()
+        except BaseException as error:
+            errors.append(type(error).__name__)
         for pipe in (self.process.stdin, self.process.stdout, self.process.stderr):
             if pipe is not None:
-                pipe.close()
+                try:
+                    pipe.close()
+                except BaseException as error:
+                    errors.append(type(error).__name__)
+        require(not errors, "Owned caller endpoint closure failed: " + ",".join(errors))
+
+
+def _cleanup_verified_window(caller: CallerPipe, child: ExactProcess | None) -> Object:
+    """Cleanup is branch-independent; only the fully verified record can signal.
+
+    An orphan can be adopted after its original parent dies. SAME birth remains
+    mandatory, but the dead parent's old current-parent relation is not demanded.
+    A kernel disappearance is never a foreign-child reap or terminal record.
+    """
+    errors: list[str] = []
+    caller_joined = caller.reaped
+    child_disposition = "no-verified-target"
+    deadline = min(caller.case_end, time.monotonic() + 20)
+    try:
+        try:
+            if caller.process.poll() is None:
+                if caller.owner.live(parent=os.getpid()):
+                    signal_verified(caller.owner, signal.SIGTERM)
+                else:
+                    errors.append("caller-live-ownership-unverified")
+        except BaseException as error:
+            errors.append("caller-stop:" + type(error).__name__)
+        try:
+            # Actual Popen handle owns this wait even if IO capture/deadline
+            # validation already failed. It does NOT reap any descendant.
+            caller.process.wait(timeout=max(.001, min(5, deadline - time.monotonic())))
+            caller.reaped = caller_joined = True
+        except BaseException as error:
+            errors.append("caller-wait:" + type(error).__name__)
+    finally:
+        try:
+            if child is not None:
+                child_disposition = "not-same-live-birth"
+                for number in (signal.SIGCONT, signal.SIGTERM):
+                    try:
+                        if child.live():
+                            signal_verified(child, number)
+                    except BaseException as error:
+                        errors.append("verified-child-signal:" + type(error).__name__)
+                try:
+                    while child.live() and time.monotonic() < deadline:
+                        time.sleep(.01)
+                    if child.live():
+                        child_disposition = "verified-child-remains-live"
+                        errors.append(child_disposition)
+                    # Absence/reuse is only a kernel observation. The original
+                    # metadata can remain unresolved and is never rewritten.
+                except BaseException as error:
+                    child_disposition = "kernel-observation-unavailable"
+                    errors.append("verified-child-observe:" + type(error).__name__)
+        finally:
+            try:
+                caller.close()
+            except BaseException as error:
+                errors.append("owned-endpoints:" + type(error).__name__)
+    return {"callerReaped": caller_joined, "verifiedChild": None if child is None else child.object(),
+            "childKernelObservation": child_disposition, "observerReapedChild": False, "errors": errors}
 
 
 def guardian_class_window(subject: AdmissionSubject, frozen: FrozenCaller, *, window: ClassWindow, kill: bool) -> None:
@@ -1386,11 +1464,11 @@ def guardian_class_window(subject: AdmissionSubject, frozen: FrozenCaller, *, wi
                 scope = subject.baseline.scopes[COMPONENT]
                 argv = [*scope.gate.provider.prefix, "--qualification-launch", str(subject.workspace.registry), COMPONENT,
                         scope.producer(COMPONENT).build, selector, "--", *tail]
-                remaining = min(10, caller.deadline - time.monotonic() - 20)
+                remaining = min(10, caller.deadline - time.monotonic())
                 require(remaining > 0, "No finite caller-case budget left for refusal and owned cleanup.")
                 rejected = OwnedChild(argv, environment=without_authority(dict(subject.environment)), cwd=subject.workspace.registry)
                 result = _collect_real(rejected, seconds=remaining,
-                                       cleanup_seconds=min(20, max(.001, caller.deadline - time.monotonic())))
+                                       cleanup_seconds=min(20, max(.001, caller.case_end - time.monotonic())))
                 require(rejected.reaped and result.returncode != 0 and not os.path.lexists(probe_state),
                         "Real normal/helper route accepted unknown custody or touched unadmitted State.")
                 with authority.mutex():
@@ -1419,22 +1497,22 @@ def guardian_class_window(subject: AdmissionSubject, frozen: FrozenCaller, *, wi
             "controlStdoutSha256": digest(bytes(caller.raw_stdout)), "diagnosticsSha256": digest(bytes(caller.diagnostics))},
             limit=32 * 1024 * 1024)
     finally:
-        if caller.process.poll() is None and caller.owner.live():
-            signal_verified(caller.owner, signal.SIGTERM)
-            try:
-                caller.wait()
-            except (ObservationFailed, subprocess.TimeoutExpired):
-                pass
-        if kill and verified_child is not None and verified_child.live():
-            # Owned observed descendant, not an arbitrary group or a reap claim:
-            # after its parent dies it may be adopted by the OS, not this process.
-            signal_verified(verified_child, signal.SIGCONT)
-            signal_verified(verified_child, signal.SIGTERM)
-            deadline = min(caller.deadline, time.monotonic() + 20)
-            while verified_child.live() and time.monotonic() < deadline:
-                time.sleep(.01)
-            # Kernel disappearance is NOT terminal custody; unknown remains.
-        caller.close()
+        original_failure = sys.exception()
+        # BOTH actual-death and failed-positive paths can leave a child after
+        # terminating their caller. A SIGTERM is no promise of caller finally.
+        cleanup = _cleanup_verified_window(caller, verified_child)
+        cleanup["originalFailureType"] = None if original_failure is None else type(original_failure).__name__
+        try:
+            subject.evidence.write("guardian-class-cleanup.json", cleanup)
+        except BaseException as error:
+            if original_failure is None:
+                raise
+            original_failure.add_note("Cleanup evidence failed: " + type(error).__name__)
+        if cleanup["errors"]:
+            if original_failure is not None:
+                original_failure.add_note("Owned cleanup unresolved: " + ",".join(cleanup["errors"]))
+            else:
+                raise ObservationFailed("Owned cleanup unresolved; preserve subject: " + ",".join(cleanup["errors"]))
 
 
 def final_working_rendered_route_coupling(subject: AdmissionSubject) -> None:
