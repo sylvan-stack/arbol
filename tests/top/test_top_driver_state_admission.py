@@ -2907,3 +2907,1061 @@ class TerminalSpanObservation:
             "observerReapedDescendant": False, "allOriginalDeferredAssertionsStillRequired": True}
         controller.evidence.write("terminal-independent-positive.json", self.record, limit=16 * 1024 * 1024)
         self.completed = True
+
+
+_MIMO_MAIN_COMPONENT = "arbol-mimo-driver"
+_MIMO_STUBBORN = "trap '' TERM; printf stubborn-start; sleep 60"
+_MIMO_RECIPE_SOURCE = ("tests/native/support.py", "tests/native/test_public_lifecycle.py")
+_MIMO_PRODUCTION_SOURCE = ("src/arbol_mimo_driver/standin.py", "src/arbol_mimo_driver/runtime.py",
+    "src/arbol_mimo_driver/ownership.py", "src/arbol_mimo_driver/adapters/watcher.py",
+    "src/arbol_mimo_driver/runs.py", "src/arbol_mimo_driver/admission.py", "bin/identity-helper.py",
+    "bin/entry.py", "src/arbol_mimo_driver/cli.py", "src/arbol_mimo_driver/native_server.py",
+    "src/arbol_mimo_driver/events.py", "src/arbol_mimo_driver/output.py",
+    "src/arbol_mimo_driver/adapters/process_table.py", "src/arbol_mimo_driver/native_cleanup.py",
+    "src/arbol_mimo_driver/operation.py", "src/arbol_mimo_driver/native_cli.py")
+
+def _mimo_explicit_native_image(path: Path, expected_sha256: str) -> Object:
+    """Hash ONLY the explicitly supplied uninstalled native input, streaming.
+
+    The finite512MiB bound matches existing qualify_binary. No installed-native
+    fallback, native invocation or descriptor inheritance is introduced.
+    """
+    import hashlib
+
+    require(valid_hash(expected_sha256) and path.is_absolute() and path.resolve(strict=True) == path,
+            "Invalid exact explicit native candidate/hash.")
+    physical_owned(path.parent, directory=True, private=False)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        before = os.fstat(fd)
+        require(stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid() and before.st_nlink == 1
+                and before.st_mode & 0o111 != 0 and 0 < before.st_size <= 512 * 1024 * 1024,
+                "Explicit uninstalled native input is not the bounded owned executable.")
+        hashed, total = hashlib.sha256(), 0
+        while total <= 512 * 1024 * 1024:
+            block = os.read(fd, min(65536, 512 * 1024 * 1024 + 1 - total))
+            if not block:
+                break
+            total += len(block)
+            hashed.update(block)
+        after, named = os.fstat(fd), path.lstat()
+        keys = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns", "st_mode", "st_nlink")
+        require(total == before.st_size and all(getattr(before, key) == getattr(after, key) == getattr(named, key) for key in keys)
+                and hashed.hexdigest() == expected_sha256, "Exact explicit native input changed during observation.")
+        return {"path": str(path), "device": before.st_dev, "inode": before.st_ino,
+                "mode": stat.S_IMODE(before.st_mode), "size": total, "sha256": hashed.hexdigest(), "links": 1}
+    finally:
+        os.close(fd)
+
+
+
+@dataclass(frozen=True)
+class MimoOfflineInput:
+    """Explicit separately approved native fixture input, NEVER installed fallback."""
+
+    candidate: Path
+    candidate_sha256: str
+    source_sha256: Mapping[str, str]
+
+    def verify(self, controller: WholeCheckController) -> Object:
+        controller.scope.recheck()  # Full actual M/D before fixture/State reads.
+        payload = controller.scope.producer(_MIMO_MAIN_COMPONENT)
+        require(set(self.source_sha256) == set((*_MIMO_RECIPE_SOURCE, *_MIMO_PRODUCTION_SOURCE))
+                and valid_hash(self.candidate_sha256), "Missing exact admitted offline fixture source/native pins.")
+        images: Object = {}
+        for name in (*_MIMO_RECIPE_SOURCE, *_MIMO_PRODUCTION_SOURCE):
+            expected = self.source_sha256[name]
+            require(valid_hash(expected), "Invalid source-owned fixture body hash.")
+            image = read_image(payload.root / name, limit=4 * 1024 * 1024, private=False)
+            require(image.sha256 == expected, "Offline fixture/production source differs from its admitted pin.")
+            images[name] = image.evidence()
+        require("bin/identity-helper.py" in payload.descriptor["helpers"]
+                and self.candidate.is_absolute() and self.candidate.resolve(strict=True) == self.candidate,
+                "Native candidate/helper input is not the exact explicit physical input.")
+        native_image = _mimo_explicit_native_image(self.candidate, self.candidate_sha256)
+        return {"nativeCandidate": native_image, "fixedSources": images,
+                "producerSource": payload.descriptor["source"], "payloadSha256": payload.digest,
+                "syntheticOnly": True, "genuineProfileOrModelUsabilityClaimed": False}
+
+
+@dataclass(frozen=True)
+class MimoMainRecipe:
+    """Arbol-owned exact DATA counterpart of Mimo's fixed MainWatcherRecipe.
+
+    No sibling import/exec; the actual fixed public candidate owns preparation.
+    Future47 reuses the Mimo-native DATA type in its own verified runtime.
+    """
+
+    home: Path
+    case: str
+    native: MimoOfflineInput
+    tuple_pins_sha256: str
+
+    @property
+    def tool(self) -> Path:
+        return self.home / "tool"
+
+    @property
+    def work(self) -> Path:
+        return self.home / "project"
+
+    @property
+    def state(self) -> Path:
+        return self.tool / "state"
+
+    @property
+    def request(self) -> Path:
+        return self.tool / "main-watcher-request.json"
+
+    @property
+    def run_id(self) -> str:
+        return "abr38-main-" + self.case
+
+    def options(self) -> Object:
+        return {"text": "ready", "calls": [{"name": "bash", "arguments": {"command": _MIMO_STUBBORN,
+            "description": "Owned offline MAIN/Watcher across-begin fixture"}}]}
+
+    def request_value(self) -> Object:
+        return {"runId": self.run_id, "subscriptionId": "xiaomi", "tools": "all", "history": [],
+            "workingDirectory": str(self.work), "input": {"role": "user", "text": "abr38-main-watcher"}}
+
+    def tails(self) -> tuple[list[str], list[str], list[str]]:
+        prefix = ["--state-dir", str(self.state), "dev", "stand-in", str(self.tool), "--"]
+        return ([*prefix, "install"], [*prefix, "driver", "subscriptions", "sign-in", "xiaomi"],
+                [*prefix, "driver", "run", "--control", "--subscription", "xiaomi", "--request", str(self.request)])
+
+    def receipt(self) -> Object:
+        require(re.fullmatch(r"[0-9a-f]{32}", self.case, re.ASCII) is not None
+                and valid_hash(self.tuple_pins_sha256), "Invalid fixed private case/tuple pins.")
+        physical_owned(self.home, directory=True)
+        install, attach, run = self.tails()
+        return {"version": 1, "kind": "abr38-mimo-main-watcher-recipe", "case": self.case,
+            "home": str(self.home), "tool": str(self.tool), "work": str(self.work), "state": str(self.state),
+            "request": str(self.request), "runId": self.run_id, "subscription": "xiaomi",
+            "candidate": str(self.native.candidate), "candidateSha256": self.native.candidate_sha256,
+            "tuplePinsSha256": self.tuple_pins_sha256, "syntheticOnly": True, "scenario": "native text",
+            "options": self.options(), "requestValue": self.request_value(),
+            "installTail": install, "attachTail": attach, "runTail": run}
+
+
+class MimoMainStream:
+    """One data-only bounded drainer for an OWNED public provider's two pipes.
+
+    The reader never signals, admits metadata, reads State or invokes callbacks.
+    It keeps output draining during real begin/binding work. Caller owns control
+    stdin and joins this thread before any successful external-phase result.
+    """
+
+    def __init__(self, child: OwnedChild, *, run_id: str | None, end: float) -> None:
+        self.child, self.run_id, self.end = child, run_id, end
+        self.condition = threading.Condition()
+        self.stopping = threading.Event()
+        self.raw = {"stdout": bytearray(), "stderr": bytearray()}
+        self.eof: set[str] = set()
+        self.records: list[Object] = []
+        self.errors: list[str] = []
+        self.partial = bytearray()
+        self.finished = False
+        self.started = False
+        self.thread = threading.Thread(target=self._read, name="abr38-mimo-public-output", daemon=False)
+
+    def start(self) -> None:
+        require(not self.started and self.child.owner.pid == self.child.process.pid,
+                "Public data drainer lacks its retained actual owned Popen identity.")
+        self.started = True
+        self.thread.start()
+
+    def _read(self) -> None:
+        parse_failed = False
+
+        def failed(error: BaseException) -> None:
+            with self.condition:
+                if len(self.errors) < 64:
+                    self.errors.append(type(error).__name__ + ":" + str(error)[:512])
+                self.condition.notify_all()
+
+        try:
+            with selectors.DefaultSelector() as selector:
+                for name, pipe in (("stdout", self.child.process.stdout), ("stderr", self.child.process.stderr)):
+                    try:
+                        require(pipe is not None, "Actual public provider output pipe is absent.")
+                        assert pipe is not None
+                        os.set_blocking(pipe.fileno(), False)
+                        selector.register(pipe, selectors.EVENT_READ, name)
+                    except BaseException as error:
+                        failed(error)
+                while selector.get_map() and not self.stopping.is_set():
+                    require(time.monotonic() < self.end, "Public output exceeded its original sixty-second span.")
+                    for key, events in selector.select(min(.025, max(0, self.end - time.monotonic()))):
+                        if not events & selectors.EVENT_READ:
+                            continue
+                        name = key.data
+                        try:
+                            data = os.read(key.fd, 65536)
+                        except BlockingIOError:
+                            continue
+                        except BaseException as error:
+                            failed(error)
+                            selector.unregister(key.fileobj)
+                            continue
+                        with self.condition:
+                            if not data:
+                                selector.unregister(key.fileobj)
+                                self.eof.add(name)  # Actual read(0), never close/exit inference.
+                                if name == "stdout" and self.partial:
+                                    failed(ObservationFailed("Truncated actual public JSONLF output."))
+                            else:
+                                room = max(0, 4 * 1024 * 1024 - len(self.raw[name]))
+                                self.raw[name].extend(data[:room])
+                                if len(data) > room:
+                                    failed(ObservationFailed("Actual output overflow; bounded failed prefix retained."))
+                                if name == "stdout" and self.run_id is not None and not parse_failed:
+                                    try:
+                                        self.partial.extend(data)
+                                        while b"\n" in self.partial:
+                                            line, _, tail = self.partial.partition(b"\n")
+                                            self.partial = bytearray(tail)
+                                            require(not self.finished and 0 < len(line) <= 1024 * 1024
+                                                    and len(self.records) < 4096, "Extra/oversized actual public frame.")
+                                            record = document(bytes(line), limit=1024 * 1024)
+                                            require(record.get("runId") == self.run_id and isinstance(record.get("type"), str)
+                                                    and type(record.get("seq")) is int
+                                                    and record["seq"] == len(self.records) + 1,
+                                                    "Public frame belongs to another run or lost its real sequence.")
+                                            self.records.append(record)
+                                            self.finished = record["type"] == "finished"
+                                        require(len(self.partial) <= 1024 * 1024, "Public partial frame exceeded its bound.")
+                                    except BaseException as error:
+                                        failed(error)
+                                        parse_failed = True  # Continue draining real failed bytes on BOTH pipes.
+                                        self.partial.clear()
+                            self.condition.notify_all()
+        except BaseException as error:
+            failed(error)
+        finally:
+            with self.condition:
+                self.condition.notify_all()
+
+    def stubborn_start(self, *, end: float) -> Object:
+        with self.condition:
+            while True:
+                require(not self.errors, "Actual data reader failed: " + repr(self.errors))
+                for record in self.records:
+                    if record["type"] == "tool_output_delta" and "stubborn-start" in str(record.get("text", "")):
+                        require(time.monotonic() <= end, "Real stubborn-start exceeded startup budget.")
+                        return dict(record)
+                require(time.monotonic() < min(end, self.end) and self.thread.is_alive()
+                        and "stdout" not in self.eof, "Actual stubborn-start was not observed before bounded EOF/exit.")
+                self.condition.wait(min(.025, max(0, min(end, self.end) - time.monotonic())))
+
+    def snapshot(self) -> Object:
+        with self.condition:
+            return {"provider": self.child.owner.object(), "stdoutHex": bytes(self.raw["stdout"]).hex(),
+                "stderrHex": bytes(self.raw["stderr"]).hex(), "actualEof": sorted(self.eof),
+                "records": list(self.records), "errors": list(self.errors), "readerAlive": self.thread.is_alive(),
+                "providerActuallyReaped": self.child.reaped, "custodyOrGatePassClaimed": False}
+
+    def join(self, *, end: float, failure: bool) -> None:
+        if not self.started:
+            return
+        deadline = min(end, self.end)
+        self.thread.join(timeout=max(0, deadline - (.05 if failure else 0) - time.monotonic()))
+        if failure and self.thread.is_alive():
+            self.stopping.set()  # Stop data work only after attempting pending-byte drain.
+            self.thread.join(timeout=max(0, deadline - time.monotonic()))
+        require(not self.thread.is_alive(), "Owned data reader did not join within original span.")
+        if not failure:
+            require(not self.errors and self.eof == {"stdout", "stderr"} and not self.partial,
+                    "Public output did not genuinely drain to complete EOF.")
+
+
+def _mimo_finite_data_call(child: OwnedChild, *, end: float) -> Captured:
+    """Exact public install/attach/begin/refusal call; NEVER the controlled Run.
+
+    Actual failed bytes survive pre-selector/IO/timeout failures. All attempts
+    share this one deadline; only the caller-owned provider is stopped/reaped.
+    This deliberately never sends successful EOF, even for preparation calls.
+    """
+    stream: MimoMainStream | None = None
+    original: BaseException | None = None
+    failures: list[str] = []
+    try:
+        require(time.monotonic() + 1 < end, "No remaining fixed-call budget/cleanup reserve.")
+        stream = MimoMainStream(child, run_id=None, end=end)
+        stream.start()
+        status = child.wait_owned(seconds=max(.001, end - 1 - time.monotonic()))
+        stream.join(end=end, failure=False)
+        captured = stream.snapshot()
+        return Captured(status, bytes.fromhex(captured["stdoutHex"]), bytes.fromhex(captured["stderrHex"]), child.owner)
+    except BaseException as error:
+        original = error
+        try:
+            child.request_stop()
+        except BaseException as cleanup:
+            failures.append("owned-stop:" + type(cleanup).__name__)
+        try:
+            child.wait_owned(seconds=max(.001, end - time.monotonic()))
+        except BaseException as cleanup:
+            failures.append("owned-wait:" + type(cleanup).__name__)
+        if stream is not None:
+            try:
+                stream.join(end=end, failure=True)
+            except BaseException as cleanup:
+                failures.append("data-join:" + type(cleanup).__name__)
+            error.add_note("Actual failed public bytes: " + repr(stream.snapshot()))
+        error.add_note("Fixed public call cleanup: " + repr(failures))
+        raise
+    finally:
+        for pipe in (child.process.stdin, child.process.stdout, child.process.stderr):
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except BaseException as cleanup:
+                    failures.append("pipe-close:" + type(cleanup).__name__)
+        if failures:
+            if original is not None:
+                original.add_note("Fixed-call endpoint failures: " + repr(failures))
+            else:
+                failure = ObservationFailed("Fixed-call actual endpoints unresolved: " + repr(failures))
+                if stream is not None:
+                    failure.add_note("Actual fixed-call bytes: " + repr(stream.snapshot()))
+                raise failure
+
+
+def _mimo_original_group_members(pgid: int, *, end: float) -> list[Object]:
+    """Read ONLY an original ledger PGID with the fixed Darwin OS ABI.
+
+    No signals or permission follows, even if the number has been reused. A
+    nonempty/reused/inaccessible/full inventory is failure, never cleanup proof.
+    Fresh PID/birth inspection is independently joined to each enumerated PID.
+    """
+    import ctypes
+    import errno
+
+    require(sys.platform == "darwin" and type(pgid) is int and 0 < pgid <= 2**31 - 1
+            and pgid != os.getpgrp() and time.monotonic() < end, "Unsafe/unavailable original native group observation.")
+    library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    library.proc_listpgrppids.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+    library.proc_listpgrppids.restype = ctypes.c_int
+    capacity = 64
+    while capacity <= 131072:
+        require(time.monotonic() < end, "Original group observation exceeded its shared deadline.")
+        values = (ctypes.c_int * capacity)()
+        ctypes.set_errno(0)
+        count = library.proc_listpgrppids(pgid, values, ctypes.sizeof(values))
+        require(type(count) is int and count >= 0
+                and (count > 0 or ctypes.get_errno() in (0, errno.ESRCH)), "Cannot independently enumerate the original group.")
+        if count >= capacity:
+            capacity *= 2
+            continue
+        members: list[Object] = []
+        for pid in values[:count]:
+            require(type(pid) is int and pid > 0 and time.monotonic() < end,
+                    "Invalid/unbounded original group member observation.")
+            current = provider_process.inspect(pid)
+            if current is not None and current.group == pgid:
+                members.append({"process": current.owner, "parent": current.parent, "group": current.group})
+        return members
+    raise ObservationFailed("Native group inventory exceeds the fixed OS observation bound.")
+
+
+@dataclass(frozen=True)
+class MimoMainView:
+    main: ExactProcess
+    watcher: ExactProcess
+    main_context: Object
+    watcher_context: Object
+    main_context_sha256: str
+    watcher_context_sha256: str
+    main_writer: Object
+    watcher_writer: Object
+    custody: Object
+    ledger: Object
+    run_record: Object
+    admission_lock: Object
+    before_metadata: Object
+
+
+class MimoMainSubject:
+    """One healthy disposable subject with REAL offline public preparation.
+
+    This owns13.1's ordinary stop only. A later separately admitted13.3 body may
+    reuse the split active boundary and settlement interfaces with its DISTINCT
+    source-defined cancellation trigger; there is no wire callback dispatcher.
+    No preparation or runtime operation occurs on construction/import.
+    """
+
+    def __init__(self, controller: WholeCheckController, baseline: Baseline, *, case: str,
+                 native: MimoOfflineInput, full_run_end: float, environment: Mapping[str, str]) -> None:
+        require(controller.scope == baseline.scopes[_MIMO_MAIN_COMPONENT]
+                and not controller.reaped and not controller.finished_external
+                and re.fullmatch(r"[0-9a-f]{32}", case, re.ASCII) is not None
+                and time.monotonic() < full_run_end <= time.monotonic() + 7200,
+                "MAIN/Watcher requires a fresh exact independently owned subject and original gate budget.")
+        controller.workspace.verify(controller.evidence)
+        controller.scope.recheck()
+        self.controller, self.baseline, self.case, self.native = controller, baseline, case, native
+        self.full_end = full_run_end
+        self.source = native.verify(controller)
+        pins = [controller.scope.gate.provider, *controller.scope.producers]
+        require(len(pins) == 5 and len({item.component for item in pins}) == 5, "Missing real five-tuple cohort.")
+        tuples_raw = canonical({"version": 1, "kind": "abr38-mimo-main-actual-tuples", "tuples": [
+            {"component": item.component, "build": item.build, "source": item.descriptor["source"],
+             "payloadSha256": item.digest} for item in pins]})
+        controller.evidence.write_bytes("mimo-main-tuples.json", tuples_raw)
+        self.recipe = MimoMainRecipe(controller.workspace.fixture_root / ("mimo-main-" + case), case,
+                                     native, digest(tuples_raw))
+        self.authority = Authority(controller.workspace.registry, _MIMO_MAIN_COMPONENT)
+        self.original_control: Object | None = None
+        self.preparation: list[Object] = []
+        self.prepared = False
+        self.child: OwnedChild | None = None
+        self.stream: MimoMainStream | None = None
+        self.view: MimoMainView | None = None
+        self.run_end = 0.0
+        self.boundary_end = 0.0
+        self.session = str(uuid.uuid4())  # Genuine new operator session, NOT a boot UUID.
+        self.begun = False
+        self.stop_sent = False
+        self.stop_observed_at = 0.0
+        self.closed = False
+        allowed = ("PATH", "USER", "LOGNAME", "LANG", "TMPDIR", "TERM")
+        self.environment = {key: environment[key] for key in allowed if key in environment}
+        self.environment.update(HOME=str(self.recipe.home), SHELL="/bin/bash",
+                                ARBOL_MIMO_TEST_CANDIDATE=str(native.candidate))
+        self.environment.setdefault("PATH", "/usr/bin:/bin")
+        self.record: Object = {"component": _MIMO_MAIN_COMPONENT, "case": case, "source": self.source,
+            "syntheticOnly": True, "genuineModelOrAccountProof": False, "preparedInvocations": self.preparation,
+            "publicDrainWhileActiveInvoked": False, "completeCheckClaimed": False}
+
+    def _argv(self, tail: list[str]) -> list[str]:
+        self.controller.scope.recheck()
+        return self.controller.fixed_argv(_MIMO_MAIN_COMPONENT,
+            self.controller.scope.producer(_MIMO_MAIN_COMPONENT).build, "driver", tail)
+
+    def _data(self, path: Path, raw: bytes) -> None:
+        require(path.parent in (self.recipe.home, self.recipe.tool) and len(raw) <= 1024 * 1024,
+                "Only fixed private fixture DATA basenames may be published.")
+        physical_owned(path.parent, directory=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            pending = memoryview(raw)
+            while pending:
+                count = os.write(fd, pending)
+                require(count > 0, "Private fixture DATA write failed.")
+                pending = pending[count:]
+            os.fsync(fd)
+            held, named = os.fstat(fd), path.lstat()
+            require(held.st_nlink == named.st_nlink == 1 and (held.st_dev, held.st_ino) == (named.st_dev, named.st_ino),
+                    "Private fixture DATA inode/link changed.")
+        finally:
+            os.close(fd)
+        sync_directory(path.parent)
+
+    def _prep_call(self, tail: list[str], *, name: str, end: float) -> Object:
+        require(time.monotonic() + 1 < end, "Original native preparation budget exhausted.")
+        child = OwnedChild(self._argv(tail), environment=without_authority(self.environment), cwd=self.recipe.home)
+        try:
+            captured = _mimo_finite_data_call(child, end=end)
+        except BaseException as error:
+            item: Object = {"name": name, "argv": child.process.args, "provider": child.owner.object(),
+                "providerActuallyReaped": child.reaped, "returncode": child.process.returncode,
+                "failureType": type(error).__name__, "actualFailedBytesAndCleanup": list(getattr(error, "__notes__", ())),
+                "custodyOrGatePassClaimed": False}
+            self.preparation.append(item)
+            try:
+                self.controller.evidence.write("mimo-prep-" + name + "-failed.json", item, limit=32 * 1024 * 1024)
+            except BaseException as evidence_error:
+                error.add_note("Preparation evidence unavailable: " + type(evidence_error).__name__)
+            raise
+        item = {"name": name, "argv": child.process.args, "provider": child.owner.object(),
+            "returncode": captured.returncode, "providerActuallyReaped": child.reaped,
+            "stdoutHex": captured.stdout.hex(), "stderrHex": captured.stderr.hex()}
+        self.preparation.append(item)
+        self.controller.evidence.write("mimo-prep-" + name + "-output.json", item, limit=32 * 1024 * 1024)
+        require(child.reaped and captured.returncode == 0 and not captured.stderr,
+                "Actual public native preparation refused; preserve original failed subject.")
+        self.controller.reaped.append(child)
+        result = document(captured.stdout, limit=1024 * 1024)
+        self.controller.require_finished_graph(_MIMO_MAIN_COMPONENT)
+        with self.authority.mutex():
+            control = normal_control(self.authority, candidate=self.controller.scope)
+            require(self.original_control is not None and control == self.original_control,
+                    "Public preparation changed healthy control/epoch.")
+            image = _raw_authority_image(self.authority)
+        item["actualControl"], item["actualMetadata"] = control, image
+        self.controller.evidence.write("mimo-prep-" + name + ".json", item, limit=32 * 1024 * 1024)
+        return result
+
+    def prepare(self) -> Object:
+        require(not self.prepared and self.child is None and not os.path.lexists(self.recipe.home),
+                "No preparation resume, existing profile, copied history or reused fixture.")
+        self.controller.require_finished_graph(_MIMO_MAIN_COMPONENT)
+        with self.authority.mutex():
+            control = normal_control(self.authority, candidate=self.controller.scope)
+            require(control["epoch"] == self.baseline.epochs[_MIMO_MAIN_COMPONENT]
+                    and not os.path.lexists(self.authority.folder / "taint.json")
+                    and not os.path.lexists(self.authority.folder / "maintenance.json"),
+                    "Offline native preparation requires the original healthy fixture baseline.")
+            self.original_control = control
+            self.record["beforePreparationMetadata"] = _raw_authority_image(self.authority)
+        physical_owned(self.controller.workspace.fixture_root, directory=True)
+        self.recipe.home.mkdir(mode=0o700)
+        self.recipe.tool.mkdir(mode=0o700)
+        self.recipe.work.mkdir(mode=0o700)
+        sync_directory(self.controller.workspace.fixture_root)
+        self._data(self.recipe.home / ".main-watcher-recipe.json", canonical(self.recipe.receipt()))
+        install, attach, _ = self.recipe.tails()
+        prepared = self._prep_call(install, name="install", end=min(self.full_end, time.monotonic() + 20))
+        require(prepared.get("installed") is True and prepared.get("qualified") is False
+                and prepared.get("nativeHome") == str(self.recipe.tool / "native-profile/home")
+                and prepared.get("nativeVersion") in ("0.1.16", "0.1.16-arbol4")
+                and isinstance(prepared.get("helperPath"), str), "Actual offline install did not produce the fixed fixture.")
+        helper_path = prepared["helperPath"]
+        require(helper_path and all(Path(value).is_absolute() and Path(value).resolve(strict=True) == Path(value)
+                                   for value in helper_path.split(os.pathsep)), "Actual native helper paths are not physical.")
+        self.environment["PATH"] = helper_path + os.pathsep + self.environment["PATH"]
+        self._data(self.recipe.tool / "scenario", b"native text\n")
+        self._data(self.recipe.tool / "options.json", canonical(self.recipe.options()))
+        self._data(self.recipe.request, canonical(self.recipe.request_value()))
+        self._prep_call(attach, name="attach", end=min(self.full_end, time.monotonic() + 30))
+        self.native.verify(self.controller)
+        manifest = document(read_image(self.recipe.tool / "fixture-manifest.json", limit=65536).raw, limit=65536)
+        require(manifest.get("syntheticIdentity") is True and manifest.get("model") == "arbol-mimo-fixture"
+                and manifest.get("home") == str(self.recipe.tool / "native-profile/home")
+                and manifest.get("binary") == str(self.native.candidate),
+                "Actual stand-in manifest escaped the explicitly synthetic candidate/home.")
+        with self.authority.mutex():
+            require(normal_control(self.authority, candidate=self.controller.scope) == self.original_control,
+                    "Preparation lost original healthy control/epoch.")
+            self.record["preparedMetadataBeforeimage"] = _raw_authority_image(self.authority)
+        self.record["recipe"] = self.recipe.receipt()
+        self.record["fixtureManifest"] = manifest
+        self.record["preparedStateInventory"] = tree_inventory(self.recipe.state)
+        self.record["preparedLifetime"] = self._lifetime()
+        self.record["ownedDirectoryOrigins"] = self._directory_origins()
+        self.controller.evidence.write("mimo-main-preparation.json", self.record, limit=32 * 1024 * 1024)
+        self.prepared = True
+        return self.recipe.receipt()
+
+    def _directory_origins(self) -> Object:
+        origins: Object = {}
+        for label, path in (("home", self.recipe.home), ("tool", self.recipe.tool), ("work", self.recipe.work),
+                            ("state", self.recipe.state), ("subscriptions", self.recipe.state / "subscriptions"),
+                            ("xiaomi", self.recipe.state / "subscriptions/xiaomi"),
+                            ("nativeHome", self.recipe.tool / "native-profile/home")):
+            image = physical_owned(path, directory=True)
+            origins[label] = {"path": str(path), "device": image.st_dev, "inode": image.st_ino,
+                              "mode": stat.S_IMODE(image.st_mode)}
+        return origins
+
+    def _lifetime(self) -> Object:
+        root = read_image(self.recipe.state / "identity.json")
+        sidecar = read_image(self.recipe.state / "subscriptions/xiaomi/identity.json")
+        root_value, witness = document(root.raw), document(sidecar.raw)
+        require(type(root_value.get("version")) is int and root_value["version"] == 1
+                and type(witness.get("version")) is int and witness["version"] == 1
+                and valid_token(root_value.get("generation")) and valid_token(witness.get("witness"))
+                and read_image(self.recipe.state / "format").raw == b"2\n", "Actual public preparation did not establish genuine format2 proof.")
+        return {"rootImage": root.evidence(), "sidecarImage": sidecar.evidence(),
+                "lifetime": {"generation": root_value["generation"], "witness": witness["witness"]}}
+
+    def _public_context(self, row: Object, parent: Object, *, role: str, entry: str) -> tuple[Object, str]:
+        require(valid_token(row["handoff"]), "Invalid actual handoff token.")
+        raw = read_bytes(self.authority.folder / "handoffs" / (row["handoff"] + ".context.json"))
+        context = document(raw)
+        normal_context(context)
+        payload = self.controller.scope.producer(_MIMO_MAIN_COMPONENT)
+        require(self.original_control is not None, "No original healthy epoch was retained.")
+        assert self.original_control is not None
+        require(context["role"] == role and context["entry"] == entry
+                and context["invocation"] == parent["invocation"]
+                and context["registry"] == str(self.controller.workspace.registry)
+                and context["registrySha256"] == self.controller.scope.registry_sha256
+                and context["component"] == _MIMO_MAIN_COMPONENT and context["epoch"] == self.original_control["epoch"]
+                and context["boot"] == self.baseline.boot and context["payloadSha256"] == payload.digest
+                and context["acceptanceSha256"] == self.controller.scope.acceptance_sha256
+                and context["parent"] == {"writer": parent["writer"],
+                                          **{key: parent[key] for key in ("pid", "startedAt")}},
+                "Actual MAIN/Watcher context lost source/tuple/epoch/boot/entry/parent binding.")
+        expected = {"version": 1, "handoff": context["handoff"], "component": _MIMO_MAIN_COMPONENT,
+            "invocation": context["invocation"], "parent": parent["writer"], "child": context["writer"],
+            "epoch": context["epoch"], "payloadSha256": payload.digest, "phase": "accepted", "nonce": context["nonce"],
+            "contextSha256": digest(raw), "role": role, "entry": entry,
+            "acceptanceSha256": self.controller.scope.acceptance_sha256, "challenge": row["challenge"]}
+        require(row == expected and valid_token(row["challenge"]), "Actual accepted ACK/ready/go/started handoff differs.")
+        return context, digest(raw)
+
+    def verify_active(self, *, draining: bool) -> MimoMainView:
+        require(self.child is not None and self.stream is not None and self.prepared and self.original_control is not None,
+                "No actual public MAIN is available for active binding.")
+        assert self.child is not None and self.stream is not None and self.original_control is not None
+        self.controller.scope.recheck()
+        payload = self.controller.scope.producer(_MIMO_MAIN_COMPONENT)
+        with self.authority.mutex(seconds=max(.001, self.boundary_end - time.monotonic())):
+            control = self.authority.read("control")
+            expected_control = {**self.original_control, "phase": "draining", "session": self.session} if draining else self.original_control
+            require(control == expected_control and not os.path.lexists(self.authority.folder / "taint.json"),
+                    "Actual current control is not the exact intended healthy/draining beforeimage.")
+            custody = reconcile(self.authority, persist_unknown=False, candidate=self.controller.scope)
+            require(not custody.unknown and custody.active == 2 and custody.pending == 0,
+                    "Actual live subject is not exactly MAIN plus persistent metadata Watcher.")
+            roots = [row for row in custody.writers if row["parent"] is None
+                     and {key: row[key] for key in ("pid", "startedAt")} == self.child.owner.object()]
+            require(len(roots) == 1 and roots[0]["phase"] == "terminal", "Owned actual provider root/transfer differs.")
+            mains = [row for row in custody.handoffs if row["parent"] == roots[0]["writer"]
+                     and row["invocation"] == roots[0]["invocation"] and row["role"] == "main"]
+            require(len(mains) == 1, "Actual public MAIN transfer is ambiguous.")
+            main_context, main_hash = self._public_context(mains[0], roots[0], role="main", entry=payload.descriptor["entry"])
+            main_writer = read(writer_path(self.authority, main_context["invocation"], main_context["writer"]))
+            helpers = [row for row in custody.handoffs if row["parent"] == main_context["writer"]
+                       and row["invocation"] == main_context["invocation"] and row["entry"] == "bin/identity-helper.py"]
+            # bind_endpoint has already finished and is NOT the live Watcher.
+            active_helpers = []
+            for row in helpers:
+                writer = read(writer_path(self.authority, row["invocation"], row["child"]))
+                if writer["phase"] == "active":
+                    active_helpers.append((row, writer))
+            require(len(active_helpers) == 1, "Persistent actual metadata Watcher is missing/ambiguous.")
+            watcher_row, watcher_writer = active_helpers[0]
+            watcher_context, watcher_hash = self._public_context(watcher_row, main_writer, role="helper", entry="bin/identity-helper.py")
+            main, watcher = ExactProcess.read(main_context["process"]), ExactProcess.read(watcher_context["process"])
+            require(main_writer == {"version": 1, "invocation": main_context["invocation"], "writer": main_context["writer"],
+                "parent": roots[0]["writer"], "component": _MIMO_MAIN_COMPONENT, "epoch": main_context["epoch"],
+                "payloadSha256": payload.digest, "boot": self.baseline.boot, **main.object(), "phase": "active",
+                "contextSha256": main_hash} and watcher_writer == {"version": 1, "invocation": watcher_context["invocation"],
+                "writer": watcher_context["writer"], "parent": main_context["writer"], "component": _MIMO_MAIN_COMPONENT,
+                "epoch": watcher_context["epoch"], "payloadSha256": payload.digest, "boot": self.baseline.boot,
+                **watcher.object(), "phase": "active", "contextSha256": watcher_hash}, "Actual active writer rows differ.")
+            require(self.child.owner.live(parent=os.getpid()) and main.live(parent=self.child.owner.pid)
+                    and watcher.live(parent=main.pid), "Real provider/MAIN/Watcher birth/direct-parent binding changed.")
+            ledger = document(read_image(self.recipe.state / "tmp" / self.recipe.run_id / "ledger.json", limit=1024 * 1024).raw,
+                              limit=1024 * 1024)
+            run = document(read_image(self.recipe.state / "runs" / (self.recipe.run_id + ".json"), limit=65536).raw, limit=65536)
+            require(run["runId"] == ledger["runId"] == self.recipe.run_id and run["owner"] == ledger["owner"] == main.object()
+                    and run["epoch"] == ledger["nonce"] and run["subscriptionId"] == ledger["subscriptionId"] == "xiaomi"
+                    and run["lifetime"] == ledger["lifetime"] == self.record["preparedLifetime"]["lifetime"]
+                    and ledger["resources"]["watcher"]["owner"] == watcher.object()
+                    and ledger["resources"]["watcher"]["state"] == "admitted", "Real Run/ledger does not bind persistent Watcher/lifetime.")
+            for row in custody.writers:
+                if row["writer"] not in (roots[0]["writer"], main_context["writer"], watcher_context["writer"]):
+                    require(row["phase"] == "terminal" and not ExactProcess.read(
+                        {key: row[key] for key in ("pid", "startedAt")}).live(), "Another metadata helper remains active/unjoined.")
+            image = _raw_authority_image(self.authority)
+            return MimoMainView(main, watcher, main_context, watcher_context, main_hash, watcher_hash, main_writer, watcher_writer,
+                {"writers": list(custody.writers), "handoffs": list(custody.handoffs)}, ledger, run,
+                self.baseline.locks[_MIMO_MAIN_COMPONENT]["admission"], image)
+
+    def start_and_begin(self) -> MimoMainView:
+        require(self.prepared and self.child is None and not self.begun, "No run/resume/subset start is allowed.")
+        require(self.native.verify(self.controller) == self.source, "Actual source/native preparation pins changed before Run.")
+        self.run_end = min(self.full_end, time.monotonic() + 60)
+        _, _, tail = self.recipe.tails()
+        self.child = OwnedChild(self._argv(tail), environment=without_authority(self.environment), cwd=self.recipe.home)
+        try:
+            self.stream = MimoMainStream(self.child, run_id=self.recipe.run_id, end=self.run_end)
+            self.stream.start()
+            started = self.stream.stubborn_start(end=min(self.run_end - 40, time.monotonic() + 20))
+            self.boundary_end = min(self.run_end - 35, time.monotonic() + 5)
+            self.view = self.verify_active(draining=False)  # Retain VERIFIED targets before fallible writes/effects.
+            self.record["actualStubbornStart"] = started
+            self.record["activeBeforeBegin"] = self.view.before_metadata
+            argv = [*self.controller.scope.gate.provider.prefix, "driver-state", "begin", "--registry-dir",
+                    str(self.controller.workspace.registry), "--component", _MIMO_MAIN_COMPONENT, "--session", self.session]
+            begin = OwnedChild(argv, environment=without_authority(self.environment), cwd=self.controller.workspace.registry)
+            result = _mimo_finite_data_call(begin, end=self.boundary_end)
+            self.controller.reaped.append(begin)
+            self.record["actualBegin"] = {"argv": argv, "provider": begin.owner.object(), "reaped": begin.reaped,
+                "stdoutHex": result.stdout.hex(), "stderrHex": result.stderr.hex(), "session": self.session}
+            self.controller.evidence.write("mimo-main-begin-output.json", self.record["actualBegin"], limit=32 * 1024 * 1024)
+            require(begin.reaped and result.returncode == 0 and document(result.stdout).get("phase") == "draining",
+                    "Actual public begin did not close new admission.")
+            current = self.verify_active(draining=True)
+            require(current.main == self.view.main and current.watcher == self.view.watcher
+                    and current.main_writer == self.view.main_writer and current.watcher_writer == self.view.watcher_writer,
+                    "Real begin changed active accepted writer/epoch bindings.")
+            with self.authority.mutex(seconds=max(.001, self.boundary_end - time.monotonic())):
+                require(_h1_raw_ex(self.authority, current.admission_lock), "Actual drain EX precondition was available while both writers lived.")
+            require(time.monotonic() <= self.boundary_end, "Real startup/bind/begin exceeded its five-second boundary.")
+            # Only the public begin's real control transition is allowed here.
+            # No normal marker/writer/handoff/context is deleted or relabelled.
+            def without_control(image: Object) -> Object:
+                return {"root": image["root"], "entries": [row for row in image["entries"] if row["path"] != "control.json"]}
+            require(without_control(current.before_metadata) == without_control(self.view.before_metadata),
+                    "Public begin changed metadata beyond its genuine control/session transition.")
+            self.record["activeAfterBegin"] = current.before_metadata
+            self.record["rawDrainExPreconditionBlockedWhileBothActive"] = True
+            self.record["rawExHolderAttributedSolelyToWatcher"] = False
+            self.view = current
+            self.begun = True
+            self.refuse_new_after_begin()
+            return current
+        except BaseException as error:
+            self.abort(error)
+            raise
+
+    def refuse_new_after_begin(self) -> None:
+        """A distinct fixed public launch must refuse before ANY new State read.
+
+        It uses the remaining ORIGINAL five-second begin-boundary budget. No
+        metadata-only refusal or absent child attribute substitutes for the raw
+        complete before/after writer/handoff/context/marker inventory.
+        """
+        require(self.begun and self.view is not None and self.child is not None
+                and self.original_control is not None and not self.stop_sent,
+                "Closed-admission observation requires the verified live pair.")
+        assert self.view is not None and self.child is not None and self.original_control is not None
+        state = self.recipe.home / "refused-state"
+        require(not os.path.lexists(state), "Refusal State must be genuinely absent.")
+        with self.authority.mutex(seconds=max(.001, self.boundary_end - time.monotonic())):
+            require(self.authority.read("control") == {**self.original_control, "phase": "draining", "session": self.session},
+                    "Genuine begin control changed before fresh-launch refusal.")
+            before = _raw_authority_image(self.authority)
+        probe = OwnedChild(self._argv(["--state-dir", str(state), "subscriptions", "identity", "xiaomi"]),
+            environment=without_authority(self.environment), cwd=self.recipe.home)
+        captured = _mimo_finite_data_call(probe, end=self.boundary_end)
+        self.controller.reaped.append(probe)
+        # Persist real bytes before any assertion on the public refusal result.
+        self.controller.evidence.write("mimo-main-new-refusal-output.json", {
+            "argv": probe.process.args, "provider": probe.owner.object(), "providerActuallyReaped": probe.reaped,
+            "returncode": captured.returncode, "stdoutHex": captured.stdout.hex(), "stderrHex": captured.stderr.hex()},
+            limit=32 * 1024 * 1024)
+        require(probe.reaped and captured.returncode != 0 and not os.path.lexists(state),
+                "Fresh public Driver reached State or succeeded after genuine begin.")
+        with self.authority.mutex(seconds=max(.001, self.boundary_end - time.monotonic())):
+            after = _raw_authority_image(self.authority)
+            require(after == before, "Refused launch changed actual control/writers/handoffs/contexts/markers.")
+            require(self.view.main.live(parent=self.child.owner.pid) and self.view.watcher.live(parent=self.view.main.pid),
+                    "Original admitted MAIN/Watcher pair did not remain live across fresh-launch refusal.")
+        require(time.monotonic() <= self.boundary_end, "Fresh refusal exceeded the original five-second boundary.")
+        self.record["closedAdmissionRefusal"] = {"before": before, "after": after,
+            "stateAbsentBeforeAndAfter": True, "providerActuallyReaped": probe.reaped,
+            "metadataOrTerminalSynthesized": False}
+
+    def ordinary_stop(self) -> None:
+        require(self.begun and self.record.get("closedAdmissionRefusal") is not None
+                and not self.stop_sent and self.child is not None and self.view is not None,
+                "Ordinary stop requires the already verified actual begin boundary.")
+        assert self.child is not None and self.view is not None
+        pipe = self.child.process.stdin
+        require(pipe is not None and not pipe.closed and self.view.main.live(parent=self.child.owner.pid)
+                and self.view.watcher.live(parent=self.view.main.pid), "Actual control/MAIN/Watcher changed before stop.")
+        assert pipe is not None
+        os.set_blocking(pipe.fileno(), False)
+        raw = memoryview(canonical({"type": "stop"}))
+        end = min(self.run_end - 15, time.monotonic() + 5)
+        with selectors.DefaultSelector() as selector:
+            selector.register(pipe, selectors.EVENT_WRITE)
+            while raw:
+                require(time.monotonic() < end, "Existing ordinary JSONLF stop could not be delivered within the original budget.")
+                if selector.select(min(.025, max(0, end - time.monotonic()))):
+                    try:
+                        count = os.write(pipe.fileno(), raw)
+                    except BlockingIOError:
+                        continue
+                    require(count > 0, "Actual ordinary stop pipe closed early.")
+                    raw = raw[count:]
+        self.stop_sent = True
+        self.stop_observed_at = time.monotonic()
+        self.record["ordinaryJsonLfStopSentAfterBegin"] = True
+        # KEEP stdin OPEN. No successful EOF trigger or communicate/collect.
+
+    def _source_coupling(self) -> Object:
+        """Exact packaged paths; static call-path proof has explicit limits.
+
+        No Mimo body is imported/executed by this observer. Actual context/D/M
+        binds its fixed public entry; source checks describe why real own-run
+        retirement implies verify_cleanup proof, not normal shutdown success.
+        """
+        import ast
+
+        import arbol_builds.driver_state as provider_state
+
+        require(self.native.verify(self.controller) == self.source, "Exact native/source pins changed during the subject.")
+        producer = self.controller.scope.producer(_MIMO_MAIN_COMPONENT)
+        selected = {
+            "src/arbol_mimo_driver/runtime.py": ("Terminal.latch", "Run.cleanup", "Run.execute"),
+            "src/arbol_mimo_driver/runs.py": ("Runs.verify_cleanup", "Runs.verified_proof", "Runs.retire", "Runs.release_owned"),
+            "src/arbol_mimo_driver/ownership.py": ("Ownership.shutdown", "Ownership.bind_endpoint"),
+            "src/arbol_mimo_driver/native_server.py": ("NativeServer.close",),
+            "src/arbol_mimo_driver/adapters/watcher.py": ("WatcherClient.finish", "WatcherClient.__init__"),
+            "src/arbol_mimo_driver/admission.py": ("Admission.finish", "HelperHandoff.require_terminal"),
+            "src/arbol_mimo_driver/operation.py": ("Operation.__init__", "Operation.__exit__"),
+        }
+        paths: Object = {}
+        for name, expected in selected.items():
+            image = read_image(producer.root / name, limit=4 * 1024 * 1024, private=False)
+            require(image.sha256 == self.native.source_sha256[name], "Packaged cancellation/verification source differs.")
+            parsed = ast.parse(image.raw, filename=str(image.path))
+            lines = image.raw.splitlines(keepends=True)
+            functions: Object = {}
+            for owner in parsed.body:
+                if isinstance(owner, ast.ClassDef):
+                    for node in owner.body:
+                        qualified = owner.name + "." + node.name if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) else ""
+                        if qualified in expected:
+                            assert isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.end_lineno is not None
+                            functions[qualified] = {"firstLine": node.lineno, "lastLine": node.end_lineno,
+                                "bodySha256": digest(b"".join(lines[node.lineno - 1:node.end_lineno]))}
+            require(set(functions) == set(expected), "Missing source-defined cancellation/cleanup proof body.")
+            paths[name] = {"image": image.evidence(), "staticBodies": functions}
+        provider = self.controller.scope.gate.provider
+        actual = (provider_process.supervise, provider_process.Guardian._close_owned,
+                  provider_process.inspect, provider_state.begin, provider_state.drain, Authority.lease)
+        provider_paths: Object = {}
+        for short in ("driver_process.py", "driver_state.py", "driver_admission.py"):
+            path = provider.root / "src/arbol_builds" / short
+            image = read_image(path, limit=1024 * 1024, private=False)
+            compiled = compile(image.raw, str(path), "exec", dont_inherit=True, optimize=sys.flags.optimize)
+            codes: dict[str, list[CodeType]] = {}
+
+            def collect(code: CodeType, target: dict[str, list[CodeType]] = codes) -> None:
+                target.setdefault(code.co_qualname, []).append(code)
+                for value in code.co_consts:
+                    if isinstance(value, CodeType):
+                        collect(value)
+
+            collect(compiled)  # Compilation ONLY; no packaged execution.
+            names = []
+            for method in actual:
+                if Path(method.__code__.co_filename).name == short:
+                    require(Path(method.__code__.co_filename).resolve(strict=True) == path.resolve(strict=True)
+                            and codes.get(method.__qualname__) == [method.__code__],
+                            "Actual provider wait/EX/process code is not its pinned packaged source.")
+                    names.append(method.__qualname__)
+            require(bool(names), "Unbound actual provider source path.")
+            provider_paths[short] = {"image": image.evidence(), "actualCodeObjects": names}
+        return {"producer": paths, "provider": provider_paths,
+            "reportConsumption": "SOURCE-COUPLED Runtime.cleanup -> Runs.verify_cleanup -> genuine terminal/clean proof -> retire/release_owned",
+            "normalOwnershipShutdownReturnedProven": False, "rawObservationsReceiptRetained": False,
+            "watcherMainOwnedWaitAndRequireTerminal": "STATIC call-path retention ONLY; invocation/success not established by cancelled subject",
+            "complementaryCompletedPredicateOwner": "ABR-38 step47; incomplete here"}
+
+    def _resource_closure(self, *, end: float) -> Object:
+        require(self.view is not None and time.monotonic() < end, "No retained original resources/deadline.")
+        assert self.view is not None
+        resources = self.view.ledger.get("resources")
+        require(isinstance(resources, dict) and 0 < len(resources) <= 1024 and "watcher" in resources,
+                "Original resource inventory is missing or outside its finite bound.")
+        assert isinstance(resources, dict)
+        observed: Object = {}
+        for name, row in resources.items():
+            require(isinstance(name, str) and isinstance(row, dict) and type(row.get("pgid")) is int,
+                    "Original native resource has no exact bounded owner/group record.")
+            owner = ExactProcess.read(row["owner"])
+            require(not owner.live(), "An original attributable resource remains alive, including outside its old group.")
+            members = _mimo_original_group_members(row["pgid"], end=end)
+            require(not members, "Original native resource group is nonempty/reused/unresolved; never signal it.")
+            observed[name] = {"original": row, "originalOwnerKernelGone": True,
+                              "freshOriginalGroupMembers": members, "observerSentResourceSignal": False}
+        # Do not sample a vanished scratch and fabricate an empty final ledger.
+        # Late resource protection is additionally source-coupled to actual
+        # verify_cleanup's complete final inventory before genuine retirement.
+        return {"retainedOriginalResources": observed,
+                "completeFinalInventory": "SOURCE-COUPLED verify_cleanup; no sampled-empty inventory claim"}
+
+    def settle_after_ordinary_stop(self) -> Object:
+        require(self.begun and self.stop_sent and self.view is not None and self.child is not None
+                and self.stream is not None and self.original_control is not None and not self.closed,
+                "No genuine ordinary cancellation subject is available for settlement.")
+        assert self.view is not None and self.child is not None and self.stream is not None and self.original_control is not None
+        settle_end = min(self.run_end - 15, self.stop_observed_at + 20)
+        require(time.monotonic() + .5 < settle_end, "No original cancellation settlement/reader reserve remains.")
+        status = self.child.wait_owned(seconds=max(.001, settle_end - .5 - time.monotonic()))
+        self.stream.join(end=settle_end, failure=False)
+        output = self.stream.snapshot()
+        # Actual bytes survive any following validation, source, State or IO error.
+        self.controller.evidence.write("mimo-main-actual-cancelled-output.json", output, limit=32 * 1024 * 1024)
+        records = output["records"]
+        require(self.child.reaped and status == 2 and not output["stderrHex"] and records
+                and sum(row["type"] == "finished" for row in records) == 1
+                and records[-1]["type"] == "finished" and records[-1].get("outcome") == "cancelled"
+                and "error" not in records[-1]
+                and not any(row["type"] == "notice" and row.get("code") == "cleanup_unresolved" for row in records),
+                "Actual ordinary stop did not produce its exact cancelled, proof-backed closure result.")
+        starts: dict[str, Object] = {}
+        finishes: dict[str, Object] = {}
+        stubborn_call = self.record["actualStubbornStart"].get("callId")
+        for row in records:
+            if row["type"] in ("tool_started", "tool_finished"):
+                call = row.get("callId")
+                require(isinstance(call, str) and bool(call) and len(call) <= 4096, "Invalid actual tool correlation.")
+                target = starts if row["type"] == "tool_started" else finishes
+                require(call not in target, "Duplicate actual tool start/finish.")
+                if target is finishes:
+                    require(call in starts, "Actual tool finished before its start.")
+                target[call] = row
+        require(bool(starts) and set(starts) == set(finishes) and stubborn_call in starts,
+                "Original held tool lacks balanced actual interruption/output completion.")
+        require(time.monotonic() <= settle_end, "Ordinary cancellation settlement exceeded its original twenty seconds.")
+        require(not self.view.main.live() and not self.view.watcher.live(),
+                "Actual MAIN/Watcher remain live; no terminal-from-provider-exit inference.")
+        self.controller.reaped.append(self.child)
+        observed_end = min(self.full_end, self.run_end, time.monotonic() + 15)
+        sources = self._source_coupling()
+        resources = self._resource_closure(end=observed_end)
+        require(self._directory_origins() == self.record["ownedDirectoryOrigins"]
+                and self._lifetime() == self.record["preparedLifetime"],
+                "Original private roots/proof changed during the cancelled subject.")
+        # Read ORIGINAL State only: no fresh registry, copy, normal API recovery
+        # call, source helper execution or report-polled race is introduced.
+        state_inventory = tree_inventory(self.recipe.state)
+        require(not os.path.lexists(self.recipe.state / "runs" / (self.recipe.run_id + ".json"))
+                and not os.path.lexists(self.recipe.state / "tmp" / self.recipe.run_id)
+                and not any(row["path"].startswith("runs/") and row["type"] == "file" for row in state_inventory)
+                and not any(row["path"].startswith("tmp/.retired-") for row in state_inventory),
+                "Actual original run/scratch remains unresolved; never relabel or erase it.")
+        with self.authority.mutex(seconds=max(.001, observed_end - time.monotonic())):
+            expected_control = {**self.original_control, "phase": "draining", "session": self.session}
+            require(self.authority.read("control") == expected_control
+                    and not os.path.lexists(self.authority.folder / "taint.json")
+                    and not os.path.lexists(self.authority.folder / "maintenance.json"),
+                    "Real cancellation changed the intended closed session or left unknown authority.")
+            custody = reconcile(self.authority, persist_unknown=False, candidate=self.controller.scope)
+            require(custody.resolved and custody.active == custody.pending == 0
+                    and all(row["phase"] == "terminal" for row in custody.writers),
+                    "Whole original custody graph is not genuinely terminal/resolved.")
+            final_handoffs = {row["handoff"]: row for row in custody.handoffs}
+            original_handoffs = {row["handoff"]: row for row in self.view.custody["handoffs"]}
+            require(all(final_handoffs.get(key) == value for key, value in original_handoffs.items()),
+                    "An original accepted transfer was removed or changed after begin.")
+            final_writers = {(row["invocation"], row["writer"]): row for row in custody.writers}
+            original_writers = {(row["invocation"], row["writer"]): row for row in self.view.custody["writers"]}
+            require(all(final_writers.get(key) == {**value, "phase": "terminal"}
+                        for key, value in original_writers.items()),
+                    "Original writer history changed beyond genuine terminal publication.")
+            changed_paths = {"writers/" + row["invocation"] + "/" + row["writer"] + ".json"
+                             for row in self.view.custody["writers"]}
+            expected_new_writers: set[tuple[str, str]] = set()
+            cleanup_helpers: list[Object] = []
+            for key in sorted(set(final_handoffs) - set(original_handoffs)):
+                handoff = final_handoffs[key]
+                require(handoff["role"] == "helper" and handoff["entry"] == "bin/identity-helper.py"
+                        and handoff["invocation"] == self.view.main_context["invocation"]
+                        and handoff["parent"] == self.view.main_context["writer"],
+                        "A new root/MAIN/foreign helper appeared after genuine begin.")
+                context, context_hash = self._public_context(handoff, self.view.main_writer,
+                    role="helper", entry="bin/identity-helper.py")
+                process = ExactProcess.read(context["process"])
+                writer_key = (context["invocation"], context["writer"])
+                require(writer_key not in original_writers and writer_key not in expected_new_writers,
+                        "A cleanup helper reused original writer/transfer authority.")
+                expected_new_writers.add(writer_key)
+                expected_writer: Object = {"version": 1, "invocation": context["invocation"], "writer": context["writer"],
+                    "parent": self.view.main_context["writer"], "component": _MIMO_MAIN_COMPONENT,
+                    "epoch": context["epoch"], "payloadSha256": self.controller.scope.producer(_MIMO_MAIN_COMPONENT).digest,
+                    "boot": self.baseline.boot, **process.object(), "phase": "terminal", "contextSha256": context_hash}
+                require(final_writers.get(writer_key) == expected_writer and not process.live(),
+                        "A legitimate cleanup helper did not genuinely close under its exact accepted context.")
+                members = _mimo_original_group_members(process.pid, end=observed_end)
+                require(not members, "An original source-bound cleanup helper group remains live/reused.")
+                cleanup_helpers.append({"handoff": handoff, "context": context, "contextSha256": context_hash,
+                    "writer": expected_writer, "kernelGone": True, "freshOriginalHelperPidGroupMembers": members,
+                    "groupOrigin": "SOURCE-COUPLED Watcher/endpoint Popen(start_new_session=True)",
+                    "observerReapedHelper": False, "helperOwnedWaitProvenByCancelledOutput": False})
+                changed_paths.update(("writers/" + context["invocation"] + "/" + context["writer"] + ".json",
+                                      "handoffs/" + key + ".json", "handoffs/" + key + ".context.json"))
+            require(set(final_writers) - set(original_writers) == expected_new_writers,
+                    "An unaccounted writer appeared beyond genuine cleanup helper transfers.")
+            for context, old_row in ((self.view.main_context, self.view.main_writer),
+                                     (self.view.watcher_context, self.view.watcher_writer)):
+                require(read(writer_path(self.authority, context["invocation"], context["writer"])) == {**old_row, "phase": "terminal"},
+                        "Actual original MAIN/Watcher did not genuinely finish under its accepted context.")
+                raw = read_bytes(self.authority.folder / "handoffs" / (context["handoff"] + ".context.json"))
+                require(document(raw) == context, "Original public context bytes/bindings changed at closure.")
+            for row in custody.writers:
+                require(not ExactProcess.read({key: row[key] for key in ("pid", "startedAt")}).live(),
+                        "Another terminal-labelled metadata process remains alive/unjoined.")
+            before = _raw_authority_image(self.authority)
+            def preserved(image: Object) -> Object:
+                return {"root": image["root"], "entries": [row for row in image["entries"] if row["path"] not in changed_paths]}
+            require(preserved(before) == preserved(self.view.before_metadata),
+                    "Cancellation changed controls/markers/contexts/archives beyond accounted genuine helper custody.")
+            require(not _h1_raw_ex(self.authority, self.view.admission_lock),
+                    "Genuine original-inode EX is still blocked after complete closure.")
+            after = _raw_authority_image(self.authority)
+            require(after == before, "Actual raw EX observation changed custody/control/marker history.")
+        require(time.monotonic() <= observed_end, "Original sixty-second span exhausted before independent closure.")
+        self.record.update({"actualCancelledOutput": output, "staticAndSourceCoupledEvidence": sources,
+            "independentOriginalResources": resources, "actualStateInventory": state_inventory,
+            "wholeTerminalCustody": {"writers": list(custody.writers), "handoffs": list(custody.handoffs)},
+            "legitimateCleanupHelpers": cleanup_helpers,
+            "actualClosedAuthority": after, "originalAdmissionExAvailable": True,
+            "providerActuallyReaped": self.child.reaped, "mainAndWatcherKernelGone": True,
+            "mainWait": "SOURCE-COUPLED actual public provider supervise/wait result; observer did not reap descendant",
+            "rawObservationsReceiptRetained": False, "normalOwnershipShutdownReturnedProven": False,
+            "observerReapedDescendant": False, "externalMaintenancePerformed": False,
+            "genuineBegunSessionRemainsClosed": self.session, "completeCheckClaimed": False})
+        for pipe in (self.child.process.stdin, self.child.process.stdout, self.child.process.stderr):
+            if pipe is not None:
+                pipe.close()
+        self.controller.evidence.write("mimo-main-across-begin-cancelled.json", self.record, limit=32 * 1024 * 1024)
+        self.closed = True
+        return dict(self.record)
+
+    def abort(self, original: BaseException) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        end = min(self.full_end, self.run_end if self.run_end else self.full_end, time.monotonic() + 15)
+        errors: list[str] = []
+        child = self.child
+        if child is not None:
+            # Failure EOF only AFTER original failure, never a successful trigger.
+            if child.process.stdin is not None:
+                try:
+                    child.process.stdin.close()
+                except BaseException as error:
+                    errors.append("failure-stdin:" + type(error).__name__)
+            if self.view is not None:
+                try:
+                    if self.view.main.live():
+                        signal_verified(self.view.main, signal.SIGTERM)
+                except BaseException as error:
+                    errors.append("verified-main-cancel:" + type(error).__name__)
+            try:
+                child.request_stop()
+            except BaseException as error:
+                errors.append("owned-provider-stop:" + type(error).__name__)
+            try:
+                child.wait_owned(seconds=max(.001, end - .25 - time.monotonic()))
+            except BaseException as error:
+                errors.append("owned-provider-wait:" + type(error).__name__)
+        if self.stream is not None:
+            try:
+                self.stream.join(end=end, failure=True)
+            except BaseException as error:
+                errors.append("data-reader-join:" + type(error).__name__)
+        if child is not None:
+            for pipe in (child.process.stdin, child.process.stdout, child.process.stderr):
+                if pipe is not None:
+                    try:
+                        pipe.close()
+                    except BaseException as error:
+                        errors.append("owned-pipe:" + type(error).__name__)
+        cleanup: Object = {"errors": errors, "subjectBeforeFailure": self.record,
+            "providerActuallyReaped": child is not None and child.reaped,
+            "main": None if self.view is None else self.view.main.object(),
+            "watcher": None if self.view is None else self.view.watcher.object(),
+            "observerSignalledHelperOrGroup": False, "observerReapedDescendant": False,
+            "custodyOrTerminalClaimed": False, "stream": None if self.stream is None else self.stream.snapshot()}
+        original.add_note("Mimo actual subject cleanup: " + repr(cleanup))
+        try:
+            self.controller.evidence.write("mimo-main-failed-cleanup.json", cleanup, limit=32 * 1024 * 1024)
+        except BaseException as error:
+            original.add_note("Private failed-subject evidence unavailable: " + type(error).__name__)
+
+
+def main_watcher_across_begin(controller: WholeCheckController, baseline: Baseline, *, case: str,
+                             native: MimoOfflineInput, full_run_end: float, environment: Mapping[str, str]) -> Object:
+    """Prospective fixed offline subject13.1; not registered/wired/executed here."""
+    subject = MimoMainSubject(controller, baseline, case=case, native=native,
+                              full_run_end=full_run_end, environment=environment)
+    try:
+        subject.prepare()
+        subject.start_and_begin()
+        subject.ordinary_stop()
+        return subject.settle_after_ordinary_stop()
+    except BaseException as error:
+        subject.abort(error)
+        raise
