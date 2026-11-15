@@ -20,6 +20,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from types import MethodType
 from typing import Protocol
 
 from top.driver_state_support import (
@@ -31,6 +32,7 @@ from top.driver_state_support import (
     Object,
     ObservationFailed,
     OwnedChild,
+    TerminalSpanCollector,
     digest,
     directory_identity,
     document,
@@ -1256,6 +1258,126 @@ class AdministrativeCapture:
     archive_witness: ArchiveWitness | None
 
 
+class TerminalObservations(Protocol):
+    """Fixed source-admitted case bodies, never names supplied over control.
+
+    The precontinue body composes H1SpanObservation.bind/positive_precontinue;
+    interval supplies the independent original-SH oracle, and finished proves
+    the real provider/Suite wait and all local result/resource dataflows.
+    Source pins below bind all three actual bound methods before any launch.
+    """
+
+    def precontinue(self, controller: WholeCheckController, baseline: Baseline,
+                    collector: TerminalSpanCollector, view: H1View, schedule: H1Schedule,
+                    ready_raw: bytes) -> None: ...
+
+    def interval(self, controller: WholeCheckController, baseline: Baseline,
+                 collector: TerminalSpanCollector, view: TerminalView) -> None: ...
+
+    def finished(self, controller: WholeCheckController, baseline: Baseline,
+                 collector: TerminalSpanCollector, view: TerminalView, captured: Captured) -> None: ...
+
+
+@dataclass(frozen=True)
+class TerminalSchedule:
+    """Static complete-body admission inputs; no runner filter or wire mode.
+
+    tuple_document is a retained canonical five-tuple document, independently
+    reconstructed from this baseline's registered immutable source images. The
+    complete helper entry order includes nested helpers, not just direct H1.
+    Final source admission must pin these actual bodies together at50/56.
+    """
+
+    tuple_document: bytes
+    helper_entries: tuple[str, ...]
+    helper_wait_statuses: tuple[int, ...]
+    producer_support_sha256: str
+    producer_admission_sha256: str
+    provider_process_sha256: str
+    observer_sha256: str
+    controller_sha256: str
+    collector_sha256: str
+
+    def verify(self, controller: WholeCheckController, baseline: Baseline,
+               component: str, observer: TerminalObservations) -> Object:
+        controller.scope.recheck()
+        require(set(baseline.images) == set(ALL_COMPONENTS), "Missing real five-tuple baseline.")
+        tuples: list[Object] = []
+        for name in ALL_COMPONENTS:
+            image = baseline.images[name]
+            pin = image.pin
+            current = pin.verify(controller.workspace.registry)
+            require(current.payload == image.payload, "Actual registered tuple changed.")
+            tuples.append({"component": name, "build": pin.build, "sourceCommit": pin.commit,
+                "sourceTree": pin.tree, "payloadSha256": pin.payload_sha256,
+                "manifestSha256": image.payload.descriptor["payloadManifestSha256"]})
+        require(self.tuple_document == evidence_bytes({"version": 1, "tuples": tuples}, limit=1024 * 1024),
+                "Retained terminal tuple document is not the real ordered five-tuple group.")
+        payload, provider = controller.scope.producer(component), controller.scope.gate.provider
+        require(0 < len(self.helper_entries) <= 4096
+                and len(self.helper_wait_statuses) == len(self.helper_entries)
+                and all(type(status) is int and -128 <= status <= 255 for status in self.helper_wait_statuses)
+                and all(entry in payload.descriptor["helpers"] for entry in self.helper_entries)
+                and "tests/identity_actor.py" in self.helper_entries,
+                "Missing fixed complete declared helper schedule.")
+        family = component.removeprefix("arbol-").removesuffix("-driver").replace("-", "_")
+        sources: Object = {}
+        for subject, name, expected in (
+            (payload, "tests/identity_support.py", self.producer_support_sha256),
+            (payload, "src/arbol_" + family + "_driver/admission.py", self.producer_admission_sha256),
+            (provider, "src/arbol_builds/driver_process.py", self.provider_process_sha256),
+            (provider, "tests/top/test_top_driver_state_admission.py", self.observer_sha256),
+            (provider, "tests/driver_identity_qualification.py", self.controller_sha256),
+            (provider, "tests/top/driver_state_support.py", self.collector_sha256),
+        ):
+            require(valid_hash(expected), "Missing reviewed terminal source pin.")
+            source_image = read_image(subject.root / name, limit=1024 * 1024, private=False)
+            require(source_image.sha256 == expected, "Packaged terminal body differs from its reviewed source.")
+            sources[name] = source_image.evidence()
+        observer_path = (provider.root / "tests/top/test_top_driver_state_admission.py").resolve(strict=True)
+        for name in ("precontinue", "interval", "finished"):
+            method = getattr(observer, name)
+            require(isinstance(method, MethodType) and method.__self__ is observer
+                    and Path(method.__func__.__code__.co_filename).resolve(strict=True) == observer_path,
+                    "Terminal observer is not the fixed actual packaged case method.")
+        for method, name in ((WholeCheckController.run_h1_positive, "tests/driver_identity_qualification.py"),
+                             (TerminalSpanCollector.bind_verified_participants, "tests/top/driver_state_support.py")):
+            require(Path(method.__code__.co_filename).resolve(strict=True) == (provider.root / name).resolve(strict=True),
+                    "Imported terminal controller/collector differs from sealed source.")
+        # Couple the actual imported production guard/process modules as well;
+        # matching a caller-supplied source hash alone does not establish M/D.
+        for module_name, name in ((Authority.__module__, "src/arbol_builds/driver_admission.py"),
+                                  (process_identity.__module__, "src/arbol_builds/driver_process.py")):
+            location = sys.modules[module_name].__file__
+            require(location is not None, "Actual production module lacks physical provenance.")
+            assert location is not None
+            actual = read_image(Path(location).resolve(strict=True), limit=1024 * 1024, private=False)
+            sealed = read_image(provider.root / name, limit=1024 * 1024, private=False)
+            require(actual.sha256 == sealed.sha256, "Actual imported production module differs from provider.")
+        return {"tuplePinsSha256": digest(self.tuple_document), "sources": sources,
+                "producer": payload.digest, "provider": provider.digest,
+                "runtime": payload.descriptor["interpreter"], "helperEntries": list(self.helper_entries),
+                "helperWaitStatuses": list(self.helper_wait_statuses)}
+
+
+@dataclass(frozen=True)
+class TerminalView:
+    h1: H1View
+    images: Mapping[str, FileImage]
+    intent: Object
+    settled: Object
+    sources: Object
+    markers: MarkerImage
+    control: Object
+
+    def recheck_files(self) -> None:
+        self.h1.recheck_files()
+        for name, before in self.images.items():
+            after = read_image(self.h1.root / name, limit=max(1, len(before.raw)))
+            require(after == before and (self.h1.root / name).lstat().st_nlink == 1,
+                    "Terminal evidence was rewritten, replaced or linked.")
+
+
 class WholeCheckController:
     """External no-SH owner: local runner status is never a complete check pass."""
 
@@ -1503,12 +1625,193 @@ class WholeCheckController:
                 and helper.live(parent=suite.pid), "H1 process ownership changed during complete report validation.")
         return view
 
-    def run_h1_positive(self, component: str, *, baseline: Baseline, case: str, schedule: H1Schedule,
-                        environment: Mapping[str, str], observations: Sequence[DeferredObservation], seconds: float) -> None:
-        """Complete original local unit inventory AND every deferred assertion.
+    def verify_terminal_armed(self, component: str, *, baseline: Baseline, collector: TerminalSpanCollector,
+                              view: H1View, schedule: H1Schedule, terminal: TerminalSchedule,
+                              sources: Object, armed_raw: bytes, original_markers: MarkerImage,
+                              original_control: Object) -> TerminalView:
+        """Observe preserved bytes/kernel/custody only; never call Suite State.
 
-        Active-loss STOP/kill proof belongs to the separate admission case; this
-        positive coordinator cannot substitute for it or terminal-close proof.
+        STOP/source-coupled provider progress and the raw sole-Suite SH probe
+        remain independent case obligations, performed before genuine CONT.
+        This validator cannot turn hash receipts into an actual wait by itself.
+        """
+        self.scope.recheck()
+        view.recheck_files()
+        require(component == view.component and collector.child.owner.live(parent=os.getpid())
+                and view.suite.live(parent=collector.child.owner.pid) and not view.helper.live(),
+                "Terminal evidence does not belong to retained actual participants.")
+        armed = _span_document(armed_raw, limit=4096)
+        exact_fields(armed, ("version", "kind", "case", "intentSha256"))
+        require(type(armed["version"]) is int and armed["version"] == 1
+                and armed["kind"] == "terminal-close-armed" and armed["case"] == view.case
+                and valid_hash(armed["intentSha256"]), "Wrong canonical terminal notification.")
+        images: dict[str, FileImage] = {}
+
+        def preserved(name: str, limit: int) -> bytes:
+            image = read_image(view.root / name, limit=limit)
+            require((view.root / name).lstat().st_nlink == 1, "Linked terminal receipt.")
+            images[name] = image
+            return image.raw
+
+        intent_raw = preserved("terminal-close-intent.json", 16 * 1024)
+        intent = _span_document(intent_raw, limit=16 * 1024)
+        exact_fields(intent, ("version", "kind", "case", "component", "tuplePinsSha256", "phaseReportSha256",
+                              "settledSha256", "suite", "provider", "admissionLock", "ownLease", "closeSite"))
+        family = component.removeprefix("arbol-").removesuffix("-driver")
+        require(type(intent["version"]) is int and intent["version"] == 1
+                and intent["kind"] == "abr38-terminal-close-intent" and intent["case"] == view.case
+                and intent["component"] == component and digest(intent_raw) == armed["intentSha256"]
+                and intent["tuplePinsSha256"] == digest(terminal.tuple_document)
+                and intent["phaseReportSha256"] == view.images["phase-report.json"].sha256
+                and intent["suite"] == {"invocation": view.suite_context["invocation"],
+                    "writer": view.suite_context["writer"], "handoff": view.suite_context["handoff"],
+                    "contextSha256": view.suite_context_sha256, **view.suite.object()}
+                and intent["provider"] == collector.child.owner.object()
+                and intent["admissionLock"] == view.admission_lock
+                and intent["closeSite"] == family + "-original-admission-close",
+                "Terminal intent differs from actual retained source/tuple/context/lock bindings.")
+        lease = intent["ownLease"]
+        require(isinstance(lease, dict), "Missing saved actual own lease.")
+        exact_fields(lease, ("fd", "device", "inode"))
+        require(type(lease["fd"]) is int and lease["fd"] >= 3
+                and all(type(lease[key]) is int and lease[key] >= 0 for key in ("device", "inode"))
+                and {key: lease[key] for key in ("device", "inode")} == view.admission_lock,
+                "Saved original own descriptor has another inode or invalid numeric identity.")
+        settled_raw = preserved("terminal-close-settled.json", 1024 * 1024)
+        settled = _span_document(settled_raw, limit=1024 * 1024)
+        exact_fields(settled, ("version", "kind", "component", "inventorySha256", "selectedSha256",
+                               "rows", "helpers", "pendingExternal"))
+        base = _span_document(view.images["phase-report.json"].raw, limit=1024 * 1024)
+        require(type(settled["version"]) is int and settled["version"] == 1
+                and settled["kind"] == "abr38-terminal-close-settled" and settled["component"] == component
+                and digest(settled_raw) == intent["settledSha256"]
+                and settled["inventorySha256"] == schedule.phase.inventory_sha256
+                and settled["selectedSha256"] == digest(evidence_bytes(list(schedule.order), limit=1024 * 1024))
+                and settled["pendingExternal"] == base["pendingExternal"]
+                and isinstance(settled["rows"], list) and len(settled["rows"]) == len(schedule.order) <= 4096
+                and isinstance(settled["helpers"], list)
+                and len(settled["helpers"]) == len(terminal.helper_entries) <= 4096,
+                "Settled report omits/reorders full local work or deferred assertions.")
+        for index, (expected_id, row) in enumerate(zip(schedule.order, settled["rows"], strict=True)):
+            require(isinstance(row, dict), "Malformed final local result row.")
+            exact_fields(row, ("id", "resultSha256"))
+            require(row["id"] == expected_id and valid_hash(row["resultSha256"])
+                    and digest(preserved(f"terminal-local-{index:04d}.result", 65536)) == row["resultSha256"],
+                    "Final actual per-ID local result bytes differ.")
+        authority = Authority(self.workspace.registry, component)
+        remaining = collector.terminal_interval_ends_at - time.monotonic()
+        require(remaining > 0, "Terminal interval expired before mutex acquisition.")
+        with authority.mutex(seconds=remaining):
+            require(time.monotonic() < collector.terminal_interval_ends_at, "Terminal interval expired before custody.")
+            custody = reconcile(authority, persist_unknown=False, candidate=self.scope)
+            require(custody.resolved and custody.active == custody.pending == 0
+                    and all(row["phase"] == "terminal" for row in custody.writers)
+                    and markers(authority) == original_markers
+                    and normal_control(authority, epoch=baseline.epochs[component], candidate=self.scope) == original_control
+                    and lock_identity(authority, "admission.lock") == view.admission_lock
+                    and not os.path.lexists(authority.folder / "taint.json"),
+                    "Real terminal/control/marker/lock/custody obligations are incomplete.")
+            prior_writers = {row["writer"]: row for row in view.custody["writers"]}
+            actual_writers = {row["writer"]: row for row in custody.writers}
+            require(set(actual_writers) == set(prior_writers)
+                    and list(custody.handoffs) == view.custody["handoffs"],
+                    "Terminal graph adds/removes an actual writer or accepted transfer.")
+            for writer, before in prior_writers.items():
+                require(actual_writers[writer] == {**before, "phase": "terminal"},
+                        "Terminal writer altered original ownership/tuple/context.")
+                if writer not in (view.suite_context["writer"], view.suite_context["parent"]["writer"]):
+                    require(not ExactProcess.read({key: before[key] for key in ("pid", "startedAt")}).live(),
+                            "Another writer could still hold an independent SH.")
+            handoffs = {row["handoff"]: row for row in custody.handoffs
+                        if row["handoff"] != view.suite_context["handoff"]}
+            seen: set[str] = set()
+            for index, (entry, status, row) in enumerate(zip(terminal.helper_entries, terminal.helper_wait_statuses,
+                                                            settled["helpers"], strict=True)):
+                require(isinstance(row, dict), "Malformed final helper row.")
+                exact_fields(row, ("invocation", "writer", "handoff", "contextSha256", "pid", "startedAt",
+                                   "waitStatus", "resultSha256", "terminalRecordSha256", "ackEvidenceSha256"))
+                require(all(valid_token(row[key]) for key in ("invocation", "writer", "handoff"))
+                        and all(valid_hash(row[key]) for key in ("contextSha256", "resultSha256",
+                            "terminalRecordSha256", "ackEvidenceSha256"))
+                        and type(row["waitStatus"]) is int and row["waitStatus"] == status
+                        and row["handoff"] not in seen and row["handoff"] in handoffs,
+                        "Missing/duplicate/failed actual helper wait/ACK evidence.")
+                seen.add(row["handoff"])
+                prefix = f"terminal-helper-{index:04d}."
+                context_raw = preserved(prefix + "context", 65536)
+                terminal_raw = preserved(prefix + "terminal", 65536)
+                result_raw = preserved(prefix + "result", 65536)
+                ack_raw = preserved(prefix + "ack", 65536)
+                context = document(context_raw, limit=65536)
+                normal_context(context)
+                handoff = handoffs[row["handoff"]]
+                expected_writer = actual_writers.get(row["writer"])
+                require(expected_writer is not None and handoff["entry"] == entry
+                        and handoff["phase"] == "accepted" and handoff["child"] == row["writer"]
+                        and handoff["contextSha256"] == row["contextSha256"] == digest(context_raw)
+                        and read_bytes(authority.folder / "handoffs" / (row["handoff"] + ".context.json")) == context_raw
+                        and evidence_bytes(expected_writer, limit=65536) == terminal_raw
+                        and digest(terminal_raw) == row["terminalRecordSha256"]
+                        and digest(result_raw) == row["resultSha256"]
+                        and digest(ack_raw) == row["ackEvidenceSha256"]
+                        and context["entry"] == entry and context["handoff"] == row["handoff"]
+                        and context["invocation"] == row["invocation"] == view.suite_context["invocation"]
+                        and context["writer"] == row["writer"]
+                        and context["process"] == {key: row[key] for key in ("pid", "startedAt")}
+                        and context["parent"]["writer"] == handoff["parent"]
+                        and all(context[key] == view.suite_context[key] for key in
+                            ("component", "epoch", "boot", "payloadSha256", "acceptanceSha256"))
+                        and not ExactProcess.read(context["process"]).live(),
+                        "Helper receipts do not bind actual completed whole graph/context/source/result.")
+                if row["handoff"] == view.helper_context["handoff"]:
+                    require(status == 0 and context == view.helper_context,
+                            "Positive H1 must really complete with zero wait status and its original context.")
+                # Exact returned/joined ACK API and actual owner wait are
+                # source-specific duties of the independently pinned oracle;
+                # this hash-bound receipt is never itself a success flag.
+                _span_document(ack_raw, limit=65536)
+            require(seen == set(handoffs) and view.helper_context["handoff"] in seen,
+                    "An actual helper is omitted from the complete fixed settlement.")
+        result = TerminalView(view, images, intent, settled, sources, original_markers, original_control)
+        result.recheck_files()
+        require(time.monotonic() < collector.terminal_interval_ends_at, "Terminal validation exceeded its interval.")
+        return result
+
+    def verify_terminal_closure(self, component: str, *, baseline: Baseline, view: TerminalView) -> None:
+        """After real close/waits, acquire fresh EX on the ORIGINAL inode."""
+        view.recheck_files()
+        authority = Authority(self.workspace.registry, component)
+        with authority.mutex():
+            custody = reconcile(authority, persist_unknown=False, candidate=self.scope)
+            require(custody.resolved and custody.active == custody.pending == 0
+                    and all(row["phase"] == "terminal" for row in custody.writers)
+                    and markers(authority) == view.markers
+                    and normal_control(authority, epoch=baseline.epochs[component], candidate=self.scope) == view.control
+                    and lock_identity(authority, "admission.lock") == view.h1.admission_lock,
+                    "Final real closure changed original authority or left work pending.")
+            descriptor = authority.open_lock("admission.lock")
+            try:
+                held = os.fstat(descriptor)
+                require({"device": held.st_dev, "inode": held.st_ino} == view.h1.admission_lock
+                        and held.st_uid == os.getuid() and stat.S_IMODE(held.st_mode) == 0o600
+                        and stat.S_ISREG(held.st_mode) and held.st_nlink == 1,
+                        "Final raw EX description is not the original private admission inode.")
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as error:
+                    raise ObservationFailed("Original admission SH remains held after real positive closure.") from error
+                require(lock_identity(authority, "admission.lock") == view.h1.admission_lock,
+                        "Original admission name changed during final raw EX.")
+            finally:
+                os.close(descriptor)  # Fresh own description only; no foreign unlock.
+
+    def run_h1_positive(self, component: str, *, baseline: Baseline, case: str, schedule: H1Schedule,
+                        terminal: TerminalSchedule, terminal_observer: TerminalObservations,
+                        environment: Mapping[str, str], observations: Sequence[DeferredObservation], seconds: float) -> None:
+        """Full positive unit: H1, genuine terminal interval and ALL deferred work.
+
+        There is no H1-only positive check entry or optional terminal bypass.
+        Independent complete-body admission still precedes wiring or use.
         """
         require(not self.reaped and not self.finished_external, "Each H1 check needs its own fresh external controller.")
         self.workspace.verify(self.evidence)
@@ -1519,6 +1822,7 @@ class WholeCheckController:
                 and re.fullmatch(r"[0-9a-f]{32}", case, re.ASCII) is not None,
                 "H1 launch needs the exact original baseline/case before any spawn.")
         schedule.verify(self.scope.producer(component))
+        sources = terminal.verify(self, baseline, component, terminal_observer)
         require(len({item.case_id for item in observations}) == len(observations)
                 and {item.case_id for item in observations} == set(schedule.phase.required_external_ids),
                 "H1 check lacks a complete static external assertion allocation.")
@@ -1526,7 +1830,7 @@ class WholeCheckController:
         child = OwnedChild(self.fixed_argv(component, self.scope.producer(component).build, "build-unit"),
                            environment=without_authority(dict(environment)), cwd=self.workspace.registry)
         try:
-            collector = HelperSpanCollector(child, case=case, seconds=seconds)
+            collector = TerminalSpanCollector(child, case=case, seconds=seconds)
         except BaseException as setup_error:
             # The actual owned provider already exists. Even collector setup or
             # resource failure must independently attempt stop AND real wait.
@@ -1546,12 +1850,24 @@ class WholeCheckController:
                         setup_error.add_note("H1 setup endpoint: " + type(error).__name__)
             raise
         view: H1View | None = None
+        participants_bound = False
         try:
             with collector:
                 try:
                     ready_raw = collector.ready()
                     view = self.verify_h1_ready(component, baseline=baseline, child=child, case=case,
                                                 schedule=schedule, ready_raw=ready_raw)
+                    # Retain both future STOP targets BEFORE any fallible IO or
+                    # callback. Collector unwind owns unconditional dual CONT,
+                    # late mirrored STOP handling and real provider-only wait.
+                    collector.bind_verified_participants(suite=view.suite, helper=view.helper)
+                    participants_bound = True
+                    authority = Authority(self.workspace.registry, component)
+                    remaining = collector.deadline - time.monotonic()
+                    require(remaining > 0, "H1 capture budget expired before original custody snapshot.")
+                    with authority.mutex(seconds=remaining):
+                        original_markers = markers(authority)
+                        original_control = normal_control(authority, epoch=baseline.epochs[component], candidate=self.scope)
                     self.evidence.write("h1-verified-preterminal.json", {"component": component, "case": case,
                         "provider": child.owner.object(), "suite": view.suite.object(), "helper": view.helper.object(),
                         "suiteContextSha256": view.suite_context_sha256, "helperContextSha256": view.helper_context_sha256,
@@ -1561,7 +1877,16 @@ class WholeCheckController:
                     current = self.verify_h1_ready(component, baseline=baseline, child=child, case=case,
                                                    schedule=schedule, ready_raw=ready_raw)
                     require(current == view, "H1 reports/custody/ownership changed immediately before continue.")
+                    terminal_observer.precontinue(self, baseline, collector, view, schedule, ready_raw)
                     collector.continue_after_validation(report_sha256=view.images["helper-span.json"].sha256)
+                    armed_raw = collector.terminal_armed()
+                    collector.confirm_terminal_stops()
+                    terminal_view = self.verify_terminal_armed(component, baseline=baseline, collector=collector,
+                        view=view, schedule=schedule, terminal=terminal, sources=sources, armed_raw=armed_raw,
+                        original_markers=original_markers, original_control=original_control)
+                    terminal_observer.interval(self, baseline, collector, terminal_view)
+                    terminal_view.recheck_files()
+                    collector.resume_terminal()
                     captured = collector.finish_positive()
                     require(child.reaped and captured.returncode == 0 and not view.helper.live() and not view.suite.live(),
                             "Positive H1 actual helper/Suite/provider lifetimes did not finish.")
@@ -1571,6 +1896,14 @@ class WholeCheckController:
                     require(context == view.suite_context and context_hash == view.suite_context_sha256,
                             "Finished whole runner is another actual Suite/context.")
                     view.recheck_files()  # Provisional reports cannot be rewritten as whole success.
+                    terminal_view.recheck_files()
+                    terminal_observer.finished(self, baseline, collector, terminal_view, captured)
+                    self.verify_terminal_closure(component, baseline=baseline, view=terminal_view)
+                    self.evidence.write("terminal-verified.json", {"component": component, "case": case,
+                        "sources": sources, "intent": terminal_view.intent, "settled": terminal_view.settled,
+                        "reports": {name: image.evidence() for name, image in terminal_view.images.items()},
+                        "originalMarkers": original_markers.evidence(), "control": original_control,
+                        "providerReaped": child.reaped, "returncode": captured.returncode}, limit=8 * 1024 * 1024)
                     # In particular the statically admitted H1-span-completion
                     # observer must establish actual direct-child wait/result/ACK
                     # source evidence and every resource, not merely PID absence or
@@ -1582,18 +1915,24 @@ class WholeCheckController:
                             "H1 positive check returned with a deferred assertion pending.")
                     self.require_finished_graph(component)
                 except BaseException as span_error:
-                    if view is not None:
+                    # The combined collector, unlike H1-only cleanup, must
+                    # CONT BOTH retained processes before TERM/wait, including
+                    # delayed provider mirroring. Its context exit attempts all
+                    # endpoints/targets within the same remaining bounded end.
+                    span_error.add_note("Combined H1/terminal failure; retained dual-target cleanup required.")
+                    if view is not None and not participants_bound:
+                        # No terminal continue/STOP can yet have occurred. A
+                        # failed identity binding still owes cleanup of the
+                        # already independently verified preterminal targets.
                         try:
                             self._cleanup_h1_failure(collector, view, span_error)
                         except BaseException as cleanup:
-                            span_error.add_note("H1 participant cleanup failed: " + type(cleanup).__name__
-                                                + "; unresolved verified targets: "
-                                                + repr({"suite": view.suite.object(), "helper": view.helper.object()}))
+                            span_error.add_note("Preterminal binding cleanup unavailable: " + type(cleanup).__name__)
                     raise
         finally:
             original = sys.exception()
             try:
-                self.evidence.write("h1-interactive-capture.json", collector.raw_observation(), limit=4 * 1024 * 1024)
+                self.evidence.write("h1-interactive-capture.json", collector.raw_observation(), limit=8 * 1024 * 1024)
             except BaseException as error:
                 if original is None:
                     raise
