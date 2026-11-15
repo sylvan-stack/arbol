@@ -11,15 +11,18 @@ import ctypes
 import errno
 import os
 import re
+import signal
 import socket
 import struct
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
-from typing import TYPE_CHECKING
+from types import FrameType
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from .driver_admission import (
     LIMIT,
@@ -338,7 +341,8 @@ class Guardian:
         finally:
             self._close_owned()
 
-    def spawn_main(self, arguments: list[str], *, environment: dict[str, str] | None = None) -> subprocess.Popen[bytes]:
+    def spawn_main(self, arguments: list[str], *, environment: dict[str, str] | None = None,
+                   prepared: Callable[[subprocess.Popen[bytes], Object], None] | None = None) -> subprocess.Popen[bytes]:
         """Preregister, spawn blocked, then accept exact ready/go/started transfer.
 
         Arguments and inherited normal environment are forwarded without storing
@@ -372,13 +376,15 @@ class Guardian:
             child_environment = {**without_authority(inherited), NORMAL_FD: str(child_fd),
                                  NORMAL_CONTEXT: str(context_path)}
             child = subprocess.Popen([*self.payload.prefix, *arguments], env=child_environment,
-                                     pass_fds=(child_fd,), close_fds=True)
+                                     pass_fds=(child_fd,), close_fds=True, process_group=0)
             child_socket.close()
             child_socket = None
             identity = process_identity(child.pid)
             if not matches(identity, parent=os.getpid()):
                 refuse()
             self.child_owner = identity
+            if prepared is not None:
+                prepared(child, identity)
             context: Object = {"version": 1, "kind": "driver-admission-context", "role": "main",
                                "registry": str(self.authority.registry),
                                "registrySha256": sha256(canonical(self.authority.identity)),
@@ -447,3 +453,209 @@ class Guardian:
                 child_socket.close()
             if frames is not None:
                 frames.close()
+
+
+class Terminal:
+    """A controlling terminal is shared, never replaced with a proxy or a PTY."""
+
+    def __init__(self) -> None:
+        self.descriptor = -1
+        self.group = os.getpgrp()
+        self.child_group: int | None = None
+        try:
+            descriptor = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY | os.O_CLOEXEC)
+        except OSError as error:
+            if error.errno in (errno.ENXIO, errno.ENODEV, errno.ENOENT, errno.ENOTTY):
+                return
+            raise
+        try:
+            os.tcgetpgrp(descriptor)
+            self.descriptor = descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    def _current(self) -> int | None:
+        try:
+            return os.tcgetpgrp(self.descriptor)
+        except OSError as error:
+            if error.errno in (errno.ENOTTY, errno.ENXIO, errno.EIO):
+                return None
+            raise
+
+    def _foreground(self, group: int) -> None:
+        previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTTOU})
+        try:
+            os.tcsetpgrp(self.descriptor, group)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+    def claim(self, group: int) -> None:
+        self.child_group = group
+        if self.descriptor >= 0 and self._current() == self.group:
+            self._foreground(group)
+
+    def release(self) -> None:
+        if (self.descriptor >= 0 and self.child_group is not None
+                and self._current() == self.child_group):
+            self._foreground(self.group)
+
+    def close(self) -> None:
+        try:
+            self.release()
+        finally:
+            if self.descriptor >= 0:
+                descriptor, self.descriptor = self.descriptor, -1
+                os.close(descriptor)
+
+
+def _terminate(number: int) -> NoReturn:
+    if number not in (signal.SIGKILL, signal.SIGSTOP):
+        signal.signal(number, signal.SIG_DFL)
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, {number})
+    os.kill(os.getpid(), number)
+    os._exit(128 + number)
+
+
+class SignalBridge:
+    """Forward asynchronous command control to a verified main/group anchor.
+
+    SIGKILL/STOP cannot be trapped. Guardian loss leaves the child's independent
+    lease and durable obligations intact; it is never cleanup or drain evidence.
+    """
+
+    def __init__(self, terminal: Terminal):
+        self.terminal = terminal
+        self.child: subprocess.Popen[bytes] | None = None
+        self.owner: Object | None = None
+        self.pending: set[int] = set()
+        self.received: list[int] = []
+        self.previous: dict[int, Any] = {}
+
+    def install(self) -> None:
+        names = ("SIGHUP", "SIGINT", "SIGQUIT", "SIGTERM", "SIGUSR1", "SIGUSR2", "SIGALRM", "SIGPIPE",
+                 "SIGXCPU", "SIGXFSZ", "SIGVTALRM", "SIGPROF", "SIGURG", "SIGWINCH", "SIGIO",
+                 "SIGTSTP", "SIGTTIN", "SIGTTOU", "SIGCONT")
+        try:
+            for name in names:
+                number = getattr(signal, name, None)
+                if number is None:
+                    continue
+                prior = signal.getsignal(number)
+                if prior == signal.SIG_IGN and number != signal.SIGCONT:
+                    continue
+                self.previous[number] = signal.signal(number, self._signal)
+        except BaseException:
+            self.restore()
+            raise
+
+    def restore(self) -> None:
+        for number, prior in self.previous.items():
+            signal.signal(number, prior)
+        self.previous.clear()
+
+    def _forward(self, number: int) -> None:
+        if self.child is None or self.owner is None:
+            self.pending.add(number)
+            return
+        current = inspect(self.owner["pid"])
+        if current is None or current.owner != self.owner:
+            return
+        if number == signal.SIGCONT and current.group == self.child.pid:
+            self.terminal.claim(current.group)
+        try:
+            # This group is a signal/TTY convenience, never a custody oracle.
+            # A changed/detached main is signalled by its exact identity alone.
+            if current.group == self.child.pid:
+                os.killpg(current.group, number)
+            else:
+                os.kill(current.owner["pid"], number)
+        except ProcessLookupError:
+            pass
+
+    def _signal(self, number: int, frame: FrameType | None) -> None:
+        self.received.append(number)
+        self._forward(number)
+
+    def prepared(self, child: subprocess.Popen[bytes], owner: Object) -> None:
+        self.child, self.owner = child, owner
+        current = inspect(child.pid)
+        if current is None or current.owner != owner or current.group != child.pid:
+            refuse()
+        self.terminal.claim(child.pid)
+        pending, self.pending = sorted(self.pending), set()
+        for number in pending:
+            self._forward(number)
+
+    def stopped(self, number: int) -> None:
+        self.terminal.release()
+        prior = None if number == signal.SIGSTOP else signal.signal(number, signal.SIG_DFL)
+        mask = signal.pthread_sigmask(signal.SIG_UNBLOCK, {number})
+        try:
+            os.kill(os.getpid(), number)
+        finally:
+            # On foreground resume the SIGCONT handler claims the terminal for
+            # the same verified child before forwarding its continuation.
+            signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+            if prior is not None:
+                signal.signal(number, prior)
+
+    def interrupted(self) -> int | None:
+        nonfatal = {getattr(signal, name) for name in (
+            "SIGCONT", "SIGWINCH", "SIGURG", "SIGIO", "SIGTSTP", "SIGTTIN", "SIGTTOU") if hasattr(signal, name)}
+        return next((number for number in self.received if number not in nonfatal), None)
+
+
+def supervise(guardian: Guardian, arguments: list[str]) -> int:
+    """No read/write on caller stdio. Mirror child's exit or terminating signal."""
+    try:
+        terminal = Terminal()
+    except BaseException:
+        guardian.abort()
+        raise
+    bridge = SignalBridge(terminal)
+    ended_by: int | None = None
+    exit_code = 1
+    try:
+        bridge.install()
+        child = guardian.spawn_main(arguments, prepared=bridge.prepared)
+        while True:
+            try:
+                pid, status = os.waitpid(child.pid, os.WUNTRACED | os.WCONTINUED)
+            except InterruptedError:
+                continue
+            if pid != child.pid:
+                refuse()
+            if os.WIFSTOPPED(status):
+                bridge.stopped(os.WSTOPSIG(status))
+            elif os.WIFCONTINUED(status):
+                continue
+            elif os.WIFEXITED(status):
+                exit_code = os.WEXITSTATUS(status)
+                child.returncode = exit_code
+                break
+            elif os.WIFSIGNALED(status):
+                ended_by = os.WTERMSIG(status)
+                child.returncode = -ended_by
+                break
+    except BaseException:
+        # A pre-transfer error must not discard the bootstrap lease obligation.
+        if not guardian.transferred:
+            try:
+                guardian.abort()
+            except Exception:
+                # Already durable unresolved obligations remain. A failed taint
+                # write never grants cleanup; preserve the original interruption.
+                pass
+        interrupted = bridge.interrupted()
+        if interrupted is None:
+            raise
+        ended_by = interrupted
+    finally:
+        try:
+            terminal.close()
+        finally:
+            bridge.restore()
+    if ended_by is not None:
+        _terminate(ended_by)
+    return exit_code
