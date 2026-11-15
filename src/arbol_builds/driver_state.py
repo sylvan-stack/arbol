@@ -14,7 +14,7 @@ import sys
 import time
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .driver_admission import (
@@ -54,9 +54,11 @@ from .driver_admission import (
 from .driver_payload import (
     DESCRIPTOR,
     SUBTREE,
+    CandidateScope,
     Gate,
     MetadataBackup,
     Payload,
+    _candidate_payload,
     load,
     metadata_backup,
     metadata_document,
@@ -249,7 +251,7 @@ def launch_candidate(provider: Payload, arguments: list[str]) -> int:
 
 
 def guarded_publication[T](registry: Path, payloads: list[Payload], authorities: list[Authority],
-                           action: Callable[[], T]) -> T:
+                           action: Callable[[], T], *, candidate: CandidateScope | None = None) -> T:
     """Pin exact Builds before short lexical control locks and durable publication.
 
     All deployment/operation publishers use this order. The callback is bounded
@@ -258,7 +260,7 @@ def guarded_publication[T](registry: Path, payloads: list[Payload], authorities:
     names = [authority.component for authority in authorities]
     if len(set(names)) != len(names) or any(authority.registry != registry for authority in authorities):
         raise Refusal("Invalid Driver publication scope.")
-    with pin_payloads(registry, payloads), ExitStack() as stack:
+    with pin_payloads(registry, payloads, candidate=candidate), ExitStack() as stack:
         for authority in sorted(authorities, key=lambda value: value.component):
             stack.enter_context(authority.mutex())
         return action()
@@ -274,6 +276,7 @@ class Request:
     command: str
     registry: Path
     values: dict[str, str]
+    candidate: CandidateScope | None = None
 
     @property
     def component(self) -> str:
@@ -341,9 +344,30 @@ def parse_request(arguments: list[str], default_registry: str) -> Request:
     return Request(name, registry, values)
 
 
+def _request_scope(request: Request) -> Request:
+    """Select candidate metadata only for the explicit administrative route."""
+    if request.command == "deploy":
+        return request  # Staged/installed verification is handled by deploy.
+    authority = Authority(request.registry, request.component)
+    qualification = authority.read("qualification")
+    digest = qualification["acceptanceSha256"]
+    raw = read_bytes(authority.shared / "acceptances" / (digest + ".json"))
+    value = decode(raw)
+    if sha256(raw) != digest:
+        raise Refusal("Administrative acceptance digest changed.")
+    if value.get("status") != "candidate":
+        return request
+    producer_digest = value.get("producerPayloadSha256")
+    if not isinstance(producer_digest, str) or not valid_hash(producer_digest):
+        raise Refusal("Administrative candidate payload digest is invalid.")
+    payload = _candidate_payload(request.registry, request.component, producer_digest)
+    candidate = resolve_candidate(request.registry, request.component, payload.build, digest)
+    return replace(request, candidate=candidate)
+
+
 def _provider(request: Request) -> Payload:
     if request.command != "deploy":
-        return verify_gate(request.registry).provider
+        return verify_gate(request.registry, candidate=request.candidate).provider
     # Deployment must bootstrap before new launcher bytes are installed. This
     # resolves only the exact registered provider; deployment separately verifies
     # closed routes, acceptance and checkpoint before any state operation.
@@ -365,9 +389,9 @@ def _provider(request: Request) -> Payload:
 def command(arguments: list[str], default_registry: str) -> int:
     """Ordinary arbol-builds delegates before handling component authority."""
     try:
-        request = parse_request(arguments, default_registry)
+        request = _request_scope(parse_request(arguments, default_registry))
         provider = _provider(request)
-        with pin_payloads(request.registry, [provider]):
+        with pin_payloads(request.registry, [provider], candidate=request.candidate):
             # Preserve this process's Build pin across exec until the one-shot
             # provider exits, including initial deployment before a gate pin.
             descriptor = open_use_guard(str(request.registry), "arbol", provider.build)
@@ -427,11 +451,11 @@ def provider_entry(descriptor: Object) -> None:
             raise Refusal("Invalid immutable provider command.")
         signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT, signal.SIGTERM})
         from .config import locations
-        request = parse_request(arguments[1:], locations().registry)
+        request = _request_scope(parse_request(arguments[1:], locations().registry))
         selected = _provider(request)
         if selected.root != provider.root or selected.digest != provider.digest:
             raise Refusal("Maintenance provider differs from the exact registered tuple.")
-        with pin_payloads(request.registry, [provider]):
+        with pin_payloads(request.registry, [provider], candidate=request.candidate):
             # Future source leaves register their reviewed fixed operations. A
             # partial source tree is never a publishable provider payload.
             function = HANDLERS.get(request.command)
@@ -451,7 +475,7 @@ def provider_entry(descriptor: Object) -> None:
 def _component(request: Request) -> Iterator[tuple[Authority, Payload, Gate]]:
     """Exact qualified payload only; source declarations grant no authority."""
     authority = Authority(request.registry, request.component)
-    gate = verify_gate(request.registry)
+    gate = verify_gate(request.registry, candidate=request.candidate)
     if not Path(__file__).resolve().is_relative_to(gate.provider.root):
         raise Refusal("Use the verified immutable maintenance provider.")
     qualification = authority.read("qualification")
@@ -475,18 +499,19 @@ def _component(request: Request) -> Iterator[tuple[Authority, Payload, Gate]]:
         if descriptor is None:
             continue
         if sha256(descriptor) == producer_digest:
-            found.append(registered(request.registry, request.component, folder.name))
+            found.append(registered(request.registry, request.component, folder.name) if request.candidate is None else
+                         request.candidate.registered(request.registry, request.component, folder.name))
     if len(found) != 1:
         raise Refusal("The exact accepted Driver payload is unavailable.")
     payload = found[0]
-    with pin_payloads(request.registry, [gate.provider, payload]):
-        verify_acceptance(authority, payload, digest=digest)
+    with pin_payloads(request.registry, [gate.provider, payload], candidate=request.candidate):
+        verify_acceptance(authority, payload, digest=digest, candidate=request.candidate)
         yield authority, payload, gate
 
 
 def _recheck(authority: Authority, payload: Payload, gate: Gate) -> None:
-    verify_acceptance(authority, payload)
-    if verify_gate(authority.registry).digest != gate.digest:
+    verify_acceptance(authority, payload, candidate=gate.candidate)
+    if verify_gate(authority.registry, candidate=gate.candidate).digest != gate.digest:
         raise Refusal("Maintenance gate changed during verification.")
 
 
