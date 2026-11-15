@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import re
 import selectors
 import signal
 import time
@@ -15,7 +16,15 @@ from typing import Literal
 
 from driver_identity_qualification import WholeCheckController, require
 
-from arbol_builds.driver_admission import COMPONENTS, Authority, reconcile, valid_token, validate, without_authority
+from arbol_builds.driver_admission import (
+    COMPONENTS,
+    Authority,
+    publish_bytes,
+    reconcile,
+    valid_token,
+    validate,
+    without_authority,
+)
 from arbol_builds.driver_payload import request_binding
 from top.driver_state_support import (
     Captured,
@@ -38,6 +47,9 @@ Fault = Literal["no-fd", "wrong-inode", "separate-description", "receipt", "stat
 Mode = Literal["observe", "before-spawn", "before-ack", "cached"] | Fault
 _OPERATIONS = {"upgrade", "identity-reset", "restore", "identity-recover"}
 _CONTEXT_FAULTS = {"epoch", "attempt", "payload"}
+_ROOT_METADATA = {"format", "identity.json", "identity-maintenance.json", "identity-upgrade.json"}
+_SUBSCRIPTION_METADATA = re.compile(r"subscriptions/[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}/identity(?:-pending)?\.json\Z", re.ASCII)
+_MANIFEST_LIMIT = 32 * 1024 * 1024
 _PROVIDER_REFUSAL = {"error": {"code": "builds_failed",
                               "message": "Driver maintenance refused; preserve closed recovery authority."}}
 
@@ -138,7 +150,8 @@ def observe(frame_object, event, value):
             if child is not None:
                 stdout = None if value is None else value.stdout.hex()
                 frame({'phase': 'child-return', 'pid': child.pid,
-                       'reapedExit': child.returncode, 'acceptedStdoutHex': stdout})
+                       'reapedExit': child.returncode, 'acceptedStdoutHex': stdout},
+                      wait=mode == 'before-ack')
     if (mode == 'before-ack' and module == 'arbol_builds.launcher' and name == 'write_all'
             and event == 'call' and frame_object.f_back.f_code.co_name == 'provider_entry'
             and frame_object.f_back.f_globals.get('__name__') == 'arbol_builds.driver_state'):
@@ -513,12 +526,25 @@ class Maintenance:
                 ended = boundary.frame("child-return")
                 self._verify_child(launched, ended, spawn, mode, replacement)
                 if mode == "before-ack":
-                    ack = boundary.frame("before-ack")
                     require(ended["reapedExit"] == 0 and ended["acceptedStdoutHex"] is not None,
                             "Lost ACK did not follow the genuine reaped administrative child.")
+                    marker = read_image(request.state / "identity-maintenance.json")
+                    archive = read_image(request.backup / "before" / "manifest.json", limit=_MANIFEST_LIMIT)
+                    attempt = document(read_image(context_path).raw)["attempt"]
+                    marker_value = document(marker.raw)
+                    require(marker_value["attempt"] == attempt and marker_value["phase"] == "complete"
+                            and marker_value["backupSha256"] == archive.sha256
+                            and os.path.lexists(self.folder / "operation.json") and not os.path.lexists(self.result),
+                            "The child did not complete its archive and marker before the provider's result.")
+                    self.lease(blocked=True)
+                    self.preserve("child-finished-before-provider-settlement", request)
+                    boundary.proceed()
+                    ack = boundary.frame("before-ack")
                     settled = self.preserve("before-lost-ack", request)
                     require(self._execute_reply() == document(bytes.fromhex(ack["ackHex"])),
                             "The intercepted ACK does not reference the actual durable result.")
+                    require(marker == read_image(marker.path) and archive == read_image(archive.path, limit=_MANIFEST_LIMIT),
+                            "Provider settlement rewrote the child's completed marker or before archive.")
                     self.lease(blocked=False)
                     captured = boundary.kill()
                     self.record(mode, child, captured)
@@ -642,13 +668,14 @@ class Maintenance:
                 "Original active result or captured substituted bytes were lost.")
 
     def admitted_proof(self, state: Path, subscription: str, *, expectation: str | None = None,
-                       name: str) -> Object:
+                       refused: bool = False, name: str) -> Object:
         self.controller.require_finished_graph(self.component)
         tail = ["--state-dir", str(state), "subscriptions", "identity", subscription]
         if expectation is not None:
             tail.extend(("--expect", expectation))
         capture = self.capture(self.controller.fixed_argv(self.component, self.payload.build, "driver", tail), name)
-        require(capture.returncode == 0 and not capture.stderr, "Fresh admitted identity operation failed.")
+        require(capture.returncode == (1 if refused else 0) and not capture.stderr,
+                "Fresh admitted identity operation returned the wrong status.")
         self.controller.require_finished_graph(self.component)
         with self.authority.mutex():
             graph = reconcile(self.authority, persist_unknown=False, candidate=self.controller.scope)
@@ -661,6 +688,10 @@ class Maintenance:
                      and row["entry"] == self.payload.descriptor["entry"]]
             require(len(mains) == 1, "Proof lacks its actual accepted MAIN route.")
         result = document(capture.stdout)
+        if refused:
+            require(expectation is not None and set(result) == {"error"} and isinstance(result["error"], dict)
+                    and result["error"].get("code") == "in_use", "A stale identity was not refused as a proof mismatch.")
+            return result
         require(result.get("subscription") == subscription and type(result.get("version")) is int
                 and result.get("version") == 1 and result.get("driver") == self.component.removeprefix("arbol-").removesuffix("-driver")
                 and valid_token(result.get("generation")) and valid_token(result.get("witness")),
@@ -735,3 +766,185 @@ def interrupted_supervisor_and_old_finish(subject: Maintenance, request: Execute
     fresh = later.admitted_proof(request.state, subscription, name="after-later-finish")
     require(fresh["generation"] == later_result["generation"], "Later legitimate finish did not open its fresh proof.")
     return {"original": result, "originalProof": proof, "later": later_result, "laterProof": fresh}
+
+
+def _metadata_name(name: str) -> bool:
+    return name in _ROOT_METADATA or _SUBSCRIPTION_METADATA.fullmatch(name) is not None
+
+
+@dataclass(frozen=True)
+class MetadataArchive:
+    """Independent raw archive observation, including absent rows and tree shape."""
+
+    raw: bytes
+    format: int | None
+    files: dict[str, bytes | None]
+
+    @property
+    def sha256(self) -> str:
+        return digest(self.raw)
+
+    @classmethod
+    def read(cls, directory: Path) -> MetadataArchive:
+        manifest = read_image(directory / "manifest.json", limit=_MANIFEST_LIMIT)
+        value = document(manifest.raw, limit=_MANIFEST_LIMIT)
+        require(set(value) == {"version", "kind", "format", "files"}
+                and type(value["version"]) is int and value["version"] == 1
+                and value["kind"] == "driver-identity-backup" and isinstance(value["files"], list)
+                and len(value["files"]) <= 100000, "Invalid metadata-only archive manifest.")
+        files: dict[str, bytes | None] = {}
+        expected = {"manifest.json": "file"}
+        prior = b""
+        size = len(manifest.raw)
+        for row in value["files"]:
+            require(isinstance(row, dict) and set(row) == {"path", "present", "size", "sha256"}
+                    and isinstance(row["path"], str) and _metadata_name(row["path"])
+                    and row["path"].encode() > prior and type(row["present"]) is bool,
+                    "Unexpected, duplicate or unsafe archive row.")
+            name = str(row["path"])
+            prior = name.encode()
+            declared_size = row["size"]
+            require(type(declared_size) is int and 0 <= declared_size <= 4096,
+                    "Invalid declared archive input size.")
+            require(size + declared_size <= _MANIFEST_LIMIT, "Archive exceeds its total byte bound.")
+            if not row["present"]:
+                require(declared_size == 0 and row["sha256"] is None, "Absence requires the exact empty row.")
+                files[name] = None
+                continue
+            entry = read_image(directory / name)
+            require(len(entry.raw) == declared_size and entry.sha256 == row["sha256"],
+                    "Physical archive bytes do not match the manifest.")
+            size += len(entry.raw)
+            files[name] = entry.raw
+            expected[name] = "file"
+            for parent in Path(name).parents:
+                if parent != Path("."):
+                    expected[parent.as_posix()] = "directory"
+        actual = {row["path"]: row["type"] for row in tree_inventory(directory)}
+        require(actual == expected and _ROOT_METADATA <= set(files),
+                "Archive has a missing or forbidden physical entry.")
+        raw_format = files["format"]
+        number = {b"1": 1, b"2": 2}.get(raw_format.strip()) if raw_format is not None else None
+        require((value["format"] is None or type(value["format"]) is int) and value["format"] == number,
+                "Archived format marker and manifest disagree.")
+        return cls(manifest.raw, number, files)
+
+
+def _restore_state_metadata(state: Path) -> dict[str, bytes]:
+    return {row["path"]: read_image(state / row["path"]).raw for row in tree_inventory(state)
+            if row["type"] == "file" and _metadata_name(row["path"])}
+
+
+def _nonmetadata_state(state: Path) -> Object:
+    return {"root": directory_identity(state),
+            "entries": [row for row in tree_inventory(state) if not _metadata_name(row["path"])]}
+
+
+def _restore_archive_order(request: Execute, result: Object, source: MetadataArchive,
+                           before: MetadataArchive, marker: Object) -> Object:
+    if source.format == 1:
+        conversion = MetadataArchive.read(request.backup / "conversion-before")
+        live_intent = conversion.files["identity-maintenance.json"]
+        require(conversion.format == 1 and conversion.files["format"] == source.files["format"]
+                and conversion.files["identity-upgrade.json"] is None and live_intent is not None
+                and document(live_intent) == {**marker, "phase": "pending"},
+                "Format 1 reconversion did not preserve its restored input and own earlier pending intent.")
+        assert live_intent is not None
+        return {"sha256": conversion.sha256, "pendingMarkerHex": live_intent.hex()}
+    require(not os.path.lexists(request.backup / "conversion-before"),
+            "Format 2 restore ran an unnecessary format 1 conversion.")
+    original = source.files["identity.json"]
+    require(original is not None and document(original)["generation"] != result["generation"]
+            and marker["backupSha256"] == before.sha256,
+            "Format 2 restore reused its archived generation or changed its before archive.")
+    return {}
+
+
+def metadata_only_restore(subject: Maintenance, request: Execute, *, source_format: Literal[1, 2],
+                          subscription: str, native_home: Path, malformed_target: bool = False) -> Object:
+    """Observe real restore, lost ACK and reopened proof on one owned fixture.
+
+    The supplied source is a previously captured metadata archive. State already
+    has a valid local record and chat, plus an isolated home with byte sentinels.
+    In the malformed case, inject fixed bad metadata only after closing it.
+    """
+    request.verify(subject.controller)
+    source_path = request.source
+    require(request.operation == "restore" and source_path is not None
+            and native_home.is_relative_to(subject.controller.workspace.fixture_root)
+            and native_home != subject.controller.workspace.fixture_root
+            and not any(native_home.is_relative_to(root) or root.is_relative_to(native_home)
+                        for root in (request.state, request.backup)),
+            "Restore requires an isolated State, archive and native home.")
+    assert source_path is not None
+    require(not native_home.is_relative_to(source_path) and not source_path.is_relative_to(native_home),
+            "The source archive overlaps native state.")
+    source = MetadataArchive.read(source_path)
+    require(source.format == source_format and not tree_inventory(request.backup),
+            "Wrong source format or a reused restore output.")
+    source_tree = _snapshot(source_path)
+    previous = subject.admitted_proof(request.state, subscription, name="before-restore-proof")
+    state = _nonmetadata_state(request.state)
+    native = _snapshot(native_home)
+    require(any(row["type"] == "file" and row["path"].endswith("/record.json") for row in state["entries"])
+            and any(row["type"] == "file" and "/chats/" in row["path"] for row in state["entries"])
+            and any(row["type"] == "file" for row in native["entries"]),
+            "Restore fixture is missing record, chat or native/auth evidence.")
+    guard_path = request.state / "identity.guard"
+    guard = read_image(guard_path)
+    fd = os.open(guard_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        held = os.fstat(fd)
+        require((held.st_dev, held.st_ino) == (guard.device, guard.inode), "State guard changed before restore.")
+        closed = subject.open()
+        intact = _restore_state_metadata(request.state)
+        if malformed_target:
+            failed = {"format": b"bad-format\n", "identity.json": b"{failed-root",
+                      "identity-upgrade.json": b"{failed-upgrade", "identity-maintenance.json": b"{failed-maintenance"}
+            for name, raw in failed.items():
+                publish_bytes(request.state / name, raw)
+        original = _restore_state_metadata(request.state)
+        subject.controller.evidence.write("restore-original-" + subject.session + ".json", {
+            "preRestoreMetadata": {name: raw.hex() for name, raw in original.items()},
+            "intactMetadata": {name: raw.hex() for name, raw in intact.items()},
+            "malformedTarget": malformed_target, "closed": closed, "protectedState": state, "nativeHome": native,
+            "guard": guard.evidence(), "sourceManifestSha256": source.sha256,
+        })
+        result = subject.execute_observed(request, "before-ack")
+        before = MetadataArchive.read(request.backup / "before")
+        require(before.sha256 == result["backupSha256"] and (set(original) | set(source.files)) <= set(before.files)
+                and all(raw == original.get(name) for name, raw in before.files.items())
+                and before.format == (None if malformed_target else 2)
+                and result["generation"] != previous["generation"],
+                "Restore did not retain raw original metadata and rotate the current proof generation.")
+        marker = document(read_image(request.state / "identity-maintenance.json").raw)
+        require(marker["sourceSha256"] == source.sha256 and marker["backupSha256"] == before.sha256
+                and read_image(request.state / "format").raw == b"2\n"
+                and not os.path.lexists(request.state / "identity-upgrade.json"),
+                "Restored format and completed marker are not bound to both archives.")
+        conversion = _restore_archive_order(request, result, source, before, marker)
+
+        subject.drain()
+        before_retry = subject.preserve("before-restore-retry", request)
+        require(subject.execute_observed(request, "cached") == result and subject.image(request) == before_retry,
+                "Restore retry changed the durable attempt, before image, source, or generation.")
+        subject.finish(request, result)
+        held = os.fstat(fd)
+        require(guard == read_image(guard_path) and (held.st_dev, held.st_ino) == (guard.device, guard.inode)
+                and _nonmetadata_state(request.state) == state and _snapshot(native_home) == native
+                and _snapshot(source_path) == source_tree and MetadataArchive.read(source_path) == source,
+                "Restore changed a live guard, native/auth bytes, chat, record or immutable source.")
+    finally:
+        os.close(fd)
+
+    stale = previous["generation"] + "." + previous["witness"]
+    subject.admitted_proof(request.state, subscription, expectation=stale, refused=True, name="old-restore-proof-refusal")
+    fresh = subject.admitted_proof(request.state, subscription, name="after-restore-proof")
+    expected = fresh["generation"] + "." + fresh["witness"]
+    require(fresh["generation"] == result["generation"]
+            and subject.admitted_proof(request.state, subscription, expectation=expected, name="after-restore-restart") == fresh,
+            "Fresh restore proof did not survive restart in the exact new generation.")
+    observation = {"result": result, "source": source.sha256, "before": before.sha256, "conversion": conversion,
+                   "oldProof": previous, "newProof": fresh, "protectedState": state, "nativeHome": native}
+    subject.controller.evidence.write("restore-finished-" + subject.session + ".json", observation)
+    return observation
