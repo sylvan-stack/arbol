@@ -723,7 +723,7 @@ def _exclusive(authority: Authority, descriptor: int) -> None:
         os.close(independent)
 
 
-def archive_terminal(authority: Authority, descriptor: int) -> None:
+def archive_terminal(authority: Authority, descriptor: int, *, candidate: CandidateScope | None = None) -> None:
     """Under control mutex and closed exclusive admission, archive whole trees.
 
     The bounded private archive journal makes the two directory renames resumable.
@@ -738,7 +738,7 @@ def archive_terminal(authority: Authority, descriptor: int) -> None:
     try:
         journal = read(journal_path)
     except FileNotFoundError:
-        custody = reconcile(authority, control=control)
+        custody = reconcile(authority, control=control, candidate=candidate)
         if not custody.resolved:
             refuse()
         journal = {"version": 1, "kind": "driver-custody-archive", "epoch": control["epoch"],

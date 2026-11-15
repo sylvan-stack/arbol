@@ -755,7 +755,7 @@ def drain(request: Request) -> Object:
                     # Resume a previously verified terminal archive before
                     # interpreting absent active directories. No taint is cleared.
                     if lease >= 0 and os.path.lexists(authority.folder / "archive" / "custody-pending.json"):
-                        archive_terminal(authority, lease)
+                        archive_terminal(authority, lease, candidate=request.candidate)
                     custody = reconcile(authority, control=control, boot=boot, candidate=request.candidate)
                     if lease >= 0 and not custody.resolved and not custody.unknown:
                         # A registered live writer without any independent SH
@@ -775,7 +775,7 @@ def drain(request: Request) -> Object:
                         if not custody.resolved or _tainted(authority):
                             raise Refusal("Custody remains unresolved under exclusive admission.")
                         if custody.writers or custody.handoffs:
-                            archive_terminal(authority, lease)
+                            archive_terminal(authority, lease, candidate=request.candidate)
                         return _receipt(request, authority, current, gate)
                     control = _draining(authority, control)
                     if "stop" in request.values and not custody.unknown and time.monotonic() < deadline:
