@@ -62,6 +62,7 @@ from .driver_payload import (
     metadata_document,
     metadata_marker,
     metadata_upgrade,
+    optional_descriptor,
     pin_payloads,
     registered,
     request_binding,
@@ -434,9 +435,8 @@ def _component(request: Request) -> Iterator[tuple[Authority, Payload, Gate]]:
             raise Refusal("Registry exceeds its bounded tuple inventory.")
         if BUILD_PATTERN.fullmatch(folder.name) is None:
             continue
-        try:
-            raw = read_bytes(folder / SUBTREE / DESCRIPTOR)
-        except FileNotFoundError:
+        raw = optional_descriptor(folder)
+        if raw is None:
             continue
         if sha256(raw) == producer_digest:
             found.append(registered(request.registry, request.component, folder.name))
@@ -659,9 +659,8 @@ def _qualified_candidates(authorities: list[Authority]) -> list[Payload]:
                 raise Refusal("Deployment registry exceeds its inventory bound.")
             if BUILD_PATTERN.fullmatch(folder.name) is None:
                 continue
-            try:
-                descriptor = read_bytes(folder / SUBTREE / DESCRIPTOR)
-            except FileNotFoundError:
+            descriptor = optional_descriptor(folder)
+            if descriptor is None:
                 continue
             if sha256(descriptor) == value["producerPayloadSha256"]:
                 matches.append(registered(authority.registry, authority.component, folder.name))

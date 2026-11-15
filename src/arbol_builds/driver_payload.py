@@ -47,6 +47,24 @@ BUILD = re.compile(r"[1-9a-f][0-9a-f]*\Z", re.ASCII)
 SOURCE = re.compile(r"[0-9a-f]{40}\Z", re.ASCII)
 
 
+def optional_descriptor(folder: Path) -> bytes | None:
+    """An older physical Build may genuinely have no declared payload yet."""
+    physical(folder)
+    root = folder / SUBTREE
+    try:
+        root.lstat()
+    except FileNotFoundError:
+        return None
+    private_directory(root)
+    path = root / DESCRIPTOR
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return None
+    # Once observed, disappearance or replacement is uncertainty, not absence.
+    return read_bytes(path)
+
+
 def relative(value: object) -> str:
     if not isinstance(value, str):
         refuse()
@@ -666,10 +684,8 @@ def _retention_builds(registry: Path, component: str, digests: set[str]) -> froz
             refuse()
         if not BUILD.fullmatch(folder.name):
             continue
-        path = folder / SUBTREE / DESCRIPTOR
-        try:
-            raw = read_bytes(path)
-        except FileNotFoundError:
+        raw = optional_descriptor(folder)
+        if raw is None:
             continue
         digest = sha256(raw)
         if digest not in digests:
