@@ -1605,6 +1605,38 @@ def complete_main_admission_inventory(subjects: Mapping[str, AdmissionSubject], 
         guardian_class_window(subjects[window_class + "-positive"], frozen, window=window_class, kill=False)
 
 
+def _raw_authority_image(authority: Authority) -> Object:
+    """Caller holds the real mutex; bounded raw fixture observation, no State API.
+
+    Capture ALL names, including contexts, markers, sessions and lock files. The
+    root inode and every retained directory/file inode belong to the oracle.
+    This is not a refreshed production custody model or a terminal inference.
+    """
+    root = physical_owned(authority.folder, directory=True)
+    inventory = tree_inventory(authority.folder)
+    require(len(inventory) <= 4096, "Raw authority inventory exceeds its finite bound.")
+    entries: list[Object] = []
+    total = 0
+    for row in inventory:
+        item = dict(row)
+        if row["type"] == "file":
+            image = read_image(authority.folder / row["path"], limit=1024 * 1024)
+            require(image.sha256 == row["sha256"] and image.device == row["device"]
+                    and image.inode == row["inode"] and image.mode == row["mode"],
+                    "Raw metadata changed during serialized capture.")
+            total += len(image.raw)
+            require(total <= 4 * 1024 * 1024, "Raw authority bytes exceed their finite bound.")
+            item["rawHex"] = image.raw.hex()
+        entries.append(item)
+    require(tree_inventory(authority.folder) == inventory,
+            "Authority inventory changed during serialized raw capture.")
+    current = physical_owned(authority.folder, directory=True)
+    require((root.st_dev, root.st_ino) == (current.st_dev, current.st_ino),
+            "Authority root changed during raw capture.")
+    return {"root": {"path": str(authority.folder), "device": root.st_dev,
+                     "inode": root.st_ino, "mode": root.st_mode & 0o777}, "entries": entries}
+
+
 def late_new_guardian_gate_after_begin_refuses(subject: AdmissionSubject) -> None:
     """A NEW fixed runner transfer cannot start after actual begin closes it.
 
@@ -1638,19 +1670,55 @@ def late_new_guardian_gate_after_begin_refuses(subject: AdmissionSubject) -> Non
         with subject.authority.mutex():
             require(subject.authority.read("control") == {"version": 1, "phase": "draining", "session": session,
                                                           "epoch": guardian.epoch}, "Begin changed the original admitted epoch.")
+            actual_owner = process_identity(os.getpid())
+            require(guardian.owner == actual_owner and guardian.boot == provider_process.boot_uuid()
+                    and guardian.payload == scope.producer(COMPONENT),
+                    "Original Guardian is not the independently observed caller/boot/tuple.")
+            expected_writer: Object = {"version": 1, "invocation": guardian.invocation, "writer": guardian.writer,
+                "parent": None, "component": COMPONENT, "epoch": guardian.epoch,
+                "payloadSha256": scope.producer(COMPONENT).digest, "boot": provider_process.boot_uuid(),
+                **actual_owner, "phase": "active", "contextSha256": None}
+            # Independent literal expectation, not Guardian._bootstrap_writer().
+            original_path = subject.authority.folder / "writers" / guardian.invocation / (guardian.writer + ".json")
+            require(document(read_image(original_path).raw) == expected_writer,
+                    "Original bootstrap writer differs from actual independent process/tuple bindings.")
+            metadata_before = _raw_authority_image(subject.authority)
+            writer_files = [row["path"] for row in metadata_before["entries"]
+                            if row["type"] == "file" and row["path"].startswith("writers/")]
+            require(writer_files == [original_path.relative_to(subject.authority.folder).as_posix()]
+                    and not any(row["path"].startswith("handoffs/") for row in metadata_before["entries"])
+                    and not os.path.lexists(subject.authority.folder / "taint.json"),
+                    "Late attempt needs the sole original bootstrap writer and no prior transfer/taint.")
+            subject.evidence.write("late-gate-metadata-before.json", metadata_before)
         refused = False
         try:
             guardian.spawn_gate("unit", prepared=forbidden_start)
         except Refusal:
             refused = True
-        require(refused and not prepared and child.process is None and guardian.handoff is None,
-                "A late new runner registered/spawned instead of refusing before execution.")
-        require(guardian.lease < 0 and guardian.build_use < 0 and subject.snapshot() == before,
-                "Failed transfer retained owned descriptions or accessed State.")
         with subject.authority.mutex():
+            metadata_after = _raw_authority_image(subject.authority)
+            # Preserve failed raw observations BEFORE asserting equality. No
+            # writer, handoff/context, marker, lock, session or archive change is
+            # authorized by this refused transfer; only taint.json may appear.
+            subject.evidence.write("late-gate-metadata-after.json", metadata_after)
+            require(refused and not prepared and child.process is None and guardian.handoff is None,
+                    "A late new runner registered/spawned instead of refusing before execution.")
+            require(guardian.lease < 0 and guardian.build_use < 0 and subject.snapshot() == before,
+                    "Failed transfer retained owned descriptions or accessed State.")
+            expected_taint: Object = {"version": 1, "component": COMPONENT, "epoch": guardian.epoch,
+                "boot": expected_writer["boot"], "reason": "custody-loss", "invocation": guardian.invocation,
+                "payloadSha256": scope.producer(COMPONENT).digest}
             taint = subject.authority.read("taint")
-            require(taint["invocation"] == guardian.invocation and taint["epoch"] == guardian.epoch
-                    and taint["component"] == COMPONENT, "Actual aborted transfer lost its durable original obligation.")
+            taint_entries = [row for row in metadata_after["entries"] if row["path"] == "taint.json"]
+            require(len(taint_entries) == 1 and taint_entries[0]["type"] == "file"
+                    and document(bytes.fromhex(taint_entries[0]["rawHex"])) == expected_taint
+                    and taint == expected_taint, "Aborted transfer lost its exact durable original obligation.")
+            retained_after = {"root": metadata_after["root"], "entries": [row for row in metadata_after["entries"]
+                                                                                 if row["path"] != "taint.json"]}
+            require(retained_after == metadata_before,
+                    "Refused late spawn mutated original raw metadata, marker, control, lock or custody inventory.")
+            require(document(read_image(original_path).raw) == expected_writer,
+                    "Refused late transfer changed the original active bootstrap writer.")
             try:
                 normal_control(subject.authority, candidate=scope)
             except Refusal:
@@ -1661,7 +1729,9 @@ def late_new_guardian_gate_after_begin_refuses(subject: AdmissionSubject) -> Non
                 "actualBeginArgv": argv, "actualBegin": document(captured.stdout), "provider": captured.owner.object(),
                 "reaped": begin.reaped, "guardian": guardian.owner, "invocation": guardian.invocation,
                 "epoch": guardian.epoch, "preparedChild": prepared, "stateBefore": before, "stateAfter": subject.snapshot(),
-                "taint": taint, "activeSuiteH1DeathProved": False})
+                "expectedOriginalWriter": expected_writer, "metadataBefore": metadata_before,
+                "metadataAfter": metadata_after, "taint": taint, "activeSuiteH1DeathProved": False},
+                limit=32 * 1024 * 1024)
     finally:
         try:
             child.cleanup()
