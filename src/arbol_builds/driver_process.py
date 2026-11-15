@@ -29,6 +29,7 @@ from .driver_admission import (
     NORMAL_CONTEXT,
     NORMAL_FD,
     Authority,
+    Custody,
     Object,
     canonical,
     canonical_uuid,
@@ -659,3 +660,31 @@ def supervise(guardian: Guardian, arguments: list[str]) -> int:
     if ended_by is not None:
         _terminate(ended_by)
     return exit_code
+
+
+def request_cancellation(authority: Authority, custody: Custody, sent: set[tuple[int, str]]) -> None:
+    """Under the short mutex, request each exact admitted main's normal stop.
+
+    All four existing runs.stop implementations signal the command owner with
+    SIGTERM and bound acknowledgement to twenty seconds. The Driver retains
+    its own vendor cancellation/escalation duties. No helper/group/descendant
+    kill or terminal disposition is inferred here.
+    """
+    mains = {(row["invocation"], row["child"]) for row in custody.handoffs
+             if row["phase"] == "accepted" and row["role"] == "main"}
+    for writer in custody.writers:
+        if writer["phase"] != "active" or (writer["invocation"], writer["writer"]) not in mains:
+            continue
+        owner = {key: writer[key] for key in ("pid", "startedAt")}
+        key = (owner["pid"], owner["startedAt"])
+        if key in sent:
+            continue
+        if (owner["pid"] == os.getpid()
+                or read_writer(authority, writer["invocation"], writer["writer"]) != writer):
+            refuse()
+        if matches(owner):
+            try:
+                os.kill(owner["pid"], signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        sent.add(key)

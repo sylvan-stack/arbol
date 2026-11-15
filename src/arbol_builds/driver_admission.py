@@ -552,7 +552,8 @@ def _custody_payload(authority: Authority, digest: str) -> Object:
     return matches[0]
 
 
-def reconcile(authority: Authority, *, control: Object | None = None, persist_unknown: bool = True) -> Custody:
+def reconcile(authority: Authority, *, control: Object | None = None, persist_unknown: bool = True,
+              boot: str | None = None) -> Custody:
     """Under control mutex: inspect obligations, never infer terminal from death.
 
     Every preexisting helper is checked against its exact original admitted
@@ -561,7 +562,9 @@ def reconcile(authority: Authority, *, control: Object | None = None, persist_un
     from .driver_process import boot_uuid, identity_record, matches
 
     control = authority.read("control") if control is None else control
-    boot = boot_uuid()
+    boot = boot_uuid() if boot is None else boot
+    if not canonical_uuid(boot):
+        refuse()
     writers: dict[tuple[str, str], Object] = {}
     handoffs: dict[str, Object] = {}
     contexts: dict[str, tuple[Object, str]] = {}

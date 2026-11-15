@@ -11,6 +11,7 @@ import re
 import signal
 import stat
 import sys
+import time
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
@@ -20,10 +21,13 @@ from .driver_admission import (
     COMPONENTS,
     LIMIT,
     Authority,
+    Custody,
     Object,
     Refusal,
+    archive_terminal,
     canonical,
     canonical_uuid,
+    custody_loss,
     decode,
     fields,
     normal_control,
@@ -52,7 +56,7 @@ from .driver_payload import (
     verify_acceptance,
     verify_gate,
 )
-from .driver_process import Guardian, boot_uuid, supervise
+from .driver_process import Guardian, boot_uuid, request_cancellation, supervise
 from .launcher import BUILD_PATTERN, Record, launch, open_use_guard, standard_descriptors, write_all
 
 
@@ -448,9 +452,10 @@ def _tainted(authority: Authority) -> bool:
     return True
 
 
-def _status(request: Request, authority: Authority, control: Object) -> Object:
+def _status(request: Request, authority: Authority, control: Object, custody: Custody | None = None) -> Object:
     # Status never publishes taint, closes admission, signals or touches state.
-    custody = reconcile(authority, control=control, persist_unknown=False)
+    if custody is None:
+        custody = reconcile(authority, control=control, persist_unknown=False)
     return {"version": 1, "component": request.component, "session": request.session,
             "phase": control["phase"], "custody": {"active": custody.active, "pending": custody.pending,
                                                      "unknown": custody.unknown, "tainted": _tainted(authority)}}
@@ -467,7 +472,8 @@ def begin(request: Request) -> Object:
                 authority.write("control", control)
             # Closing happens before custody inspection. Unknown obligations
             # retain their taint and same epoch; begin never cancels work.
-            reconcile(authority, control=control)
+            archive_pending = os.path.lexists(authority.folder / "archive" / "custody-pending.json")
+            reconcile(authority, control=control, persist_unknown=not archive_pending)
             _tainted(authority)
             return {"version": 1, "component": request.component, "session": request.session,
                     "phase": control["phase"]}
@@ -479,3 +485,93 @@ def status(request: Request) -> Object:
         with authority.mutex():
             _recheck(authority, payload, gate)
             return _status(request, authority, _control(authority, request.session))
+
+
+def _draining(authority: Authority, control: Object) -> Object:
+    if control["phase"] != "draining":
+        control = {**control, "phase": "draining"}
+        authority.write("control", control)
+    return control
+
+
+def _receipt(request: Request, authority: Authority, control: Object, gate: Gate) -> Object:
+    receipt = {"version": 1, "kind": "driver-state-maintenance", "component": request.component,
+               "session": request.session, "epoch": control["epoch"], "phase": "exclusive",
+               "gateSha256": gate.digest}
+    path = authority.folder / "maintenance.json"
+    try:
+        previous = read_bytes(path)
+    except FileNotFoundError:
+        previous = None
+    raw = canonical(receipt)
+    if previous is not None and previous != raw:
+        validate("maintenance", decode(previous))
+        archive = authority.folder / "archive" / ("maintenance-" + sha256(previous) + ".json")
+        if archive.exists() and read_bytes(archive) != previous:
+            raise Refusal("Maintenance receipt archive changed.")
+        if not archive.exists():
+            publish_bytes(archive, previous)
+    authority.write("control", {**control, "phase": "exclusive"})
+    if previous != raw:
+        authority.write("maintenance", receipt)
+    return {"version": 1, "component": request.component, "session": request.session,
+            "phase": "exclusive", "receipt": str(path)}
+
+
+@handler("drain")
+def drain(request: Request) -> Object:
+    # This bounds all explicit mutex/poll waits in this call. Inventory and
+    # identity verification remain bounded metadata work, not a process scan.
+    deadline = time.monotonic() + 20
+    sent: set[tuple[int, str]] = set()
+    with _component(request) as (authority, payload, gate):
+        boot = boot_uuid()
+        while True:
+            lease = -1
+            with authority.mutex(seconds=max(0, deadline - time.monotonic())):
+                control = _control(authority, request.session, closed=True)
+                if sha256(read_bytes(authority.shared / "gate.json")) != gate.digest:
+                    raise Refusal("Maintenance gate changed during drain.")
+                try:
+                    lease = authority.lease(exclusive=True)
+                except BlockingIOError:
+                    pass
+                try:
+                    # Resume a previously verified terminal archive before
+                    # interpreting absent active directories. No taint is cleared.
+                    if lease >= 0 and os.path.lexists(authority.folder / "archive" / "custody-pending.json"):
+                        archive_terminal(authority, lease)
+                    custody = reconcile(authority, control=control, boot=boot)
+                    if lease >= 0 and not custody.resolved and not custody.unknown:
+                        # A registered live writer without any independent SH
+                        # lease is custody loss, never evidence of quiescence.
+                        custody_loss(authority, invocation=token(), epoch=control["epoch"], boot=boot,
+                                     payload_sha256=None)
+                        custody = Custody(custody.writers, custody.handoffs, custody.active, custody.pending, True)
+                    tainted = _tainted(authority)
+                    if lease >= 0 and custody.resolved and not tainted:
+                        _recheck(authority, payload, gate)
+                        current = _control(authority, request.session, closed=True)
+                        if current != control:
+                            raise Refusal("Maintenance control changed during drain.")
+                        # The acquired EX description excludes every writer;
+                        # recheck the exact graph before archival/receipt.
+                        custody = reconcile(authority, control=current, boot=boot)
+                        if not custody.resolved or _tainted(authority):
+                            raise Refusal("Custody remains unresolved under exclusive admission.")
+                        if custody.writers or custody.handoffs:
+                            archive_terminal(authority, lease)
+                        return _receipt(request, authority, current, gate)
+                    control = _draining(authority, control)
+                    if "stop" in request.values and not custody.unknown and time.monotonic() < deadline:
+                        request_cancellation(authority, custody, sent)
+                    if custody.unknown or tainted or time.monotonic() >= deadline:
+                        return _status(request, authority, control, custody)
+                finally:
+                    if lease >= 0:
+                        # Close only this independent one-shot description.
+                        # Durable exclusive/draining state stays closed.
+                        os.close(lease)
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(0.05, remaining))
