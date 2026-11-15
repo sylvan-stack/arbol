@@ -23,7 +23,6 @@ export type EntityKind =
   | 'branch'
   | 'hunk'
   | 'living_topic'
-  | 'mandate'
   | 'prompt'
   | 'response';
 
@@ -72,7 +71,6 @@ export const KINDS: Record<EntityKind, EntityKindMeta> = {
   branch: { tag: 'brn', label: 'Branch', shape: 'note', hue: 270, glyph: '⎇' },
   hunk: { tag: 'hun', label: 'Hunk', shape: 'note', hue: 12, glyph: '≋' },
   living_topic: { tag: 'liv', label: 'Living Topic', shape: 'note', hue: 172, glyph: '◉' },
-  mandate: { tag: 'mnd', label: 'Mandate', shape: 'note', hue: 48, glyph: '✦' },
   prompt: { tag: 'pmt', label: 'Prompt', shape: 'mark', hue: 264, glyph: '›' },
   response: { tag: 'rsp', label: 'Response', shape: 'mark', hue: 156, glyph: '‹' },
 };

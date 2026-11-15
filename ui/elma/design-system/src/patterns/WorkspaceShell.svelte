@@ -14,7 +14,6 @@
       'Quick Text',
       'Living Topics',
       'Blueprints',
-      'Stewardship',
       'Artifacts',
       'Monitoring',
     ],

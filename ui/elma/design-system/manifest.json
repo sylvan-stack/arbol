@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/sylvan-stack/arbol-design-system",
-  "commit": "587b8ba71f13328282d8d894835cf5c80f8b1b1d",
+  "commit": "eb25852a8d7ed6b638cea61bd163ba4f4eaa3dbc",
   "files": {
     "docs/licenses/Hanken-Grotesk-OFL.txt": "f45f60ca871850c58d8dc9c973bd6fcad40c137e9d037172b961e8ca68c87ef7",
     "docs/licenses/Spline-Sans-Mono-OFL.txt": "3127290ccd196ec0c4ffa60296845224a034b92c81de8231b0916278ed7607e1",
@@ -17,7 +17,7 @@
     "src/components/TextField.svelte": "2e35e5a99d9d74f9fe23c9ea800a15bc0a25c2d03e462afcac772d86b3e6c86c",
     "src/components/Tooltip.svelte": "a8290d706ea49b5d635ca7686524888b21173366488af55ff98233bf815d346d",
     "src/components/WorkspaceGlyph.svelte": "51a9aa36aa2f8da4407f4d9e1a4a5d7fda66e1f95ef98d813ae239f81a9805db",
-    "src/entities.ts": "85a15407512163cfcaca957f947516bd6089473509ce629cff4285ce4f238f10",
+    "src/entities.ts": "aa4c26a6dee84c05c8bf3fd0a6f7b498a3142d827ca7f582dad79f13893cd951",
     "src/json.ts": "9101532d0ae7e1c0ed89b6eaf3bbe00b7c1727b5946e7429fe5d24a34ad75396",
     "src/markdown.ts": "3879de5cdf3bb5c48a2f29639e3237a41d700d487f88571181a908b27c2d1e0e",
     "src/pages/IntelligenceProviders.svelte": "e2204c1be3793f9408dc29af254a8a22a5c1367f3a85a906af7dad51301e0f46",
@@ -32,7 +32,7 @@
     "src/patterns/Notice.svelte": "b2d76e8101550ea9006c791266b1b4ae45092b5dd481dd1e147883f5fc790f79",
     "src/patterns/PageHeader.svelte": "6a6514e5fddc38dbb904e86be9d9a7d007dbe43fd4aef5ac8406a2718477876a",
     "src/patterns/WorkspaceHeader.svelte": "6dc4212e8db3a5c2c0db6d45d2286d20456641cd9fd37501f6fccdb55bd353a1",
-    "src/patterns/WorkspaceShell.svelte": "7d5bed93161635bc1b7f81d3cc85c49054c3c232ee3d0a7a65ce5704a98edc79",
+    "src/patterns/WorkspaceShell.svelte": "717da3e36672023133fc07d4ad9f83886ddb891125ab09d01b428d63fa7d308b",
     "src/sections/AllowanceMetrics.svelte": "11c2e513b10320f29494381ddf51268a33419879e99ef46ed1321094e2f67dc2",
     "src/sections/AskUserQuestion.svelte": "40aac40331bb5d7087dc7c0a263564a2bf859669b0ea62335dbae710a96c2d78",
     "src/sections/Composer.svelte": "d9ae9912d8a371093de9e3908b76e87bff2dbb58c84c467a7c9b61a1e37d8d06",
