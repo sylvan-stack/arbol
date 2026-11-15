@@ -15,6 +15,7 @@ from typing import Any
 from arbol_installation.admission import Admission, AdmissionRefusal, runtime_folder
 
 from .config import Locations
+from .driver_payload import retention_status
 from .launcher import (
     BUILD_PATTERN,
     Record,
@@ -108,6 +109,10 @@ def prune_admitted(paths: Locations, names: list[str], days: float, now_ms: floa
             protected.update(usage.trunks.get(component,set()))
             for record in records:
                 if record["build"] in protected or not old_enough(paths.registry,record,clock,days):
+                    continue
+                retained = retention_status(paths.registry, component, record["build"])
+                if retained is not None:
+                    row.setdefault(retained, []).append(record["build"])
                     continue
                 def still_old(record: Record = record) -> bool:
                     if not old_enough(paths.registry, record, clock, days):

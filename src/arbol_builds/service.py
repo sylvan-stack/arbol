@@ -508,23 +508,28 @@ def missing_only(function: Any, path: str, error: BaseException) -> None:
 def prune_protections(registry: str, component: str, working: list[Record],
                       *,
                       schema: SchemaState | None = None) -> set[str]:
-    """Extra retained defaults, in addition to newest-n and Locked Builds (BLD-D22)."""
+    """Defaults and persistent Driver pins, in addition to newest-n and Locks."""
+    from .driver_payload import protected_payloads
+
+    pinned = protected_payloads(registry, component, [record["build"] for record in working])
     if component == "arbol" or trunk(component):
         schema = schema if schema is not None else read_schema()
         if schema.pair is None:
             raise ValueError(f"Cannot prune {component}. {SCHEMA_ERRORS[schema.status][1]}")
         selected = (default_record(registry, [record for record in working if backend_fits(record, schema.pair)])
                     if component == "arbol" else chosen(registry, working, schema.pair))
-        return {selected["build"]} if selected is not None else set()
+        return pinned | ({selected["build"]} if selected is not None else set())
     if component in ("arbol-root", "arbol-roots"):
         return {record["build"] for record in working}
     selected = default_record(registry, working)
-    return {selected["build"]} if selected is not None else set()
+    return pinned | ({selected["build"]} if selected is not None else set())
 
 
 
 def remove_build_payload(registry: str, record: Record, eligible: Callable[[], bool] | None = None) -> str:
     """Called under the component reservation; active/unverifiable usage keeps every file and record."""
+    from .driver_payload import retention_status
+
     try:
         descriptor = open_use_guard(registry, record["component"], record["build"], exclusive=True)
     except BlockingIOError:
@@ -534,6 +539,11 @@ def remove_build_payload(registry: str, record: Record, eligible: Callable[[], b
     try:
         if eligible is not None and not eligible():
             return "recent"
+        # This snapshot releases its short control mutexes before deletion.
+        # A new reference publisher must first acquire SH on our held EX inode.
+        retained = retention_status(registry, record["component"], record["build"])
+        if retained is not None:
+            return retained
         folder = os.path.join(registry, record["component"], record["build"])
         record["prunedAt"] = now()
         save_unlocked(folder, record)

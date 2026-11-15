@@ -11,6 +11,8 @@ import os
 import re
 import stat
 import unicodedata
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -21,16 +23,20 @@ from .driver_admission import (
     Authority,
     Object,
     canonical,
+    canonical_uuid,
     decode,
     fields,
     natural,
     physical,
     private_directory,
     publish,
+    read,
     read_bytes,
     refuse,
     sha256,
     valid_hash,
+    valid_token,
+    validate,
 )
 
 MANIFEST = "driver-payload-manifest.json"
@@ -430,3 +436,273 @@ def verify_acceptance(authority: Authority, payload: Payload, *, digest: str | N
             or value["providerPayloadSha256"] != gate.provider.digest):
         refuse()
     return value
+
+
+@contextmanager
+def pin_payloads(registry: Path, payloads: list[Payload]) -> Iterator[None]:
+    """Independently guard every exact tuple before publishing a durable reference.
+
+    Call before control mutex acquisition. Closing these guards is safe only
+    after publication made the tuple visible to the final prune recheck.
+    """
+    from .launcher import open_use_guard
+
+    held: list[int] = []
+    try:
+        tuples: dict[tuple[str, str], Payload] = {}
+        for payload in payloads:
+            key = (payload.component, payload.build)
+            if key in tuples and tuples[key].digest != payload.digest:
+                refuse()
+            tuples[key] = payload
+        for (component, build), payload in sorted(tuples.items()):
+            descriptor = open_use_guard(str(registry), component, build)
+            held.append(descriptor)
+            info = os.fstat(descriptor)
+            named = (registry / component / ".uses" / build).lstat()
+            if (info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600
+                    or (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino)):
+                refuse()
+            current = registered(registry, component, build)
+            if current.root != payload.root or current.digest != payload.digest:
+                refuse()
+        yield
+    finally:
+        for descriptor in reversed(held):
+            os.close(descriptor)
+
+
+@dataclass(frozen=True)
+class Retention:
+    builds: frozenset[str] = frozenset()
+    all_builds: bool = False
+    uncertain: bool = False
+
+
+def _retention_gate(raw: bytes) -> Object:
+    value = decode(raw)
+    fields(value, "version kind providerPayloadSha256 components")
+    if (value["kind"] != "driver-gate" or not valid_hash(value["providerPayloadSha256"])
+            or not isinstance(value["components"], list) or len(value["components"]) != len(COMPONENTS)):
+        refuse()
+    for component, row in zip(COMPONENTS, value["components"], strict=True):
+        if (not isinstance(row, dict) or set(row) != {"component", "launcher", "launcherSha256"}
+                or row["component"] != component or not valid_hash(row["launcherSha256"])):
+            refuse()
+        path = physical(row["launcher"], directory=False)
+        if path.name != component or _file_hash(path)[1] != row["launcherSha256"]:
+            refuse()
+    return value
+
+
+def _retention_acceptance(shared: Path, component: str, digest: str, refs: dict[str, set[str]],
+                          registry: Path) -> None:
+    if not valid_hash(digest):
+        refuse()
+    raw = read_bytes(shared / "acceptances" / (digest + ".json"))
+    value = decode(raw)
+    fields(value, "version kind status scope contract providerPayloadSha256 producerPayloadSha256 gateSha256 platform evidenceSha256")
+    if (sha256(raw) != digest or value["kind"] != "driver-qualification"
+            or value["status"] not in ("candidate", "qualified") or value["scope"] != str(registry)
+            or value["contract"] != "DRV-browser-identity-1"):
+        refuse()
+    for key in ("providerPayloadSha256", "producerPayloadSha256", "gateSha256", "evidenceSha256"):
+        if not valid_hash(value[key]):
+            refuse()
+    refs["arbol"].add(value["providerPayloadSha256"])
+    refs[component].add(value["producerPayloadSha256"])
+
+
+def _retention_records(folder: Path, *, depth: int = 0) -> list[tuple[Path, Object]]:
+    """Bounded registry-only scan; never traverse payloads, state or symlinks."""
+    if depth > 5:
+        refuse()
+    private_directory(folder)
+    found: list[tuple[Path, Object]] = []
+    entries: list[Path] = []
+    for path in folder.iterdir():
+        if len(entries) >= MAX_ENTRIES:
+            refuse()
+        entries.append(path)
+    for path in sorted(entries):
+        info = path.lstat()
+        if stat.S_ISDIR(info.st_mode):
+            found.extend(_retention_records(path, depth=depth + 1))
+        elif stat.S_ISREG(info.st_mode) and path.name.endswith(".json"):
+            found.append((path, read(path)))
+        else:
+            refuse()
+        if len(found) > MAX_ENTRIES:
+            refuse()
+    return found
+
+
+def _retention_component(authority: Authority, refs: dict[str, set[str]]) -> bool:
+    control = authority.read("control")
+    qualification = authority.read("qualification")
+    if qualification["component"] != authority.component:
+        refuse()
+    _retention_acceptance(authority.shared, authority.component, qualification["acceptanceSha256"],
+                          refs, authority.registry)
+    retain_all = False
+    try:
+        taint = authority.read("taint")
+    except FileNotFoundError:
+        taint = None
+    if taint is not None:
+        if taint["component"] != authority.component:
+            refuse()
+        if taint["payloadSha256"] is None:
+            retain_all = True  # Unknown old payload cannot be guessed from a dead main.
+        else:
+            refs[authority.component].add(taint["payloadSha256"])
+    folders = [(authority.folder / "writers", "writer"), (authority.folder / "handoffs", "handoff")]
+    pending_archive = authority.folder / "archive" / "custody-pending.json"
+    if pending_archive.exists():
+        journal = read(pending_archive)
+        fields(journal, "version kind epoch archive phase")
+        if (journal["kind"] != "driver-custody-archive" or not valid_token(journal["archive"])
+                or not valid_token(journal["epoch"])
+                or journal["phase"] not in ("prepared", "writers", "handoffs", "complete")):
+            refuse()
+        archived = authority.folder / "archive" / ("custody-" + journal["archive"])
+        folders += [(archived / "writers", "writer"), (archived / "handoffs", "handoff")]
+    for folder, kind in folders:
+        if not folder.exists():
+            if pending_archive.exists():
+                continue
+            refuse()
+        for path, value in _retention_records(folder):
+            if path.name.endswith(".context.json"):
+                # The matching handoff/writer pin is authoritative; context also
+                # retains its exact old acceptance while transfer is unresolved.
+                from .driver_admission import normal_context
+                normal_context(value)
+                if value["component"] != authority.component:
+                    refuse()
+                _retention_acceptance(authority.shared, authority.component, value["acceptanceSha256"],
+                                      refs, authority.registry)
+            else:
+                validate(kind, value)
+                if value["component"] != authority.component or not valid_hash(value["payloadSha256"]):
+                    refuse()
+                refs[authority.component].add(value["payloadSha256"])
+    sessions = private_directory(authority.folder / "sessions")
+    count = 0
+    for session in sessions.iterdir():
+        count += 1
+        if count > MAX_ENTRIES or not canonical_uuid(session.name):
+            refuse()
+        private_directory(session)
+        operation = session / "operation.json"
+        active = operation.exists()
+        records: list[tuple[Path, Object]] = []
+        if active:
+            value = read(operation)
+            validate("operation", value)
+            if value["epoch"] != control["epoch"]:
+                refuse()
+            records.append((operation, value))
+        result = session / "result.json"
+        if result.exists():
+            value = read(result)
+            validate("result", value)
+            if active or control["phase"] != "normal" or value["epoch"] == control["epoch"]:
+                records.append((result, value))
+        if (active or control["phase"] != "normal") and (session / "attempts").exists():
+            for path, value in _retention_records(session / "attempts"):
+                if path.name in ("operation.json", "result.json"):
+                    validate("operation" if path.name == "operation.json" else "result", value)
+                    records.append((path, value))
+        for path, value in records:
+            if value["component"] != authority.component or not valid_hash(value["payloadSha256"]):
+                refuse()
+            refs[authority.component].add(value["payloadSha256"])
+            if path.name == "operation.json":
+                _retention_acceptance(authority.shared, authority.component, value["acceptanceSha256"],
+                                      refs, authority.registry)
+    return retain_all
+
+
+def _retention_builds(registry: Path, component: str, digests: set[str]) -> frozenset[str]:
+    """Map only exact D digests, not executable names, timestamps or defaults."""
+    if not digests:
+        return frozenset()
+    remaining, found = set(digests), set()
+    count = 0
+    for folder in private_directory(registry / component).iterdir():
+        count += 1
+        if count > MAX_ENTRIES:
+            refuse()
+        if not BUILD.fullmatch(folder.name):
+            continue
+        path = folder / SUBTREE / DESCRIPTOR
+        try:
+            raw = read_bytes(path)
+        except FileNotFoundError:
+            continue
+        digest = sha256(raw)
+        if digest not in digests:
+            continue
+        value = decode(raw)
+        fields(value, "version kind component build source interpreter entry helpers importRoots payloadManifestSha256 capabilities")
+        if (value["kind"] != "driver-capability" or value["component"] != component
+                or value["build"] != folder.name or not valid_hash(value["payloadManifestSha256"])):
+            refuse()
+        remaining.discard(digest)
+        found.add(folder.name)
+    if remaining:
+        refuse()  # A missing/corrupt pinned tuple retains affected candidates.
+    return frozenset(found)
+
+
+def retention(registry: str, component: str) -> Retention:
+    """A preliminary snapshot, also repeated under .uses EX immediately before deletion."""
+    if component not in (*COMPONENTS, "arbol"):
+        return Retention()
+    root = Path(os.path.abspath(registry))
+    shared = root / ".driver-qualification"
+    names = COMPONENTS if component == "arbol" else (component,)
+    present = (os.path.lexists(shared / "gate.json") or os.path.lexists(shared / "deployment.json")
+               or any(os.path.lexists(root / name / ".driver-admission") for name in names))
+    if not present:
+        return Retention()
+    try:
+        private_directory(root)
+        refs: dict[str, set[str]] = {name: set() for name in (*COMPONENTS, "arbol")}
+        with ExitStack() as stack:
+            authorities = [Authority(root, name) for name in names]
+            for authority in authorities:
+                stack.enter_context(authority.mutex(seconds=0))
+            gate = _retention_gate(read_bytes(shared / "gate.json"))
+            refs["arbol"].add(gate["providerPayloadSha256"])
+            deployment = shared / "deployment.json"
+            if deployment.exists():
+                value = read(deployment)
+                validate("deployment", value)
+                if value["phase"] != "complete":
+                    # Includes before-images and all old/new tuples during a
+                    # partially installed/restaged all-four rollout.
+                    return Retention(all_builds=True)
+            retain_all = False
+            for authority in authorities:
+                retain_all = _retention_component(authority, refs) or retain_all
+            if retain_all:
+                return Retention(all_builds=True)
+            return Retention(builds=_retention_builds(root, component, refs[component]))
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+        return Retention(uncertain=True)
+
+
+def protected_payloads(registry: str, component: str, numbers: list[str]) -> set[str]:
+    value = retention(registry, component)
+    return set(numbers) if value.all_builds or value.uncertain else set(value.builds)
+
+
+def retention_status(registry: str, component: str, number: str) -> str | None:
+    value = retention(registry, component)
+    if value.uncertain:
+        return "unverifiable"
+    if value.all_builds or number in value.builds:
+        return "inUse"
+    return None

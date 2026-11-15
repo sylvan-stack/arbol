@@ -9,6 +9,8 @@ from __future__ import annotations
 import os
 import stat
 import sys
+from collections.abc import Callable
+from contextlib import ExitStack
 from pathlib import Path
 
 from .driver_admission import (
@@ -28,7 +30,7 @@ from .driver_admission import (
     validate,
     without_authority,
 )
-from .driver_payload import DESCRIPTOR, SUBTREE, Payload, registered, verify_acceptance, verify_gate
+from .driver_payload import DESCRIPTOR, SUBTREE, Payload, pin_payloads, registered, verify_acceptance, verify_gate
 from .driver_process import Guardian, boot_uuid, supervise
 from .launcher import Record, launch, open_use_guard
 
@@ -165,3 +167,19 @@ def launch_gated(registry: str, component: str, route: str, arguments: list[str]
         return launch_selected(reg, comp, record, args, entry, guard, route=route)
 
     return launch(registry, component, arguments, driver_launch=admitted)
+
+
+def guarded_publication[T](registry: Path, payloads: list[Payload], authorities: list[Authority],
+                           action: Callable[[], T]) -> T:
+    """Pin exact Builds before short lexical control locks and durable publication.
+
+    All deployment/operation publishers use this order. The callback is bounded
+    trusted registry metadata work: no child, signal, wait or payload deletion.
+    """
+    names = [authority.component for authority in authorities]
+    if len(set(names)) != len(names) or any(authority.registry != registry for authority in authorities):
+        raise Refusal("Invalid Driver publication scope.")
+    with pin_payloads(registry, payloads), ExitStack() as stack:
+        for authority in sorted(authorities, key=lambda value: value.component):
+            stack.enter_context(authority.mutex())
+        return action()
