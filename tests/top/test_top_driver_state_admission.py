@@ -1294,7 +1294,7 @@ def guardian_class_window(subject: AdmissionSubject, frozen: FrozenCaller, *, wi
     """Actual fixed caller death or separate real positive control, never a fake ACK."""
     subject, coupling = prepare_sealed_candidate_coupling(subject)
     caller = CallerPipe(subject, frozen, window)
-    child_identity: ExactProcess | None = None
+    verified_child: ExactProcess | None = None
     try:
         ready, boundary = caller.frame(), caller.frame()
         observed_at = time.monotonic()
@@ -1311,8 +1311,10 @@ def guardian_class_window(subject: AdmissionSubject, frozen: FrozenCaller, *, wi
                 and ready["case"] == caller.case and ready["window"] == window
                 and ready["caller"] == caller.owner.object() and caller.owner.live(parent=os.getpid()),
                 "Caller boundary frame does not bind the actual independently owned Popen.")
-        child_identity = ExactProcess.read(ready["child"])
-        require(child_identity.live(parent=caller.owner.pid), "Caller frame child is not its exact real direct child.")
+        # Parsing validates shape only. A frame claim is never a signal target,
+        # including in finally when a later ownership/binding check rejects it.
+        claimed_child = ExactProcess.read(ready["child"])
+        require(claimed_child.live(parent=caller.owner.pid), "Caller frame child is not its exact real direct child.")
         authority = subject.authority
         with authority.mutex():
             raw = read_bytes(authority.folder / "handoffs" / (ready["handoff"] + ".context.json"))
@@ -1331,17 +1333,21 @@ def guardian_class_window(subject: AdmissionSubject, frozen: FrozenCaller, *, wi
                     and context["boot"] == root["boot"] == child_writer["boot"] == subject.baseline.boot
                     and context["acceptanceSha256"] == handoff["acceptanceSha256"] == scope_now.acceptance_sha256
                     and child_writer["parent"] == root["writer"] and child_writer["contextSha256"] == digest(raw)
-                    and {key: child_writer[key] for key in ("pid", "startedAt")} == child_identity.object()
+                    and {key: child_writer[key] for key in ("pid", "startedAt")} == claimed_child.object()
                     and handoff["role"] == "main" and handoff["entry"] == context["entry"]
                     and handoff["invocation"] == ready["invocation"] and handoff["nonce"] == context["nonce"],
                     "Actual boundary failed independent tuple/epoch/boot/acceptance/writer bindings.")
             require(digest(raw) == ready["contextSha256"] and context["parent"] == {"writer": ready["writer"], **caller.owner.object()}
-                    and context["process"] == child_identity.object() and context["registry"] == str(subject.workspace.registry)
+                    and context["process"] == claimed_child.object() and context["registry"] == str(subject.workspace.registry)
                     and context["entry"] == subject.baseline.scopes[COMPONENT].producer(COMPONENT).descriptor["entry"]
                     and root["phase"] == "active" and root["pid"] == caller.owner.pid and root["startedAt"] == caller.owner.started_at
                     and handoff["phase"] == ("pending" if window == "G-ready-return" else "accepted")
                     and child_writer["phase"] in ("active", "terminal"), "Actual durable boundary differs from the claimed frame.")
         coupling.verify(subject)
+        require(claimed_child.live(parent=caller.owner.pid), "Actual owned child changed during complete ownership verification.")
+        # Only the independently verified same-birth descendant can ever enter
+        # cleanup. Retain this record across legitimate OS adoption after death.
+        verified_child = claimed_child
         state = subject.workspace.fixture_root / "guardian-class-state"
         state_before = tree_inventory(state) if os.path.lexists(state) else None
         require(time.monotonic() - observed_at < 5 and caller.owner.live(parent=os.getpid()), "Exact kill/continue validation window expired.")
@@ -1406,7 +1412,7 @@ def guardian_class_window(subject: AdmissionSubject, frozen: FrozenCaller, *, wi
             independent_lease = "genuinely-finished"
         subject.evidence.write("guardian-class-outcome.json", {"version": 1, "kind": "abr38-guardian-class-window",
             "window": window, "case": caller.case, "actualCallerArgv": caller.argv, "caller": caller.owner.object(),
-            "child": child_identity.object(), "actualCallerReturncode": caller.process.returncode, "reaped": caller.reaped,
+            "child": verified_child.object(), "actualCallerReturncode": caller.process.returncode, "reaped": caller.reaped,
             "kill": kill, "ready": ready, "boundary": boundary, "independentLease": independent_lease,
             "stateBeforeKillOrContinue": state_before, "stateAfter": tree_inventory(state) if os.path.lexists(state) else None,
             "publicCouplingSha256": coupling.observation_sha256, "publicLateBinaryDeathObserved": False,
@@ -1419,13 +1425,13 @@ def guardian_class_window(subject: AdmissionSubject, frozen: FrozenCaller, *, wi
                 caller.wait()
             except (ObservationFailed, subprocess.TimeoutExpired):
                 pass
-        if kill and child_identity is not None and child_identity.live():
+        if kill and verified_child is not None and verified_child.live():
             # Owned observed descendant, not an arbitrary group or a reap claim:
             # after its parent dies it may be adopted by the OS, not this process.
-            signal_verified(child_identity, signal.SIGCONT)
-            signal_verified(child_identity, signal.SIGTERM)
+            signal_verified(verified_child, signal.SIGCONT)
+            signal_verified(verified_child, signal.SIGTERM)
             deadline = min(caller.deadline, time.monotonic() + 20)
-            while child_identity.live() and time.monotonic() < deadline:
+            while verified_child.live() and time.monotonic() < deadline:
                 time.sleep(.01)
             # Kernel disappearance is NOT terminal custody; unknown remains.
         caller.close()
