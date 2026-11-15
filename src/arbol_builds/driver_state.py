@@ -494,7 +494,7 @@ def begin(request: Request) -> Object:
             # Closing happens before custody inspection. Unknown obligations
             # retain their taint and same epoch; begin never cancels work.
             archive_pending = os.path.lexists(authority.folder / "archive" / "custody-pending.json")
-            if not _boot_recovery_pending(authority):
+            if not _boot_recovery_pending(authority, control):
                 reconcile(authority, control=control, persist_unknown=not archive_pending)
             _tainted(authority)
             return {"version": 1, "component": request.component, "session": request.session,
@@ -1009,12 +1009,28 @@ def _recovery_journal(folder: Path, record: Object) -> Object | None:
     return value
 
 
-def _boot_recovery_pending(authority: Authority) -> bool:
+def _boot_recovery_pending(authority: Authority, control: Object) -> bool:
+    """Preserve a verified closed checkpoint before its first recovery journal.
+
+    The caller holds this component mutex; rollout mutation/recovery requires
+    all four. This only defers custody interpretation, never proves a new boot
+    or grants exclusive admission. Drain retains that verification/archival.
+    """
     record = _rollout_record(authority.shared / "deployment.json")
     if record is None or record["phase"] != "awaiting-boot":
         return False
-    folder = _rollout_folder(authority.registry, record["session"], record["checkpoint"])
-    return _recovery_journal(folder, record) is not None
+    if control["phase"] != "draining" or control["session"] != record["session"]:
+        raise Refusal("Pending boot recovery has a different closed session.")
+    authorities = [authority if component == authority.component else Authority(authority.registry, component)
+                   for component in COMPONENTS]
+    folder, _ = _verify_rollout(authority.registry, authorities, record)
+    journal = _recovery_journal(folder, record)
+    if record["newBoot"] is not None and journal is None:
+        raise Refusal("Published boot recovery has no matching private journal.")
+    # A valid awaiting-boot checkpoint protects the old custody/taint even when
+    # no drain has yet published recovery.json. Reconciliation against a new
+    # boot here would replace that evidence before drain can archive it.
+    return True
 
 
 def _recover_boot(request: Request, current_boot: str, deadline: float) -> None:
