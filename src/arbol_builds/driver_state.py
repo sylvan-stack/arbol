@@ -76,6 +76,7 @@ from .driver_payload import (
     verify_gate,
 )
 from .driver_process import (
+    MIMO_CANDIDATE_HELPERS,
     AdministrativeOutput,
     Guardian,
     boot_uuid,
@@ -221,16 +222,17 @@ def launch_gated(registry: str, component: str, route: str, arguments: list[str]
 
 
 def launch_candidate(provider: Payload, arguments: list[str]) -> int:
-    """The three fixed isolated selectors; no launcher policy or legacy fallback."""
+    """Fixed isolated selectors; no launcher policy or legacy fallback."""
     if (len(arguments) < 6 or arguments[0] != "--qualification-launch"
             or arguments[2] not in COMPONENTS or BUILD_PATTERN.fullmatch(arguments[3]) is None
             or arguments[5] != "--"):
         raise Refusal("Invalid fixed candidate dispatch.")
     registry = physical(arguments[1])
     component, build, selector, tail = arguments[2], arguments[3], arguments[4], arguments[6:]
-    if (selector not in ("driver", "build-unit", "build-native")
+    if (selector not in ("driver", "build-unit", "build-native", *MIMO_CANDIDATE_HELPERS)
             or (selector != "driver" and tail)
-            or (selector == "build-native" and component != "arbol-mimo-driver")):
+            or ((selector == "build-native" or selector in MIMO_CANDIDATE_HELPERS)
+                and component != "arbol-mimo-driver")):
         raise Refusal("Invalid fixed candidate selector.")
     authority = Authority(registry, component)
     qualification = authority.read("qualification")
@@ -248,7 +250,8 @@ def launch_candidate(provider: Payload, arguments: list[str]) -> int:
         except BaseException:
             guardian.abort()
             raise
-        mode = {"build-unit": "unit", "build-native": "native"}.get(selector)
+        mode = (selector if selector in MIMO_CANDIDATE_HELPERS else
+                {"build-unit": "unit", "build-native": "native"}.get(selector))
         return supervise(guardian, tail, gate_kind=mode)
 
 

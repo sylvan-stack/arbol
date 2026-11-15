@@ -60,6 +60,11 @@ if TYPE_CHECKING:
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _MAX_SECONDS = 253402300799
+MIMO_CANDIDATE_HELPERS = {
+    "native-probe-death": "tests/fixtures/native_probe_owner_death.py",
+    "native-temporary-run-death": "tests/fixtures/native_temporary_run.py",
+    "native-post-delete-death": "tests/fixtures/native_post_delete_recovery.py",
+}
 _STARTED = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})\.([0-9]{6})Z\Z", re.ASCII)
 
 
@@ -354,11 +359,17 @@ class Guardian:
 
     def spawn_gate(self, kind: str, *,
                    prepared: Callable[[subprocess.Popen[bytes], Object], None] | None = None) -> subprocess.Popen[bytes]:
-        """Only the two specified fixed runner modes, never a caller path/argv."""
-        if (self.candidate is None or kind not in ("unit", "native")
-                or (kind == "native" and self.payload.component != "arbol-mimo-driver")):
+        """Only fixed candidate runners/actors, never a caller path/argv."""
+        if self.candidate is None:
             refuse()
-        return self._spawn([kind], role="helper", entry="scripts/check_build.py", prepared=prepared)
+        if kind in ("unit", "native"):
+            if kind == "native" and self.payload.component != "arbol-mimo-driver":
+                refuse()
+            return self._spawn([kind], role="helper", entry="scripts/check_build.py", prepared=prepared)
+        entry = MIMO_CANDIDATE_HELPERS.get(kind)
+        if self.payload.component != "arbol-mimo-driver" or entry is None:
+            refuse()
+        return self._spawn([], role="helper", entry=entry, prepared=prepared)
 
     def _spawn(self, arguments: list[str], *, role: str, entry: str,
                environment: dict[str, str] | None = None,
@@ -368,9 +379,13 @@ class Guardian:
         Arguments and inherited normal environment are forwarded without storing
         them. Only one explicitly listed socket descriptor reaches this child.
         """
+        mimo = self.payload.component == "arbol-mimo-driver"
+        fixed_helper = ((entry == "scripts/check_build.py"
+                         and (arguments == ["unit"] or (mimo and arguments == ["native"])))
+                        or (mimo and entry in MIMO_CANDIDATE_HELPERS.values() and not arguments))
         if (role not in ("main", "helper")
                 or (role == "main" and entry != self.payload.descriptor["entry"])
-                or (role == "helper" and (self.candidate is None or entry != "scripts/check_build.py"
+                or (role == "helper" and (self.candidate is None or not fixed_helper
                                           or entry not in self.payload.descriptor["helpers"]))):
             refuse()
         prefix = self.payload.prefix if role == "main" else self.payload.helper_prefix(entry)
