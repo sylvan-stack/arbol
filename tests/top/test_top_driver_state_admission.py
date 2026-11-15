@@ -504,6 +504,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import CodeType
 from typing import Literal
 from unittest.mock import patch
 
@@ -513,6 +514,7 @@ from driver_identity_qualification import (
     FixtureAuthority,
     H1Schedule,
     H1View,
+    TerminalView,
     WholeCheckController,
     Workspace,
     require,
@@ -542,10 +544,12 @@ from top.driver_state_support import (
     Captured,
     EvidenceRecorder,
     ExactProcess,
+    FileImage,
     HelperSpanCollector,
     Object,
     ObservationFailed,
     OwnedChild,
+    TerminalSpanCollector,
     digest,
     document,
     exact_fields,
@@ -2611,3 +2615,250 @@ def h1_active_loss_subject(controller: WholeCheckController, baseline: Baseline,
                 if outer_error is None:
                     raise
                 outer_error.add_note("H1 raw output evidence unavailable: " + type(error).__name__)
+
+
+class TerminalSpanObservation:
+    """Fixed four-family positive oracles for the full combined controller.
+
+    These methods supply no gate by themselves. Complete body/source admission
+    must bind the real full-runner adapter, actual helper-owner waits/ACK and
+    quiet sole-owning finish before use. No thread, selector or control message
+    is introduced. The existing collector owns unconditional BOTH-target CONT
+    and bounded real cleanup even when any observation here raises.
+    """
+
+    def __init__(self, *, component: str, case: str, programs: H1ProgramPins) -> None:
+        require(component in _H1_SELECTORS and re.fullmatch(r"[0-9a-f]{32}", case, re.ASCII) is not None,
+                "Invalid fixed positive terminal subject.")
+        self.component, self.case, self.programs = component, case, programs
+        self.h1: H1SpanObservation | None = None
+        self.ps: H1SystemPs | None = None
+        self.original: H1View | None = None
+        self.images: dict[str, FileImage] = {}
+        self.interval_seen = False
+        self.completed = False
+        self.record: Object = {"component": component, "case": case, "completeCheckClaimed": False}
+
+    def precontinue(self, controller: WholeCheckController, baseline: Baseline,
+                    collector: TerminalSpanCollector, view: H1View, schedule: H1Schedule,
+                    ready_raw: bytes) -> None:
+        require(self.original is None and not self.interval_seen and not self.completed
+                and view.component == self.component and view.case == self.case
+                and without_authority(dict(os.environ)) == dict(os.environ),
+                "Positive external observer is repeated, foreign or carries admission authority.")
+        self.original = view
+        span = H1SpanObservation.bind(controller, baseline, collector, component=self.component,
+            case=self.case, schedule=schedule, ready_raw=ready_raw, programs=self.programs)
+        self.h1 = span
+        require(span.view == view, "Positive precontinue observer verified another H1 subject.")
+        # This owns the genuine H1 STOP/ENOENT/raw-EX/CONT observation; it does
+        # NOT send the Suite continue or claim H1/local/full-check completion.
+        self.record["h1Precontinue"] = span.positive_precontinue()
+        self.ps = span.ps
+        require(self.ps is not None, "Fixed OS process observer is unavailable.")
+
+    def _image(self, view: TerminalView, name: str, *, limit: int = 65536) -> FileImage:
+        view.h1.recheck_files()
+        image = read_image(view.h1.root / name, limit=limit)
+        require((view.h1.root / name).lstat().st_nlink == 1, "Linked positive helper receipt.")
+        if name in self.images:
+            require(image == self.images[name], "Actual helper/completion receipt changed.")
+        self.images[name] = image
+        return image
+
+    def _provider_progress(self, controller: WholeCheckController, view: TerminalView) -> Object:
+        """Bind actual mirrored-STOP/wait branch to Guardian's real prior close.
+
+        A terminal provider row alone is NEVER used as proof of its SH close.
+        The owned provider is independently observed STOPPED by the caller;
+        this exact public supervise branch is reached only after spawn_gate
+        returns through Guardian._spawn's real own-close and finalizers.
+        """
+        provider = controller.scope.gate.provider
+        path = provider.root / "src/arbol_builds/driver_process.py"
+        image = read_image(path, limit=1024 * 1024, private=False)
+        require(image.sha256 == view.sources["sources"]["src/arbol_builds/driver_process.py"]["sha256"]
+                and provider_process.__file__ is not None
+                and Path(provider_process.__file__).resolve(strict=True) == path.resolve(strict=True),
+                "Actual public supervisor source differs from the pinned provider.")
+        compiled = compile(image.raw, str(path), "exec", dont_inherit=True, optimize=sys.flags.optimize)
+        codes: dict[str, list[CodeType]] = {}
+
+        def collect(code: CodeType) -> None:
+            codes.setdefault(code.co_qualname, []).append(code)
+            for value in code.co_consts:
+                if isinstance(value, CodeType):
+                    collect(value)
+
+        collect(compiled)  # Compilation only, never executes a packaged body.
+        methods = (provider_process.Guardian.spawn_gate, provider_process.Guardian._spawn,
+                   provider_process.Guardian._close_owned, provider_process.SignalBridge.stopped,
+                   provider_process.SignalBridge._forward, provider_process.supervise)
+        for method in methods:
+            require(Path(method.__code__.co_filename).resolve(strict=True) == path.resolve(strict=True)
+                    and codes.get(method.__qualname__) == [method.__code__],
+                    "Actual close/STOP/continue/wait code object differs from packaged source.")
+        return {"source": image.evidence(), "actualCodeObjects": [method.__qualname__ for method in methods],
+                "closeSite": view.intent["closeSite"], "provider": view.intent["provider"],
+                "suite": view.intent["suite"], "providerRootAloneUsedAsCloseProof": False}
+
+    def _helpers(self, controller: WholeCheckController, view: TerminalView) -> None:
+        """Exact ACK/result receipts plus actual complete metadata/source binding.
+
+        Source-pinned producer witnesses own real direct-child waits and joined
+        APIs; no observer attempts to reap those nonchildren or treats a flag,
+        terminal record, file hash or kernel absence alone as that wait.
+        """
+        authority = Authority(controller.workspace.registry, self.component)
+        provisional = _h1_canonical(view.h1.images["local-results.json"].raw, limit=1024 * 1024)
+        require(len(provisional["rows"]) == len(view.settled["rows"]), "Whole local result inventory changed.")
+        for before, after in zip(provisional["rows"], view.settled["rows"], strict=True):
+            require(before["id"] == after["id"], "Whole local result order changed.")
+            if before["id"] != provisional["h1CaseId"]:
+                require(before["resultSha256"] == after["resultSha256"],
+                        "Original completed ordinary result was replaced at terminal settlement.")
+            else:
+                require(before["resultSha256"] != after["resultSha256"],
+                        "Provisional H1 preconditions cannot substitute for its real positive result.")
+        h1_index: int | None = None
+        for index, row in enumerate(view.settled["helpers"]):
+            prefix = f"terminal-helper-{index:04d}."
+            context_raw = view.images[prefix + "context"].raw
+            context = document(context_raw, limit=65536)
+            accepted_raw = read_bytes(authority.folder / "handoffs" / (context["handoff"] + ".json"))
+            accepted = document(accepted_raw)
+            ack_raw = view.images[prefix + "ack"].raw
+            ack = _h1_canonical(ack_raw, limit=65536)
+            if self.component == "arbol-codex-driver":
+                expected_ack: Object = {"version": 1, "kind": "abr38-terminal-helper-actual-ack",
+                    "handoff": accepted, "contextSha256": digest(context_raw), "process": context["process"],
+                    "ackPath": "synchronous-acknowledge-returned-before-ticket-close"}
+            elif self.component == "arbol-pi-driver":
+                expected_ack = {"version": 1, "kind": "abr38-pi-owned-helper-ack", **context["process"],
+                    "contextSha256": digest(context_raw), "handoffSha256": digest(accepted_raw)}
+            else:
+                expected_ack = {"version": 1, "kind": "abr38-actual-helper-ack", "pid": context["process"]["pid"],
+                    "contextSha256": digest(context_raw), "handoffSha256": digest(accepted_raw)}
+            require(type(ack.get("version")) is int and ack == expected_ack,
+                    "Actual source-bound terminal helper ACK receipt differs.")
+            if context["handoff"] == view.h1.helper_context["handoff"]:
+                require(h1_index is None and context == view.h1.helper_context and row["waitStatus"] == 0,
+                        "Positive H1 receipt is duplicate/foreign or has failed actual wait status.")
+                h1_index = index
+        require(h1_index is not None, "Actual positive H1 helper is absent from the complete settlement.")
+        assert h1_index is not None
+        row = view.settled["helpers"][h1_index]
+        prefix = f"terminal-helper-{h1_index:04d}."
+        actor_raw = view.images[prefix + "result"].raw
+        result = _h1_canonical(actor_raw, limit=4096)
+        require(type(result.get("version")) is int and result == {"version": 1, "kind": "actor-result",
+            "case": self.case, "action": "lease-hold", "outcome": "completed"},
+            "Real positive H1 result is not its actual completed local observation.")
+        if self.component == "arbol-pi-driver":
+            stdout_name, stderr_name = "helper.stdout", "helper.stderr"
+        else:
+            stdout_name, stderr_name = "actor.stdout", "actor.stderr"
+        require(self._image(view, stdout_name).raw == actor_raw and self._image(view, stderr_name).raw == b"",
+                "Actual H1 output/result or stderr differs from its genuine successful capture.")
+        if self.component == "arbol-codex-driver":
+            completion_raw = self._image(view, "helper-completion.json").raw
+            expected_completion: Object = {"version": 1, "kind": "abr38-H1-actual-completion", "case": self.case,
+                "process": view.h1.helper.object(), "waitStatus": 0, "actorResultSha256": digest(actor_raw),
+                "contextSha256": view.h1.helper_context_sha256,
+                "terminalRecordSha256": row["terminalRecordSha256"],
+                "ackPath": "synchronous-acknowledge-returned-before-ticket-close"}
+        elif self.component == "arbol-pi-driver":
+            completion_raw = self._image(view, "helper-completion.json").raw
+            original_ack = self._image(view, "helper-ack.json").raw
+            handoff_raw = read_bytes(authority.folder / "handoffs" / (view.h1.helper_context["handoff"] + ".json"))
+            require(_h1_canonical(original_ack, limit=4096) == {"version": 1, "kind": "abr38-pi-direct-helper-ack",
+                **view.h1.helper.object(), "contextSha256": view.h1.helper_context_sha256,
+                "handoffSha256": digest(handoff_raw)}, "Original Pi H1 synchronous ACK receipt differs.")
+            expected_completion = {"version": 1, "kind": "abr38-pi-helper-completion", "case": self.case,
+                "contextSha256": view.h1.helper_context_sha256, "handoffSha256": digest(handoff_raw),
+                **view.h1.helper.object(), "returncode": 0, "actorResultSha256": digest(actor_raw),
+                "stderrSha256": digest(b""), "terminalRecordSha256": row["terminalRecordSha256"],
+                "ackEvidenceSha256": digest(original_ack)}
+        else:
+            completion_raw = self._image(view, "helper-settlement.json").raw
+            original_ack = self._image(view, "helper-ack.json").raw
+            require(original_ack == view.images[prefix + "ack"].raw
+                    and self._image(view, "helper-terminal.json").raw == view.images[prefix + "terminal"].raw,
+                    "Original actual H1 ACK/terminal receipt changed before whole finish.")
+            expected_completion = {"version": 1, "kind": "abr38-direct-helper-settlement",
+                **view.h1.helper.object(), "returncode": 0, "stdoutSha256": digest(actor_raw),
+                "stderrSha256": digest(b""), "contextSha256": view.h1.helper_context_sha256,
+                "terminalSha256": row["terminalRecordSha256"], "ackSha256": digest(original_ack)}
+        completion = _h1_canonical(completion_raw, limit=65536)
+        require(type(completion.get("version")) is int and completion == expected_completion,
+                "Original actual owner wait/result/ACK/terminal completion differs.")
+        self.record["h1ActualCompletion"] = {"sha256": digest(completion_raw), "value": completion}
+
+    def interval(self, controller: WholeCheckController, baseline: Baseline,
+                 collector: TerminalSpanCollector, view: TerminalView) -> None:
+        require(self.original == view.h1 and self.h1 is not None and self.ps is not None
+                and not self.interval_seen and not self.completed,
+                "Independent terminal interval is repeated, unbound or out of order.")
+        end = collector.terminal_interval_ends_at
+        assert self.ps is not None
+        provider = collector.child.owner
+        # BOTH retained kernel targets, with a Suite bracket. No provider STOP
+        # is sent by this observer; public supervision mirrors real Suite STOP.
+        require(provider.live(parent=os.getpid()) and view.h1.suite.live(parent=provider.pid),
+                "Actual terminal targets lost retained birth/parent bindings.")
+        self.record["suiteStopped"] = self.ps.stopped(view.h1.suite, deadline=end)
+        self.record["providerStopped"] = self.ps.stopped(provider, deadline=end)
+        self.record["suiteStoppedAgain"] = self.ps.stopped(view.h1.suite, deadline=end)
+        self.record["sourceBoundProviderProgress"] = self._provider_progress(controller, view)
+        remaining = end - time.monotonic()
+        require(remaining > 0, "Terminal interval expired before independent short mutex.")
+        authority = Authority(controller.workspace.registry, self.component)
+        with authority.mutex(seconds=remaining):
+            require(time.monotonic() < end, "Terminal mutex was unavailable within the original interval.")
+            custody = reconcile(authority, persist_unknown=False, candidate=controller.scope)
+            require(custody.resolved and custody.active == custody.pending == 0
+                    and all(row["phase"] == "terminal" for row in custody.writers),
+                    "Actual terminal graph has active/pending/unknown obligations.")
+            suite = read(writer_path(authority, view.h1.suite_context["invocation"], view.h1.suite_context["writer"]))
+            require(suite == {"version": 1, "invocation": view.h1.suite_context["invocation"],
+                "writer": view.h1.suite_context["writer"], "parent": view.h1.suite_context["parent"]["writer"],
+                "component": self.component, "epoch": baseline.epochs[self.component],
+                "payloadSha256": controller.scope.producer(self.component).digest, "boot": baseline.boot,
+                **view.h1.suite.object(), "phase": "terminal", "contextSha256": view.h1.suite_context_sha256},
+                "Actual Suite has not genuinely published terminal under its original context.")
+            for writer in custody.writers:
+                if writer["writer"] not in (suite["writer"], suite["parent"]):
+                    require(not ExactProcess.read({key: writer[key] for key in ("pid", "startedAt")}).live(),
+                            "Another actual writer could hold SH at the sole-Suite interval.")
+            self._helpers(controller, view)
+            before = _raw_authority_image(authority)
+            blocked = _h1_raw_ex(authority, view.h1.admission_lock)
+            require(blocked, "Actual original-inode EX did not block at the sole-Suite own-close boundary.")
+            require(_raw_authority_image(authority) == before and time.monotonic() < end,
+                    "Raw interval probe changed metadata or exceeded its five-second boundary.")
+            self.record["soleSuiteOriginalShBlockedEx"] = blocked
+            self.record["terminalMetadata"] = before
+        view.recheck_files()
+        self.interval_seen = True
+        # Return with BOTH still stopped; controller performs real dual CONT.
+        require(time.monotonic() < end, "Independent terminal interval completed too late.")
+
+    def finished(self, controller: WholeCheckController, baseline: Baseline,
+                 collector: TerminalSpanCollector, view: TerminalView, captured: Captured) -> None:
+        require(self.interval_seen and not self.completed and self.original == view.h1
+                and collector.child.reaped and captured.owner == collector.child.owner
+                and captured.returncode == 0 and not view.h1.suite.live() and not view.h1.helper.live(),
+                "Actual positive Suite/helper/provider close/zero-exit/reaps did not complete.")
+        view.recheck_files()
+        for name, image in self.images.items():
+            require(read_image(view.h1.root / name, limit=max(1, len(image.raw))) == image,
+                    "Completed H1 owner evidence changed after actual whole close.")
+        # The real public provider source maps its actual Suite waitpid exit to
+        # the observed provider return. This is not an observer descendant reap.
+        self.record["sourceBoundProviderWait"] = self._provider_progress(controller, view)
+        controller.verify_terminal_closure(self.component, baseline=baseline, view=view)
+        self.record["realWholeClosure"] = {"provider": captured.owner.object(), "returncode": captured.returncode,
+            "providerActuallyReaped": collector.child.reaped, "suiteKernelGone": True, "helperKernelGone": True,
+            "observerReapedDescendant": False, "allOriginalDeferredAssertionsStillRequired": True}
+        controller.evidence.write("terminal-independent-positive.json", self.record, limit=16 * 1024 * 1024)
+        self.completed = True
