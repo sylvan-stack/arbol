@@ -349,11 +349,31 @@ class Guardian:
 
     def spawn_main(self, arguments: list[str], *, environment: dict[str, str] | None = None,
                    prepared: Callable[[subprocess.Popen[bytes], Object], None] | None = None) -> subprocess.Popen[bytes]:
+        return self._spawn(arguments, role="main", entry=self.payload.descriptor["entry"],
+                           environment=environment, prepared=prepared)
+
+    def spawn_gate(self, kind: str, *,
+                   prepared: Callable[[subprocess.Popen[bytes], Object], None] | None = None) -> subprocess.Popen[bytes]:
+        """Only the two specified fixed runner modes, never a caller path/argv."""
+        if (self.candidate is None or kind not in ("unit", "native")
+                or (kind == "native" and self.payload.component != "arbol-mimo-driver")):
+            refuse()
+        return self._spawn([kind], role="helper", entry="scripts/check_build.py", prepared=prepared)
+
+    def _spawn(self, arguments: list[str], *, role: str, entry: str,
+               environment: dict[str, str] | None = None,
+               prepared: Callable[[subprocess.Popen[bytes], Object], None] | None = None) -> subprocess.Popen[bytes]:
         """Preregister, spawn blocked, then accept exact ready/go/started transfer.
 
         Arguments and inherited normal environment are forwarded without storing
         them. Only one explicitly listed socket descriptor reaches this child.
         """
+        if (role not in ("main", "helper")
+                or (role == "main" and entry != self.payload.descriptor["entry"])
+                or (role == "helper" and (self.candidate is None or entry != "scripts/check_build.py"
+                                          or entry not in self.payload.descriptor["helpers"]))):
+            refuse()
+        prefix = self.payload.prefix if role == "main" else self.payload.helper_prefix(entry)
         if self.handoff is not None or self.transferred:
             refuse()
         handoff, child_writer, nonce = token(), token(), token()
@@ -361,8 +381,8 @@ class Guardian:
         pending: Object = {"version": 1, "handoff": handoff, "component": self.authority.component,
                            "invocation": self.invocation, "parent": self.writer, "child": child_writer,
                            "epoch": self.epoch, "payloadSha256": self.payload.digest, "phase": "pending",
-                           "nonce": nonce, "contextSha256": None, "role": "main",
-                           "entry": self.payload.descriptor["entry"], "acceptanceSha256": self.acceptance_sha256}
+                           "nonce": nonce, "contextSha256": None, "role": role,
+                           "entry": entry, "acceptanceSha256": self.acceptance_sha256}
         frames: Frames | None = None
         child_socket: socket.socket | None = None
         try:
@@ -381,7 +401,7 @@ class Guardian:
             inherited = os.environ.copy() if environment is None else dict(environment)
             child_environment = {**without_authority(inherited), NORMAL_FD: str(child_fd),
                                  NORMAL_CONTEXT: str(context_path)}
-            child = subprocess.Popen([*self.payload.prefix, *arguments], env=child_environment,
+            child = subprocess.Popen([*prefix, *arguments], env=child_environment,
                                      pass_fds=(child_fd,), close_fds=True, process_group=0)
             child_socket.close()
             child_socket = None
@@ -391,18 +411,18 @@ class Guardian:
             self.child_owner = identity
             if prepared is not None:
                 prepared(child, identity)
-            context: Object = {"version": 1, "kind": "driver-admission-context", "role": "main",
+            context: Object = {"version": 1, "kind": "driver-admission-context", "role": role,
                                "registry": str(self.authority.registry),
                                "registrySha256": sha256(canonical(self.authority.identity)),
                                "component": self.authority.component, "epoch": self.epoch, "boot": self.boot,
                                "invocation": self.invocation, "writer": child_writer,
                                "parent": {"writer": self.writer, **self.owner}, "process": identity,
                                "handoff": handoff, "nonce": nonce, "payloadSha256": self.payload.digest,
-                               "acceptanceSha256": self.acceptance_sha256, "entry": self.payload.descriptor["entry"]}
+                               "acceptanceSha256": self.acceptance_sha256, "entry": entry}
             normal_context(context)
             digest = sha256(canonical(context))
             with self.authority.mutex():
-                self._check()
+                self._check(allow_draining=role == "helper")
                 if read_handoff(self.authority, handoff) != pending or context_path.exists():
                     refuse()
                 publish(context_path, context)
@@ -420,7 +440,7 @@ class Guardian:
                                 "payloadSha256": self.payload.digest, "boot": self.boot, **identity,
                                 "phase": "active", "contextSha256": digest}
             with self.authority.mutex():
-                self._check()
+                self._check(allow_draining=role == "helper")
                 if (read_handoff(self.authority, handoff) != pending
                         or read_writer(self.authority, self.invocation, child_writer) != expected
                         or not matches(identity, parent=os.getpid())):
