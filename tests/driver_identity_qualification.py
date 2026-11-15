@@ -202,6 +202,7 @@ class Workspace:
     bin_identity: Object
     fixture_root_identity: Object
     origin_evidence_name: str
+    origin_image: Object
 
     @property
     def fixture_root(self) -> Path:
@@ -227,12 +228,14 @@ class Workspace:
                               "creator": creator.object(),
                               "boot": boot_uuid(), "platform": platform_identity(), "emptyAtCreation": True})
         return cls(registry, binary, fixture, creator, directory_identity(registry), directory_identity(binary),
-                   directory_identity(fixture_root), name)
+                   directory_identity(fixture_root), name, dict(evidence.files[name]))
 
     def verify(self, evidence: EvidenceRecorder) -> None:
-        require(valid_token(self.fixture) and self.origin_evidence_name in evidence.files,
-                "Missing external new-workspace provenance.")
-        origin = document(read_image(evidence.root / self.origin_evidence_name).raw)
+        require(valid_token(self.fixture), "Missing external new-workspace provenance.")
+        original = read_image(Path(self.origin_image["path"]))
+        require(original.evidence() == self.origin_image, "Original physical workspace evidence changed.")
+        require(directory_identity(evidence.root) == evidence.identity, "Transaction recorder origin changed.")
+        origin = document(original.raw)
         require(origin["fixture"] == self.fixture and origin["registry"] == self.registry_identity
                 and origin["bin"] == self.bin_identity and origin["fixtureRoot"] == self.fixture_root_identity
                 and origin["creator"] == self.creator.object()
@@ -442,6 +445,142 @@ def verify_completed_receipt(authority: Authority, proof: CompletedReceipt, *, c
 
 
 @dataclass(frozen=True)
+class ArchiveImage:
+    root: Object
+    entries: Mapping[str, Object]
+
+    @classmethod
+    def capture(cls, folder: Path) -> ArchiveImage:
+        root = directory_identity(folder)
+        entries = {str(row["path"]): row for row in tree_inventory(folder)}
+        require(directory_identity(folder) == root, "Archive root changed during inventory.")
+        return cls(root, entries)
+
+    def evidence(self) -> Object:
+        return {"root": self.root, "entries": [self.entries[name] for name in sorted(self.entries)]}
+
+
+def custody_source_images(authority: Authority) -> dict[str, ArchiveImage]:
+    return {name: ArchiveImage.capture(authority.folder / name) for name in ("writers", "handoffs")}
+
+
+def verify_archive_delta(before: ArchiveImage, after: ArchiveImage, sources: Mapping[str, ArchiveImage],
+                         receipt_before: bytes | None) -> None:
+    """Independently derive precisely the existing rename/receipt-copy effects."""
+    require(before.root == after.root, "Original archive directory identity changed.")
+    require(all(after.entries.get(name) == row for name, row in before.entries.items()),
+            "A previously retained archive entry disappeared or changed bytes/type/mode/inode.")
+    added = set(after.entries) - set(before.entries)
+    allowed: set[str] = set()
+    custody_roots = {name.split("/", 1)[0] for name in added if name.startswith("custody-")}
+    require(len(custody_roots) <= 1, "One actual terminal archive created multiple unexplained groups.")
+    for destination in custody_roots:
+        require(valid_token(destination.removeprefix("custody-")) and set(sources) == {"writers", "handoffs"},
+                "Archive addition is not the exact production terminal-tree shape.")
+        root = after.entries[destination]
+        exact_fields(root, ("path", "type", "device", "inode"))
+        require(root["type"] == "directory", "Custody archive root is not a private actual directory.")
+        allowed.add(destination)
+        for name, source in sources.items():
+            target = destination + "/" + name
+            expected_root = {"path": target, "type": "directory",
+                             "device": source.root["device"], "inode": source.root["inode"]}
+            require(after.entries.get(target) == expected_root, "Archived tree did not retain its source directory inode.")
+            allowed.add(target)
+            for relative, row in source.entries.items():
+                moved = target + "/" + relative
+                require(after.entries.get(moved) == {**row, "path": moved},
+                        "Actual renamed archive changed a source entry or its inode/bytes.")
+                allowed.add(moved)
+    receipt_names = {name for name in added if name.startswith("maintenance-")}
+    require(len(receipt_names) <= 1, "One actual drain created multiple unexplained receipt copies.")
+    if receipt_names:
+        require(receipt_before is not None, "Receipt archive has no actual prior canonical receipt.")
+        assert receipt_before is not None
+        receipt = document(receipt_before)
+        validate("maintenance", receipt)
+        require(receipt_before == canonical(receipt), "Receipt beforeimage is not canonical production metadata.")
+        name = "maintenance-" + digest(receipt_before) + ".json"
+        require(receipt_names == {name}, "Receipt archive name differs from the exact old bytes.")
+        row = after.entries[name]
+        exact_fields(row, ("path", "sha256", "size", "device", "inode", "mode", "type"))
+        require(row["type"] == "file" and row["mode"] == 0o600 and row["size"] == len(receipt_before)
+                and row["sha256"] == digest(receipt_before), "Actual receipt copy differs from its original bytes.")
+        allowed.add(name)
+    require(added == allowed, "Unknown archive addition, pending journal or unexplained production effect.")
+
+
+@dataclass(frozen=True)
+class ArchiveWitness:
+    """Only captured successful real provider drain effects may intervene."""
+
+    component: str
+    before: ArchiveImage
+    after: ArchiveImage
+    sources: Mapping[str, ArchiveImage]
+    receipt_before: bytes | None
+    observation: Path
+    observation_sha256: str
+
+    def verify(self, workspace: Workspace) -> Object:
+        require(self.component in COMPONENTS, "Wrong archive-witness component.")
+        image = read_image(self.observation, limit=32 * 1024 * 1024)
+        require(image.sha256 == self.observation_sha256, "Original actual-drain observation changed.")
+        value = document(image.raw, limit=32 * 1024 * 1024)
+        exact_fields(value, ("version", "kind", "component", "registry", "session", "provider", "producer",
+                             "gateSha256", "acceptanceSha256", "controlBefore", "controlAfter", "receiptAfter",
+                             "process", "returncode", "reaped", "stdout", "before", "after", "sources", "receiptBefore"))
+        require(value["version"] == 1 and type(value["version"]) is int
+                and value["kind"] == "abr38-actual-provider-drain-archives"
+                and value["component"] == self.component and value["registry"] == workspace.registry_identity
+                and value["returncode"] == 0 and value["reaped"] is True
+                and value["stdout"].get("phase") == "exclusive"
+                and value["stdout"].get("component") == self.component
+                and value["stdout"].get("session") == value["session"]
+                and value["stdout"].get("receipt") == str(Authority(workspace.registry, self.component).folder / "maintenance.json")
+                and value["before"] == self.before.evidence() and value["after"] == self.after.evidence()
+                and value["sources"] == {name: source.evidence() for name, source in self.sources.items()}
+                and value["receiptBefore"] == (None if self.receipt_before is None else self.receipt_before.decode("utf-8")),
+                "Archive addition is not the captured exact successful production drain.")
+        ExactProcess.read(value["process"])
+        payloads: dict[str, Payload] = {}
+        for name, component in (("provider", "arbol"), ("producer", self.component)):
+            row = value[name]
+            record, payload = _registered_payload(workspace.registry, component, row["build"])
+            require(payload.digest == row["payloadSha256"]
+                    and payload.descriptor["source"] == {"commit": row["sourceCommit"], "tree": row["sourceTree"]}
+                    and payload.descriptor["payloadManifestSha256"] == row["manifestSha256"]
+                    and record["source"]["uncommittedChanges"] is False,
+                    "Actual archive operation source/runtime M-D tuple differs.")
+            payloads[name] = payload
+        acceptance_hash = value["acceptanceSha256"]
+        require(valid_hash(acceptance_hash), "Actual archive acceptance hash is malformed.")
+        raw_acceptance = read_bytes(workspace.registry / ".driver-qualification/acceptances" / (acceptance_hash + ".json"))
+        acceptance = document(raw_acceptance)
+        require(digest(raw_acceptance) == acceptance_hash and raw_acceptance == canonical(acceptance)
+                and acceptance["kind"] == "driver-qualification" and acceptance["status"] in ("candidate", "qualified")
+                and acceptance["scope"] == str(workspace.registry)
+                and acceptance["gateSha256"] == value["gateSha256"]
+                and acceptance["providerPayloadSha256"] == payloads["provider"].digest
+                and acceptance["producerPayloadSha256"] == payloads["producer"].digest,
+                "Actual archive operation issuing acceptance differs.")
+        before_control, after_control = value["controlBefore"], value["controlAfter"]
+        validate("control", before_control)
+        validate("control", after_control)
+        receipt_raw = value["receiptAfter"].encode("utf-8")
+        receipt = document(receipt_raw)
+        validate("maintenance", receipt)
+        require(before_control["phase"] in ("draining", "exclusive") and before_control["session"] == value["session"]
+                and after_control == {**before_control, "phase": "exclusive"}
+                and receipt_raw == canonical(receipt)
+                and receipt["component"] == self.component and receipt["session"] == value["session"]
+                and receipt["epoch"] == before_control["epoch"] and receipt["gateSha256"] == value["gateSha256"],
+                "Actual drain control/receipt changed session, epoch or issuing gate.")
+        verify_archive_delta(self.before, self.after, self.sources, self.receipt_before)
+        return value
+
+
+@dataclass(frozen=True)
 class Baseline:
     gate_bytes: bytes
     scopes: Mapping[str, CandidateScope]
@@ -454,6 +593,8 @@ class Baseline:
     platform: Object
     authority_identities: Mapping[str, Object]
     deployment_identity: Object
+    archives: Mapping[str, ArchiveImage]
+    generation_image: Object
     receipts: Mapping[str, CompletedReceipt] = field(default_factory=dict)
 
 
@@ -553,8 +694,14 @@ class FixtureAuthority:
 
     def __init__(self, workspace: Workspace, evidence: EvidenceRecorder) -> None:
         workspace.verify(evidence)
+        require(set(evidence.files) <= {workspace.origin_evidence_name},
+                "A fixture transaction requires an exclusively new evidence recorder.")
+        evidence.write("workspace-origin-handoff.json", {"version": 1, "kind": "abr38-transaction-origin",
+                       "fixture": workspace.fixture, "original": workspace.origin_image,
+                       "transactionEvidence": evidence.identity})
         self.workspace, self.evidence = workspace, evidence
         self.authorities = {component: Authority(workspace.registry, component) for component in COMPONENTS}
+        self._used = False
 
     def _locks(self) -> dict[str, Object]:
         return {component: {"control": lock_identity(authority, "control.lock"),
@@ -630,7 +777,52 @@ class FixtureAuthority:
                     os.close(descriptor)
             sync_directory(authority.folder)
 
-    def _healthy(self, old: Baseline, deployment: DeploymentPin) -> None:
+    def _prior_generation(self, old: Baseline, *, selected: bool = True) -> Object:
+        folder = self.workspace.registry / ".driver-qualification/fixture-authority"
+        image = read_image(folder / ("generation-" + old.generation_sha256 + ".json"), limit=32 * 1024 * 1024)
+        require(image.sha256 == old.generation_sha256 and image.evidence() == old.generation_image,
+                "Actual prior generation bytes/inode changed.")
+        generation = document(image.raw, limit=32 * 1024 * 1024)
+        require(image.raw == evidence_bytes(generation, limit=32 * 1024 * 1024)
+                and generation["kind"] == "abr38-fixture-generation"
+                and generation["fixture"] == self.workspace.fixture
+                and generation["registry"] == self.workspace.registry_identity
+                and generation["boot"] == old.boot and generation["platform"] == old.platform
+                and generation["gateSha256"] == digest(old.gate_bytes)
+                and generation["authorityIdentities"] == dict(old.authority_identities)
+                and generation["deploymentLock"] == old.deployment_identity
+                and generation["locks"] == dict(old.locks)
+                and generation["archives"] == {name: archive.evidence() for name, archive in old.archives.items()},
+                "Prior generation no longer binds the retained physical fixture/archive lineage.")
+        require(read_image(folder / "owner.json").evidence() == generation["ownerImage"],
+                "Original immutable fixture genesis provenance changed.")
+        if selected:
+            require(read(folder / "head.json") == {"version": 1, "kind": "abr38-fixture-head",
+                    "fixture": self.workspace.fixture, "generationSha256": old.generation_sha256,
+                    "gateSha256": digest(old.gate_bytes)}, "Original selected generation/head differs.")
+        return generation
+
+    def _retained_archives(self, old: Baseline, witnesses: Sequence[ArchiveWitness]) -> dict[str, ArchiveImage]:
+        self._prior_generation(old)
+        require(all(proof.component in COMPONENTS for proof in witnesses), "Unknown archive witness component.")
+        expected = dict(old.archives)
+        for proof in witnesses:
+            observed = proof.verify(self.workspace)
+            scope = old.scopes[proof.component]
+            require(observed["gateSha256"] == scope.gate.digest
+                    and observed["acceptanceSha256"] == scope.acceptance(proof.component)[0]
+                    and observed["provider"]["payloadSha256"] == scope.gate.provider.digest
+                    and observed["producer"]["payloadSha256"] == scope.producer(proof.component).digest,
+                    "Intervening actual drain did not use this unchanged OLD selected tuple group.")
+            require(proof.before == expected[proof.component] and proof.after != proof.before,
+                    "Actual archive additions do not form the complete previous-generation chain.")
+            expected[proof.component] = proof.after
+        for component, authority in self.authorities.items():
+            require(ArchiveImage.capture(authority.folder / "archive") == expected[component],
+                    "Unknown archive deletion/change/addition since the actual prior generation.")
+        return expected
+
+    def _healthy(self, old: Baseline, deployment: DeploymentPin, witnesses: Sequence[ArchiveWitness]) -> dict[str, ArchiveImage]:
         self.workspace.verify(self.evidence)
         deployment.verify()
         require(deployment.identity == old.deployment_identity
@@ -645,16 +837,21 @@ class FixtureAuthority:
                 and owner["deploymentLock"] == old.deployment_identity,
                 "Original genesis authority identity provenance changed.")
         self._assert_no_special_authority(old)
+        retained_archives = self._retained_archives(old, witnesses)
         for component, authority in self.authorities.items():
             require(authority.read("control") == {"version": 1, "phase": "normal", "session": None,
                                                   "epoch": old.epochs[component]}, "Old control lineage changed.")
             old.scopes[component].recheck()
             head = read(authority.shared / "fixture-authority/head.json")
             require(head["generationSha256"] == old.generation_sha256, "Fixture generation lineage changed.")
+        return retained_archives
 
     def apply(self, pins: Sequence[TuplePin], *, old: Baseline | None = None,
-              completed: Sequence[CompletedLaunch] = (), evolutions: Mapping[str, RecordEvolution] | None = None) -> Baseline:
+              completed: Sequence[CompletedLaunch] = (), evolutions: Mapping[str, RecordEvolution] | None = None,
+              archive_witnesses: Sequence[ArchiveWitness] = ()) -> Baseline:
         """One fresh/rebind transaction; failures preserve state and cannot resume here."""
+        require(not self._used, "A fixture transaction/evidence recorder cannot be reused or resumed.")
+        self._used = True
         deadline = Deadline.after(120)
         self.workspace.verify(self.evidence)
         with use_pins(self.workspace.registry, pins) as images:
@@ -682,14 +879,20 @@ class FixtureAuthority:
                                 and held.st_uid == os.getuid() and stat.S_IMODE(held.st_mode) == 0o600,
                                 "Historical issuing image guard differs.")
                         pin.verify(self.workspace.registry)
-                return catalog_section(self.workspace.registry, lambda: self._publish(group, old, completed, deadline), deadline=deadline)
+                return catalog_section(self.workspace.registry, lambda: self._publish(group, old, completed, deadline, archive_witnesses), deadline=deadline)
 
     def _validate_group(self, group: PreparedGroup, before: Mapping[str, MarkerImage],
                         epochs: Mapping[str, str], locks: Mapping[str, Object],
-                        authority_identities: Mapping[str, Object], deployment: DeploymentPin) -> None:
+                        authority_identities: Mapping[str, Object], deployment: DeploymentPin,
+                        archives: Mapping[str, ArchiveImage], old: Baseline | None) -> None:
         self.workspace.verify(self.evidence)
         deployment.verify()
         require(self._authority_identities() == authority_identities, "Stable authority directories were replaced.")
+        if old is not None:
+            self._prior_generation(old, selected=False)
+        for component, authority in self.authorities.items():
+            require(ArchiveImage.capture(authority.folder / "archive") == archives[component],
+                    "Complete retained archive inventory changed before/after gate-LAST.")
         require(self._locks() == locks, "Authority lock descriptions were replaced.")
         require(_gate_document(group.gate_bytes) == group.gate, "Actual routes do not match staged canonical gate.")
         provider = _candidate_payload(self.workspace.registry, "arbol", group.images["arbol"].payload.digest)
@@ -708,7 +911,8 @@ class FixtureAuthority:
                     "Actual record changed during serialized publication.")
 
     def _publish(self, group: PreparedGroup, old: Baseline | None,
-                 completed: Sequence[CompletedLaunch], deadline: Deadline) -> Baseline:
+                 completed: Sequence[CompletedLaunch], deadline: Deadline,
+                 witnesses: Sequence[ArchiveWitness]) -> Baseline:
         shared = self.workspace.registry / ".driver-qualification"
         fresh = old is None
         if fresh:
@@ -726,6 +930,8 @@ class FixtureAuthority:
         new_gate_published = False
         epochs: dict[str, str] = {}
         before: dict[str, MarkerImage] = {}
+        archive_outputs: dict[str, ArchiveImage] = {}
+        expected_old_archives: dict[str, ArchiveImage] = {}
         with fixture_deployment_lock(self.workspace.registry, original=None if old is None else old.deployment_identity) as deployment, ExitStack() as locks:
             deadline.remaining()
             if fresh:
@@ -735,7 +941,7 @@ class FixtureAuthority:
                 private_directory(shared / "fixture-authority", create=True)
             else:
                 assert old is not None
-                self._healthy(old, deployment)
+                self._healthy(old, deployment, witnesses)
             for authority in self.authorities.values():
                 locks.enter_context(authority.mutex(seconds=min(20, deadline.remaining())))
             exclusive: dict[str, int] = {}
@@ -751,7 +957,7 @@ class FixtureAuthority:
                     # All four are now held, so revalidate the COMPLETE original
                     # normal controls/scopes/permitted receipt lineage before
                     # writing even the first transaction-owned draining control.
-                    self._healthy(old, deployment)
+                    expected_old_archives = self._healthy(old, deployment, witnesses)
                     for component, authority in self.authorities.items():
                         authority.write("control", {"version": 1, "phase": "draining", "session": session,
                                                     "epoch": old.epochs[component]})
@@ -762,6 +968,8 @@ class FixtureAuthority:
                     locks.callback(os.close, descriptor)
                 stable_locks = self._locks()
                 stable_authorities = self._authority_identities()
+                require(old is None or stable_authorities == old.authority_identities,
+                        "Original authority identities changed after closure; no new baseline.")
                 deployment.verify()
                 if not fresh:
                     assert old is not None
@@ -779,7 +987,23 @@ class FixtureAuthority:
                         deadline.remaining()
                         authority.write("control", {"version": 1, "phase": "exclusive", "session": session,
                                                     "epoch": old.epochs[component]})
+                        archive_before = ArchiveImage.capture(authority.folder / "archive")
+                        require(archive_before == expected_old_archives[component],
+                                "Archive changed since the serialized OLD beforeimage.")
+                        source_before = custody_source_images(authority)
                         archive_terminal(authority, exclusive[component], candidate=old.scopes[component])
+                        archive_after = ArchiveImage.capture(authority.folder / "archive")
+                        verify_archive_delta(archive_before, archive_after, source_before, None)
+                        archive_outputs[component] = archive_after
+                        self.evidence.write("terminal-archive-" + component + ".json", {
+                            "version": 1, "kind": "abr38-actual-terminal-archive", "component": component,
+                            "registry": authority.identity, "control": authority.read("control"),
+                            "before": archive_before.evidence(), "after": archive_after.evidence(),
+                            "sources": {name: image.evidence() for name, image in source_before.items()},
+                            "oldProviderPayloadSha256": old.scopes[component].gate.provider.digest,
+                            "oldProducerPayloadSha256": old.scopes[component].producer(component).digest,
+                            "independentExclusiveLock": lock_identity(authority, "admission.lock"),
+                        }, limit=32 * 1024 * 1024)
                         require(markers(authority) == before[component], "Archival changed normal-admission history.")
                     require(read_bytes(gate_path) == old.gate_bytes, "Old canonical gate changed before withholding.")
                     self.evidence.write_bytes("old-gate.json", old.gate_bytes)
@@ -787,11 +1011,18 @@ class FixtureAuthority:
                 else:
                     require(not os.path.lexists(gate_path), "A fresh scope unexpectedly has a gate.")
                     before = {component: markers(authority) for component, authority in self.authorities.items()}
+                    archive_outputs = {component: ArchiveImage.capture(authority.folder / "archive")
+                                       for component, authority in self.authorities.items()}
+                    require(all(not image.entries for image in archive_outputs.values()),
+                            "Fresh actual archive directory has unowned additions.")
                 new_selection_started = True
                 fixture = private_directory(shared / "fixture-authority", create=True)
                 acceptances = private_directory(shared / "acceptances", create=True)
-                archives = {component: tree_inventory(authority.folder / "archive")
-                            for component, authority in self.authorities.items()}
+                archives = archive_outputs
+                require(set(archives) == set(COMPONENTS), "Missing exact terminal-archive result.")
+                for component, authority in self.authorities.items():
+                    require(ArchiveImage.capture(authority.folder / "archive") == archives[component],
+                            "Retained archive changed after actual archival; no refreshed self-baseline.")
                 for component, authority in self.authorities.items():
                     deadline.remaining()
                     raw = canonical(group.acceptances[component])
@@ -840,7 +1071,11 @@ class FixtureAuthority:
                     "deploymentLock": deployment.identity, "normalAdmissions": {
                         component: {"before": image.evidence(), "after": markers(self.authorities[component]).evidence()}
                         for component, image in before.items()},
-                    "archives": archives, "evidenceSha256": group.preparation_evidence_sha256,
+                    "archives": {component: image.evidence() for component, image in archives.items()},
+                    "ownerImage": read_image(fixture / "owner.json").evidence(),
+                    "interveningArchiveWitnesses": [{"component": proof.component,
+                        "path": str(proof.observation), "sha256": proof.observation_sha256} for proof in witnesses],
+                    "evidenceSha256": group.preparation_evidence_sha256,
                 }
                 # This is immutable fixture provenance, not production grant/empty-custody evidence.
                 generation_bytes = evidence_bytes(generation, limit=32 * 1024 * 1024)
@@ -851,7 +1086,7 @@ class FixtureAuthority:
                 publish_bytes(generation_path, generation_bytes, limit=32 * 1024 * 1024)
                 publish(fixture / "head.json", {"version": 1, "kind": "abr38-fixture-head", "fixture": self.workspace.fixture,
                                                 "generationSha256": generation_hash, "gateSha256": digest(group.gate_bytes)})
-                self._validate_group(group, before, epochs, stable_locks, stable_authorities, deployment)
+                self._validate_group(group, before, epochs, stable_locks, stable_authorities, deployment, archives, old)
                 deadline.remaining()
                 require(owner["boot"] == boot_uuid() and owner["platform"] == platform_identity(), "Actual machine changed.")
                 publish(gate_path, group.gate)  # The sole NEW group publication point, LAST.
@@ -865,7 +1100,7 @@ class FixtureAuthority:
                     require(reconcile(authority, candidate=scopes[component]).resolved,
                             "Actual postcommit custody is not resolved.")
                     require(markers(authority) == before[component], "Postcommit marker inventory changed under EX.")
-                self._validate_group(group, before, epochs, stable_locks, stable_authorities, deployment)
+                self._validate_group(group, before, epochs, stable_locks, stable_authorities, deployment, archives, old)
                 self.evidence.write("committed-generation.json", generation, limit=32 * 1024 * 1024)
                 retained = {} if old is None else {
                     component: replace(proof, rebind_generations=(*proof.rebind_generations, generation_hash))
@@ -873,7 +1108,8 @@ class FixtureAuthority:
                 }
                 return Baseline(group.gate_bytes, scopes, before, stable_locks, group.images, epochs,
                                 generation_hash, str(generation["boot"]), generation["platform"],
-                                stable_authorities, deployment.identity, retained)
+                                stable_authorities, deployment.identity, archives,
+                                read_image(generation_path, limit=32 * 1024 * 1024).evidence(), retained)
             except BaseException:
                 # OLD partial closure leaves its exact OLD group, not a mixed NEW success.
                 # From withholding onward no partial NEW group may remain admitted.
@@ -916,6 +1152,7 @@ class AdministrativeCapture:
     arguments: Mapping[str, str]
     before_control: Object
     capture: Captured
+    archive_witness: ArchiveWitness | None
 
 
 class WholeCheckController:
@@ -1064,13 +1301,45 @@ class WholeCheckController:
         authority = Authority(self.workspace.registry, component)
         with authority.mutex():
             before_control = authority.read("control")
+            archive_before = ArchiveImage.capture(authority.folder / "archive")
+            source_before = custody_source_images(authority)
+            receipt_before = (read_bytes(authority.folder / "maintenance.json")
+                              if os.path.lexists(authority.folder / "maintenance.json") else None)
         child = OwnedChild(argv, environment=without_authority(dict(environment)), cwd=self.workspace.registry)
         captured = self._collect_owned(child, seconds)
         require(captured.returncode == 0, "Actual administrative operation failed; preserve closed state.")
         result = document(captured.stdout)
         require("error" not in result, "Actual administrative operation refused.")
+        archive_after = ArchiveImage.capture(authority.folder / "archive")
+        witness = None
+        if archive_after != archive_before:
+            require(command == "drain" and result.get("phase") == "exclusive",
+                    "Unaccounted archive mutation outside the actual successful production drain.")
+            verify_archive_delta(archive_before, archive_after, source_before, receipt_before)
+            def tuple_row(payload: Payload) -> Object:
+                _, current = _registered_payload(self.workspace.registry, payload.component, payload.build)
+                require(current == payload, "Actual drain payload changed.")
+                return {"build": payload.build, "sourceCommit": payload.descriptor["source"]["commit"],
+                        "sourceTree": payload.descriptor["source"]["tree"], "payloadSha256": payload.digest,
+                        "manifestSha256": payload.descriptor["payloadManifestSha256"]}
+            name = "drain-archives-" + uuid.uuid4().hex + ".json"
+            raw_hash = self.evidence.write(name, {"version": 1, "kind": "abr38-actual-provider-drain-archives",
+                    "component": component, "registry": authority.identity, "session": session,
+                    "provider": tuple_row(self.scope.gate.provider), "producer": tuple_row(self.scope.producer(component)),
+                    "gateSha256": self.scope.gate.digest,
+                    "acceptanceSha256": authority.read("qualification")["acceptanceSha256"],
+                    "controlBefore": before_control, "controlAfter": authority.read("control"),
+                    "receiptAfter": read_bytes(authority.folder / "maintenance.json").decode("utf-8"),
+                    "process": captured.owner.object(), "returncode": captured.returncode, "reaped": child.reaped,
+                    "stdout": result, "before": archive_before.evidence(), "after": archive_after.evidence(),
+                    "sources": {key: image.evidence() for key, image in source_before.items()},
+                    "receiptBefore": None if receipt_before is None else receipt_before.decode("utf-8")},
+                    limit=32 * 1024 * 1024)
+            witness = ArchiveWitness(component, archive_before, archive_after, source_before, receipt_before,
+                                     self.evidence.root / name, raw_hash)
+            witness.verify(self.workspace)
         self.last_administration = AdministrativeCapture(component, command, session, dict(arguments),
-                                                          before_control, captured)
+                                                          before_control, captured, witness)
         return result
 
 
