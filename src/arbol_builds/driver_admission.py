@@ -473,7 +473,9 @@ def normal_control(authority: Authority, *, epoch: str | None = None) -> Object:
     if taint is not None:
         if taint["component"] != authority.component or taint["reason"] != "legacy":
             refuse()
-    return control
+    if not reconcile(authority, control=control).unknown:
+        return control
+    refuse()
 
 
 def custody_loss(authority: Authority, *, invocation: str, epoch: str, boot: str,
@@ -497,3 +499,250 @@ def custody_loss(authority: Authority, *, invocation: str, epoch: str, boot: str
     value = {"version": 1, "component": authority.component, "epoch": epoch, "boot": boot,
              "reason": "custody-loss", "invocation": invocation, "payloadSha256": payload_sha256}
     authority.write("taint", value)
+
+
+@dataclass(frozen=True)
+class Custody:
+    writers: tuple[Object, ...]
+    handoffs: tuple[Object, ...]
+    active: int
+    pending: int
+    unknown: bool
+
+    @property
+    def resolved(self) -> bool:
+        return not self.unknown and not self.active and not self.pending
+
+
+def _documents(folder: Path, *, limit: int = 100000) -> list[Path]:
+    private_directory(folder)
+    found: list[Path] = []
+    for path in folder.iterdir():
+        if len(found) >= limit or not path.name.endswith(".json"):
+            refuse()
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode):
+            refuse()
+        found.append(path)
+    return sorted(found)
+
+
+def _custody_payload(authority: Authority, digest: str) -> Object:
+    from .driver_payload import BUILD, DESCRIPTOR, SUBTREE, registered
+
+    if not valid_hash(digest):
+        refuse()
+    matches: list[Object] = []
+    count = 0
+    for folder in (authority.registry / authority.component).iterdir():
+        count += 1
+        if count > 100000:
+            refuse()
+        if not BUILD.fullmatch(folder.name):
+            continue
+        path = folder / SUBTREE / DESCRIPTOR
+        try:
+            raw = read_bytes(path)
+        except FileNotFoundError:
+            continue
+        if sha256(raw) == digest:
+            matches.append(registered(authority.registry, authority.component, folder.name).descriptor)
+    if len(matches) != 1:
+        refuse()
+    return matches[0]
+
+
+def reconcile(authority: Authority, *, control: Object | None = None) -> Custody:
+    """Under control mutex: inspect obligations, never infer terminal from death.
+
+    Every preexisting helper is checked against its exact original admitted
+    invocation/epoch/payload. Its accepted record survives its parent's exit.
+    """
+    from .driver_process import boot_uuid, identity_record, matches
+
+    control = authority.read("control") if control is None else control
+    boot = boot_uuid()
+    writers: dict[tuple[str, str], Object] = {}
+    handoffs: dict[str, Object] = {}
+    contexts: dict[str, tuple[Object, str]] = {}
+    active = pending = 0
+    unknown = False
+    try:
+        if (authority.folder / "archive" / "custody-pending.json").exists():
+            refuse()  # Only closed exclusive archive recovery may interpret missing directories.
+        root = private_directory(authority.folder / "writers")
+        for invocation in sorted(root.iterdir()):
+            if not valid_token(invocation.name):
+                refuse()
+            for path in _documents(invocation):
+                writer_name = path.name.removesuffix(".json")
+                value = read_writer(authority, invocation.name, writer_name)
+                identity_record({key: value[key] for key in ("pid", "startedAt")})
+                if (value["epoch"] != control["epoch"] or value["boot"] != boot
+                        or not valid_hash(value["payloadSha256"])):
+                    refuse()
+                if value["parent"] is None:
+                    if value["contextSha256"] is not None:
+                        refuse()
+                elif not valid_hash(value["contextSha256"]):
+                    refuse()
+                if len(writers) >= 100000:
+                    refuse()
+                writers[(invocation.name, writer_name)] = value
+        for path in _documents(authority.folder / "handoffs"):
+            if path.name.endswith(".context.json"):
+                handoff = path.name.removesuffix(".context.json")
+                if not valid_token(handoff):
+                    refuse()
+                raw = read_bytes(path)
+                value = decode(raw)
+                normal_context(value)
+                if value["handoff"] != handoff:
+                    refuse()
+                contexts[handoff] = (value, sha256(raw))
+            else:
+                handoff = path.name.removesuffix(".json")
+                handoffs[handoff] = read_handoff(authority, handoff)
+        payloads: dict[str, Object] = {}
+        incoming: dict[tuple[str, str], Object] = {}
+        for handoff, value in handoffs.items():
+            invocation = value["invocation"]
+            parent = writers.get((invocation, value["parent"]))
+            child = writers.get((invocation, value["child"]))
+            if (parent is None or value["epoch"] != control["epoch"]
+                    or value["payloadSha256"] != parent["payloadSha256"]
+                    or value["epoch"] != parent["epoch"] or not valid_hash(value["payloadSha256"])):
+                refuse()
+            key = (invocation, value["child"])
+            if key in incoming:
+                refuse()
+            incoming[key] = value
+            if value["phase"] == "pending":
+                pending += 1
+                if parent["phase"] != "active":
+                    refuse()
+            elif child is None:
+                refuse()
+            payload = payloads.get(value["payloadSha256"])
+            if payload is None:
+                payload = _custody_payload(authority, value["payloadSha256"])
+                payloads[value["payloadSha256"]] = payload
+            allowed = [payload["entry"]] if value["role"] == "main" else payload["helpers"]
+            if value["entry"] not in allowed:
+                refuse()
+            context_pair = contexts.get(handoff)
+            if value["contextSha256"] is None:
+                if context_pair is not None or child is not None or value["phase"] != "pending":
+                    refuse()
+                continue
+            if context_pair is None:
+                refuse()
+            context, digest = context_pair
+            expected_parent = {"writer": parent["writer"], **{key: parent[key] for key in ("pid", "startedAt")}}
+            if (digest != value["contextSha256"] or context["registry"] != str(authority.registry)
+                    or context["registrySha256"] != sha256(canonical(authority.identity))
+                    or context["component"] != authority.component or context["epoch"] != value["epoch"]
+                    or context["boot"] != boot or context["invocation"] != invocation
+                    or context["writer"] != value["child"] or context["parent"] != expected_parent
+                    or any(context[key] != value[key] for key in (
+                        "handoff", "nonce", "payloadSha256", "acceptanceSha256", "role", "entry"))):
+                refuse()
+            if child is not None and (child["parent"] != parent["writer"]
+                                      or child["contextSha256"] != digest
+                                      or child["payloadSha256"] != value["payloadSha256"]
+                                      or context["process"] != {key: child[key] for key in ("pid", "startedAt")}):
+                refuse()
+            if value["phase"] == "pending" and not matches(context["process"], parent=parent["pid"]):
+                refuse()
+        if set(contexts) - set(handoffs):
+            refuse()
+        for key, writer in writers.items():
+            if writer["parent"] is not None:
+                handoff_value = incoming.get(key)
+                if handoff_value is None or handoff_value["parent"] != writer["parent"]:
+                    refuse()
+                if writer["phase"] == "terminal" and handoff_value["phase"] != "accepted":
+                    refuse()
+            elif writer["phase"] == "terminal" and not any(
+                    value["parent"] == writer["writer"] and value["invocation"] == writer["invocation"]
+                    and value["phase"] == "accepted" for value in handoffs.values()):
+                refuse()
+            if writer["phase"] == "active":
+                active += 1
+                if not matches({key: writer[key] for key in ("pid", "startedAt")}):
+                    refuse()
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+        unknown = True
+        custody_loss(authority, invocation=token(), epoch=control["epoch"], boot=boot, payload_sha256=None)
+    return Custody(tuple(writers.values()), tuple(handoffs.values()), active, pending, unknown)
+
+
+def _exclusive(authority: Authority, descriptor: int) -> None:
+    """Verify the held description without ever unlocking it."""
+    named = (authority.folder / "admission.lock").lstat()
+    held = _regular(descriptor)
+    if (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino):
+        refuse()
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    independent = authority.open_lock("admission.lock")
+    try:
+        try:
+            fcntl.flock(independent, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        refuse()
+    finally:
+        os.close(independent)
+
+
+def archive_terminal(authority: Authority, descriptor: int) -> None:
+    """Under control mutex and closed exclusive admission, archive whole trees.
+
+    The bounded private archive journal makes the two directory renames resumable.
+    It carries no new public admission fields and no account or process argv.
+    """
+    control = authority.read("control")
+    if control["phase"] not in ("draining", "exclusive"):
+        refuse()
+    _exclusive(authority, descriptor)
+    archive = private_directory(authority.folder / "archive")
+    journal_path = archive / "custody-pending.json"
+    try:
+        journal = read(journal_path)
+    except FileNotFoundError:
+        custody = reconcile(authority, control=control)
+        if not custody.resolved:
+            refuse()
+        journal = {"version": 1, "kind": "driver-custody-archive", "epoch": control["epoch"],
+                   "archive": token(), "phase": "prepared"}
+        private_directory(archive / ("custody-" + journal["archive"]), create=True)
+        publish(journal_path, journal)
+    fields(journal, "version kind epoch archive phase")
+    if (journal["kind"] != "driver-custody-archive" or journal["epoch"] != control["epoch"]
+            or not valid_token(journal["archive"])
+            or journal["phase"] not in ("prepared", "writers", "handoffs", "complete")):
+        refuse()
+    destination = private_directory(archive / ("custody-" + journal["archive"]))
+    phases = ("prepared", "writers", "handoffs", "complete")
+    for index, name in enumerate(("writers", "handoffs")):
+        source, target = authority.folder / name, destination / name
+        if phases.index(journal["phase"]) <= index:
+            if target.exists():
+                private_directory(target)
+                if source.exists():
+                    refuse()
+            else:
+                private_directory(source)
+                os.rename(source, target)
+                sync_directory(destination)
+                sync_directory(authority.folder)
+            journal = {**journal, "phase": phases[index + 1]}
+            publish(journal_path, journal)
+        else:
+            private_directory(target)
+    # The old complete trees remain private recovery evidence. Recreate only
+    # after both renames are durable; normal admission stays closed throughout.
+    for name in ("writers", "handoffs"):
+        private_directory(authority.folder / name, create=True)
+    publish(journal_path, {**journal, "phase": "complete"})
+    remove(journal_path)
