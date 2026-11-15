@@ -2073,8 +2073,15 @@ class H1SpanObservation:
 
     def __init__(self, controller: WholeCheckController, baseline: Baseline, collector: HelperSpanCollector,
                  *, component: str, case: str, schedule: H1Schedule, ready_raw: bytes) -> None:
-        # Pure ownership-container setup only. bind retains this instance across
-        # EVERY fallible source/ready/origin/ps/evidence operation below.
+        # Ready starts ONE <=60-second span, including failed EOF capture and
+        # all cleanup; the original full-unit budget cannot leak through here.
+        # Preserve the collector's existing twenty-second cleanup reserve and
+        # retain the separate five-second effect boundary below.
+        ready_at = collector.ready_observed_at
+        collector.end = min(collector.end, ready_at + 60)
+        collector.deadline = min(collector.deadline, collector.end - 20)
+        # bind retains this instance across EVERY subsequent fallible
+        # source/ready/origin/ps/evidence operation below.
         self.controller, self.baseline, self.collector = controller, baseline, collector
         self.component, self.case, self.schedule, self.ready_raw = component, case, schedule, ready_raw
         self.view: H1View | None = None
@@ -2086,7 +2093,7 @@ class H1SpanObservation:
         self.observations: Object = {"component": component, "case": case, "completeCheckClaimed": False}
         self.cleanup_record: Object | None = None
         self.sources: Object = {}
-        self.end = min(collector.deadline, collector.ready_observed_at + 5)
+        self.end = min(collector.deadline, ready_at + 5)
         self.authority = Authority(controller.workspace.registry, component)
 
     @classmethod
