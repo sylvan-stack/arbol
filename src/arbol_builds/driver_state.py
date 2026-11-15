@@ -1457,3 +1457,159 @@ def supervise_execute(prepared: Prepared) -> AdministrativeOutput:
 
     return run_administrative(prepared.payload, prepared.context, prepared.binding, prepared.descriptor,
                               prepared.context_path, check)
+
+
+def _pending_scope(context: Object, *, marker_absent: bool = False) -> None:
+    """Read only declared identity metadata, preserving unrelated pending evidence."""
+    directory = private_directory(physical(context["stateDirectory"]))
+    if _state_format(directory) != 2 or _root_generation(directory) != context["generation"]:
+        raise Refusal("Completed maintenance lacks the exact format/root generation.")
+    if os.path.lexists(directory / "identity-upgrade.json"):
+        raise Refusal("An unresolved root conversion journal remains fenced.")
+    if marker_absent and os.path.lexists(directory / "identity-maintenance.json"):
+        raise Refusal("A later root maintenance marker cannot consume an earlier result.")
+    subscriptions = directory / "subscriptions"
+    if not os.path.lexists(subscriptions):
+        return
+    private_directory(subscriptions)
+    count = 0
+    for folder in subscriptions.iterdir():
+        count += 1
+        if count > 100000 or SUBSCRIPTION.fullmatch(folder.name) is None:
+            raise Refusal("Unsafe Subscription identity metadata.")
+        private_directory(folder)
+        for name in ("identity.json", "identity-pending.json"):
+            path = folder / name
+            try:
+                raw = read_bytes(path)
+            except FileNotFoundError:
+                continue
+            metadata_document("subscriptions/" + folder.name + "/" + name, raw)
+            if name == "identity-pending.json" and (
+                    context["operation"] != "identity-recover" or folder.name == context["subscription"]):
+                raise Refusal("An operation-relevant Subscription journal remains fenced.")
+
+
+def _complete_marker(context: Object, operation: Object, backup_digest: str, raw: bytes) -> Object:
+    marker = metadata_marker(decode(raw))
+    expected = {"version": 1, **{key: context[key] for key in (
+        "component", "session", "epoch", "operation", "attempt", "payloadSha256", "generation")},
+        "phase": "complete", "sourceSha256": operation["sourceSha256"], "backupSha256": backup_digest}
+    if marker != expected:
+        raise Refusal("Local maintenance marker does not settle the exact pending attempt.")
+    return marker
+
+
+def _result_value(context: Object, backup_digest: str) -> Object:
+    result = {"version": 1, "kind": "driver-state-result", **{key: context[key] for key in (
+        "component", "session", "epoch", "operation", "attempt", "payloadSha256", "generation")},
+        "stateDirectorySha256": sha256(context["stateDirectory"].encode("utf-8")),
+        "format": 2, "status": "complete", "backupSha256": backup_digest}
+    if context["operation"] == "identity-recover":
+        result["subscription"] = context["subscription"]
+    validate("result", result)
+    return result
+
+
+def _archive_observation(prepared: Prepared) -> str:
+    backup = private_directory(physical(prepared.binding["backup"]))
+    before = metadata_backup(backup / "before")
+    if prepared.operation["backupSha256"] not in (None, before.digest):
+        raise Refusal("Before-manifest does not match its immutable attempt.")
+    if prepared.context["operation"] == "restore":
+        source = metadata_backup(private_directory(physical(prepared.binding["source"])), source=True)
+        if source.digest != prepared.operation["sourceSha256"]:
+            raise Refusal("Restore source changed before acknowledgement.")
+        conversion = backup / "conversion-before"
+        if source.manifest["format"] == 1:
+            if metadata_backup(conversion).manifest["format"] != 1:
+                raise Refusal("Format1 restore lacks its immutable conversion before-image.")
+        elif os.path.lexists(conversion):
+            raise Refusal("Format2 restore has an unexpected conversion before-image.")
+    elif prepared.operation["sourceSha256"] is not None:
+        raise Refusal("Unexpected maintenance source binding.")
+    if prepared.context["operation"] == "identity-recover":
+        name = "subscriptions/" + prepared.context["subscription"] + "/identity-pending.json"
+        original = before.contents.get(name)
+        if before.manifest["format"] != 2 or original is None:
+            raise Refusal("Targeted recovery lacks its immutable original journal.")
+        pending = metadata_document(name, original)
+        sidecar_name = "subscriptions/" + prepared.context["subscription"] + "/identity.json"
+        sidecar = metadata_document(sidecar_name, read_bytes(Path(prepared.context["stateDirectory"]) / sidecar_name))
+        if sidecar != {"version": 1, "witness": pending["witness"], "state": "retired"}:
+            raise Refusal("Targeted recovery has not durably retired the original witness.")
+    return before.digest
+
+
+def _child_result(output: AdministrativeOutput, context: Object) -> None:
+    if output.returncode != 0 or not 0 < len(output.stdout) <= LIMIT:
+        raise Refusal("Administrative child did not return one bounded success.")
+    value = decode(output.stdout, exact=False)
+    fields(value, "version format generation maintenance")
+    expected = {"version": 1, "format": 2, "generation": context["generation"],
+                "maintenance": {key: context[key] for key in (
+                    "component", "session", "epoch", "operation", "attempt", "payloadSha256")}}
+    expected["maintenance"]["stateDirectorySha256"] = sha256(context["stateDirectory"].encode("utf-8"))
+    if context["operation"] == "identity-recover":
+        expected["maintenance"]["subscription"] = context["subscription"]
+    if type(value["format"]) is not int or value != expected:
+        raise Refusal("Administrative result tuple/generation mismatch.")
+
+
+def settle_execute(prepared: Prepared, output: AdministrativeOutput | None) -> Object:
+    """Ack only exact completed state; write result before retiring pending pointer."""
+    if output is not None:
+        _child_result(output, prepared.context)
+    elif prepared.cached_result is None:
+        raise Refusal("Neither child success nor a durable same-attempt result exists.")
+    digest = _archive_observation(prepared)
+    state = Path(prepared.context["stateDirectory"])
+    marker_raw = read_bytes(state / "identity-maintenance.json")
+    _complete_marker(prepared.context, prepared.operation, digest, marker_raw)
+    _pending_scope(prepared.context)
+    result = _result_value(prepared.context, digest)
+    if prepared.cached_result is not None and prepared.cached_result != result:
+        raise Refusal("Durable result does not match the exact current attempt.")
+    authority = prepared.authority
+    with authority.mutex():
+        control, receipt = _closed_attempt(authority, prepared.request, prepared.payload, prepared.gate, prepared.descriptor)
+        if control["epoch"] != prepared.context["epoch"] or receipt != prepared.context["receiptSha256"]:
+            raise Refusal("Exclusive admission changed before acknowledgement.")
+        if (read(prepared.context_path) != prepared.context
+                or read(prepared.folder / "contexts" / (prepared.context["attempt"] + ".request.json")) != prepared.binding):
+            raise Refusal("Immutable attempt changed before acknowledgement.")
+        active = _read_optional(prepared.folder / "operation.json", "operation")
+        if active is not None and active != prepared.operation:
+            raise Refusal("A later pending operation cannot consume earlier output.")
+        if active is None and prepared.cached_result is None:
+            raise Refusal("Pending attempt disappeared before acknowledgement.")
+        operation = {**prepared.operation, "backupSha256": digest}
+        if active is not None:
+            publish(prepared.folder / "operation.json", operation)
+        # These observations occur under the same retained EX description; a
+        # failed acknowledgement never runs a new rotation or reopens admission.
+        if read_bytes(state / "identity-maintenance.json") != marker_raw:
+            raise Refusal("Complete marker changed before acknowledgement.")
+        _pending_scope(prepared.context)
+        destination = _attempt_history(prepared.folder, prepared.context, operation=operation)
+        _immutable(destination / "marker.json", marker_raw)
+        path = prepared.folder / "result.json"
+        previous = _read_optional(path, "result")
+        if previous is not None and previous != result:
+            raise Refusal("A different result already owns this active pointer.")
+        if previous is None:
+            publish(path, result)
+        _immutable(destination / "result.json", canonical(result))
+        if active is not None:
+            remove(prepared.folder / "operation.json")
+        prepared.operation = operation
+        prepared.cached_result = result
+        return {"version": 1, "component": prepared.context["component"], "session": prepared.context["session"],
+                "phase": "exclusive", "result": str(path)}
+
+
+@handler("execute")
+def execute(request: Request) -> Object:
+    with prepare_execute(request) as prepared:
+        output = None if prepared.cached_result is not None else supervise_execute(prepared)
+        return settle_execute(prepared, output)
