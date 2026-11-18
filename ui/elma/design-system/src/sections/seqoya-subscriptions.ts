@@ -50,6 +50,7 @@ export interface SubscriptionWindow {
   label: string;
   windowMinutes?: number;
   resetsAt?: string | null;
+  approximateReset?: boolean;
   expiresAt?: string | 0;
   remainingMinutes?: number;
   usedPercent?: number;
@@ -129,7 +130,7 @@ export interface AllowanceView {
     observedAt?: string;
     note?: string;
     credits?: { total: string; remaining: string };
-    windows: { label: string; remainingPercent?: number; resetsAt?: string; windowMinutes?: number; elapsed?: boolean }[];
+    windows: { label: string; remainingPercent?: number; resetsAt?: string; approximateReset?: boolean; windowMinutes?: number; elapsed?: boolean }[];
   };
   capacity?: {
     model: string;

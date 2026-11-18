@@ -13,13 +13,15 @@
   const unknown = $derived(apiAccess ? 'Unavailable' : 'Awaiting reading');
   const timeLeft = $derived(window.next === 'awaitingRenewal' ? 'Awaiting next allowance'
     : window.pendingStart ? 'Starts with next use' : window.resetsAt === null ? 'No scheduled end'
-    : duration(window.remainingMinutes));
+    : (window.approximateReset ? '≈ ' : '') + duration(window.remainingMinutes));
   const resetTip = $derived([
-    window.resetsAt ? 'Resets at ' + formatSubscriptionCardTime(window.resetsAt)
+    window.resetsAt ? (window.approximateReset ? 'Resets around ' : 'Resets at ') + formatSubscriptionCardTime(window.resetsAt)
       : window.pendingStart ? 'Resets at: five hours after the next use'
       : window.resetsAt === null ? 'No scheduled reset' : 'Reset time awaits a provider reading.',
     window.expiresAt === 0 ? 'Never expires.'
       : window.expiresAt ? 'Allowance expires ' + formatSubscriptionCardTime(window.expiresAt) + '.' : '',
+    window.source && window.observedAt
+      ? window.source + ' · Read ' + formatSubscriptionCardTime(window.observedAt) : '',
   ].filter(Boolean).join('\n'));
   const estimateTip = $derived([window.model, window.estimateBasis,
     window.terminal && window.expiresAt ? 'Allowance expires ' + formatSubscriptionCardTime(window.expiresAt) : '',

@@ -8,12 +8,14 @@ import { deepSeekBalance } from './vigor-estimates';
 interface QuotaReading {
   remainingPercent: number;
   resetsAt: string;
+  approximateReset?: boolean;
 }
 
 interface ManualReading {
   subscription: string;
   updatedAt: string;
   labelUpdatedAt?: string;
+  browser?: boolean;
   observedAt: string;
 }
 
@@ -40,6 +42,16 @@ interface WindowEstimate {
 /** The optional bounded projection returned by the native app.readVigor channel. */
 export interface UsageEvidence {
   windowEstimates?: WindowEstimate[];
+  claudeDashboard?: {
+    subscription: string;
+    createdAt: string;
+    checkedAt: string;
+    observedAt: string;
+    plan: 'pro' | 'max' | 'team' | 'enterprise';
+    fiveHour?: QuotaReading;
+    weekly?: QuotaReading;
+    resetExpiries?: string[];
+  };
   piChatGPT?: ManualReading & {
     plan: 'plus' | 'pro';
     allowed: boolean;
@@ -72,6 +84,9 @@ export interface UsageEvidence {
 type Quota = NonNullable<AllowanceView['quota']>;
 type Credits = NonNullable<Quota['credits']>;
 type Result = VigorRollup['subscriptions'][number]['result'];
+type DriverReport = NonNullable<SubscriptionRecord['lastUsage']>;
+type DriverWindow = DriverReport['windows'][number];
+const browserSource = 'Arbol Browser dashboard';
 const day = 86_400_000;
 const integer = new Intl.NumberFormat();
 // Xiaomi Token Plan rate for mimo-v2.6-pro. Checked 12 November 2026.
@@ -104,6 +119,20 @@ function windowReading(label: string, resetsAt: string | undefined, now: number,
   return { label, remainingPercent, resetsAt, windowMinutes, elapsed: !!resetsAt && Date.parse(resetsAt) <= now };
 }
 
+function preferDashboard(
+  dashboardReset: string, observedAt: string, report: DriverReport | undefined,
+  driverWindow: DriverWindow | undefined, now: number,
+): boolean {
+  if (!report || driverWindow?.usedPercent == null) return true;
+  const driverTime = Date.parse(report.fetchedAt);
+  if (!Number.isFinite(driverTime) || driverTime > now) return true;
+  const driverEnd = Date.parse(driverWindow.resetsAt ?? '');
+  const driverCurrent = driverEnd > now || !driverWindow.resetsAt && driverWindow.usedPercent === 0;
+  const dashboardCurrent = Date.parse(dashboardReset) > now;
+  if (dashboardCurrent !== driverCurrent) return dashboardCurrent;
+  return Date.parse(observedAt) > driverTime;
+}
+
 function validCredits(value?: Credits): value is Credits {
   return !!value && typeof value.total === 'string' && typeof value.remaining === 'string' && /^[0-9]{1,21}$/.test(value.total) && /^[0-9]{1,21}$/.test(value.remaining)
     && BigInt(value.total) > 0n && BigInt(value.remaining) <= BigInt(value.total);
@@ -116,20 +145,20 @@ function mimoQuota(account: SubscriptionRecord, saved: Result | undefined, readi
   const manual = matches(reading, account, now) ? reading : undefined;
   let quota: Quota | undefined;
   if (report && directWindow?.usedPercent != null) {
+    const credits = validCredits(report.extra?.planCredits) ? report.extra.planCredits : undefined;
+    const left = credits ? 100 * Number(credits.remaining) / Number(credits.total) : 100 - directWindow.usedPercent;
     quota = {
-      source: 'Xiaomi Token Plan', plan: report.plan, observedAt: report.fetchedAt,
-      credits: validCredits(report.extra?.planCredits) ? report.extra.planCredits : undefined,
-      windows: [windowReading(directWindow.label, directWindow.resetsAt, now, 100 - directWindow.usedPercent, directWindow.windowMinutes)],
+      source: 'Xiaomi Token Plan', plan: report.plan, observedAt: report.fetchedAt, credits,
+      windows: [windowReading(directWindow.label, directWindow.resetsAt, now, left, directWindow.windowMinutes)],
     };
   }
-  if (manual && (!quota || quota.windows[0].elapsed
-    && Date.parse(manual.resetsAt) > Date.parse(quota.windows[0].resetsAt ?? ''))) {
+  if (manual && preferDashboard(manual.resetsAt, manual.observedAt, report, directWindow, now)) {
     const duration = radarWindow?.resetsAt && Date.parse(radarWindow.resetsAt) === Date.parse(manual.resetsAt)
       ? radarWindow.windowMinutes ?? undefined : undefined;
     const credits = { total: manual.totalCredits, remaining: manual.remainingCredits };
     if (validCredits(credits)) {
       quota = {
-        source: 'Saved Xiaomi Token Plan reading', plan: manual.plan && planNames[manual.plan],
+        source: manual.browser ? browserSource : 'Saved Xiaomi Token Plan reading', plan: manual.plan && planNames[manual.plan],
         observedAt: manual.observedAt, credits,
         windows: [windowReading('Token Plan', manual.resetsAt, now, 100 * Number(credits.remaining) / Number(credits.total), duration)],
       };
@@ -163,16 +192,27 @@ function chatGPTQuota(account: SubscriptionRecord, reading: UsageEvidence['piCha
   if (!matches(reading, account, now)) {
     return { issues: ['Pi quota has no saved dashboard reading. Open ChatGPT Usage and check Connected App Limits for this sign-in.'] };
   }
-  const windows = [
-    ...(reading.fiveHour ? [windowReading('Shared five-hour quota', reading.fiveHour.resetsAt, now, reading.fiveHour.remainingPercent, 300)] : []),
-    ...(reading.weekly ? [windowReading('Shared weekly quota', reading.weekly.resetsAt, now, reading.weekly.remainingPercent, 10_080)] : []),
+  const report = account.lastUsage;
+  const windows: Quota['windows'] = [];
+  const sharedWindows = [
+    { reading: reading.fiveHour, label: 'Shared five-hour quota', minutes: 300 },
+    { reading: reading.weekly, label: 'Shared weekly quota', minutes: 10_080 },
   ];
+  for (const { reading: captured, label, minutes } of sharedWindows) {
+    const driverWindow = report?.windows.find((window) => window.windowMinutes === minutes);
+    if (captured && preferDashboard(captured.resetsAt, reading.observedAt, report, driverWindow, now)) {
+      windows.push({
+        ...windowReading(label, captured.resetsAt, now, captured.remainingPercent, minutes),
+        approximateReset: captured.approximateReset,
+      });
+    }
+  }
   const issues = ['Absolute token capacity unavailable. ChatGPT Usage reports percentages for the shared plan.'];
   if (!reading.allowed) issues.push('Pi’s access to the shared plan was disabled at the reading.');
   else if (reading.capPercent < 100) issues.push('Pi’s remaining app-specific quota needs a separate consumption reading.');
-  if (!windows.length) issues.push('Shared plan quota has no reading.');
+  if (!windows.length && !report?.windows.length) issues.push('Shared plan quota has no reading.');
   return { issues, quota: {
-    source: 'ChatGPT dashboard snapshot', observedAt: reading.observedAt,
+    source: reading.browser ? browserSource : 'ChatGPT dashboard snapshot', observedAt: reading.observedAt,
     plan: reading.plan === 'plus' ? 'ChatGPT Plus' : 'ChatGPT Pro',
     note: reading.allowed ? `Pi could use up to ${reading.capPercent}% of the shared plan at this reading.` : undefined,
     windows,
@@ -213,7 +253,7 @@ function allowance(
 ): AllowanceView | undefined {
   if (account.state !== 'signed_in') return undefined;
   if (driver === 'mimo' && account.family === 'xiaomi') return mimoQuota(account, saved, evidence?.mimo, now);
-  if (driver === 'pi' && account.family === 'chatgpt' && !account.lastUsage?.windows.length) {
+  if (driver === 'pi' && account.family === 'chatgpt') {
     return chatGPTQuota(account, evidence?.piChatGPT, now);
   }
   const windows = account.lastUsage?.windows ?? [];
@@ -258,6 +298,7 @@ function asWindow(
     }
     reading = {
       label, windowMinutes, next: 'projected',
+      approximateReset: rollover === 'weekly' ? reading.approximateReset : undefined,
       pendingStart: rollover === 'startsOnUse',
       resetsAt: rollover === 'weekly' ? new Date(end).toISOString() : undefined,
       usedPercent: 0, remainingPercent: 100,
@@ -392,11 +433,36 @@ function windowCapacity(
   return { model, total, source: `${source} Sampled ${formatSubscriptionCardTime(observedAt)}. ${calculation}`, calculation };
 }
 
+function matchingClaudeDashboard(
+  driver: string, account: SubscriptionRecord, reading: UsageEvidence['claudeDashboard'], now: number,
+): UsageEvidence['claudeDashboard'] {
+  if (driver !== 'claude' || account.family !== 'anthropic' || account.state !== 'signed_in' || !reading) return undefined;
+  return reading.subscription === account.id && sameCreation(reading.createdAt, account.createdAt)
+    && Date.parse(reading.checkedAt) === Date.parse(account.checkedAt ?? '')
+    && reading.plan === publicAccountPlan(account) && Date.parse(reading.observedAt) <= now
+    ? reading : undefined;
+}
+
 function subscriptionMetrics(
   driver: string, account: SubscriptionRecord, view: AllowanceView | undefined, evidence: UsageEvidence | undefined, now: number,
 ): SubscriptionMetrics {
   const report = account.lastUsage;
   const rawWindows = report?.windows ?? [];
+  const piChatGPT = driver === 'pi' && account.family === 'chatgpt';
+  const dashboard = matchingClaudeDashboard(driver, account, evidence?.claudeDashboard, now);
+  const claudeWindows = new Map<string, { minutes: number; captured: QuotaReading }>();
+  if (dashboard) {
+    const candidates = [
+      { label: 'Five hours', minutes: 300, captured: dashboard.fiveHour },
+      { label: 'Seven days', minutes: 10_080, captured: dashboard.weekly },
+    ];
+    for (const { label, minutes, captured } of candidates) {
+      if (captured && preferDashboard(captured.resetsAt, dashboard.observedAt, report,
+        rawWindows.find((window) => window.label === label), now)) {
+        claudeWindows.set(label, { minutes, captured });
+      }
+    }
+  }
   const calibrated = driver === 'codex' && account.family === 'chatgpt'
     ? rawWindows.find((window) => window.kind === 'weekly' && window.windowMinutes === 10_080) : undefined;
   const kimi = driver === 'pi' && account.family === 'kimi-coding';
@@ -407,7 +473,8 @@ function subscriptionMetrics(
     if (end <= now) passedBoundaries.add(end);
     return asWindow(reading, now, capacity, rolloverFor(driver, account.family, reading.windowMinutes));
   }
-  const windows = rawWindows.map((window) => {
+  const windows = rawWindows.filter((window) => !claudeWindows.has(window.label)
+    && !(piChatGPT && view?.quota?.windows.some((entry) => entry.windowMinutes === window.windowMinutes))).map((window) => {
     const used = window.usedPercent;
     // The monthly membership credits expire at the reported refresh boundary.
     // https://www.kimi.com/en/help/membership/membership-update-rules
@@ -425,6 +492,14 @@ function subscriptionMetrics(
     }, capacity);
   });
 
+  if (dashboard) {
+    for (const [label, { minutes, captured }] of claudeWindows) {
+      windows.push(project({
+        label, windowMinutes: minutes, resetsAt: captured.resetsAt, source: browserSource,
+        observedAt: dashboard.observedAt, remainingPercent: captured.remainingPercent, usedPercent: 100 - captured.remainingPercent,
+      }, windowCapacity(driver, account, label, evidence, now)));
+    }
+  }
   const quota = view?.quota;
   if (quota) {
     for (const window of quota.windows) {
@@ -432,6 +507,7 @@ function subscriptionMetrics(
       const capacity = mimo ? view?.capacity : windowCapacity(driver, account, window.label, evidence, now);
       const row = project({
         label: window.label, resetsAt: window.resetsAt, windowMinutes: window.windowMinutes,
+        approximateReset: window.approximateReset,
         expiresAt: mimo ? window.resetsAt : undefined, terminal: mimo,
         source: quota.source, observedAt: quota.observedAt,
         usedPercent: left === undefined ? undefined : 100 - left, remainingPercent: left,
@@ -462,7 +538,14 @@ function subscriptionMetrics(
     if (!piReading.allowed) issues.push('Pi’s access to the shared plan was disabled at the reading.');
     else if (piReading.capPercent < 100) issues.push('Pi has a separate app cap. These figures describe the shared plan.');
   }
-  return { windows, issues, passedBoundaries: [...passedBoundaries], limitResets: resetInventory(account, now) };
+  let limitResets = resetInventory(account, now);
+  if (dashboard?.resetExpiries && (!limitResets?.observedAt
+      || Date.parse(dashboard.observedAt) > Date.parse(limitResets.observedAt))) {
+    const entries = dashboard.resetExpiries.filter((expiresAt) => Date.parse(expiresAt) > now)
+      .map((expiresAt) => ({ label: 'Full reset', expiresAt }));
+    limitResets = { count: entries.length, entries, observedAt: dashboard.observedAt };
+  }
+  return { windows, issues, passedBoundaries: [...passedBoundaries], limitResets };
 }
 
 function endTime(window: SubscriptionWindow) {
