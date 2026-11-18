@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import PurePosixPath
 from typing import Any, Literal
 
 Tool = Literal["claude-code", "codex", "kimi-code", "pi", "mimo"]
@@ -165,3 +166,36 @@ class Turn:
     def __post_init__(self) -> None:
         if self.state != "failed" and (self.error is not None or self.error_kind is not None):
             raise ValueError("Only a failed turn carries an error.")
+
+
+def _relative(path: str) -> str:
+    parts = PurePosixPath(path).parts
+    if not path or path.startswith("/") or ".." in parts:
+        raise ValueError("An archive file's path is relative to the tool's home and stays inside it.")
+    return path
+
+
+@dataclass(frozen=True)
+class HomeFile:
+    """A file in the tool's home, by its path relative to the home."""
+
+    path: str
+
+    def __post_init__(self) -> None:
+        _relative(self.path)
+
+
+@dataclass(frozen=True)
+class ExportedRows:
+    """A session's rows of a tool's database, exported as JSON bytes under a path such as
+    `state_5.sqlite#<thread id>.json`, with the database file's modification time as their `mtime` (IMP-D12)."""
+
+    path: str
+    content: bytes
+    mtime: datetime
+
+    def __post_init__(self) -> None:
+        _relative(self.path)
+
+
+type ArchiveFile = HomeFile | ExportedRows
