@@ -63,7 +63,9 @@ def parse(args: list[str]) -> Command:
     if len(words) > (1 if name == 'list' else 2):
         raise Refusal('invalid_input', f'Surplus argument for {name}.')
     code = words[1] if len(words) == 2 and name in {'trunks', 'start'} else None
-    if code is not None and (not re.fullmatch(r'[a-z][a-z0-9]{0,31}', code) or code in {'run', 'settle', 'list'}):
+    # A command word of arbol-trunk, or imported, which no Trunk Build may take (IMP-0.18), is no code name.
+    if code is not None and (not re.fullmatch(r'[a-z][a-z0-9]{0,31}', code)
+                             or code in {'run', 'settle', 'list', 'imported'}):
         raise Refusal('invalid_input', 'Expected a Trunk code name.')
     if name == 'start':
         if not UUID.fullmatch(options.get('--exchange', '')) or '--request' not in options:
