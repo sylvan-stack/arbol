@@ -250,3 +250,32 @@ def live_by_mtime(paths: Iterable[Path], clock: datetime) -> bool:
         if changed >= since:
             return True
     return False
+
+
+class SessionFailure(Exception):
+    """One session cannot be read (IMP-D13). The message is built only from a line number, a record type or a file path
+    within the tool's home, and never quotes session content (IMP-0.21)."""
+
+    def __init__(self, code: FailureCode, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+@dataclass(frozen=True)
+class Failed:
+    """What a reader yields in place of a session it cannot read: the session's native ID, or the name of its file when
+    it failed before the ID was known, with no kind, and the failure's code and message (IMP-D13)."""
+
+    native_id: str | None
+    file: str | None
+    code: FailureCode
+    message: str
+
+    def __post_init__(self) -> None:
+        if (self.native_id is None) == (self.file is None):
+            raise ValueError("A failed session is named by its native ID or, before that is known, by its file.")
+
+    @classmethod
+    def of(cls, failure: SessionFailure, *, native_id: str | None = None, file: str | None = None) -> Failed:
+        return cls(native_id, file, failure.code, failure.message)
