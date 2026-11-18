@@ -18,3 +18,11 @@ id = "seqoya-browser-bindings"
 file = "002-browser-bindings.sql"
 sha256 = "19b9f26b1d8f4307b99f5eb60f96b0144ae56133dd3dfbfadfafab73f81c119f"
 compatibility_version = 1
+
+[[migrations]]
+revision = 3
+predecessor = 2
+id = "session-imports"
+file = "003-session-imports.sql"
+sha256 = "35fbfcf66b6e0b9e927aea9be4786827ad168781ad4066aaf41d4cbd19a5e7a3"
+compatibility_version = 1
