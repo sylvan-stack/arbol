@@ -8,6 +8,8 @@ path as a session's identity (IMP-1.11).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal
 
 Tool = Literal["claude-code", "codex", "kimi-code", "pi", "mimo"]
@@ -28,3 +30,42 @@ STATES: tuple[State, ...] = ("completed", "failed", "cancelled", "interrupted")
 # The failures of one session a reader reports (IMP-D13). `rows_refused` is the importer's.
 FailureCode = Literal["unreadable_session", "unknown_format"]
 FAILURE_CODES: tuple[FailureCode, ...] = ("unreadable_session", "unknown_format")
+
+
+@dataclass(frozen=True)
+class Usage:
+    """Token usage by the common rule (IMP-1): `inputTokens` is input + cache read + cache write, beside
+    `cachedInputTokens` (cache read) and `cacheWriteTokens`; `outputTokens`; and `reasoningTokens` only where the tool
+    records it. Build one from the tool's counts with `native()`; adding two sums them."""
+
+    input_tokens: int = 0
+    cached_input_tokens: int = 0
+    cache_write_tokens: int = 0
+    output_tokens: int = 0
+    reasoning_tokens: int | None = None
+
+    @classmethod
+    def native(cls, *, uncached: int, cache_read: int = 0, cache_write: int = 0, output: int = 0,
+               reasoning: int | None = None) -> Usage:
+        """From a tool's own counts, where `uncached` is the input it counts apart from cache reads and writes."""
+        return cls(uncached + cache_read + cache_write, cache_read, cache_write, output, reasoning)
+
+    def __add__(self, other: Usage) -> Usage:
+        if not isinstance(other, Usage):
+            return NotImplemented
+        reasoning = (None if self.reasoning_tokens is None and other.reasoning_tokens is None
+                     else (self.reasoning_tokens or 0) + (other.reasoning_tokens or 0))
+        return Usage(self.input_tokens + other.input_tokens,
+                     self.cached_input_tokens + other.cached_input_tokens,
+                     self.cache_write_tokens + other.cache_write_tokens,
+                     self.output_tokens + other.output_tokens,
+                     reasoning)
+
+
+@dataclass(frozen=True)
+class Response:
+    """One model response of the main agent: its `startedAt` and its usage, so that IMP-0 can assign it to the segment
+    it falls in (IMP-D12)."""
+
+    started_at: datetime
+    usage: Usage
