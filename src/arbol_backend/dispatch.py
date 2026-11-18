@@ -30,9 +30,10 @@ UNCERTAIN = {"no_answer", "in_progress"}
 
 
 def selected_trunk(params: Params) -> Params:
+    # Not a code name: a command word of arbol-trunk, or imported, which no Trunk Build may take (IMP-0.18).
     code = params.get("trunk", "trivial")
     if (not isinstance(code, str) or not re.fullmatch(r"[a-z][a-z0-9]{0,31}", code)
-            or code in ("run", "settle", "list")):
+            or code in ("run", "settle", "list", "imported")):
         raise Error("invalid_input")
     return {} if code == "trivial" else {"trunk": code}
 
