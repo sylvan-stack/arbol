@@ -8,9 +8,10 @@ path as a session's identity (IMP-1.11).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 Tool = Literal["claude-code", "codex", "kimi-code", "pi", "mimo"]
 TOOLS: tuple[Tool, ...] = ("claude-code", "codex", "kimi-code", "pi", "mimo")
@@ -69,3 +70,49 @@ class Response:
 
     started_at: datetime
     usage: Usage
+
+
+@dataclass(frozen=True)
+class Image:
+    """An image part of a tool result, described and never stored (IMP-0.10)."""
+
+    media_type: str
+    size: int
+
+
+@dataclass(frozen=True)
+class Result:
+    """A tool call's result: its output text, the structured fields the native result carries, and its images."""
+
+    text: str
+    fields: Mapping[str, Any] | None = None
+    images: tuple[Image, ...] = ()
+
+
+@dataclass(frozen=True)
+class TextBlock:
+    """Text the main agent wrote, with the time it was written (IMP-D12)."""
+
+    text: str
+    at: datetime
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    """A tool call: `callId`, `agent` (the sub-agent that made it, or None for the main agent), `name`, `input`,
+    `result` (None when the session holds no result), `ok`, `error`, `parentCallId`, `startedAt`, and the `truncated`
+    flag Pi sets on a result it cut."""
+
+    call_id: str
+    agent: str | None
+    name: str
+    input: Any
+    result: Result | None
+    ok: bool
+    error: str | None
+    parent_call_id: str | None
+    started_at: datetime
+    truncated: bool = False
+
+
+type Item = TextBlock | ToolCall
