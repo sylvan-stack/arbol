@@ -199,3 +199,36 @@ class ExportedRows:
 
 
 type ArchiveFile = HomeFile | ExportedRows
+
+
+@dataclass(frozen=True, eq=False)
+class Session:
+    """One top-level session: `tool`, `nativeId`, `kind`, `title`, `createdAt`, `toolVersion`, `origin` (the facts IMP-1
+    names for the tool, a JSON object), its working folder for IMP-0's fallback, `live`, its turns in native order, its
+    archive files, and `filesNotArchived`, the count of files it names outside the tool's home.
+
+    A session is identified by `(tool, nativeId)` alone; no path takes part (IMP-1.11). The database checks the lengths
+    of native IDs and turn keys, and refuses a violation as `rows_refused` (IMP-0)."""
+
+    tool: Tool
+    native_id: str
+    kind: Kind
+    title: str | None
+    created_at: datetime
+    tool_version: str | None
+    origin: Mapping[str, Any]
+    working_folder: str | None
+    live: bool
+    turns: tuple[Turn, ...] = ()
+    archive_files: tuple[ArchiveFile, ...] = ()
+    files_not_archived: int = 0
+
+    @property
+    def identity(self) -> tuple[Tool, str]:
+        return (self.tool, self.native_id)
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Session) and self.identity == other.identity
+
+    def __hash__(self) -> int:
+        return hash(self.identity)
