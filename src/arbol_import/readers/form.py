@@ -116,3 +116,16 @@ class ToolCall:
 
 
 type Item = TextBlock | ToolCall
+
+
+@dataclass(frozen=True)
+class Subagent:
+    """A sub-agent that worked in a turn: its native agent ID, the `callId` of the call that started it or None when that
+    call cannot be found, the time of its first record, whether its last turn failed, and its usage, which the turn's
+    `usage` leaves out and IMP-0 adds to the run (IMP-D12)."""
+
+    agent_id: str
+    call_id: str | None
+    first_record_at: datetime
+    last_turn_failed: bool
+    usage: Usage
