@@ -8,10 +8,10 @@ path as a session's identity (IMP-1.11).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
-from pathlib import PurePosixPath
+from datetime import UTC, datetime, timedelta
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 Tool = Literal["claude-code", "codex", "kimi-code", "pi", "mimo"]
@@ -232,3 +232,21 @@ class Session:
 
     def __hash__(self) -> int:
         return hash(self.identity)
+
+
+LIVE_WINDOW = timedelta(minutes=10)
+
+
+def live_by_mtime(paths: Iterable[Path], clock: datetime) -> bool:
+    """IMP-0's liveness by modification time: whether any of the session's files changed within 10 minutes of the run's
+    clock, an aware time. A file gone since the reader named it has just changed. Kimi Code adds its session lock and
+    Mimo uses `time_updated` instead, each in its own reader."""
+    since = clock - LIVE_WINDOW
+    for path in paths:
+        try:
+            changed = datetime.fromtimestamp(path.stat().st_mtime, UTC)
+        except FileNotFoundError:
+            return True
+        if changed >= since:
+            return True
+    return False
