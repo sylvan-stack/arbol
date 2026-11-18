@@ -40,7 +40,7 @@ def component_name(name: str) -> str:
     if trunk(name):
         if not code_name(name[len(TRUNKS) + 1:]):
             raise ValueError("A Trunk is named arbol-trunk/<code name>: one lower-case word of 1 to 32 letters and "
-                             "digits that starts with a letter and is not run, settle or list.")
+                             "digits that starts with a letter and is not run, settle, list or imported.")
     elif COMPONENT_PATTERN.fullmatch(name) is None or name == TRUNKS:
         raise ValueError("A component name must contain lower-case letters, digits and separating hyphens.")
     return name

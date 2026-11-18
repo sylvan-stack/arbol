@@ -29,6 +29,9 @@ BUILD_PATTERN = re.compile(r"[1-9a-f][0-9a-f]*")
 TRUNKS = "arbol-trunk"
 CODE_NAME = re.compile(r"[a-z][a-z0-9]{0,31}")
 COMMAND_WORDS = ("run", "settle", "list")
+# Code names no Trunk Build may take (BLD-0). An imported Exchange carries the Trunk "imported" with
+# Build 0 and is never resolved to a Trunk Build (IMP-0.18).
+RESERVED_CODE_NAMES = ("imported",)
 # Historical Root-bound components, retained for old Build records and release inputs.
 ROOT_COMPONENTS = ("arbol", "arbol-root")
 ROOT_PATTERN = re.compile(r"[a-z0-9]+")
@@ -117,9 +120,10 @@ def trunk(component: str) -> bool:
 
 
 def code_name(code: str) -> bool:
-    """A Trunk's code name: one lower-case word of 1 to 32 letters and digits that starts with a letter, and no
-    command word of the Root Contract (RCT-0)."""
-    return CODE_NAME.fullmatch(code) is not None and code not in COMMAND_WORDS
+    """A Trunk's code name: one lower-case word of 1 to 32 letters and digits that starts with a letter, and
+    neither a command word of `arbol-trunk` (BLD-0) nor a reserved code name (IMP-0.18)."""
+    return (CODE_NAME.fullmatch(code) is not None and code not in COMMAND_WORDS
+            and code not in RESERVED_CODE_NAMES)
 
 
 def root_identifier(value: object) -> bool:
