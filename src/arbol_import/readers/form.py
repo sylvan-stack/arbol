@@ -129,3 +129,39 @@ class Subagent:
     first_record_at: datetime
     last_turn_failed: bool
     usage: Usage
+
+
+@dataclass(frozen=True)
+class Steer:
+    """Input the owner added during a turn, and when; IMP-0 splits the turn at it."""
+
+    text: str
+    at: datetime
+
+
+@dataclass(frozen=True)
+class Turn:
+    """One turn in native order: `turnKey`, `trigger`, `prompt`, `startedAt`, `endedAt` (the end record's time, else the
+    time of the turn's last record), `state`, and for a failed turn the tool's error text and kind; `workingFolder`,
+    `model` and `effort`; `usage`, the main agent's responses in order; `items` in native order; `subagents`; and
+    `steers`."""
+
+    turn_key: str
+    trigger: Trigger
+    prompt: str
+    started_at: datetime
+    ended_at: datetime
+    state: State
+    error: str | None
+    error_kind: str | None
+    working_folder: str | None
+    model: str | None
+    effort: str | None
+    usage: tuple[Response, ...] = ()
+    items: tuple[Item, ...] = ()
+    subagents: tuple[Subagent, ...] = ()
+    steers: tuple[Steer, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.state != "failed" and (self.error is not None or self.error_kind is not None):
+            raise ValueError("Only a failed turn carries an error.")
