@@ -8,6 +8,7 @@ path as a session's identity (IMP-1.11).
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -279,3 +280,17 @@ class Failed:
     @classmethod
     def of(cls, failure: SessionFailure, *, native_id: str | None = None, file: str | None = None) -> Failed:
         return cls(native_id, file, failure.code, failure.message)
+
+
+RECORD_TYPE = re.compile(r"[A-Za-z0-9_.:/-]{1,64}")
+
+
+def unknown_record(record_type: object, where: str, *, conversation: bool) -> None:
+    """IMP-D10, for a parsed record a reader does not recognise. A record that is not a conversation record (a turn
+    bound, message, loop event, response item or part, by the reader's tool) is skipped; a conversation record of
+    unknown shape fails the session with `unknown_format`. `where` is the file within the tool's home and the line."""
+    if not conversation:
+        return
+    named = f"a {record_type} record" if isinstance(record_type, str) and RECORD_TYPE.fullmatch(record_type) \
+        else "a record"
+    raise SessionFailure("unknown_format", f"{where}: {named} has an unknown shape.")
