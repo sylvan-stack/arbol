@@ -18,6 +18,7 @@ from .config import Locations
 from .driver_payload import retention_status
 from .launcher import (
     BUILD_PATTERN,
+    RESERVED_CODE_NAMES,
     Record,
     backend_fits,
     code_name,
@@ -147,6 +148,12 @@ def absolute_time(value: object) -> bool:
     return isinstance(value, str) and milliseconds(value) is not None
 
 
+def listed_trunk(item: Record) -> bool:
+    """A Trunk code name, or a reserved one with Build 0: an imported Exchange, which no Trunk Build protects
+    (IMP-0.18, IMP-D15)."""
+    return code_name(item["trunk"]) or (item["trunk"] in RESERVED_CODE_NAMES and item.get("build") == "0")
+
+
 def listed_exchanges(value: object) -> list[Record]:
     if (not isinstance(value, dict) or "error" in value
             or not isinstance(value.get("exchanges"), list) or value.get("unreadable") != []):
@@ -157,7 +164,7 @@ def listed_exchanges(value: object) -> list[Record]:
         if (not isinstance(item, dict) or type(item.get("exchangeFormat")) is not int or item["exchangeFormat"] != 1
                 or not isinstance(item.get("exchange"), str) or not UUID.fullmatch(item["exchange"])
                 or not isinstance(item.get("chat"), str) or not UUID.fullmatch(item["chat"])
-                or not isinstance(item.get("trunk"), str) or not code_name(item["trunk"])
+                or not isinstance(item.get("trunk"), str) or not listed_trunk(item)
                 or not isinstance(item.get("build"), str)
                 or not (item["build"] == "0" or BUILD_PATTERN.fullmatch(item["build"]))
                 or not isinstance(item.get("process"), dict) or not isinstance(item.get("signsOfLife"), dict)
