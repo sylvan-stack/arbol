@@ -9,11 +9,11 @@ path as a session's identity (IMP-1.11).
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 Tool = Literal["claude-code", "codex", "kimi-code", "pi", "mimo"]
 TOOLS: tuple[Tool, ...] = ("claude-code", "codex", "kimi-code", "pi", "mimo")
@@ -294,3 +294,30 @@ def unknown_record(record_type: object, where: str, *, conversation: bool) -> No
     named = f"a {record_type} record" if isinstance(record_type, str) and RECORD_TYPE.fullmatch(record_type) \
         else "a record"
     raise SessionFailure("unknown_format", f"{where}: {named} has an unknown shape.")
+
+
+@dataclass(frozen=True)
+class Source:
+    """What a reader reads: the tool's home, the Driver's state folder or None, the private work folder for Mimo's
+    database copy or None, the run's clock (an aware time), and the native IDs selected, or None for all."""
+
+    home: Path
+    driver_state: Path | None
+    work: Path | None
+    clock: datetime
+    selected: frozenset[str] | None = None
+
+    def wants(self, native_id: str) -> bool:
+        return self.selected is None or native_id in self.selected
+
+
+class Reader(Protocol):
+    """A tool's reader module, `arbol_import.readers.<tool code name with - as _>`. `read()` yields one `Session` or
+    `Failed` per top-level session; a failed session never stops the others. A reader only reads."""
+
+    def read(self, source: Source) -> Iterator[Session | Failed]: ...
+
+
+def reader_module(tool: Tool) -> str:
+    """The name of a tool's reader module, which the command imports by name."""
+    return f"{__package__}.{tool.replace('-', '_')}"
