@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -16,7 +17,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import NoReturn
 
-from .form import SessionFailure, Source, unknown_record
+from .form import Kind, SessionFailure, Source, unknown_record
 
 _DATABASE = "mimocode.db"
 _DATABASE_FILES = (_DATABASE, f"{_DATABASE}-wal", f"{_DATABASE}-shm")
@@ -147,6 +148,8 @@ _PART_TYPES = frozenset({
 class _KindFacts:
     title: str | None = None
     directory: str | None = None
+    completed_history: bool = False
+    probe_actor: bool = False
 
 
 @dataclass(frozen=True)
@@ -242,7 +245,7 @@ def _session_info(row: sqlite3.Row, facts: _KindFacts) -> _SessionInfo:
     )
 
 
-def _part(row: sqlite3.Row) -> _Part:
+def _part(row: sqlite3.Row, facts: _KindFacts) -> _Part:
     data = _data(row, "part")
     kind = _string(data.get("type"), "part")
     if kind not in _PART_TYPES:
@@ -255,10 +258,16 @@ def _part(row: sqlite3.Row) -> _Part:
     elif kind == "file":
         _string(data.get("mime"), "part")
         _string(data.get("url"), "part")
-    return _Part(_id(row["id"], "part"), kind, data, _time(row["time_created"], "part"), synthetic)
+    part = _Part(_id(row["id"], "part"), kind, data, _time(row["time_created"], "part"), synthetic)
+    metadata = _optional_object(data.get("metadata"), "part")
+    state = _object(data.get("state"), "part") if kind == "tool" else {}
+    state_metadata = _optional_object(state.get("metadata"), "part")
+    if "arbolCompletedHistory" in metadata or "arbolCompletedHistory" in state_metadata:
+        facts.completed_history = True
+    return part
 
 
-def _message(row: sqlite3.Row, parts: list[sqlite3.Row]) -> _Message:
+def _message(row: sqlite3.Row, parts: list[sqlite3.Row], facts: _KindFacts) -> _Message:
     data = _data(row, "message")
     role = _string(data.get("role"), "message")
     if role not in ("user", "assistant"):
@@ -266,13 +275,15 @@ def _message(row: sqlite3.Row, parts: list[sqlite3.Row]) -> _Message:
     parent = _id(data.get("parentID"), "message") if role == "assistant" else None
     lane = _id(row["agent_id"], "message")
     created = _time(row["time_created"], "message")
-    return _Message(
-        _id(row["id"], "message"), lane, role, parent, created, data, tuple(_part(part) for part in parts),
-    )
+    message_id = _id(row["id"], "message")
+    name = data.get("agent")
+    if lane != "main" and isinstance(name, str) and name.startswith("probe-"):
+        facts.probe_actor = True
+    return _Message(message_id, lane, role, parent, created, data, tuple(_part(part, facts) for part in parts))
 
 
 def _read_messages(
-    database: sqlite3.Connection, native_id: str, part_rows: list[sqlite3.Row],
+    database: sqlite3.Connection, native_id: str, part_rows: list[sqlite3.Row], facts: _KindFacts,
 ) -> tuple[list[_Message], list[sqlite3.Row]]:
     parts: dict[str, list[sqlite3.Row]] = defaultdict(list)
     for row in part_rows:
@@ -280,6 +291,42 @@ def _read_messages(
     messages = []
     message_rows = []
     for row in _message_rows(database, native_id):
-        messages.append(_message(row, parts.get(_id(row["id"], "message"), [])))
+        messages.append(_message(row, parts.get(_id(row["id"], "message"), []), facts))
         message_rows.append(row)
     return messages, message_rows
+
+
+_DRIVER_TITLES = re.compile(r"Arbol run [0-9A-Fa-f]{32}|Arbol completed history|arbol-source-[0-9A-Fa-f]+:.*", re.S)
+_DRIVER_ID = re.compile(r"ses_[0-9a-f]{26}")
+
+
+def _kind(native_id: str, facts: _KindFacts) -> Kind:
+    if (
+        _DRIVER_ID.fullmatch(native_id)
+        or facts.completed_history
+        or facts.title == f"Cancelled {native_id}"
+        or (facts.title is not None and _DRIVER_TITLES.fullmatch(facts.title))
+    ):
+        return "arbol_driver"
+    if facts.probe_actor or (facts.directory is not None and _claude_scratchpad(facts.directory)):
+        return "probe"
+    return "owner"
+
+
+def _claude_scratchpad(directory: str) -> bool:
+    parts = Path(directory).parts
+    for index, component in enumerate(parts):
+        if (component == ".claude" or re.fullmatch(r"claude-\d+", component)) and "scratchpad" in parts[index + 1:]:
+            return True
+    return False
+
+
+def _read_actor_facts(database: sqlite3.Connection, native_id: str, facts: _KindFacts) -> None:
+    if _kind(native_id, facts) != "owner":
+        return
+    for row in _actor_names(database, native_id):
+        lane = _id(row["actor_id"], "actor registry")
+        name = _string(row["agent"], "actor registry")
+        if lane != "main" and name.startswith("probe-"):
+            facts.probe_actor = True
+            return
