@@ -5,12 +5,12 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Never
 
-from .form import SessionFailure, unknown_record
+from .form import SessionFailure, State, Steer, Trigger, Turn, unknown_record
 from .lines import file_records
 
 _SESSION = re.compile(r"session_([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})")
@@ -280,3 +280,158 @@ def _context_edit(record: _Record, records: list[_Record]) -> None:
         if type(count) is not int or count <= 0:
             record.invalid("context.undo")
         _undo(records, count)
+
+
+_TRIGGERS: dict[str, Trigger] = {
+    "user": "typed",
+    "task": "task",
+    "skill_activation": "system",
+    "system_trigger": "system",
+}
+_MEDIA_PARTS = frozenset({"image_url", "video_url", "audio_url"})
+
+
+def _turn_key(value: object) -> str | None:
+    if type(value) is int:
+        return str(value)
+    return value if isinstance(value, str) and value else None
+
+
+def _parts(value: object, record: _Record) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        record.invalid(record.kind)
+    parts: list[dict[str, Any]] = []
+    for raw in value:
+        part = _object(raw)
+        kind = _string(part.get("type"))
+        if kind == "text":
+            if not isinstance(part.get("text"), str):
+                record.invalid(record.kind)
+        elif kind not in _MEDIA_PARTS and kind != "think":
+            record.invalid(record.kind)
+        parts.append(part)
+    return parts
+
+
+def _text(parts: list[dict[str, Any]]) -> str:
+    return "".join(part["text"] for part in parts if part["type"] == "text")
+
+
+def _prompt(record: _Record) -> str:
+    return _text(_parts(record.data.get("input"), record))
+
+
+def _error(value: object) -> str | None:
+    return _string(value) or _string(_object(value).get("message"))
+
+
+@dataclass
+class _NativeTurn:
+    key: str
+    origin: str
+    prompt: str
+    start: _Record
+    last_at: datetime
+    end: _Record | None = None
+    records: list[_Record] = field(default_factory=list)
+
+    def project(self, cwd: str | None) -> Turn:
+        state: State = "interrupted"
+        kind = error = None
+        if self.end is not None:
+            reason: str = self.end.data["reason"]
+            match reason:
+                case "completed" | "cancelled":
+                    state = reason
+                case _:
+                    state = "failed"
+                    kind = reason
+                    error = _error(self.end.data.get("error"))
+        steers = tuple(Steer(_prompt(record), record.time()) for record in self.records if record.kind == "turn.steer")
+        return Turn(self.key, _TRIGGERS.get(self.origin, "system"), self.prompt, self.start.time(),
+                    self.end.time() if self.end is not None else self.last_at, state, error, kind,
+                    cwd, None, None, steers=steers)
+
+
+@dataclass
+class _Lane:
+    first_at: datetime | None = None
+    version: str | None = None
+    turns: dict[str, _NativeTurn] = field(default_factory=dict)
+    current: _NativeTurn | None = None
+    call_turns: dict[str, _NativeTurn] = field(default_factory=dict)
+
+    def append(self, record: _Record) -> None:
+        data = record.data
+        kind = record.kind
+        key = _turn_key(data.get("turnId"))
+        turn: _NativeTurn | None
+        if self.first_at is None:
+            self.first_at = record.at
+        if kind == "metadata":
+            self.version = self.version or _string(data.get("protocol_version"))
+            return
+        if kind == "context.clear":
+            self.turns.clear()
+            self.call_turns.clear()
+            self.current = None
+            return
+        if kind == "turn.prompt":
+            origin = _string(_object(data.get("origin")).get("kind"))
+            if key is None or not origin:
+                record.invalid(kind)
+            prompt = _prompt(record)
+            turn = _NativeTurn(key, origin, prompt, record, record.time(), records=[record])
+            self.current = self.turns[key] = turn
+            return
+
+        turn = self.turns.get(key) if key is not None else self.current
+        if kind == "tool.result" and (parent := _string(data.get("parentUuid"))):
+            turn = self.call_turns.get(parent, turn)
+        if kind == "context.undo":
+            if turn is None and self.turns:
+                turn = next(reversed(self.turns.values()))
+            if turn is not None:
+                _context_edit(record, turn.records)
+                if not any(item.kind == "turn.prompt" for item in turn.records):
+                    del self.turns[turn.key]
+                    self.call_turns = {uuid: owner for uuid, owner in self.call_turns.items() if owner is not turn}
+                    if self.current is turn:
+                        self.current = None
+                else:
+                    turn.last_at = record.time()
+            else:
+                _context_edit(record, [])
+            return
+
+        if kind == "turn.ended":
+            if key is None or not _string(data.get("reason")):
+                record.invalid(kind)
+            if turn is not None and turn.end is None:
+                turn.end = record
+                if self.current is turn:
+                    self.current = None
+            return
+        if kind == "turn.steer":
+            _prompt(record)
+            if turn is None or turn.end is not None:
+                return
+        if kind == "context.append_message":
+            message = _object(data.get("message"))
+            role = _string(message.get("role"))
+            if role not in {"user", "assistant", "tool", "system", "developer"}:
+                record.invalid(kind)
+            _parts(message.get("content"), record)
+            # The content is a copy. Keep only the evidence needed to group it for undo.
+            if _object(message.get("origin")).get("kind") == "compaction_summary":
+                return
+            record = _Record(kind, record.at, record.where, {"message": {
+                "role": role, "id": message.get("id"), "toolCallId": message.get("toolCallId"),
+            }})
+        if turn is not None:
+            if record.at is not None:
+                turn.last_at = record.at
+            if kind in _LOOP_EVENTS or kind in {"turn.steer", "context.append_message", "llm.request", "subagent.spawned"}:
+                turn.records.append(record)
+            if kind == "tool.call" and (uuid := _string(data.get("uuid"))):
+                self.call_turns[uuid] = turn
