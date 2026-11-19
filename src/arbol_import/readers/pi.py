@@ -6,11 +6,11 @@ import re
 import stat
 from collections.abc import Generator, Iterator
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NoReturn
 
-from .form import Kind, SessionFailure, Source, unknown_record
+from .form import Kind, SessionFailure, Source, State, Turn, unknown_record
 from .lines import file_records
 
 _NATIVE_ID = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
@@ -204,3 +204,111 @@ def _active_messages(entries: list[_Entry]) -> Iterator[tuple[_Entry, dict[str, 
         if role not in ("user", "assistant", "toolResult") or entry.at is None:
             entry.bad("message")
         yield entry, message
+
+
+type _Message = tuple[_Entry, dict[str, Any]]
+
+
+def _entry_time(entry: _Entry) -> datetime:
+    at = entry.at
+    if at is None:
+        entry.bad("message")
+    return at
+
+
+def _native_time(entry: _Entry, record: dict[str, Any]) -> datetime:
+    if "timestamp" not in record:
+        return _entry_time(entry)
+    stamp = record["timestamp"]
+    if isinstance(stamp, (int, float)) and not isinstance(stamp, bool):
+        try:
+            return datetime.fromtimestamp(stamp / 1000, UTC)
+        except (OSError, OverflowError, ValueError):
+            pass
+    entry.bad("message-timestamp")
+
+
+def _parts(entry: _Entry, content: object, allowed: tuple[str, ...]) -> Iterator[dict[str, Any]]:
+    if not isinstance(content, list):
+        entry.bad("message-content")
+    for part in content:
+        if not isinstance(part, dict) or part.get("type") not in allowed:
+            entry.bad("message-part")
+        if part["type"] == "text" and not isinstance(part.get("text"), str):
+            entry.bad("text")
+        yield part
+
+
+def _prompt(entry: _Entry, message: dict[str, Any]) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    parts = _parts(entry, content, ("text", "image"))
+    return "\n".join(part["text"] for part in parts if part["type"] == "text")
+
+
+def _turn_messages(messages: Iterator[_Message]) -> Iterator[list[_Message]]:
+    turn: list[_Message] = []
+    for entry, message in messages:
+        if message["role"] == "user":
+            if turn:
+                yield turn
+            turn = [(entry, message)]
+        elif turn:
+            turn.append((entry, message))
+    if turn:
+        yield turn
+
+
+def _ending(assistant: _Message | None) -> tuple[State, str | None, str | None]:
+    if assistant is None:
+        return "interrupted", None, None
+    entry, message = assistant
+    reason = _string(message.get("stopReason"))
+    if reason is None:
+        entry.bad("assistant-stop")
+    if reason == "stop":
+        return "completed", None, None
+    if reason == "aborted":
+        return "cancelled", None, None
+    if reason == "toolUse":
+        return "interrupted", None, None
+    if reason == "error":
+        return "failed", _string(message.get("errorMessage")), None
+    return "failed", None, reason
+
+
+def _turn_end(last: _Message, state: State) -> datetime:
+    entry, message = last
+    if message["role"] == "toolResult":
+        return _native_time(entry, message)
+    if message["role"] == "assistant" and state != "interrupted" and "durationMs" in message:
+        duration = message["durationMs"]
+        if isinstance(duration, (int, float)) and not isinstance(duration, bool) and duration >= 0:
+            try:
+                return _native_time(entry, message) + timedelta(milliseconds=duration)
+            except (OverflowError, ValueError):
+                pass
+        entry.bad("assistant-duration")
+    return _entry_time(entry)
+
+
+def _turn(rows: list[_Message], cwd: str) -> Turn:
+    start, user = rows[0]
+    turn_key = start.native_id
+    assert turn_key is not None  # The active path validated it.
+    last_assistant = next((row for row in reversed(rows) if row[1]["role"] == "assistant"), None)
+    state, error, error_kind = _ending(last_assistant)
+    return Turn(
+        turn_key=turn_key,
+        trigger="typed",
+        prompt=_prompt(start, user),
+        started_at=_native_time(start, user),
+        ended_at=_turn_end(rows[-1], state),
+        state=state,
+        error=error,
+        error_kind=error_kind,
+        working_folder=cwd,
+        model=None,
+        effort=None,
+    )
