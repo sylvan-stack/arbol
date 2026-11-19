@@ -187,6 +187,7 @@ class _Part:
     started: datetime
     last_saved: datetime
     tool: ToolCall | None
+    launched_actor: str | None
 
 
 @dataclass(frozen=True)
@@ -299,8 +300,16 @@ def _part(row: sqlite3.Row, facts: _KindFacts) -> _Part:
     metadata = _optional_object(data.get("metadata"), "part")
     state_metadata = _optional_object(state.get("metadata"), "part")
     call = _tool_call(data, state, state_metadata, started) if kind == "tool" else None
+    launched_actor = None
+    if (
+        call is not None and call.name == "actor"
+        and call.input.get("action") in (None, "run", "spawn")
+        and state_metadata.get("sessionId") in (None, row["session_id"])
+    ):
+        launched_actor = _optional_string(state_metadata.get("actorId"), "part")
     part = _Part(
-        _id(row["id"], "part"), kind, data, created, synthetic, started, max(created, started, ended), call,
+        _id(row["id"], "part"), kind, data, created, synthetic, started,
+        max(created, started, ended), call, launched_actor,
     )
     if "arbolCompletedHistory" in metadata or "arbolCompletedHistory" in state_metadata:
         facts.completed_history = True
@@ -547,3 +556,66 @@ def _usage(value: object) -> Usage:
 
 def _responses(turn: _Turn) -> tuple[Response, ...]:
     return tuple(Response(message.created, message.usage) for message in turn.assistants)
+
+
+@dataclass(frozen=True)
+class _Launch:
+    message: _Message
+    call_id: str
+
+
+@dataclass(frozen=True)
+class _Actor:
+    lane: str
+    messages: list[_Message]
+    launch: _Launch | None
+
+
+def _message_order(message: _Message) -> tuple[datetime, str]:
+    return message.created, message.id
+
+
+def _actor_owners(
+    messages: list[_Message], turns: list[_Turn], by_assistant: dict[str, _Turn],
+) -> dict[str, list[_Actor]]:
+    lanes: dict[str, list[_Message]] = defaultdict(list)
+    launches: dict[str, _Launch] = {}
+    for message in messages:
+        if message.lane != "main":
+            lanes[message.lane].append(message)
+        if message.role == "assistant":
+            for part in message.parts:
+                if part.launched_actor and part.tool is not None:
+                    launches.setdefault(part.launched_actor, _Launch(message, part.tool.call_id))
+
+    windows = [(turn, _turn_end(turn)) for turn in reversed(turns)]
+    owners: dict[str, _Turn | None] = {}
+    assigned: dict[str, list[_Actor]] = defaultdict(list)
+    for lane, records in lanes.items():
+        current = lane
+        visited: set[str] = set()
+        # Resolve nested launches through their caller lane. A link to an archived
+        # launch (or a cycle in saved links) cannot give the actor a projected turn.
+        while current not in visited and current not in owners:
+            visited.add(current)
+            launch = launches.get(current)
+            if launch is None:
+                first = lanes[current][0]
+                owners[current] = next(
+                    (
+                        turn for turn, end in windows
+                        if _message_order(turn.user) <= _message_order(first) and first.created <= end
+                    ),
+                    None,
+                )
+                break
+            if launch.message.lane == "main":
+                owners[current] = by_assistant.get(launch.message.id)
+                break
+            current = launch.message.lane
+        owner = owners.get(current)
+        for resolved in visited:
+            owners[resolved] = owner
+        if owner is not None:
+            assigned[owner.user.id].append(_Actor(lane, records, launches.get(lane)))
+    return assigned
