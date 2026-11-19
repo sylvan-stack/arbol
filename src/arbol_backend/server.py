@@ -10,6 +10,7 @@ import stat
 from collections.abc import Coroutine
 from typing import Any
 
+from arbol_installation.build_output import sweep_periodically
 from arbol_radar.records import Records
 from arbol_radar.tick import Ticker
 
@@ -178,6 +179,8 @@ class Backend:
             self.task(self.initial_work())
             self.stuck.start()
             self.task(self.monitor())
+            if not self.identity.fixture:
+                self.task(sweep_periodically(self.identity.home))
             await self.stopped.wait()
             return 0
         finally:
