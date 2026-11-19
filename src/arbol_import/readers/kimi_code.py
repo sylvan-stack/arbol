@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Never
 
-from .form import Item, SessionFailure, State, Steer, TextBlock, Trigger, Turn, unknown_record
+from .form import Item, Result, SessionFailure, State, Steer, TextBlock, ToolCall, Trigger, Turn, unknown_record
 from .lines import file_records
 
 _SESSION = re.compile(r"session_([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})")
@@ -412,6 +412,8 @@ class _Lane:
                 if self.current is turn:
                     self.current = None
             return
+        if kind in {"tool.call", "tool.result"}:
+            _check_tool(record)
         if kind == "content.part":
             _content(record)
         if kind == "turn.steer":
@@ -449,7 +451,69 @@ def _content(record: _Record) -> TextBlock | None:
 
 def _items(turn: _NativeTurn, home: Path, session: _SavedSession, *,
            agent: str | None = None, parent_call: str | None = None) -> Iterator[Item]:
-    if agent is None:
-        for record in turn.records:
-            if record.kind == "content.part" and (item := _content(record)) is not None:
-                yield item
+    results = {record.data["parentUuid"]: record for record in turn.records if record.kind == "tool.result"}
+    seen: set[str] = set()
+    for record in turn.records:
+        data = record.data
+        if record.kind == "content.part" and agent is None and (item := _content(record)) is not None:
+            yield item
+        if record.kind != "tool.call" or data["uuid"] in seen:
+            continue
+        seen.add(data["uuid"])
+        result, ok, error = None, True, None
+        if linked := results.get(data["uuid"]):
+            result, ok, error = _result(home, session, linked)
+        yield ToolCall(data["toolCallId"], agent, data["name"], data.get("args"), result, ok, error,
+                       parent_call, record.time())
+
+
+def _check_tool(record: _Record) -> None:
+    data = record.data
+    if record.kind == "tool.call":
+        if not all(_string(data.get(key)) for key in ("uuid", "toolCallId", "name")):
+            record.invalid("tool.call")
+    elif record.kind == "tool.result":
+        result = _object(data.get("result"))
+        if not _string(data.get("parentUuid")) or ("isError" in result and type(result["isError"]) is not bool):
+            record.invalid("tool.result")
+        if not isinstance(result.get("output"), str):
+            _parts(result.get("output"), record)
+
+
+_SPILL_LINE = re.compile(r"(?m)^output_path: ([^\r\n]+)\r?$")
+
+
+def _spill_name(result: dict[str, Any], text: str) -> str | None:
+    if name := _string(_object(result.get("spill")).get("outputPath")):
+        return name
+    if result.get("truncated") is True or text.startswith(("Tool output exceeded ", "[Per-line truncation occurred;")):
+        if found := _SPILL_LINE.search(text):
+            return found[1]
+    return None
+
+
+def _spill_path(session: _SavedSession, name: str) -> Path:
+    path = Path(name)
+    if path.is_absolute():
+        return path
+    if path.parts and path.parts[0] == "tool-results":
+        return session.folder / path
+    return session.folder / "tool-results" / path
+
+
+def _result(home: Path, session: _SavedSession, record: _Record) -> tuple[Result, bool, str | None]:
+    result = _object(record.data["result"])
+    output = result["output"]
+    parts = [] if isinstance(output, str) else _parts(output, record)
+    text = output if isinstance(output, str) else _text(parts)
+    if name := _spill_name(result, text):
+        path = _spill_path(session, name)
+        if path.is_relative_to(session.folder / "tool-results") and _eligible(home, path):
+            try:
+                text = path.read_text(encoding="utf-8", newline="")
+            except (OSError, UnicodeError):
+                raise SessionFailure("unreadable_session", f"{record.where}: could not read the tool result.") from None
+    ok = result.get("isError") is not True
+    error = None if ok else _error(result.get("error")) or text or _string(result.get("note"))
+    fields = {key: value for key, value in result.items() if key not in {"output", "isError"}}
+    return Result(text, fields or None), ok, error
