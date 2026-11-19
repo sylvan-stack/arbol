@@ -10,8 +10,18 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+# The database scripts run directly both from the checkout/Backend Build and
+# from the schema directory installed beside the Build tools.
+release = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(release / "src" if (release / "src/arbol_installation").is_dir() else release))
+try:
+    from arbol_installation.paths import database_settings, postgres_folder, prepare_installation
+finally:
+    sys.path.pop(0)
 
 MAJOR = 17
 HOST = "127.0.0.1"
@@ -34,9 +44,12 @@ class Places:
 
     home: Path
 
+    def prepare(self) -> None:
+        prepare_installation(self.home)
+
     @property
     def folder(self) -> Path:
-        return self.home / "Library" / "Application Support" / "Arbol" / "database"
+        return postgres_folder(self.home)
 
     @property
     def data(self) -> Path:
@@ -60,7 +73,7 @@ class Places:
 
     @property
     def settings(self) -> Path:
-        return self.home / ".arbol" / "database.json"
+        return database_settings(self.home)
 
 
 def address() -> str:

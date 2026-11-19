@@ -161,14 +161,19 @@ def check_throwaway_server(context: Context) -> Detail:
 
 
 def check_settings(context: Context) -> Detail:
-    """`~/.arbol/database.json` holds the address and nothing else: a role, a host and a port (ARC-1)."""
+    """Check the server address and optional database selection in the private settings."""
     path = context.places.settings
     try:
         settings = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as problem:
         raise Failed(f"{path} cannot be read: {problem}") from problem
-    if not isinstance(settings, dict) or set(settings) != {"address"} or not isinstance(settings["address"], str):
-        raise Failed(f"{path} must hold only an address")
+    if (not isinstance(settings, dict) or set(settings) not in ({"address"}, {"address", "database"})
+            or not isinstance(settings["address"], str)):
+        raise Failed(f"{path} must hold an address and may name the installed database")
+    if "database" in settings:
+        database = settings["database"]
+        if not isinstance(database, str) or not database.strip() or "\0" in database:
+            raise Failed(f"{path} must name a valid database")
     parts = urlsplit(settings["address"])
     if (parts.scheme != "postgresql" or not parts.username or parts.password is not None or not parts.hostname
             or not parts.port or parts.path not in ("", "/") or parts.query or parts.fragment):
