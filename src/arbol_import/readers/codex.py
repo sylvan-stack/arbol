@@ -8,6 +8,7 @@ import re
 import shutil
 import sqlite3
 import stat
+from collections import defaultdict
 from collections.abc import Generator, Iterator
 from contextlib import closing
 from dataclasses import dataclass, field
@@ -135,34 +136,43 @@ def _header(rollout: Rollout, row: object, line: int) -> None:
         unknown_record("session_meta", where, conversation=True)
 
 
+def _rollout_paths(home: Path) -> Iterator[Path]:
+    yield from sorted(_directory_entries(home, home / "archived_sessions"))
+    directories = [home / "sessions"]
+    for length in (4, 2, 2):
+        directories = [
+            child for directory in directories for child in _directory_entries(home, directory)
+            if len(child.name) == length and child.name.isascii() and child.name.isdecimal()
+        ]
+    for directory in sorted(directories):
+        yield from sorted(_directory_entries(home, directory))
+
+
 def _discover(home: Path) -> Iterator[Rollout]:
-    patterns = ("sessions/[0-9][0-9][0-9][0-9]/[0-9][0-9]/[0-9][0-9]/rollout-*.jsonl*",
-                "archived_sessions/rollout-*.jsonl*")
-    for pattern in patterns:
-        for path in sorted(home.glob(pattern)):
-            relative = path.relative_to(home).as_posix()
-            if not _ROLLOUT.fullmatch(relative):
+    for path in _rollout_paths(home):
+        relative = path.relative_to(home).as_posix()
+        if not _ROLLOUT.fullmatch(relative):
+            continue
+        rollout = Rollout(relative)
+        try:
+            target = path.resolve(strict=True)
+            if not target.is_relative_to(home):
+                rollout.outside = True
+                yield rollout
                 continue
-            rollout = Rollout(relative)
-            try:
-                target = path.resolve(strict=True)
-                if not target.is_relative_to(home):
-                    rollout.outside = True
-                    yield rollout
-                    continue
-                if not stat.S_ISREG(target.stat().st_mode):
-                    continue
-                rollout.mtime_ns = _rollout_target(home, relative).stat().st_mtime_ns
-                with closing(_records(home, relative)) as records:
-                    first = next(records, None)
-                if first is None:
-                    continue
-                _header(rollout, first[1], first[0])
-            except SessionFailure as failure:
-                rollout.failure = failure
-            except (OSError, RuntimeError, ValueError):
-                rollout.failure = SessionFailure("unreadable_session", f"{relative}: the rollout could not be read.")
-            yield rollout
+            if not stat.S_ISREG(target.stat().st_mode):
+                continue
+            rollout.mtime_ns = _rollout_target(home, relative).stat().st_mtime_ns
+            with closing(_records(home, relative)) as records:
+                first = next(records, None)
+            if first is None:
+                continue
+            _header(rollout, first[1], first[0])
+        except SessionFailure as failure:
+            rollout.failure = failure
+        except (OSError, RuntimeError, ValueError):
+            rollout.failure = SessionFailure("unreadable_session", f"{relative}: the rollout could not be read.")
+        yield rollout
 
 
 _DB = "state_5.sqlite"
@@ -402,3 +412,120 @@ def _driver_ids(state: Path | None) -> set[str]:
             if isinstance(data, dict) and (native_id := _id(data.get("conversation"))) is not None:
                 found.add(native_id)
     return found
+
+
+@dataclass
+class Thread:
+    native_id: str
+    chosen: Rollout
+    copies: list[Rollout]
+    parent: str | None
+    broken: list[Rollout] = field(default_factory=list)
+
+
+@dataclass
+class Inventory:
+    roots: list[Thread]
+    children: dict[str, list[Thread]]
+    unidentified: list[Rollout]
+    outside: dict[str, set[str]]
+
+    def family(self, root: Thread) -> Iterator[Thread]:
+        pending = [root]
+        seen: set[str] = set()
+        while pending:
+            thread = pending.pop()
+            if thread.native_id in seen:
+                continue
+            seen.add(thread.native_id)
+            yield thread
+            pending.extend(reversed(self.children.get(thread.native_id, ())))
+
+
+def _catalogue_path(home: Path, row: Object) -> Path | None:
+    name = row.get("rollout_path")
+    if not isinstance(name, str) or not name or "\0" in name:
+        return None
+    try:
+        # Keep the lexical path for exact matching and separately check where
+        # it resolves. A catalogue entry must never initiate a rollout read.
+        return Path(os.path.abspath(home / name))
+    except (OSError, ValueError):
+        return None
+
+
+def _copy_preference(home: Path, path: Path | None, rollout: Rollout) -> tuple[int, int, str]:
+    found = str(home / rollout.relative)
+    rank = 2
+    if path is not None:
+        wanted = str(path)
+        if wanted == found:
+            rank = 0
+        elif wanted.removesuffix(".zst") == found.removesuffix(".zst"):
+            rank = 1
+    return rank, -rollout.mtime_ns, rollout.relative
+
+
+def _inventory(home: Path, catalogue: Catalogue) -> Inventory:
+    paths: dict[str, Path] = {}
+    path_ids: dict[str, set[str]] = defaultdict(set)
+    edges: dict[str, set[str]] = defaultdict(set)
+    outside: dict[str, set[str]] = defaultdict(set)
+    copies: dict[str, list[Rollout]] = defaultdict(list)
+    broken: dict[str, list[Rollout]] = defaultdict(list)
+    unidentified: list[Rollout] = []
+    for native_id, row in catalogue.threads.items():
+        path = _catalogue_path(home, row)
+        if path is None:
+            continue
+        paths[native_id] = path
+        path_ids[str(path).removesuffix(".zst")].add(native_id)
+        try:
+            target = path.resolve()
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if not target.is_relative_to(home):
+            outside[native_id].add(str(target).removesuffix(".zst"))
+    for edge in catalogue.edges:
+        edges[edge["child_thread_id"]].add(edge["parent_thread_id"])
+    for rollout in _discover(home):
+        matched_id = rollout.native_id
+        if matched_id is None:
+            matches = path_ids.get(str(home / rollout.relative).removesuffix(".zst"), set())
+            if len(matches) == 1:
+                matched_id = next(iter(matches))
+        if rollout.outside:
+            if matched_id is not None:
+                try:
+                    target = (home / rollout.relative).resolve()
+                except (OSError, RuntimeError, ValueError):
+                    continue
+                outside[matched_id].add(str(target).removesuffix(".zst"))
+        elif rollout.failure is not None:
+            if matched_id is None:
+                unidentified.append(rollout)
+            else:
+                broken[matched_id].append(rollout)
+        elif matched_id is not None:
+            copies[matched_id].append(rollout)
+
+    roots: list[Thread] = []
+    children: dict[str, list[Thread]] = defaultdict(list)
+    for native_id in sorted(copies.keys() | broken.keys()):
+        valid = copies[native_id]
+        invalid = broken[native_id]
+        chosen = min(valid or invalid, key=lambda rollout: _copy_preference(home, paths.get(native_id), rollout))
+        parent = chosen.parent
+        if not valid and parent is None:
+            evidence = {rollout.parent for rollout in invalid if rollout.parent is not None} | edges[native_id]
+            if len(evidence) > 1:
+                unidentified.extend(invalid)
+                continue
+            if evidence:
+                parent = next(iter(evidence))
+        thread = Thread(native_id, chosen, valid, parent, invalid)
+        if parent is None:
+            roots.append(thread)
+        else:
+            children[parent].append(thread)
+    return Inventory(roots, children, unidentified, outside)
