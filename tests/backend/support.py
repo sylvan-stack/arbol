@@ -290,9 +290,9 @@ def fenced_step(arguments: list[str]) -> int:
 
     Snapshot, restore and upgrade use the production implementation with the disposable runtime and archive.
     """
-    runtime, action, *rest = arguments
+    runtime, archive_folder, action, *rest = arguments
     storage: Any = import_module("archive_volume")
-    archive_root = (Path(runtime).parent / "recovery").resolve(strict=True)
+    archive_root = Path(archive_folder).resolve(strict=True)
 
     class DisposableArchive:
         def backup_path(self, path: Path, *, allow_missing: bool = False) -> Path:
@@ -378,7 +378,8 @@ class SingleInstallation:
     def fenced(self, *arguments: str) -> dict[str, Any]:
         """One fenced step in a child on the package's interpreter; a refusal ends the set-up with its message."""
         result = subprocess.run([sys.executable, "-I", "-B", "-c", FENCED, str(self.package), str(self.runtime),
-                                 *arguments], capture_output=True, timeout=120, env=self.env)
+                                 str(self.cluster.base / "recovery"), *arguments],
+                                capture_output=True, timeout=120, env=self.env)
         if result.returncode:
             message = (result.stdout + result.stderr).decode(errors="replace").strip()
             raise RuntimeError(f"The fenced {arguments[0]} step refused: {message}")
