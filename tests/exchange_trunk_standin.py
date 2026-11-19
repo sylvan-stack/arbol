@@ -19,6 +19,17 @@ def wait_for(path: Path) -> None:
 
 def main() -> None:
     place = Path(sys.argv[1])
+    if sys.argv[2:] == ["trivial", "list"]:
+        print(json.dumps({
+            "installationLayout": 2,
+            "schema": {"status": "ready", "revision": 1, "compatibilityVersion": 1},
+            "trunks": [{"trunk": "trivial", "default": True, "builds": [{
+                "build": "a", "status": "working", "installationLayout": 2,
+                "schemaCompatibility": [{"compatibilityVersion": 1, "minRevision": 1}],
+                "fits": True, "runnable": True, "chosen": True,
+            }]}],
+        }))
+        return
     if sys.argv[2:7] != ["trivial", "-v", "a", "run", "--detach"]:
         raise ValueError("Expected the selected detached Trunk invocation.")
     fixture = json.loads((place / "reply.json").read_text())

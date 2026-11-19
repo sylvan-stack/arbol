@@ -24,6 +24,7 @@ from arbol_backend.exchange_context import Refusal as Refusal  # noqa: E402
 from arbol_backend.exchange_launcher import Reply  # noqa: E402
 from arbol_backend.model import Identity  # noqa: E402
 from arbol_installation.admission import GENERATION_ENV, STATE, directory, prepare_directory  # noqa: E402
+from arbol_installation.paths import INSTALLATION_LAYOUT  # noqa: E402
 
 EXCHANGE = "7f3a2c1e-4b5d-4e6f-8a9b-0c1d2e3f4a5b"
 ACCEPTED = {
@@ -48,7 +49,8 @@ class Starting(unittest.TestCase):
         with directory(runtime) as folder:
             fd = os.open(STATE, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600, dir_fd=folder)
             with os.fdopen(fd, "w") as stream:
-                json.dump({"format": 1, "state": "normal", "generation": "a" * 32, "release": "b" * 64,
+                json.dump({"format": INSTALLATION_LAYOUT, "state": "normal", "generation": "a" * 32,
+                           "release": "b" * 64,
                            "source": {"host": str(home / "socket"), "port": 5432, "database": "unused",
                                       "databaseOid": 1}, "session": None}, stream)
         standin = Path(__file__).with_name("exchange_trunk_standin.py").resolve()
@@ -72,7 +74,8 @@ class Starting(unittest.TestCase):
 
         def spawn(args: list[str], **kwargs: Any) -> subprocess.Popen[bytes]:
             child: subprocess.Popen[bytes] = POPEN(args, **kwargs)
-            self.child = child
+            if args[1:6] == ["trivial", "-v", "a", "run", "--detach"]:
+                self.child = child
             return child
 
         with patch.dict(os.environ, {GENERATION_ENV: "a" * 32}), patch.object(exchange_start, "receipt", return_value=None):
