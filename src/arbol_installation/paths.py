@@ -4,6 +4,8 @@ import os
 import stat
 from pathlib import Path
 
+INSTALLATION_LAYOUT = 2
+
 
 def installation_root(home: Path | None = None) -> Path:
     return (Path.home() if home is None else home) / ".arbol"

@@ -30,6 +30,7 @@ from .launcher import (
     code_name,
     default_record,
     executable_entry,
+    installation_layout,
     numbered_folders,
     open_use_guard,
     plain,
@@ -442,6 +443,8 @@ def build_component(component: str, paths: Locations, stop: Stop) -> Record:
     # Whole numbers, also when written 1.0, in the order of BuildRecord.
     if "contract" in config:
         record["contract"] = int(config["contract"])
+    if "installationLayout" in config:
+        record["installationLayout"] = installation_layout(config)
     if "schemaCompatibility" in config:
         record["schemaCompatibility"] = config["schemaCompatibility"]
     if "dataFormat" in config:

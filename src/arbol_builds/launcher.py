@@ -152,6 +152,12 @@ def schema_compatibility(value: object) -> bool:
     return True
 
 
+def installation_layout(record: Record) -> int | None:
+    """Read the independent layout declaration, with layout 1 as the historical default."""
+    value = record.get("installationLayout", 1)
+    return value if type(value) is int and positive(value) else None
+
+
 def backend_fits(record: Record, pair: tuple[int, int] | None) -> bool:
     if pair is None or "root" in record:
         return False
@@ -174,7 +180,8 @@ def valid_record(value: object, component: str, build: str) -> bool:
             isinstance(check, dict) and text(check.get("name")) and isinstance(check.get("passed"), bool)
             for check in checks):
         return False
-    if any(key in value and not positive(value[key]) for key in ("contract", "dataFormat")):
+    if (installation_layout(value) is None
+            or any(key in value and not positive(value[key]) for key in ("contract", "dataFormat"))):
         return False
     declares_schema = "schemaCompatibility" in value
     if declares_schema and not schema_compatibility(value["schemaCompatibility"]):

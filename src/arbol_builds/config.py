@@ -14,6 +14,7 @@ from .launcher import (
     TRUNKS,
     code_name,
     entry_path,
+    installation_layout,
     js_integer,
     positive,
     refuse_constant,
@@ -92,6 +93,8 @@ def description(repo: str, component: str) -> tuple[dict[str, Any], str, dict[st
         raise ValueError("A Driver requires contract, dataFormat and unit, contract and live checks.")
     if "rootContracts" in config or (trunk(component) and "contract" in config):
         raise ValueError("A Trunk declares schemaCompatibility in place of rootContracts or contract.")
+    if installation_layout(config) is None:
+        raise ValueError("installationLayout must be a positive integer.")
     if (trunk(component) or "schemaCompatibility" in config) and not schema_compatibility(
             config.get("schemaCompatibility")):
         raise ValueError("schemaCompatibility must contain a positive integer minRevision for each distinct "
