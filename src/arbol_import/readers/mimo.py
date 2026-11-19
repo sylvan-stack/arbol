@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sqlite3
 import stat
+from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import NoReturn
 
-from .form import SessionFailure, Source
+from .form import SessionFailure, Source, unknown_record
 
 _DATABASE = "mimocode.db"
 _DATABASE_FILES = (_DATABASE, f"{_DATABASE}-wal", f"{_DATABASE}-shm")
@@ -129,3 +133,153 @@ def _actor_names(database: sqlite3.Connection, native_id: str) -> Iterator[sqlit
         yield from database.execute(
             "SELECT actor_id, agent FROM actor_registry WHERE session_id = ? ORDER BY actor_id", (native_id,)
         )
+
+
+type _Object = dict[str, object]
+
+_PART_TYPES = frozenset({
+    "text", "subtask", "reasoning", "file", "tool", "step-start", "step-finish",
+    "snapshot", "patch", "agent", "retry", "checkpoint", "compaction",
+})
+
+
+@dataclass
+class _KindFacts:
+    title: str | None = None
+    directory: str | None = None
+
+
+@dataclass(frozen=True)
+class _SessionInfo:
+    title: str
+    directory: str
+    version: str
+    title_source: str
+    slug: str
+    created: datetime
+    updated: datetime
+
+
+@dataclass(frozen=True)
+class _Part:
+    id: str
+    kind: str
+    data: _Object
+    created: datetime
+    synthetic: bool
+
+
+@dataclass(frozen=True)
+class _Message:
+    id: str
+    lane: str
+    role: str
+    parent: str | None
+    created: datetime
+    data: _Object
+    parts: tuple[_Part, ...]
+
+
+def _unknown(record: str) -> NoReturn:
+    unknown_record(record, _DATABASE, conversation=True)
+    raise AssertionError("unknown_record must raise for a conversation record")
+
+
+def _string(value: object, record: str) -> str:
+    if not isinstance(value, str):
+        _unknown(record)
+    return value
+
+
+def _id(value: object, record: str) -> str:
+    text = _string(value, record)
+    if not text:
+        _unknown(record)
+    return text
+
+
+def _object(value: object, record: str) -> _Object:
+    if not isinstance(value, dict):
+        _unknown(record)
+    # JSON object keys are strings.
+    return value
+
+
+def _optional_object(value: object, record: str) -> _Object:
+    return {} if value is None else _object(value, record)
+
+
+def _invalid_constant(_: str) -> NoReturn:
+    raise ValueError("Non-JSON number")
+
+
+def _data(row: sqlite3.Row, record: str) -> _Object:
+    value = row["data"]
+    if not isinstance(value, str):
+        raise _unreadable(record)
+    try:
+        decoded = json.loads(value, parse_constant=_invalid_constant)
+    except (ValueError, RecursionError):
+        raise _unreadable(record) from None
+    return _object(decoded, record)
+
+
+def _time(value: object, record: str) -> datetime:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        _unknown(record)
+    try:
+        return datetime.fromtimestamp(value / 1000, UTC)
+    except (OSError, OverflowError, ValueError):
+        _unknown(record)
+
+
+def _session_info(row: sqlite3.Row, facts: _KindFacts) -> _SessionInfo:
+    facts.title = _string(row["title"], "session")
+    facts.directory = _string(row["directory"], "session")
+    return _SessionInfo(
+        facts.title, facts.directory, _string(row["version"], "session"), _string(row["title_source"], "session"),
+        _string(row["slug"], "session"), _time(row["time_created"], "session"), _time(row["time_updated"], "session"),
+    )
+
+
+def _part(row: sqlite3.Row) -> _Part:
+    data = _data(row, "part")
+    kind = _string(data.get("type"), "part")
+    if kind not in _PART_TYPES:
+        _unknown("part")
+    synthetic = data.get("synthetic", False)
+    if not isinstance(synthetic, bool):
+        _unknown("part")
+    if kind == "text":
+        _string(data.get("text"), "part")
+    elif kind == "file":
+        _string(data.get("mime"), "part")
+        _string(data.get("url"), "part")
+    return _Part(_id(row["id"], "part"), kind, data, _time(row["time_created"], "part"), synthetic)
+
+
+def _message(row: sqlite3.Row, parts: list[sqlite3.Row]) -> _Message:
+    data = _data(row, "message")
+    role = _string(data.get("role"), "message")
+    if role not in ("user", "assistant"):
+        _unknown("message")
+    parent = _id(data.get("parentID"), "message") if role == "assistant" else None
+    lane = _id(row["agent_id"], "message")
+    created = _time(row["time_created"], "message")
+    return _Message(
+        _id(row["id"], "message"), lane, role, parent, created, data, tuple(_part(part) for part in parts),
+    )
+
+
+def _read_messages(
+    database: sqlite3.Connection, native_id: str, part_rows: list[sqlite3.Row],
+) -> tuple[list[_Message], list[sqlite3.Row]]:
+    parts: dict[str, list[sqlite3.Row]] = defaultdict(list)
+    for row in part_rows:
+        parts[_id(row["message_id"], "part")].append(row)
+    messages = []
+    message_rows = []
+    for row in _message_rows(database, native_id):
+        messages.append(_message(row, parts.get(_id(row["id"], "message"), [])))
+        message_rows.append(row)
+    return messages, message_rows
