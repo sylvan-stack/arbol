@@ -24,6 +24,7 @@ from .form import (
     Source,
     State,
     Steer,
+    Subagent,
     TextBlock,
     ToolCall,
     Trigger,
@@ -644,7 +645,7 @@ def _results(rows: Iterable[Record]) -> dict[str, NativeResult]:
 
 def _items(
     rows: Iterable[Record], results: dict[str, NativeResult], *,
-    agent: str | None = None, parent_call: str | None = None,
+    agent: str | None = None,
 ) -> Iterator[Item]:
     for record in rows:
         if record.duplicate or record.row.get("type") != "assistant":
@@ -667,7 +668,7 @@ def _items(
                     result=native.output if native is not None else None,
                     ok=native.ok if native is not None else False,
                     error=native.output.text if native is not None and not native.ok else None,
-                    parent_call_id=parent_call,
+                    parent_call_id=None,
                     started_at=_at(record),
                 )
 
@@ -869,3 +870,37 @@ def _placements(
             turn_index = _locate_turn(turns, log.first_at)
         if turn_index is not None and log.first_at is not None:
             yield turn_index, log, link.call_id if link is not None else None
+
+
+def _subagent(log: AgentLog, call_id: str | None) -> Subagent:
+    first = log.first_at
+    assert first is not None
+    rows = [record for record in log.rows if not record.duplicate]
+    last_turn = rows
+    for group in _turn_records(rows):
+        last_turn = group.rows
+    ending = _ending(last_turn)
+    usage = sum((response.usage for response in _responses(rows).values()), Usage())
+    return Subagent(log.native_id, call_id, first, ending is not None and ending.state == "failed", usage)
+
+
+def _project_turns(rows: Sequence[Record], agents: dict[str, AgentLog]) -> tuple[Turn, ...]:
+    results = _results(rows)
+    responses = _responses(rows)
+    turns = [_turn(group, results, responses) for group in _turn_records(rows)]
+    agent_items = {
+        agent_id: tuple(_items(log.rows, _results(log.rows), agent=agent_id))
+        for agent_id, log in agents.items()
+    }
+    nested: list[list[Item]] = [[] for _ in turns]
+    subagents: list[list[Subagent]] = [[] for _ in turns]
+    for index, log, call_id in _placements(turns, agents, agent_items):
+        subagents[index].append(_subagent(log, call_id))
+        nested[index].extend(
+            replace(item, parent_call_id=call_id)
+            for item in agent_items[log.native_id] if isinstance(item, ToolCall)
+        )
+    return tuple(
+        replace(turn, items=(*turn.items, *nested[index]), subagents=tuple(subagents[index]))
+        for index, turn in enumerate(turns)
+    )
