@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 import re
@@ -17,7 +19,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import NoReturn
 
-from .form import Kind, SessionFailure, Source, State, TextBlock, unknown_record
+from .form import Image, Kind, Result, SessionFailure, Source, State, TextBlock, ToolCall, unknown_record
 
 _DATABASE = "mimocode.db"
 _DATABASE_FILES = (_DATABASE, f"{_DATABASE}-wal", f"{_DATABASE}-shm")
@@ -172,6 +174,7 @@ class _Part:
     synthetic: bool
     started: datetime
     last_saved: datetime
+    tool: ToolCall | None
 
 
 @dataclass(frozen=True)
@@ -275,13 +278,17 @@ def _part(row: sqlite3.Row, facts: _KindFacts) -> _Part:
         _string(data.get("mime"), "part")
         _string(data.get("url"), "part")
     created = _time(row["time_created"], "part")
-    timing = _optional_object(data.get("time"), "part")
+    state = _object(data.get("state"), "part") if kind == "tool" else {}
+    record = state if kind == "tool" else data
+    timing = _optional_object(record.get("time"), "part")
     started = _optional_time(timing.get("start"), "part") or created
     ended = _optional_time(timing.get("end"), "part") or started
-    part = _Part(_id(row["id"], "part"), kind, data, created, synthetic, started, max(created, started, ended))
     metadata = _optional_object(data.get("metadata"), "part")
-    state = _object(data.get("state"), "part") if kind == "tool" else {}
     state_metadata = _optional_object(state.get("metadata"), "part")
+    call = _tool_call(data, state, state_metadata, started) if kind == "tool" else None
+    part = _Part(
+        _id(row["id"], "part"), kind, data, created, synthetic, started, max(created, started, ended), call,
+    )
     if "arbolCompletedHistory" in metadata or "arbolCompletedHistory" in state_metadata:
         facts.completed_history = True
     return part
@@ -449,3 +456,57 @@ def _text_block(message: _Message, part: _Part) -> TextBlock | None:
     if part.kind == "text" and not part.synthetic and not message.summary:
         return TextBlock(_string(part.data.get("text"), "part"), part.started)
     return None
+
+
+def _attachments(value: object) -> Iterator[_Object]:
+    if value is None:
+        return
+    if not isinstance(value, list):
+        _unknown("part")
+    for raw in value:
+        attachment = _object(raw, "part")
+        _string(attachment.get("mime"), "part")
+        _string(attachment.get("url"), "part")
+        yield attachment
+
+
+def _inline_image(attachment: _Object) -> Image | None:
+    media_type = _string(attachment.get("mime"), "part")
+    url = _string(attachment.get("url"), "part")
+    if not media_type.lower().startswith("image/") or url[:5].lower() != "data:":
+        return None
+    header, comma, payload = url.partition(",")
+    if not comma or header[5:].lower() != f"{media_type};base64".lower():
+        return None
+    try:
+        return Image(media_type, len(base64.b64decode(payload, validate=True)))
+    except (binascii.Error, ValueError):
+        _unknown("part")
+
+
+def _tool_call(data: _Object, state: _Object, metadata: _Object, started: datetime) -> ToolCall:
+    call_id = _id(data.get("callID"), "part")
+    name = _id(data.get("tool"), "part")
+    arguments = _object(state.get("input"), "part")
+    status = state.get("status")
+    if status not in ("pending", "running", "completed", "error"):
+        _unknown("part")
+
+    result = None
+    error = None
+    if status in ("completed", "error"):
+        if status == "completed":
+            output = _string(state.get("output"), "part")
+        else:
+            error = _string(state.get("error"), "part")
+            partial = metadata.get("output")
+            output = partial if isinstance(partial, str) else error
+        images = tuple(
+            image for attachment in _attachments(state.get("attachments"))
+            if (image := _inline_image(attachment)) is not None
+        )
+        fields = {key: value for key, value in metadata.items() if key not in {"attachments", "images", "output"}}
+        if name == "bash" and type(fields.get("exit")) is int:
+            fields["exitCode"] = fields.pop("exit")
+        result = Result(output, fields or None, images)
+    return ToolCall(call_id, None, name, arguments, result, status == "completed", error, None, started)
