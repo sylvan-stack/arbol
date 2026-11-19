@@ -467,3 +467,219 @@ class Drill:
                 await bridge.close()
         self.checked(step, f"exchanges-settle-through-{build.number}", states == ("completed", "completed"),
                      states=states)
+
+    # --- 4.4 The checks of 8.5 and 8.6 -------------------------------------------------------------------------------
+
+    def write_import(self) -> tuple[str, str]:
+        """One fictional imported chat and one completed Exchange with trunk `imported`, Build `0`, its prompt and
+        run, written as the importer will: in one transaction with `arbol.importing` on."""
+        chat, exchange = str(uuid.uuid4()), str(uuid.uuid4())
+        self.cluster.psql(f"""
+            BEGIN;
+            SET LOCAL arbol.importing = 'on';
+            INSERT INTO public.chats (id, title, created_at) VALUES ('{chat}', 'Fictional imported session', now());
+            INSERT INTO public.chat_imports (chat_id, tool, native_id, kind, tool_version, origin, manifest,
+                                             first_imported, last_imported)
+              VALUES ('{chat}', 'codex', 'fictional-native-session', 'owner', '0.0.0', '{{}}', '{"0" * 64}', now(),
+                      now());
+            INSERT INTO public.exchanges (id, chat_id, number, state, trunk, build, route, working_folder,
+                                          accepted_at, ended_at)
+              VALUES ('{exchange}', '{chat}', 1, 'completed', 'imported', '0', '{{}}', '/', now(), now());
+            INSERT INTO public.exchange_imports (exchange_id, chat_id, turn_key, trigger)
+              VALUES ('{exchange}', '{chat}', 'fictional-turn-1', 'typed');
+            INSERT INTO public.messages (exchange_id, position, role, text)
+              VALUES ('{exchange}', 0, 'user', 'Fictional imported prompt.'),
+                     ('{exchange}', 1, 'assistant', 'Fictional imported answer.');
+            INSERT INTO public.runs (exchange_id, run_id, outcome, ended_at)
+              VALUES ('{exchange}', 'imported.1', 'completed', now());
+            COMMIT;
+        """)
+        return chat, exchange
+
+    def refused_insert(self, chat: str) -> tuple[str | None, str | None]:
+        import psycopg
+
+        with psycopg.connect(f"{self.cluster.server_address}/{DATABASE}", autocommit=True) as connection:
+            try:
+                connection.execute(
+                    "INSERT INTO public.exchanges (id, chat_id, number, state, trunk, build, route, working_folder, "
+                    "accepted_at, ended_at) VALUES (%s, %s, 2, 'completed', 'imported', '0', '{}', '/', now(), now())",
+                    (str(uuid.uuid4()), chat))
+            except psycopg.Error as error:
+                return error.sqlstate, error.diag.message_primary
+        return None, None
+
+    def count(self, chat: str) -> int:
+        return int(self.cluster.psql(f"SELECT count(*) FROM exchanges WHERE chat_id = '{chat}'"))
+
+    async def read_imported(self, step: str, build: Any, chat: str, exchange: str) -> None:
+        with self.backend(build):
+            bridge = await self.bridge()
+            try:
+                before = self.count(chat)
+                send = await self.send(bridge, f"imported-{build.number}", chat=chat)
+                await asyncio.sleep(1)
+                after = self.count(chat)
+                page = await bridge.call("chats.page", {"limit": 200})
+                exchanges = await bridge.call("chat.exchanges", {"chat": chat, "beforeNumber": 2147483647,
+                                                                 "limit": 50})
+            finally:
+                await bridge.close()
+        code = send["reply"].get("error", {}).get("code")
+        self.checked(step, f"send-to-imported-refused-through-{build.number}",
+                     code == "database_unavailable" and after == before, code=code, before=before, after=after)
+        listed = [item for item in page.get("result", {}).get("chats", []) if item.get("chat") == chat]
+        self.checked(step, f"chat-list-reads-imported-through-{build.number}",
+                     "error" not in page and len(listed) == 1, listed=len(listed), error=page.get("error"))
+        rows = exchanges.get("result", {}).get("exchanges", [])
+        found = [row for row in rows if row.get("exchange") == exchange]
+        shape = [(row.get("trunk"), row.get("build")) for row in found]
+        self.checked(step, f"snapshot-reads-imported-through-{build.number}",
+                     "error" not in exchanges and shape == [("imported", "0")], shape=shape,
+                     error=exchanges.get("error"))
+
+    def reserved(self, step: str) -> None:
+        clone_tool = self.source / "bin/arbol-builds"
+        before = sorted(p.name for p in (self.registry / "arbol-trunk").iterdir())
+        result = subprocess.run([str(clone_tool), "build", "arbol-trunk/imported", "--repo", str(TRUNK_CHECKOUT),
+                                 "--registry-dir", str(self.registry), "--bin-dir", str(self.bin)],
+                                capture_output=True, timeout=120, env=self.environment())
+        after = sorted(p.name for p in (self.registry / "arbol-trunk").iterdir())
+        self.checked(step, "build-imported-refused", result.returncode != 0 and before == after
+                     and not (self.registry / "arbol-trunk/imported").exists(), status=result.returncode,
+                     reply=result.stdout.decode(errors="replace").strip()[-300:], before=before, after=after)
+        exchanges = self.upgrade.folder / "bin/arbol-exchanges"
+        request = self.live / "request.json"
+        private_json(request, {"message": "Fictional drill message.", "workingFolder": str(self.work),
+                               "route": {**ROUTE, "model": "complete"}})
+        for arguments in (["trunks", "imported"],
+                          ["start", "imported", "--exchange", str(uuid.uuid4()), "--request", str(request)]):
+            run = subprocess.run([str(exchanges), *arguments], capture_output=True, timeout=60,
+                                 env=self.environment(), cwd=self.work)
+            try:
+                code = json.loads(run.stdout).get("error", {}).get("code")
+            except ValueError:
+                code = None
+            self.checked(step, f"exchanges-{arguments[0]}-imported-refused", run.returncode != 0
+                         and code == "invalid_input", status=run.returncode, code=code)
+
+    async def reserved_bridge(self, step: str) -> None:
+        with self.backend(self.upgrade):
+            bridge = await self.bridge()
+            try:
+                chat = next(iter(self.chats.values()))
+                send = await self.send(bridge, "reserved-send", chat=chat, trunk="imported")
+                again = await bridge.call("exchange.sendAgain", {
+                    "exchange": next(iter(self.exchanges.values())), "newExchange": str(uuid.uuid4()),
+                    "route": {**ROUTE, "model": "complete"}, "trunk": "imported"})
+            finally:
+                await bridge.close()
+        for name, reply in (("chat.send", send["reply"]), ("exchange.sendAgain", again)):
+            code = reply.get("error", {}).get("code")
+            self.checked(step, f"bridge-{name}-imported-refused", code == "invalid_input", code=code)
+
+    # --- Phases ------------------------------------------------------------------------------------------------------
+
+    async def phases(self) -> None:
+        P, Q = (self.prior, "P"), (self.upgrade, "Q")
+        self.record("8", "drill-start", "started", prior=self.prior.number, priorSource=self.prior.source,
+                    upgrade=self.upgrade.number, upgradeSource=self.upgrade.source, trunk=self.trunk.number,
+                    trunkSource=self.trunk.source, live=str(self.live), out=str(self.out))
+        self.prepare()
+        await asyncio.to_thread(self.open_admission, self.prior, "P", {"revision": 1, "compatibilityVersion": 1})
+        await self.populate("8.1", self.prior, "p")
+        self.save_image("8.1-populated")
+        if self.until == "baseline":
+            return
+
+        await asyncio.to_thread(lambda: self.fenced_upgrade("8.2", prior=P, upgrade=Q, target=2))
+        ledger = self.cluster.value("SELECT json_agg(json_build_array(revision, compatibility_version) ORDER BY "
+                                    "revision) FROM arbol_schema_migrations")
+        self.checked("8.2", "ledger-revision-2", ledger == [[1, 1], [2, 1]], ledger=ledger)
+        await self.populate("8.2", self.upgrade, "q")
+        if self.until == "upgrade2":
+            return
+
+        held = await asyncio.to_thread(self.maintenance, self.upgrade)
+        before = self.save_image("8.3-before")
+        upgraded = await asyncio.to_thread(
+            lambda: self.fenced_upgrade("8.3", prior=Q, upgrade=(self.upgrade, "Q3"), target=3, held=held))
+        after = self.save_image("8.4-after")
+        migrations, upgrades = (after["ledger"][name] for name in LEDGER)
+        checks = {
+            "tablesIdentical": {k: v for k, v in after["tables"].items() if k not in ("chat_imports", "exchange_imports")}
+            == before["tables"],
+            "oidUnchanged": after["databaseOid"] == before["databaseOid"],
+            "migrationsKept": migrations[:-1] == before["ledger"]["arbol_schema_migrations"]
+            and migrations[-1]["revision"] == 3 and migrations[-1]["compatibility_version"] == 1,
+            "upgradesKept": upgrades[:-1] == before["ledger"]["arbol_schema_upgrades"]
+            and upgrades[-1]["maintenance_session"] == upgraded["session"],
+            "importTablesEmpty": after["tables"].get("chat_imports") == [] and after["tables"].get(
+                "exchange_imports") == [],
+            "function": any(f["name"] == "refuse_imported_exchange" for f in after["functions"]),
+            "trigger": {"name": "exchanges_refuse_imported", "table": "exchanges",
+                        "function": "refuse_imported_exchange"} in after["triggers"],
+        }
+        self.checked("8.4", "revision-3-preserves-every-row", all(checks.values()), **checks)
+        if self.until == "upgrade3":
+            return
+
+        await self.exchange_round("8.5", self.upgrade)
+        await asyncio.to_thread(self.switch, self.prior, "P")
+        await self.exchange_round("8.5", self.prior)
+        chat, exchange = self.write_import()
+        sqlstate, message = self.refused_insert(chat)
+        self.checked("8.5", "insert-without-importing-refused", (sqlstate, message) == ("P0001", "imported_chat"),
+                     sqlstate=sqlstate, message=message)
+        await self.read_imported("8.5", self.prior, chat, exchange)
+        await asyncio.to_thread(self.switch, self.upgrade, "Q")
+        await self.read_imported("8.5", self.upgrade, chat, exchange)
+        if self.until == "revision3":
+            return
+
+        self.reserved("8.6")
+        await self.reserved_bridge("8.6")
+        self.record("8", "drill-finished", "passed")
+
+    def switch(self, build: Any, label: str) -> None:
+        """Reopen the installation to another release at the same revision, through maintenance."""
+        from arbol_backend.exchange_drain import reopen
+
+        source, session = self.maintenance(self.upgrade if label == "P" else self.prior)
+        schema = self.cluster.value("SELECT json_build_object('revision', max(revision), 'compatibilityVersion', 1) "
+                                    "FROM arbol_schema_migrations")
+        _, digest = self.release(label, build)
+        reopen(self.context(build), source, session, release=digest, schema=schema, verify_release=self.verified(label))
+        self.record("8.5", f"reopened-to-{build.number}", True, release=digest)
+
+    def close(self) -> None:
+        for path in sorted(self.live.glob("restore-*")) + [self.cluster.base]:
+            if path.exists():
+                Cluster(path).stop()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--source", type=Path, default=Path(__file__).resolve().parents[1],
+                        help="the qualified arbol checkout whose tools run the drill (default: this one)")
+    parser.add_argument("--run", type=Path, required=True, help="the owner-only run folder for retained output")
+    parser.add_argument("--live", type=Path, required=True, help="a new, empty owner-only folder under /tmp")
+    parser.add_argument("--registry", type=Path, required=True, help="the private Build registry")
+    parser.add_argument("--prior", type=Path, required=True, help="Build P, the release before the upgrades")
+    parser.add_argument("--upgrade", type=Path, required=True, help="Build Q, the qualified release")
+    parser.add_argument("--trunk", type=Path, required=True, help="the trivial Trunk Build T")
+    parser.add_argument("--until", choices=PHASES, default=PHASES[-1])
+    options = parser.parse_args()
+    drill = Drill(options)
+    try:
+        asyncio.run(drill.phases())
+    except DrillError as error:
+        drill.record("8", "drill-stopped", "failed", reason=str(error))
+        return 1
+    finally:
+        drill.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
