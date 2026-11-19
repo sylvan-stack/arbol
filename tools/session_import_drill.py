@@ -7,7 +7,8 @@ written to the caller's installation; the Builds are read from the registry name
 
 Phases, in order (IMP-0.11, IMP-0.16, IMP-0.18): `baseline` (8.1), `upgrade2` (8.2), `upgrade3` (8.3 and 8.4),
 `revision3` (8.5) and `reserved` (8.6). `--until <phase>` stops after that phase. Every chat is fictional, and no
-result line holds chat text.
+result line holds chat text. With `--release-to`, a complete drill saves its evidence outside ~/Builds after
+shutdown and releases its dedicated run folder to cleanup.
 """
 
 from __future__ import annotations
@@ -119,10 +120,13 @@ class Cluster:
                         "-w", "-t", "60", "start"], check=True, capture_output=True, timeout=90,
                        env=self.environment())
 
-    def stop(self) -> None:
-        if (self.data / "postmaster.pid").exists():
-            subprocess.run([str(PG / "pg_ctl"), "-D", str(self.data), "-m", "fast", "-w", "-t", "60", "stop"],
-                           check=False, capture_output=True, timeout=90, env=self.environment())
+    def stop(self) -> bool:
+        pid_file = self.data / "postmaster.pid"
+        if not os.path.lexists(pid_file):
+            return True
+        result = subprocess.run([str(PG / "pg_ctl"), "-D", str(self.data), "-m", "fast", "-w", "-t", "60", "stop"],
+                                check=False, capture_output=True, timeout=90, env=self.environment())
+        return result.returncode == 0 and not os.path.lexists(pid_file)
 
     def psql(self, sql: str, *, database: str = DATABASE) -> str:
         result = subprocess.run([str(PG / "psql"), "-X", "-At", "-v", "ON_ERROR_STOP=1", "-h", str(self.socket),
@@ -168,18 +172,35 @@ def image(cluster: Cluster) -> dict[str, Any]:
 class Drill:
     def __init__(self, options: argparse.Namespace) -> None:
         self.source = options.source.resolve(strict=True)
+        sys.path[:0] = [str(self.source / relative) for relative in ("", "src", "tests", "scripts", "database")]
         self.run = owner_only(options.run)
         self.live = owner_only(options.live)
+        self.registry = owner_only(options.registry)
+        self.archive: Path | None = None
+        self.run_info: os.stat_result | None = None
+        self.shutdown_confirmed = True
         require(self.live.is_relative_to(Path("/private/tmp")) and not any(self.live.iterdir()),
                 "The live folder must be a new, empty folder under /tmp.")
         require(not self.run.is_relative_to(self.live) and not self.live.is_relative_to(self.run),
                 "The run folder and the live folder must be separate.")
-        self.out = private_folder(self.run / f"drill-{time.strftime('%Y%m%dT%H%M%S')}")
-        self.results = self.out / "results.jsonl"
-        self.registry = owner_only(options.registry)
+        if options.release_to is not None:
+            from arbol_installation.build_output import contains_path, empty_run, evidence_destination
+
+            home = Path.home()
+            run = options.run.absolute()
+            self.run_info = empty_run(home, run)
+            inputs = {self.source, self.live, self.registry}
+            inputs.update(path.resolve(strict=True) for path in (options.prior, options.upgrade, options.trunk))
+            inputs.update(path.resolve() for path in (ARBOL_CHECKOUT, TRUNK_CHECKOUT, DESIGN_CHECKOUT))
+            require(not contains_path(self.run, inputs) and not any(contains_path(path, {self.run}) for path in inputs),
+                    "--release-to requires a dedicated output directory separate from the source, Builds and live state.")
+            self.archive = evidence_destination(home, options.release_to)
+            require(not contains_path(self.live, {self.archive}), "Save the evidence outside the disposable live folder.")
         self.prior = self.build(options.prior, "arbol")
         self.upgrade = self.build(options.upgrade, "arbol")
         self.trunk = self.build(options.trunk, "arbol-trunk/trivial")
+        self.out = private_folder(self.run / f"drill-{time.strftime('%Y%m%dT%H%M%S')}")
+        self.results = self.out / "results.jsonl"
         self.python = self.source / ".venv/bin/python"
         self.home = private_folder(self.live / "home")
         require(self.home != Path.home().resolve() and self.home.is_relative_to(self.live),
@@ -200,7 +221,6 @@ class Drill:
         self.until = options.until
 
     def build(self, folder: Path, component: str) -> Any:
-        sys.path[:0] = [str(self.source / relative) for relative in ("", "src", "tests", "scripts", "database")]
         from tools.trunk_runtime_journeys import Build
 
         folder = folder.resolve(strict=True)
@@ -351,7 +371,7 @@ class Drill:
                       str(PORT), "--user", ROLE, "restore", "--snapshot", str(attempt / "snapshot"), "--output",
                       str(attempt / "restore-attempt"))
         finally:
-            restore.stop()
+            self.shutdown_confirmed = restore.stop() and self.shutdown_confirmed
         receipt = json.loads((attempt / "restore-attempt/restore.json").read_text())
         self.checked(step, "isolated-restore-verified", receipt.get("status") == "verified",
                      snapshotSha256=receipt.get("snapshotSha256"), targetCluster=receipt.get("targetCluster"))
@@ -385,10 +405,21 @@ class Drill:
             assert child.stdin is not None
             child.stdin.close()
             try:
-                child.wait(timeout=60)
+                if child.wait(timeout=60) != 0:
+                    self.shutdown_confirmed = False
             except subprocess.TimeoutExpired:
+                self.shutdown_confirmed = False
                 os.killpg(child.pid, signal.SIGTERM)
                 child.wait(timeout=30)
+            if self.archive is not None:
+                try:
+                    os.killpg(child.pid, 0)
+                except ProcessLookupError:
+                    pass
+                except OSError:
+                    self.shutdown_confirmed = False
+                else:
+                    self.shutdown_confirmed = False
 
     async def bridge(self) -> Any:
         from tools.backend_journeys import Bridge
@@ -403,7 +434,7 @@ class Drill:
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
             state = self.state(exchange)
-            if state not in (None, "open"):
+            if state is not None and state != "open":
                 return state
             await asyncio.sleep(0.25)
         raise DrillError("An Exchange did not settle in time.")
@@ -655,7 +686,35 @@ class Drill:
     def close(self) -> None:
         for path in sorted(self.live.glob("restore-*")) + [self.cluster.base]:
             if path.exists():
-                Cluster(path).stop()
+                try:
+                    self.shutdown_confirmed = Cluster(path).stop() and self.shutdown_confirmed
+                except (OSError, subprocess.SubprocessError):
+                    if self.archive is None:
+                        raise
+                    self.shutdown_confirmed = False
+
+    def finalize(self, status: int, drained: bool) -> int:
+        if self.archive is None:
+            return status
+        from arbol_installation.build_output import release_run, save_evidence
+
+        cleanup = {"run": str(self.run)}
+        if status or self.until != PHASES[-1]:
+            cleanup["retained"] = "The requested phases did not complete the full drill."
+        elif not drained or not self.shutdown_confirmed:
+            cleanup["error"] = "The drill could not confirm that all processes stopped."
+        else:
+            try:
+                home = Path.home()
+                self.record("8", "release-shutdown-confirmed", True)
+                save_evidence(home, self.archive, self.out)
+                cleanup["evidence"] = str(self.archive)
+                cleanup["queued"] = str(release_run(home, self.run, self.archive / self.out.name / self.results.name,
+                                                     expected=self.run_info))
+            except (OSError, ValueError) as error:
+                cleanup["error"] = str(error)
+        print(json.dumps({"runRelease": cleanup}), flush=True)
+        return 1 if "error" in cleanup else status
 
 
 def main() -> int:
@@ -663,6 +722,7 @@ def main() -> int:
     parser.add_argument("--source", type=Path, default=Path(__file__).resolve().parents[1],
                         help="the qualified arbol checkout whose tools run the drill (default: this one)")
     parser.add_argument("--run", type=Path, required=True, help="the owner-only run folder for retained output")
+    parser.add_argument("--release-to", type=Path, help="archive a complete drill here and release its new run folder")
     parser.add_argument("--live", type=Path, required=True, help="a new, empty owner-only folder under /tmp")
     parser.add_argument("--registry", type=Path, required=True, help="the private Build registry")
     parser.add_argument("--prior", type=Path, required=True, help="Build P, the release before the upgrades")
@@ -671,14 +731,26 @@ def main() -> int:
     parser.add_argument("--until", choices=PHASES, default=PHASES[-1])
     options = parser.parse_args()
     drill = Drill(options)
+    status = 0
+    drained = False
     try:
         asyncio.run(drill.phases())
+        if drill.archive is not None and drill.until == PHASES[-1]:
+            from arbol_backend.model import Refused
+
+            # Installed-mode backends can leave detached Exchange work behind.
+            # Freeze private admission to verify the runtime catalogue and PostgreSQL before shutdown.
+            try:
+                drill.maintenance(drill.upgrade)
+                drained = True
+            except (Refused, OSError, ValueError, subprocess.SubprocessError) as error:
+                drill.record("8", "release-drain-unconfirmed", "retained", reason=str(error))
     except DrillError as error:
         drill.record("8", "drill-stopped", "failed", reason=str(error))
-        return 1
+        status = 1
     finally:
         drill.close()
-    return 0
+    return drill.finalize(status, drained)
 
 
 if __name__ == "__main__":
