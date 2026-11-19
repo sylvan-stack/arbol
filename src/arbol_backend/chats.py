@@ -52,6 +52,12 @@ async def tool_params(params: Params) -> Params:
     return {"exchange": uuid_id(params.get("exchange")), "position": integer(params.get("position"), 1, 2147483647)}
 
 
+async def phase_detail_params(params: Params) -> Params:
+    return {"exchange": uuid_id(params.get("exchange")),
+            "after": integer(params.get("after", 0), 0, 2147483647),
+            "offset": integer(params.get("offset", 0), 0, 2147483646)}
+
+
 async def rename_params(params: Params) -> Params:
     result = await chat(params)
     if "title" not in params:
@@ -102,6 +108,7 @@ class Chats:
         registry.method("chats.page", self.page, page_params)
         registry.method("chat.exchanges", self.reader.page_exchanges, exchange_params)
         registry.method("toolCall.get", self.reader.tool, tool_params)
+        registry.method("exchange.phaseDetails", self.reader.phase_details, phase_detail_params)
         registry.method("chat.rename", self.rename, rename_params)
         registry.method("chat.settings", self.settings, self.catalogues.settings)
         registry.method("chat.mark", self.mark, mark_params)

@@ -13,6 +13,7 @@ from .database import Database, Session
 from .metadata import Attention, Layout, inspect, iso
 
 TOOL_BYTES = 8192
+PHASE_DETAIL_PAGE = 128 * 1024
 
 
 async def refuse_imported(database: Database | Session, chat: str) -> None:
@@ -271,3 +272,33 @@ class Reader:
             if error is not None:
                 result["error"] = error
             return result
+
+    async def phase_details(self, params: Params) -> Params:
+        """Read immutable record text, paging within a record when it exceeds one reply."""
+        offset = params["offset"]
+        async with self.database.session(snapshot=True) as session:
+            if (self.database.schema.revision or 0) < 4:
+                return {"entries": []}
+            rows = await session.execute(
+                "SELECT d.position, substr(d.entry,%s,%s), char_length(d.entry) "
+                "FROM exchange_phase_details d JOIN exchanges e ON e.id=d.exchange_id "
+                "WHERE d.exchange_id=%s AND d.position>%s AND e.trunk='steady' AND e.replaced_by IS NULL "
+                "ORDER BY d.position LIMIT %s",
+                [offset + 1, PHASE_DETAIL_PAGE, params["exchange"], params["after"], 1 if offset else 32],
+            )
+        remaining = PHASE_DETAIL_PAGE
+        entries: list[Params] = []
+        for position, part, size in rows:
+            text = part[:remaining]
+            if not text:
+                raise Error("invalid_input")
+            entry: Params = {"position": position, "text": text}
+            entries.append(entry)
+            next_offset = offset + len(text)
+            if next_offset < size:
+                entry["nextOffset"] = next_offset
+                break
+            remaining -= len(text)
+            if not remaining:
+                break
+        return {"entries": entries}
