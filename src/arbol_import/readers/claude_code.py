@@ -150,8 +150,22 @@ class OrderedFile:
     failure_line: int = 1
 
 
-def _read_records(home: Path, path: Path) -> Generator[tuple[int, Any]]:
+def _data_file(home: Path, path: Path) -> Path:
     resolved = _regular(home, path)
+    try:
+        if (
+            resolved.parent == path.parent.resolve()
+            and resolved.suffix == path.suffix
+            and _archive_name(resolved.relative_to(home))
+        ):
+            return resolved
+    except (OSError, RuntimeError, ValueError):
+        pass
+    raise _unreadable(home, path)
+
+
+def _read_records(home: Path, path: Path) -> Generator[tuple[int, Any]]:
+    resolved = _data_file(home, path)
     yield from file_records(home, resolved.relative_to(home).as_posix())
 
 
@@ -168,7 +182,7 @@ def _order_file(home: Path, file: SessionFile) -> OrderedFile:
     modified = None
     number = 0
     try:
-        modified = _mtime(_regular(home, file.path))
+        modified = _mtime(_data_file(home, file.path))
         stream = _read_records(home, file.path)
         try:
             for line, row in stream:
@@ -216,14 +230,40 @@ def _ordered_rows(home: Path, ordered: OrderedFile) -> Iterator[tuple[int, Any]]
         raise ordered.lookahead_failure
 
 
+def _context_files(files: list[SessionFile], selected: frozenset[str] | None) -> Iterable[SessionFile]:
+    if selected is None:
+        return files
+    by_project: dict[Path, list[SessionFile]] = {}
+    by_id: dict[str, list[SessionFile]] = {}
+    for file in files:
+        by_project.setdefault(file.path.parent, []).append(file)
+        by_id.setdefault(file.native_id, []).append(file)
+
+    # A continued UUID can cross IDs in a project, and copies of the same
+    # session can cross projects. Include both links when a selection is given.
+    pending = [file for native_id in selected for file in by_id.get(native_id, ())]
+    related: set[SessionFile] = set()
+    while pending:
+        file = pending.pop()
+        if file in related:
+            continue
+        related.add(file)
+        pending.extend(by_project.pop(file.path.parent, []))
+        pending.extend(by_id.pop(file.native_id, []))
+    return related
+
+
 def _ordered_sessions(home: Path, source: Source) -> Iterator[Failed | tuple[str, SessionRecords]]:
-    files = []
+    discovered: list[SessionFile] = []
     for file in _discover(home):
         if isinstance(file, Failed):
             yield file
         else:
-            files.append(_order_file(home, file))
-    files.sort(key=lambda ordered: (ordered.at, ordered.file.path))
+            discovered.append(file)
+    files = sorted(
+        (_order_file(home, file) for file in _context_files(discovered, source.selected)),
+        key=lambda ordered: (ordered.at, ordered.file.path),
+    )
 
     remaining: dict[str, int] = {}
     for ordered in files:
@@ -613,10 +653,11 @@ def _result_fields(value: Any) -> Any:
     if isinstance(value, list):
         return [_result_fields(part) for part in value]
     if isinstance(value, dict):
-        return {
-            key: _result_fields(part) for key, part in value.items()
-            if key != "base64" and not (key == "data" and value.get("type") == "base64")
-        }
+        kind = _string(value.get("type")) or ""
+        omitted = ("data",) if kind == "base64" else ()
+        if kind == "image" or kind.startswith("image/") or "media_type" in value or "mediaType" in value:
+            omitted = (*omitted, "base64")
+        return {key: _result_fields(part) for key, part in value.items() if key not in omitted}
     return value
 
 
@@ -727,7 +768,7 @@ def _present(home: Path, path: Path) -> bool:
 
 def _json_file(home: Path, path: Path) -> Any:
     try:
-        return json.loads(_regular(home, path).read_bytes())
+        return json.loads(_data_file(home, path).read_bytes())
     except (OSError, ValueError, RecursionError):
         raise _unreadable(home, path) from None
 
@@ -1099,3 +1140,28 @@ def _session(home: Path, source: Source, native_id: str, kind: Kind, session: Se
         archive_files=files,
         files_not_archived=outside,
     )
+
+
+def read(source: Source) -> Iterator[Session | Failed]:
+    """Yield one Claude Code reader result per selected native session."""
+    try:
+        home = source.home.resolve()
+    except (OSError, RuntimeError, ValueError):
+        yield Failed.of(SessionFailure("unreadable_session", "projects: could not be read."), file="projects")
+        return
+
+    driver_ids = _driver_ids(source.driver_state)
+    for discovered in _ordered_sessions(home, source):
+        if isinstance(discovered, Failed):
+            yield discovered
+            continue
+        native_id, session = discovered
+        kind = _kind(native_id, driver_ids, session.rows)
+        try:
+            # The scanner stopped before the offending row. A later sidecar
+            # failure retains the prefix already accepted from the main logs.
+            if session.failure is not None:
+                raise session.failure
+            yield _session(home, source, native_id, kind, session)
+        except SessionFailure as error:
+            yield Failed.of(error, native_id=native_id, kind=kind)
