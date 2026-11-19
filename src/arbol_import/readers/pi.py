@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import os
 import re
 import stat
 from collections.abc import Generator, Iterator
@@ -21,6 +22,12 @@ _ENTRY_TYPES = (
     "custom", "custom_message", "context_edit", "label", "session_info",
 )
 _ARCHIVE_ROLES = ("system", "custom", "bashExecution", "branchSummary", "compactionSummary")
+_SPILL_LOG = re.compile(r"pi-(?:bash|powershell|output)-[0-9a-f]{16}\.log")
+_EXCLUDED_NAMES = frozenset({
+    ".cache", ".env", ".git", ".ssh", "auth", "cache", "caches", "config", "credentials", "device-id",
+    "device_id", "logs", "secrets", "tokens",
+})
+_HOME_STATE_DIRS = frozenset({"bin", "extensions", "install", "plugins", "prompts", "skills", "themes", "tools"})
 
 
 def _iso_time(value: object) -> datetime | None:
@@ -43,12 +50,35 @@ def _session_name(path: Path) -> bool:
     return path.suffix == ".jsonl" and bool(prefix and separator and suffix)
 
 
+def _session_layout(relative: Path) -> bool:
+    return len(relative.parts) == 3 and relative.parts[0] == "sessions" and _session_name(relative)
+
+
+def _eligible_path(relative: Path) -> bool:
+    if relative.parts and relative.parts[0].casefold() in _HOME_STATE_DIRS:
+        return False
+    for part in relative.parts:
+        name = part.casefold()
+        if name in _EXCLUDED_NAMES or name.startswith((
+            ".env.", "auth.", "config.", "credentials.", "device-id.", "device_id.", "settings.", "settings-backup-",
+        )):
+            return False
+        if name.startswith("models") and ".json" in name:
+            return False
+        # Pi's shell tools save full tool output with a .log suffix as well.
+        if name.endswith((".cache", ".index", ".log", ".token", ".wal")) and not _SPILL_LOG.fullmatch(name):
+            return False
+    return True
+
+
 def _children(home: Path, directory: Path) -> list[Path]:
     file = directory.relative_to(home).as_posix()
     try:
         resolved = directory.resolve()
         if not resolved.is_relative_to(home / "sessions"):
             raise _unreadable(file)
+        if not _eligible_path(directory.relative_to(home)) or not _eligible_path(resolved.relative_to(home)):
+            return []
         if stat.S_ISDIR(resolved.stat().st_mode):
             return sorted(resolved.iterdir())
     except FileNotFoundError:
@@ -61,8 +91,9 @@ def _children(home: Path, directory: Path) -> list[Path]:
 def _session_path(home: Path, path: Path) -> Path:
     try:
         resolved = path.resolve()
-        parts = resolved.relative_to(home).parts
-        if (len(parts) == 3 and parts[0] == "sessions" and _session_name(resolved)
+        relative = resolved.relative_to(home)
+        if (_session_layout(relative)
+                and _eligible_path(path.relative_to(home)) and _eligible_path(relative)
                 and stat.S_ISREG(resolved.stat().st_mode)):
             return resolved
     except (OSError, RuntimeError, ValueError):
@@ -295,7 +326,7 @@ def _turn_end(last: _Message, state: State) -> datetime:
     return _entry_time(entry)
 
 
-def _turn(rows: list[_Message], cwd: str) -> Turn:
+def _turn(home: Path, rows: list[_Message], cwd: str) -> Turn:
     start, user = rows[0]
     turn_key = start.native_id
     assert turn_key is not None  # The active path validated it.
@@ -313,7 +344,7 @@ def _turn(rows: list[_Message], cwd: str) -> Turn:
         working_folder=cwd,
         model=None,
         effort=None,
-        items=tuple(_items(rows)),
+        items=tuple(_items(home, rows)),
     )
 
 
@@ -337,7 +368,45 @@ def _without_image_bytes(value: Any) -> Any:
     return value
 
 
-def _result(entry: _Entry, message: dict[str, Any]) -> tuple[Result, bool, bool]:
+def _spill_failure(entry: _Entry) -> SessionFailure:
+    return SessionFailure("unreadable_session", f"{entry.where}: the spilled tool result could not be read.")
+
+
+def _spill_path(home: Path, entry: _Entry, message: dict[str, Any]) -> Path | None:
+    details = message.get("details")
+    name = _string(details.get("fullOutputPath")) if isinstance(details, dict) else None
+    if name is None or "\0" in name:
+        return None
+    path = home / name
+    try:
+        resolved = path.resolve()
+    except (OSError, RuntimeError, ValueError):
+        normalized = Path(os.path.abspath(path))
+        if not normalized.is_relative_to(home):
+            return normalized
+        raise _spill_failure(entry) from None
+    if resolved.is_relative_to(home):
+        if path.is_relative_to(home) and not _eligible_path(path.relative_to(home)):
+            return None
+        relative = resolved.relative_to(home)
+        if _session_layout(relative) or not _eligible_path(relative):
+            return None
+    return resolved
+
+
+def _full_output(home: Path, entry: _Entry, message: dict[str, Any], inline: str) -> str:
+    path = _spill_path(home, entry, message)
+    if path is None or not path.is_relative_to(home):
+        return inline
+    try:
+        if stat.S_ISREG(path.stat().st_mode):
+            return path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeError):
+        raise _spill_failure(entry) from None
+    return inline
+
+
+def _result(home: Path, entry: _Entry, message: dict[str, Any]) -> tuple[Result, str | None, bool]:
     content = message.get("content")
     parts = list(_parts(entry, content, ("text", "image")))
     output = "\n".join(part["text"] for part in parts if part["type"] == "text")
@@ -353,7 +422,8 @@ def _result(entry: _Entry, message: dict[str, Any]) -> tuple[Result, bool, bool]
         fields = {key: value for key, value in details.items() if key not in ("truncation", "fullOutputPath")}
     else:
         fields = {"details": details} if details is not None else {}
-    return Result(output, _without_image_bytes(fields) or None, images), is_error, truncated
+    full_output = _full_output(home, entry, message, output)
+    return Result(full_output, _without_image_bytes(fields) or None, images), output if is_error else None, truncated
 
 
 def _results(rows: list[_Message]) -> dict[str, _Message]:
@@ -369,7 +439,7 @@ def _results(rows: list[_Message]) -> dict[str, _Message]:
     return results
 
 
-def _items(rows: list[_Message]) -> Iterator[Item]:
+def _items(home: Path, rows: list[_Message]) -> Iterator[Item]:
     results = _results(rows)
     calls: set[str] = set()
     for entry, message in rows:
@@ -387,15 +457,15 @@ def _items(rows: list[_Message]) -> Iterator[Item]:
                 entry.bad("tool-call")
             calls.add(call_id)
             saved = results.get(call_id)
-            result, is_error, truncated = _result(*saved) if saved is not None else (None, False, False)
+            result, error, truncated = _result(home, *saved) if saved is not None else (None, None, False)
             yield ToolCall(
                 call_id=call_id,
                 agent=None,
                 name=name,
                 input=arguments,
                 result=result,
-                ok=result is not None and not is_error,
-                error=result.text if result is not None and is_error else None,
+                ok=result is not None and error is None,
+                error=error,
                 parent_call_id=None,
                 started_at=_native_time(entry, part),
                 truncated=truncated,
