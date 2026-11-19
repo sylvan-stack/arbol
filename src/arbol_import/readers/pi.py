@@ -5,12 +5,12 @@ from __future__ import annotations
 import re
 import stat
 from collections.abc import Generator, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .form import SessionFailure, Source, unknown_record
+from .form import Kind, SessionFailure, Source, unknown_record
 from .lines import file_records
 
 _NATIVE_ID = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
@@ -93,3 +93,48 @@ def _selected_header(rows: Iterator[tuple[int, Any]], file: str, source: Source)
     line, row = first
     header = _header(row, file, line)
     return header if source.wants(header.native_id) else None
+
+
+def _string(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+@dataclass(frozen=True)
+class _Entry:
+    file: str
+    line: int
+    row: dict[str, Any]
+
+    @property
+    def native_id(self) -> str | None:
+        return _string(self.row.get("id"))
+
+    @property
+    def at(self) -> datetime | None:
+        return _iso_time(self.row.get("timestamp"))
+
+    @property
+    def has_parent(self) -> bool:
+        return "parentId" in self.row and (
+            self.row["parentId"] is None or _string(self.row["parentId"]) is not None
+        )
+
+
+@dataclass
+class _Scan:
+    file: str
+    entries: list[_Entry] = field(default_factory=list)
+    kind: Kind = "owner"
+    title: str | None = None
+
+    def add(self, line: int, row: Any) -> None:
+        if not isinstance(row, dict):
+            return
+        entry = _Entry(self.file, line, row)
+        self.entries.append(entry)
+        if (line == 2 and row.get("type") == "custom" and row.get("customType") == "arbol-history-import"
+                and entry.native_id is not None and entry.has_parent and entry.at is not None):
+            self.kind = "arbol_driver"
+        if row.get("type") == "session_info":
+            name = _string(row.get("name"))
+            self.title = name if name and name.strip() else None
