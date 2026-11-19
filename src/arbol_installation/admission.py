@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
+from .paths import installation_root, prepare_installation
+
 Mode = Literal["normal", "controlled"]
 Source = dict[str, str | int]
 DIRECTORY = "writer-admission"
@@ -41,7 +43,7 @@ class AdmissionRefusal(Exception):
 
 
 def runtime_folder(home: Path | None = None) -> Path:
-    return (home or Path.home()) / "Library/Application Support/Arbol/runtime"
+    return installation_root(home) / "runtime"
 
 
 def private_dir(descriptor: int) -> None:
@@ -237,6 +239,8 @@ def write_state(folder: int, state: State) -> None:
 
 def prepare_directory(runtime: Path) -> None:
     """Explicit operator setup only. A missing state never grants admission."""
+    if runtime == runtime_folder():
+        prepare_installation()
     runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
     root = os.open(runtime, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:

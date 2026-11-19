@@ -23,6 +23,7 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.rows import tuple_row
 
 from arbol_installation.admission import AdmissionRefusal
+from arbol_installation.paths import database_settings, postgres_folder
 
 from .exchange_admission import Admission, Lease, register_database_writer
 from .model import Identity, Refused, object_file, private_directory
@@ -167,7 +168,7 @@ def private_socket(identity: Identity, host: str) -> str:
     if not Path(host).is_absolute() or "," in host:
         raise ValueError("A qualification connection needs an absolute private socket path.")
     directory = Path(host).resolve(strict=True)
-    if directory == (identity.home / "Library/Application Support/Arbol/database/socket").resolve():
+    if directory == (postgres_folder(identity.home) / "socket").resolve():
         raise ValueError("The installed database socket is not an isolated target.")
     private_directory(directory)
     return str(directory)
@@ -183,7 +184,7 @@ def database_fields(name: str, role: str, host: str, port: int) -> dict[str, str
 
 def configured_target(identity: Identity) -> dict[str, str]:
     try:
-        value = object_file(identity.home / ".arbol/database.json")
+        value = object_file(database_settings(identity.home))
         if (set(value) != {"address", "database"} or not isinstance(value["address"], str)
                 or not isinstance(value["database"], str)):
             raise ValueError("Invalid database configuration.")

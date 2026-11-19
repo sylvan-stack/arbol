@@ -6,6 +6,7 @@ import os
 import sys
 from pathlib import Path
 
+from arbol_installation.paths import prepare_installation
 from arbol_radar.cli import run as vigor
 
 from .database import explicit_target
@@ -28,6 +29,7 @@ def main(args: list[str], package: Path) -> int:
         if parsed["verb"] == "vigor":  # the read of Subscriptions Vigor; the command line works while no backend runs
             return asyncio.run(vigor(selected, parsed))
         if not selected.fixture:
+            prepare_installation(selected.home)
             selected.folder.mkdir(mode=0o700, parents=True, exist_ok=True)
         private_directory(selected.folder)
         if parsed.get("action") == "acquire":

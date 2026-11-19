@@ -10,6 +10,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from arbol_installation.admission import runtime_folder
+from arbol_installation.paths import installation_root
+
 ROOT_ID = re.compile(r"[a-z0-9]+\Z", re.ASCII)
 BUILD_ID = re.compile(r"[1-9a-f][0-9a-f]*\Z", re.ASCII)
 ISOLATION = {"--runtime-dir", "--bin-dir", "--settings-dir", "--database"}
@@ -148,7 +151,7 @@ def identity(package: Path, options: dict[str, str], *, home: Path | None = None
     def path(key: str, default: Path) -> Path:
         return Path(os.path.abspath(os.path.expanduser(options.get(key, str(default)))))
 
-    installed = home / "Library/Application Support/Arbol/runtime"
+    installed = runtime_folder(home)
     folder = path("--runtime-dir", installed)
     if "--runtime-dir" in options:
         if folder.resolve() == installed.resolve():
@@ -157,7 +160,7 @@ def identity(package: Path, options: dict[str, str], *, home: Path | None = None
         raise Refused("invalid_input", "The backend socket path exceeds 103 bytes.")
     return Identity(
         number, folder, path("--bin-dir", home / ".local/bin"),
-        path("--settings-dir", home / ".arbol" if folder == installed else folder / "settings"),
+        path("--settings-dir", installation_root(home) if folder == installed else folder / "settings"),
         options.get("--database"), home, package,
         compatibility, bool(options.keys() & ISOLATION),
     )

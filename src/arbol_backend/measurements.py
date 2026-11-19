@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 
+from arbol_installation.paths import postgres_folder
+
 from .bridge import Error, Params, Registry
 from .database import Session
 from .health import Health
@@ -79,7 +81,7 @@ class Measurements:
             host = session.connection.info.host
             if not self.disk.local(host, server):
                 raise ValueError("The database server is not local.")
-            candidate = self.database.identity.home / "Library/Application Support/Arbol/database/data"
+            candidate = postgres_folder(self.database.identity.home) / "data"
             path = await asyncio.to_thread(self.disk.confirm, candidate, pid, float(started))
             return str(path), host, server
         except asyncio.CancelledError:
