@@ -8,18 +8,21 @@ import os
 import re
 import stat
 from collections.abc import Generator, Iterator
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NoReturn
 
 from .form import (
+    Failed,
     HomeFile,
     Image,
     Item,
     Kind,
     Response,
     Result,
+    Session,
     SessionFailure,
     Source,
     State,
@@ -550,3 +553,78 @@ def _archive(home: Path, scan: _Scan, clock: datetime) -> tuple[tuple[HomeFile, 
     ordered = (session, *sorted(files - {session}))
     archive = tuple(HomeFile(path.relative_to(home).as_posix()) for path in ordered)
     return archive, live_by_mtime(ordered, clock), len(outside)
+
+
+def _discover(home: Path) -> Iterator[Path | Failed]:
+    try:
+        folders = _children(home, home / "sessions")
+    except SessionFailure as failure:
+        yield Failed.of(failure, file="sessions")
+        return
+    for folder in folders:
+        try:
+            files = _children(home, folder)
+        except SessionFailure as failure:
+            yield Failed.of(failure, file=folder.relative_to(home).as_posix())
+            continue
+        for path in files:
+            if not _session_name(path):
+                continue
+            try:
+                yield _session_path(home, path)
+            except SessionFailure as failure:
+                yield Failed.of(failure, file=path.relative_to(home).as_posix())
+
+
+def _read_session(home: Path, path: Path, source: Source) -> Session | Failed | None:
+    file = path.relative_to(home).as_posix()
+    scan = _Scan(file)
+    header = None
+    try:
+        with closing(_session_records(home, file)) as rows:
+            header = _selected_header(rows, file, source)
+            if header is None:
+                return None
+            for line, record in rows:
+                scan.add(line, record)
+        turns = tuple(_turn(home, messages, header.cwd) for messages in _turn_messages(_active_messages(scan.entries)))
+        archive, live, outside = _archive(home, scan, source.clock)
+        return Session(
+            tool="pi",
+            native_id=header.native_id,
+            kind=scan.kind,
+            title=scan.title,
+            created_at=header.created_at,
+            tool_version=None,
+            origin={"cwd": header.cwd},
+            working_folder=header.cwd,
+            live=live,
+            turns=turns,
+            archive_files=archive,
+            files_not_archived=outside,
+        )
+    except (SessionFailure, OSError, OverflowError, RecursionError) as error:
+        failure = error if isinstance(error, SessionFailure) else _unreadable(file)
+        if header is not None:
+            return Failed.of(failure, native_id=header.native_id, kind=scan.kind)
+        return Failed.of(failure, file=file) if source.selected is None else None
+
+
+def read(source: Source) -> Iterator[Session | Failed]:
+    """Read the selected Pi sessions, reporting each session's failures without stopping the scan."""
+    try:
+        home = source.home.resolve()
+    except (OSError, RuntimeError, ValueError):
+        if source.selected is None:
+            yield Failed.of(_unreadable("sessions"), file="sessions")
+        return
+    seen: set[Path] = set()
+    for candidate in _discover(home):
+        if isinstance(candidate, Failed):
+            if source.selected is None:
+                yield candidate
+        elif candidate not in seen:
+            seen.add(candidate)
+            session = _read_session(home, candidate, source)
+            if session is not None:
+                yield session
