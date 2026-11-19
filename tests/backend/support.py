@@ -12,7 +12,9 @@ import sys
 import tempfile
 import time
 import tomllib
+from functools import partial
 from hashlib import sha256
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -275,6 +277,48 @@ def reach(package: Path, compatibility: tuple[tuple[int, int], ...]) -> dict[str
     raise RuntimeError("No migration of this package reaches a revision its schemaCompatibility admits.")
 
 
+# A child on the package's interpreter runs one step of the fenced schema upgrade with the package's own tools
+# (database/README.md, "Database recovery before reopening"). -I keeps the caller's PYTHONPATH out.
+FENCED = ("import sys; from pathlib import Path; package = Path(sys.argv[1]); "
+          "sys.path[:0] = [str(package / name) for name in ('database', 'src', 'runtime/site-packages', 'tests')]; "
+          "from backend.support import fenced_step; raise SystemExit(fenced_step(sys.argv[2:]))")
+
+
+def fenced_step(arguments: list[str]) -> int:
+    """In the child: one fenced step, printing one JSON object.
+
+    Snapshot, restore and upgrade run what the command lines of `recovery.py` and `migrate_schema.py` run. The one
+    difference is the `exclusive` adapter: it holds the fixture's runtime instead of the installed one, as
+    `database/README.md` says qualification does.
+    """
+    runtime, action, *rest = arguments
+    release: Any = import_module("recovery_release")
+    if action == "verify-release":
+        folder, expected = rest
+        print(json.dumps({"releaseSha256": release.verify_release(Path(folder), expected)[1]}))
+        return 0
+    fence = partial(import_module("arbol_backend.exchange_drain").exclusive_upgrade, runtime=Path(runtime))
+    if action == "recovery":
+        recovery: Any = import_module("recovery")
+        return int(recovery.main(rest, exclusive=fence))
+    if action == "upgrade":
+        migration: Any = import_module("migrate_schema")
+        database, socket, port, user, revision, session, prior, staged, snapshot, receipt = rest
+        try:
+            result = migration.upgrade(
+                migration.database_target(database, socket=Path(socket), port=int(port), user=user),
+                migration.load_manifest(),
+                migration.Upgrade(int(revision), session, prior, staged, Path(snapshot), Path(receipt)),
+                exclusive=fence,
+                verify_recovery=migration._recovery_verifier,
+            )
+        except migration.Refusal as error:
+            result = {"status": error.status, "message": str(error)}
+        print(json.dumps(result))
+        return 0 if result["status"] == "ready" else 1
+    raise ValueError(f"Unknown fenced step: {action}")
+
+
 class SingleInstallation:
     """Canonical database and one private home/runtime/bin for the backend and its children."""
 
@@ -303,6 +347,18 @@ class SingleInstallation:
     @property
     def endpoint(self) -> Path:
         return self.runtime / "backend.sock"
+
+    def fenced(self, *arguments: str) -> dict[str, Any]:
+        """One fenced step in a child on the package's interpreter; a refusal ends the set-up with its message."""
+        result = subprocess.run([sys.executable, "-I", "-B", "-c", FENCED, str(self.package), str(self.runtime),
+                                 *arguments], capture_output=True, timeout=120, env=self.env)
+        if result.returncode:
+            message = (result.stdout + result.stderr).decode(errors="replace").strip()
+            raise RuntimeError(f"The fenced {arguments[0]} step refused: {message}")
+        value = json.loads(result.stdout.splitlines()[-1])
+        if not isinstance(value, dict):
+            raise RuntimeError(f"The fenced {arguments[0]} step gave no result object.")
+        return value
 
     def open_admission(self) -> None:
         """Run off the asyncio event loop: the operator gate runs its own SQL probes."""
