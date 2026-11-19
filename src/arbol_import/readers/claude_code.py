@@ -5,13 +5,13 @@ from __future__ import annotations
 import json
 import re
 import stat
-from collections.abc import Generator, Iterator, Sequence
+from collections.abc import Generator, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NoReturn
 
-from .form import Failed, Kind, SessionFailure, Source, unknown_record
+from .form import Failed, Kind, SessionFailure, Source, State, Steer, Trigger, Turn, unknown_record
 from .lines import file_records
 
 
@@ -417,3 +417,98 @@ def _kind(native_id: str, driver_ids: set[str], records: Sequence[Record]) -> Ki
         if first_prompt in _PROBE_PROMPTS:
             return "probe"
     return "agent_launched"
+
+
+@dataclass(frozen=True)
+class TurnRecords:
+    prompt: str
+    rows: list[Record]
+
+
+def _turn_records(records: Iterable[Record]) -> Iterator[TurnRecords]:
+    current = None
+    for record in records:
+        if record.duplicate:
+            continue
+        prompt = _user_prompt(record)
+        if prompt is not None:
+            if current is not None:
+                yield current
+            current = TurnRecords(prompt, [])
+        if current is not None:
+            current.rows.append(record)
+    if current is not None:
+        yield current
+
+
+def _at(record: Record) -> datetime:
+    assert record.at is not None
+    return record.at
+
+
+def _trigger(row: Record) -> Trigger:
+    origin = row.row.get("turnOrigin")
+    if origin == "task_notification":
+        return "task"
+    if origin in ("sdk", "peer", "host_synthetic"):
+        return "system"
+    return "typed" if origin in (None, "human") else "system"
+
+
+@dataclass(frozen=True)
+class Ending:
+    at: datetime
+    state: State
+    error: str | None = None
+    kind: str | None = None
+
+
+def _ending(rows: Sequence[Record]) -> Ending | None:
+    marker = next((row for row in reversed(rows) if _interruption(row)), None)
+    if marker is not None:
+        return Ending(_at(marker), "cancelled")
+    assistant = next((row for row in reversed(rows) if row.row.get("type") == "assistant"), None)
+    if assistant is None:
+        return None
+    message = _message(assistant)
+    if assistant.row.get("isApiErrorMessage"):
+        return Ending(
+            _at(assistant), "failed", _text(message.get("content")), _string(assistant.row.get("error"))
+        )
+    reason = _string(message.get("stop_reason"))
+    if reason == "end_turn":
+        return Ending(_at(assistant), "completed")
+    if reason is not None and reason != "tool_use":
+        return Ending(_at(assistant), "failed", kind=reason)
+    return None
+
+
+def _steers(rows: Iterable[Record]) -> Iterator[Steer]:
+    for row in rows:
+        if row.row.get("type") != "attachment":
+            continue
+        attachment = _object(row.row.get("attachment"))
+        if attachment.get("type") == "queued_command":
+            yield Steer(_REMINDER.sub("", _text(attachment.get("prompt"))), _at(row))
+
+
+def _turn(group: TurnRecords) -> Turn:
+    rows = group.rows
+    start = rows[0]
+    ending = _ending(rows)
+    if ending is None:
+        ending = Ending(next(row.at for row in reversed(rows) if row.at is not None), "interrupted")
+    return Turn(
+        turn_key=start.row["uuid"],
+        trigger=_trigger(start),
+        prompt=group.prompt,
+        started_at=_at(start),
+        ended_at=ending.at,
+        state=ending.state,
+        error=ending.error,
+        error_kind=ending.kind,
+        working_folder=_string(start.row.get("cwd")),
+        model=None,
+        effort=None,
+        steers=tuple(_steers(rows)),
+    )
