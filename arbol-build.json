@@ -1,5 +1,6 @@
 {
   "component": "arbol",
+  "installationLayout": 2,
   "entry": "bin/arbol",
   "schemaCompatibility": [
     {

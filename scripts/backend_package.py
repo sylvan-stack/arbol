@@ -14,6 +14,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from arbol_backend.model import BUILD_ID, object_file, schema_compatibility  # noqa: E402
+from arbol_installation.paths import INSTALLATION_LAYOUT  # noqa: E402
 
 MUTABLE = {"build.json", "build.log", "last-start", "package-manifest.json"}
 # M/D are generated after this outer provenance record settles. Only these
@@ -61,19 +62,28 @@ def compatibility(folder: Path, record: dict[str, Any]) -> tuple[tuple[int, int]
     return declared
 
 
+def require_layout(*documents: dict[str, Any]) -> None:
+    for document in documents:
+        layout = document.get("installationLayout")
+        if type(layout) is not int or layout != INSTALLATION_LAYOUT:
+            raise ValueError("The source, Build record and package must declare the active installation layout.")
+
+
 def build_record(folder: Path) -> dict[str, Any]:
     record = object_file(folder / "build.json")
+    package = object_file(folder / "package.json")
+    require_layout(object_file(folder / "arbol-build.json"), record, package)
     if (
         record.get("component") != "arbol"
         or record.get("entry") != "bin/arbol"
         or "root" in record
         or not isinstance(record.get("build"), str)
         or not BUILD_ID.fullmatch(record["build"])
-        or record.get("packageVersion") != object_file(folder / "package.json").get("version")
+        or record.get("packageVersion") != package.get("version")
     ):
         raise ValueError("The Arbol Build identity must match its package.")
     declared = compatibility(folder, record)
-    if dict(declared) != dict(schema_compatibility(object_file(folder / "package.json").get("schemaCompatibility"))):
+    if dict(declared) != dict(schema_compatibility(package.get("schemaCompatibility"))):
         raise ValueError("The Build and package must declare the same schema compatibility.")
     return record
 
@@ -130,6 +140,7 @@ def source(root: Path) -> dict[str, Any]:
 def verify(folder: Path) -> None:
     record = build_record(folder)
     manifest = object_file(folder / "package-manifest.json")
+    require_layout(manifest)
     if (
         manifest.get("component") != "arbol"
         or "root" in manifest

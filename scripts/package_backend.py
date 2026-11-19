@@ -215,6 +215,7 @@ def package(root: Path = ROOT) -> Path:
         shutil.copy2(root / name, folder / name)
     record = json.loads((folder / "build.json").read_text())
     package_record = json.loads((folder / "package.json").read_text())
+    package_record["installationLayout"] = record["installationLayout"]
     package_record["schemaCompatibility"] = record["schemaCompatibility"]
     (folder / "package.json").write_text(json.dumps(package_record, indent=2) + "\n")
     database = root / "database"
@@ -259,6 +260,7 @@ def package(root: Path = ROOT) -> Path:
         "format": 1,
         "component": "arbol",
         "entry": "bin/arbol",
+        "installationLayout": record["installationLayout"],
         "schemaCompatibility": record["schemaCompatibility"],
         "build": record["build"],
         "packageVersion": record["packageVersion"],
