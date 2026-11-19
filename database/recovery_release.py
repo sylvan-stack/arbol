@@ -29,6 +29,7 @@ COMMIT = re.compile(r"[0-9a-f]{40}")
 DIGEST = re.compile(r"[0-9a-f]{64}")
 LABEL = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*")
 MUTABLE_BUILD_FILES = {"build.log", "last-start", ".use.lock"}
+SEALED_LAYOUT_2 = {"arbol", "arbol-claude-driver", "arbol-codex-driver", "arbol-mimo-driver"}
 
 
 class RecoveryError(ValueError):
@@ -277,6 +278,25 @@ def retain_signed_app(app: Path, destination: Path) -> str:
     return sha(canonical(before))
 
 
+def sealed_payload_evidence(payload: Path, component: str, build: str, commit: str, git_tree: str) -> dict[str, str]:
+    application = Path(__file__).resolve().parents[1]
+    source = application / "driver-payload/src"
+    if not source.is_dir():
+        source = application / "src"
+    sys.path.insert(0, str(source))
+    try:
+        verifier = import_module("arbol_builds.driver_payload")
+        verified = verifier.load(payload, component, build)
+    except (ImportError, OSError, ValueError) as error:
+        raise RecoveryError("The selected immutable package could not be verified.") from error
+    finally:
+        sys.path.pop(0)
+    descriptor = verified.descriptor
+    if descriptor["source"] != {"commit": commit, "tree": git_tree}:
+        raise RecoveryError("The immutable package differs from its committed Git tree.")
+    return {"descriptorSha256": str(verified.digest), "manifestSha256": str(descriptor["payloadManifestSha256"])}
+
+
 def capture_build(
     item: dict[str, Any], output: Path, index: int, inventory: dict[str, Any],
 ) -> dict[str, Any]:
@@ -306,14 +326,25 @@ def capture_build(
             or not entry_path.is_file() or not os.access(entry_path, os.X_OK)):
         raise RecoveryError("Build identity, entry or package version differs from its committed configuration.")
     expected_checks = [{"name": check["name"], "passed": True} for check in build_config["checks"]]
-    if record.get("checks") != expected_checks:
+    recorded_checks = record.get("checks")
+    if recorded_checks != expected_checks or any(check["passed"] is not True for check in recorded_checks):
         raise RecoveryError("The Build has not recorded every committed check as successful.")
 
     evidence: dict[str, Any] = {}
-    manifest_file = folder / "package-manifest.json"
+    payload = folder
+    sealed = folder / "driver-payload"
+    if os.path.lexists(sealed) or (layout >= 2 and component in SEALED_LAYOUT_2):
+        git_tree = commit_id(git(checkout, "rev-parse", f"{commit}^{{tree}}").decode().strip())
+        evidence["sealedPayload"] = sealed_payload_evidence(sealed, component, build, commit, git_tree)
+        if component != "arbol":
+            payload = sealed
+    manifest_file = payload / "package-manifest.json"
     if manifest_file.is_file():
         manifest = document(manifest_file)
-        packaged_layout = manifest.get("installationLayout", 1)
+        # Sealed Driver manifests predate the installation layout declaration.
+        # Their exact Build/source identity was verified above and the layout is
+        # bound by the committed description and registry record.
+        packaged_layout = manifest.get("installationLayout", layout if payload == sealed else 1)
         if (manifest.get("format") != 1 or manifest.get("candidate", False) is not False
                 or type(packaged_layout) is not int or packaged_layout != layout
                 or any(manifest.get(key) != record.get(key)
@@ -322,10 +353,10 @@ def capture_build(
                 or manifest["source"].get("uncommittedChanges") is not False
                 or manifest["source"].get("componentPath", prefix.rstrip("/")) != prefix.rstrip("/")):
             raise RecoveryError("The package manifest differs from the selected Build or its source.")
-        check_hashes(folder, manifest["files"])
+        check_hashes(payload, manifest["files"])
         evidence["packageManifestSha256"] = digest(manifest_file)
         if "python" in manifest:
-            evidence.update(python_evidence(manifest, checkout, commit, prefix, folder))
+            evidence.update(python_evidence(manifest, checkout, commit, prefix, payload))
         if component == "arbol" and inventory["kind"] == "legacy":
             # Packaging read this from another checkout; the Arbol commit cannot identify those bytes.
             contract_layout = folder / "tests/backend/layout.sql"
