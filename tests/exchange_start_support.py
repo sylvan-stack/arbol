@@ -57,7 +57,7 @@ class Starting(unittest.TestCase):
                             + ' "$@"\n')
         launcher.chmod(0o700)
         self.request = home / "request with spaces"
-        self.request.write_bytes(b"\xff the coordinator must not parse this file")
+        self.request.write_bytes(b'{ "message" : "Detached start fixture" }\n')
         self.child: subprocess.Popen[bytes] | None = None
         self.addCleanup(self.clean_child)
 
