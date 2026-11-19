@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from arbol_installation.admission import runtime_folder
-from arbol_installation.paths import installation_root
+from arbol_installation.paths import INSTALLATION_LAYOUT, installation_root
 
 ROOT_ID = re.compile(r"[a-z0-9]+\Z", re.ASCII)
 BUILD_ID = re.compile(r"[1-9a-f][0-9a-f]*\Z", re.ASCII)
@@ -125,9 +125,12 @@ def identity(package: Path, options: dict[str, str], *, home: Path | None = None
     home = home or Path.home()
     number = "0"
     try:
+        description = object_file(package / "arbol-build.json")
+        documents = [description]
         if os.path.lexists(package / "build.json"):
             record = object_file(package / "build.json")
             manifest = object_file(package / "package.json")
+            documents.extend((record, manifest, object_file(package / "package-manifest.json")))
             version = manifest.get("version")
             compatibility = schema_compatibility(record.get("schemaCompatibility"))
             if (
@@ -143,8 +146,11 @@ def identity(package: Path, options: dict[str, str], *, home: Path | None = None
                 raise ValueError("Invalid Build identity.")
             number = record["build"]
         else:
-            description = object_file(package / "arbol-build.json")
             compatibility = schema_compatibility(description.get("schemaCompatibility"))
+        for document in documents:
+            layout = document.get("installationLayout")
+            if type(layout) is not int or layout != INSTALLATION_LAYOUT:
+                raise Refused("no_fit", "The backend Build and installation layout differ.")
     except (OSError, ValueError, UnicodeError) as error:
         raise Refused("invalid_input", "Cannot read the backend Build and its schema compatibility.") from error
 
