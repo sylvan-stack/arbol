@@ -88,9 +88,12 @@ Save the input JSON inventory in an owner-only operator directory outside Git.
 ```
 
 Use `current` for a single-database release and omit the legacy Root record.
-Add the selected Drivers and other runtime dependencies that apply. Supply
-`checkout` on a Build entry if the Git commit is available in a relocated
-checkout instead of the one named by the Build. Use the actual `root.json` for
+Add the selected Drivers, Browser, classifier and every applicable Trunk.
+Supply `checkout` on a Build entry if the Git commit is available in a
+relocated checkout. For a Trunk, point that field to its component directory,
+such as `trunks/steady`, within the checkout. A layout-2 Mimo entry needs
+`nativeCandidate` with the absolute path of the exact pinned native gate input.
+Use the actual `root.json` for
 `root`; it must identify the named database and the Root selected by the saved
 Arbol and Root Builds. Record the effective settings, launch and renderer
 references, and required private files. Save credential references and retain
@@ -102,14 +105,44 @@ uv run --no-sync python database/recovery_release.py \
   --inventory "$inventory" --output "$recovery/prior-release"
 ```
 
+From a packaged Backend Build, use its `runtime/python/bin/python3.14 -B`
+and its `database/recovery_release.py` with the same arguments.
+
 Repeat for the staged release in a separate directory. Save the returned
 `releaseSha256` values. The recorder verifies source and package evidence and
 preserves the source archives, locked inputs, Build configuration and referenced
-recovery files. Unresolved required inputs refuse publication. Legacy release
+recovery files. It checks every committed gate result in the selected Build
+record. For sealed packages it verifies the physical payload, its descriptor
+and the exact Git tree. Pi and Mimo package metadata bind the interpreter to
+its source pin. Browser capture verifies the signed host, its launcher and the
+published source admission, then retains the pinned stock Electron and Native
+qualification inputs. Node must be available for Browser capture. Unresolved
+required inputs refuse publication. Legacy release
 records retain the exact packaged Root Contract SQL as `root-contract.sql`
 after checking it against `contractLayoutSha256`. Use the recorded signed App
-bundle and its Build record for exact App recovery. Reproduce other unavailable
-Builds from their recorded source and locked inputs.
+bundle and its Build record for exact App recovery.
+
+To reproduce another selected Build, use its `savedAt` directory and the
+`sourceCommit`, `componentPath` and `evidence.gitSource` values from the verified
+release record. Clone the retained bare Git repository into a private workspace,
+check out the recorded commit, and compare its tree and archive before using
+the recorded component directory with the ordinary Build command.
+
+```bash
+git clone --no-local --no-tags "$saved/source.git" "$checkout"
+git -C "$checkout" switch --detach "$source_commit"
+git -C "$checkout" rev-parse HEAD 'HEAD^{tree}'
+git -C "$checkout" archive --format=tar --output="$comparison_tar" "$source_commit"
+cmp "$comparison_tar" "$saved/source.tar"
+```
+
+Use the saved inputs and the recorded SDK, compiler and signer for Browser.
+Restore its pinned prerequisite bytes to the physical paths named in the
+committed recipe and its input manifests in the controlled recovery workspace.
+Use normal independent source admission when the published Forester admission
+has advanced. For Mimo, supply the retained pinned native input through
+`ARBOL_MIMO_TEST_CANDIDATE` and qualify with the existing real account for its
+live gate. Keep provider credentials in their original stores.
 
 For a current installation, with the authoritative maintenance session still
 held by the runtime, capture one named database:
