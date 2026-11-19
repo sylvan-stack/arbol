@@ -22,6 +22,9 @@ from typing import Any, BinaryIO
 from urllib.parse import unquote_to_bytes
 
 from .form import (
+    ArchiveFile,
+    ExportedRows,
+    HomeFile,
     Image,
     Item,
     Kind,
@@ -35,6 +38,7 @@ from .form import (
     ToolCall,
     Trigger,
     Usage,
+    live_by_mtime,
     unknown_record,
 )
 from .lines import file_records, lines
@@ -507,7 +511,7 @@ def _inventory(home: Path, catalogue: Catalogue) -> Inventory:
         except (OSError, RuntimeError, ValueError):
             continue
         if not target.is_relative_to(home):
-            outside[native_id].add(str(target).removesuffix(".zst"))
+            outside[native_id].add(str(target))
     for edge in catalogue.edges:
         edges[edge["child_thread_id"]].add(edge["parent_thread_id"])
     for rollout in _discover(home):
@@ -522,7 +526,7 @@ def _inventory(home: Path, catalogue: Catalogue) -> Inventory:
                     target = (home / rollout.relative).resolve()
                 except (OSError, RuntimeError, ValueError):
                     continue
-                outside[matched_id].add(str(target).removesuffix(".zst"))
+                outside[matched_id].add(str(target))
         elif rollout.failure is not None:
             if matched_id is None:
                 unidentified.append(rollout)
@@ -1387,3 +1391,44 @@ def _session_metadata(root: Thread, catalogue: Catalogue, titles: dict[str, str]
         title = titles.get(root.native_id)
     cwd = root.chosen.origin.get("cwd")
     return title, cwd if isinstance(cwd, str) else None
+
+
+# The native catalogue fields describing a session. Other columns and tables
+# may contain application settings, account or device identifiers, or caches.
+_THREAD_ARCHIVE_FIELDS = frozenset("""
+    id rollout_path created_at updated_at source model_provider cwd title tokens_used
+    has_user_event archived archived_at git_sha git_branch cli_version first_user_message
+    agent_nickname agent_role agent_path model reasoning_effort created_at_ms updated_at_ms
+    thread_source preview recency_at history_mode name is_pinned section_id section_order
+    originator attached_parent_thread_id
+""".split())
+_EDGE_ARCHIVE_FIELDS = frozenset({"parent_thread_id", "child_thread_id", "status"})
+
+
+def _session_archive(home: Path, catalogue: Catalogue, inventory: Inventory, family: list[Thread],
+                     clock: datetime) -> tuple[tuple[ArchiveFile, ...], int, bool]:
+    native_ids = {thread.native_id for thread in family}
+    root = family[0]
+    files = sorted({rollout.relative for thread in family for rollout in thread.copies})
+    archive: list[ArchiveFile] = [HomeFile(relative) for relative in files]
+    if catalogue.mtime is not None:
+        threads = [
+            {key: value for key, value in catalogue.threads[native_id].items() if key in _THREAD_ARCHIVE_FIELDS}
+            for native_id in sorted(native_ids) if native_id in catalogue.threads
+        ]
+        edges = [
+            {key: value for key, value in edge.items() if key in _EDGE_ARCHIVE_FIELDS}
+            for edge in catalogue.edges
+            if edge["parent_thread_id"] in native_ids and edge["child_thread_id"] in native_ids
+        ]
+        edges.sort(key=lambda edge: (edge["parent_thread_id"], edge["child_thread_id"], str(edge.get("status", ""))))
+        if threads or edges:
+            rows = json.dumps({"threads": threads, "thread_spawn_edges": edges},
+                              sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+            archive.append(ExportedRows(f"{_DB}#{root.native_id}.json", rows, catalogue.mtime))
+    outside = {path for native_id in native_ids for path in inventory.outside.get(native_id, ())}
+    try:
+        live = live_by_mtime((home / relative for relative in files), clock)
+    except OSError:
+        raise SessionFailure("unreadable_session", f"{root.chosen.relative}: rollout times could not be read.") from None
+    return tuple(archive), len(outside), live
