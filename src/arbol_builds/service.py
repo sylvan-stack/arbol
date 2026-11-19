@@ -347,10 +347,12 @@ def write_launcher(bin_folder: str, registry: str, component: str, python: str |
 class Stop:
     """Set by SIGINT or SIGTERM during a build: the running command's process group is stopped."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, check_group_exit: bool = False) -> None:
         self.requested = False
         self.group: int | None = None
         self.at = 0.0
+        self.check_group_exit = check_group_exit
+        self.groups_ended = True
 
     def request(self) -> None:
         if self.requested:
@@ -411,6 +413,15 @@ def command(text: str, repo: str, folder: str, number: str, log: int, stop: Stop
     stop.group = None
     if stop.requested:
         signal_group(child.pid, signal.SIGKILL)
+    if stop.check_group_exit:
+        try:
+            os.killpg(child.pid, 0)
+        except ProcessLookupError:
+            pass  # The command was reaped and no process group remains.
+        except OSError:
+            stop.groups_ended = False
+        else:
+            stop.groups_ended = False
     ended = str(code) if code >= 0 else signal.Signals(-code).name
     os.write(log, f"Exit: {ended}{' (stopped by caller)' if stop.requested else ''}\n".encode())
     return code == 0 and not stop.requested
