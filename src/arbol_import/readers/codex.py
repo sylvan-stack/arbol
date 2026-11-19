@@ -14,6 +14,7 @@ from collections.abc import Generator, Iterator
 from contextlib import closing
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from heapq import heappop, heappush
 from pathlib import Path
 from struct import Struct, unpack
 from tempfile import TemporaryDirectory
@@ -724,11 +725,9 @@ def _event_fields(payload: Object, kind: str) -> Object:
             raise _Shape
         _required_id(item.get("id"))
         _optional_string(item.get("call_id", item.get("callId")))
-        if item_kind == "CommandExecution":
-            _optional_int(item.get("exit_code", item.get("exitCode")))
-        return {"item": item, "call_id": _optional_string(payload.get("call_id", payload.get("callId"))),
-                "start": _unix_time(payload.get("started_at_ms"), 1000),
-                "end": _unix_time(payload.get("completed_at_ms"), 1000)}
+        if kind == "item_started":
+            return {}
+        return _completed_work(payload, item, item_kind)
     if kind not in _EVENT_ONLY_IN_ARCHIVE:
         raise _Shape
     return {}
@@ -1105,3 +1104,109 @@ def _turn_items(turn: NativeTurn, projected: dict[int, ProjectedCall], *, text: 
             yield call.item
         elif text and (block := _assistant_text(record)) is not None:
             yield block
+
+
+def _work_times(record: Record) -> tuple[datetime, datetime]:
+    end: datetime = record.data["end"] or record.at
+    start: datetime = record.data["start"] or end
+    return start, end
+
+
+def _work_call(record: Record, parent: ToolCall, start: datetime) -> ToolCall:
+    item = record.data["item"]
+    status = item.get("status")
+    result = record.data["result"]
+    arguments = record.data["arguments"]
+    name = record.data["name"]
+    code = record.data["exit_code"]
+    failed, error = _native_error(result) if result is not None else (False, None)
+    ok = code == 0 if code is not None else not failed and status not in ("failed", "declined", "inProgress",
+                                                                          "in_progress", "aborted")
+    if not ok and error is None:
+        error = _result_text(item.get("error")) or (result.text if result is not None else "") or None
+    return ToolCall(item["id"], parent.agent, name, arguments, result, ok, None if ok else error, parent.call_id, start)
+
+
+def _completed_work(payload: Object, item: Object, kind: str) -> Object:
+    result: Result | None
+    arguments: Any
+    if kind == "CommandExecution":
+        name = "command_execution"
+        command = item.get("command")
+        if command is not None and (not isinstance(command, list) or any(not isinstance(arg, str) for arg in command)):
+            raise _Shape
+        _optional_string(item.get("interaction_input"))
+        arguments = {field: item[field] for field in ("command", "cwd", "interaction_input") if field in item}
+        output = _optional_string(item.get("aggregated_output", item.get("aggregatedOutput")))
+        code = _optional_int(item.get("exit_code", item.get("exitCode")))
+        fields = {"exit_code": code} if code is not None else None
+        result = _tool_result(output) if output is not None else None
+        if fields is not None:
+            result = replace(result, fields={**(result.fields or {}), **fields}) if result else Result("", fields)
+    elif kind == "McpToolCall":
+        name = f"{_required_id(item.get('server'))}::{_required_id(item.get('tool'))}"
+        arguments = item.get("arguments")
+        code = None
+        mcp_result = item.get("result")
+        if mcp_result is not None and not isinstance(mcp_result, dict):
+            raise _Shape
+        result = _tool_result(mcp_result) if mcp_result is not None else None
+    else:
+        name = "file_change"
+        changes = _object(item.get("changes"))
+        arguments = {
+            path: {key: _optional_string(change.get(key)) for key in ("type", "move_path") if key in change}
+            for path, entry in changes.items() if (change := _object(entry)) is not None
+        }
+        code = None
+        patch_output = {key: _optional_string(item[key]) for key in ("stdout", "stderr") if key in item}
+        output = "\n".join(value for value in patch_output.values() if value)
+        result = Result(output, patch_output or None)
+    _optional_string(item.get("status"))
+    link = _optional_string(payload.get("call_id", payload.get("callId")))
+    start = _unix_time(payload.get("started_at_ms"), 1000)
+    end = _unix_time(payload.get("completed_at_ms"), 1000)
+    return {"item": {"id": item["id"], "type": kind, "status": item.get("status"), "error": item.get("error"),
+                     "call_id": item.get("call_id", item.get("callId")), "exit_code": code},
+            "call_id": link, "start": start, "end": end, "result": result, "name": name,
+            "arguments": arguments, "exit_code": code}
+
+
+def _code_mode_work(records: list[Record], projected: dict[int, ProjectedCall]) -> dict[int, ProjectedCall]:
+    spans = sorted(
+        (entry for entry in projected.values()
+         if entry.output_at is not None and entry.item.name.rsplit("::", 1)[-1] == "exec"),
+        key=lambda entry: entry.item.started_at,
+    )
+    if not spans:
+        return {}
+    used_ids = {entry.item.call_id for entry in projected.values()}
+    work = []
+    for record in records:
+        item = record.data.get("item") if record.kind == "item_completed" else None
+        if item is None or _work_link(record, item) is not None or item["id"] in used_ids:
+            continue
+        start, end = _work_times(record)
+        if start <= end:
+            work.append((start, record.line, end, record))
+    result: dict[int, ProjectedCall] = {}
+    active: dict[int, tuple[ProjectedCall, datetime]] = {}
+    expiry: list[tuple[datetime, int]] = []
+    index = 0
+    for start, line, end, record in sorted(work):
+        while index < len(spans) and spans[index].item.started_at <= start:
+            span = spans[index]
+            bound = span.output_at
+            if bound is not None:
+                active[index] = (span, bound)
+                heappush(expiry, (bound, index))
+            index += 1
+        while expiry and expiry[0][0] < start:
+            _, expired = heappop(expiry)
+            del active[expired]
+        matches = [span for span, bound in active.values() if end <= bound]
+        native_id = record.data["item"]["id"]
+        if len(matches) == 1 and native_id not in used_ids:
+            used_ids.add(native_id)
+            result[line] = ProjectedCall(_work_call(record, matches[0].item, start), end)
+    return result
