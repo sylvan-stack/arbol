@@ -9,7 +9,7 @@ from uuid import uuid4
 from psycopg.types.json import Jsonb
 
 from .bridge import Error, Params, Registry, uuid_id
-from .chat_data import draft
+from .chat_data import draft, refuse_imported
 from .chats import Chats
 from .model import Refused
 from .validation import integer, text
@@ -194,6 +194,8 @@ class Drafts:
         key = await scope(params)
         await self.chats.own_layout()
         base, body = params["baseRevision"], params["text"]
+        if body and "chat" in key:
+            await refuse_imported(self.database, key["chat"])
         self.invalidate(key)
         try:
             if body == "":
@@ -204,14 +206,22 @@ class Drafts:
                 rows = await self.database.execute(
                     f"DELETE FROM drafts WHERE {column(key)}=%s AND revision=%s RETURNING revision", [value(key), base])
             elif base is None:
-                select = "SELECT %s,id,NULL,%s,nextval('drafts_revision'),clock_timestamp() FROM chats WHERE id=%s" if "chat" in key else (
-                    "VALUES(%s,NULL,%s,%s,nextval('drafts_revision'),clock_timestamp())")
-                args: list[Any] = [uuid4(), body, key["chat"]] if "chat" in key else [uuid4(), key["folder"], body]
+                if "chat" in key:
+                    select = (
+                        "SELECT %s,c.id,NULL,%s,nextval('drafts_revision'),clock_timestamp() FROM chats c "
+                        "WHERE c.id=%s AND NOT EXISTS (SELECT 1 FROM public.chat_imports ci WHERE ci.chat_id=c.id)"
+                    )
+                    args: list[Any] = [uuid4(), body, key["chat"]]
+                else:
+                    select = "VALUES(%s,NULL,%s,%s,nextval('drafts_revision'),clock_timestamp())"
+                    args = [uuid4(), key["folder"], body]
                 rows = await self.database.execute(
                     "INSERT INTO drafts(id,chat_id,folder,text,revision,updated_at) " + select +
                     f" ON CONFLICT({column(key)}) DO NOTHING RETURNING revision", args)
-                if not rows and "chat" in key and await self.current(key) is None:
-                    raise Error("not_found")
+                if not rows and "chat" in key:
+                    await refuse_imported(self.database, key["chat"])
+                    if await self.current(key) is None:
+                        raise Error("not_found")
             else:
                 rows = await self.database.execute(
                     "UPDATE drafts SET text=%s,revision=nextval('drafts_revision'),sent_as=NULL,sent_request=NULL,"
