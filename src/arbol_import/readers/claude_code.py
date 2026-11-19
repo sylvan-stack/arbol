@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 import stat
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -64,3 +66,37 @@ def _discover(home: Path, source: Source) -> Iterator[SessionFile | Failed]:
         files = [SessionFile(path) for path in paths if path.suffix == ".jsonl"]
         if any(source.wants(file.native_id) for file in files):
             yield from files
+
+
+_NATIVE_ID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", re.IGNORECASE)
+
+
+def _map_entries(root: Path, directory: Path) -> Iterator[Path]:
+    try:
+        if _inside(root, directory) is not None:
+            yield from directory.iterdir()
+    except (OSError, RuntimeError):
+        pass
+
+
+def _driver_ids(state: Path | None) -> set[str]:
+    if state is None:
+        return set()
+    try:
+        root = state.resolve()
+    except (OSError, RuntimeError):
+        return set()
+
+    native_ids = set()
+    for subscription in _map_entries(root, root / "subscriptions"):
+        for entry in _map_entries(root, subscription / "chats"):
+            if entry.suffix != ".json":
+                continue
+            try:
+                value = json.loads(_regular(root, entry).read_bytes())
+            except (OSError, ValueError, RecursionError, SessionFailure):
+                continue
+            conversation = value.get("conversation") if isinstance(value, dict) else None
+            if isinstance(conversation, str) and _NATIVE_ID.fullmatch(conversation):
+                native_ids.add(conversation)
+    return native_ids
