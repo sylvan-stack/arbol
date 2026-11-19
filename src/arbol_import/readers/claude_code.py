@@ -2,16 +2,33 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import re
 import stat
 from collections.abc import Generator, Iterable, Iterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NoReturn
 
-from .form import Failed, Kind, SessionFailure, Source, State, Steer, Trigger, Turn, unknown_record
+from .form import (
+    Failed,
+    Image,
+    Item,
+    Kind,
+    Result,
+    SessionFailure,
+    Source,
+    State,
+    Steer,
+    TextBlock,
+    ToolCall,
+    Trigger,
+    Turn,
+    unknown_record,
+)
 from .lines import file_records
 
 
@@ -169,9 +186,11 @@ class Record:
     row: dict[str, Any]
     at: datetime | None
     duplicate: bool
+    stream_path: Path | None = None
+    results: dict[str, NativeResult] = field(default_factory=dict)
 
     def where(self, home: Path) -> str:
-        return f"{self.file.path.relative_to(home)}:{self.position[1]}"
+        return f"{(self.stream_path or self.file.path).relative_to(home)}:{self.position[1]}"
 
 
 @dataclass
@@ -320,13 +339,18 @@ def _validate_message(home: Path, record: Record) -> None:
 
 
 def _validated(
-    home: Path, file: SessionFile, position: tuple[int, int], raw: object, duplicate: bool
+    home: Path, file: SessionFile, position: tuple[int, int], raw: object, duplicate: bool,
+    *, stream_path: Path | None = None,
 ) -> Record | None:
     row = _object(raw)
     kind = row.get("type")
-    record = Record(file, position, row, _record_time(row), duplicate)
+    record = Record(file, position, row, _record_time(row), duplicate, stream_path)
     if kind in _MESSAGE_TYPES:
         _validate_message(home, record)
+        if kind == "user":
+            results = _native_results(home, record)
+            if results and not duplicate:
+                record = replace(record, results=results)
     elif kind == "attachment":
         attachment = _object(row.get("attachment"))
         if not _string(attachment.get("type")):
@@ -512,3 +536,123 @@ def _turn(group: TurnRecords) -> Turn:
         effort=None,
         steers=tuple(_steers(rows)),
     )
+
+
+@dataclass(frozen=True)
+class NativeResult:
+    output: Result
+    ok: bool
+
+
+_SPILLED = re.compile(r"\A<persisted-output>\s*[^\n]*?Full output saved to:[ \t]*([^\r\n]+)")
+
+
+def _spill_path(record: Record, text: str) -> Path | None:
+    match = _SPILLED.match(text)
+    if match is None:
+        return None
+    path = Path(match[1].strip())
+    if path.is_absolute():
+        return path
+    if path.parts and path.parts[0] == "tool-results":
+        return record.file.directory / path
+    return record.file.directory / "tool-results" / path
+
+
+def _spill_text(home: Path, record: Record, text: str) -> str:
+    path = _spill_path(record, text)
+    if path is None:
+        return text
+    folder = record.file.directory / "tool-results"
+    try:
+        resolved = _inside(home, path)
+        if resolved is None or not resolved.is_relative_to(folder):
+            return text
+        return _regular(home, resolved).read_text(encoding="utf-8")
+    except (OSError, RuntimeError, ValueError, SessionFailure):
+        raise SessionFailure("unreadable_session", f"{record.where(home)}: the tool result could not be read.") from None
+
+
+def _result_image(home: Path, record: Record, part: dict[str, Any]) -> Image:
+    source = _object(part.get("source"))
+    media_type = _string(source.get("media_type"))
+    data = _string(source.get("data"))
+    if source.get("type") != "base64" or not media_type or data is None:
+        _bad_record(home, record)
+    try:
+        return Image(media_type, len(base64.b64decode(data, validate=True)))
+    except (binascii.Error, ValueError):
+        _bad_record(home, record)
+
+
+def _result_fields(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_result_fields(part) for part in value]
+    if isinstance(value, dict):
+        return {
+            key: _result_fields(part) for key, part in value.items()
+            if key != "base64" and not (key == "data" and value.get("type") == "base64")
+        }
+    return value
+
+
+def _native_results(home: Path, record: Record) -> dict[str, NativeResult]:
+    results = {}
+    native_fields = _object(record.row.get("toolUseResult"))
+    for block in _blocks(_message(record).get("content")):
+        if block.get("type") != "tool_result":
+            continue
+        content = block.get("content", "")
+        call_id = block["tool_use_id"]
+        images = tuple(
+            _result_image(home, record, part) for part in _blocks(content) if part.get("type") == "image"
+        )
+        if record.duplicate:
+            continue
+        parts = [content] if isinstance(content, str) else [
+            part["text"] for part in _blocks(content) if part.get("type") == "text"
+        ]
+        text = "\n".join(_spill_text(home, record, part) for part in parts)
+        extras = {
+            key: value for key, value in block.items() if key not in ("type", "tool_use_id", "is_error", "content")
+        }
+        output = Result(text, _result_fields({**native_fields, **extras}) or None, images)
+        results[call_id] = NativeResult(output, not block.get("is_error", False))
+    return results
+
+
+def _results(rows: Iterable[Record]) -> dict[str, NativeResult]:
+    results: dict[str, NativeResult] = {}
+    for record in rows:
+        results.update(record.results)
+    return results
+
+
+def _items(
+    rows: Iterable[Record], results: dict[str, NativeResult], *,
+    agent: str | None = None, parent_call: str | None = None,
+) -> Iterator[Item]:
+    for record in rows:
+        if record.duplicate or record.row.get("type") != "assistant":
+            continue
+        content = _message(record).get("content")
+        if isinstance(content, str):
+            if agent is None:
+                yield TextBlock(content, _at(record))
+            continue
+        for block in _blocks(content):
+            if block.get("type") == "text" and agent is None:
+                yield TextBlock(block["text"], _at(record))
+            if block.get("type") == "tool_use":
+                native = results.get(block["id"])
+                yield ToolCall(
+                    call_id=block["id"],
+                    agent=agent,
+                    name=block["name"],
+                    input=block["input"],
+                    result=native.output if native is not None else None,
+                    ok=native.ok if native is not None else False,
+                    error=native.output.text if native is not None and not native.ok else None,
+                    parent_call_id=parent_call,
+                    started_at=_at(record),
+                )
