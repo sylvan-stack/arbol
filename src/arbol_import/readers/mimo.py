@@ -11,7 +11,7 @@ import stat
 from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -330,3 +330,50 @@ def _read_actor_facts(database: sqlite3.Connection, native_id: str, facts: _Kind
         if lane != "main" and name.startswith("probe-"):
             facts.probe_actor = True
             return
+
+
+_USER_INPUT = frozenset({"text", "file", "agent", "subtask"})
+
+
+@dataclass
+class _Turn:
+    user: _Message
+    assistants: list[_Message] = field(default_factory=list)
+
+
+def _synthetic_user(message: _Message) -> bool:
+    synthetic = any(part.synthetic or part.kind == "compaction" for part in message.parts)
+    real_input = any(part.kind in _USER_INPUT and not part.synthetic for part in message.parts)
+    return synthetic and not real_input
+
+
+def _prompt(user: _Message) -> str:
+    return "\n".join(
+        _string(part.data.get("text"), "part")
+        for part in user.parts
+        if part.kind == "text" and not part.synthetic
+    )
+
+
+def _main_turns(messages: list[_Message]) -> tuple[list[_Turn], dict[str, _Turn]]:
+    turns = []
+    owner_by_message: dict[str, _Turn] = {}
+    current = None
+    for message in messages:
+        if message.lane != "main" or message.role != "user":
+            continue
+        if not _synthetic_user(message):
+            current = _Turn(message)
+            turns.append(current)
+        if current is not None:
+            owner_by_message[message.id] = current
+
+    owner_by_assistant = {}
+    for message in messages:
+        if message.lane != "main" or message.parent is None:
+            continue
+        owner = owner_by_message.get(message.parent)
+        if owner is not None:
+            owner.assistants.append(message)
+            owner_by_assistant[message.id] = owner
+    return turns, owner_by_assistant
