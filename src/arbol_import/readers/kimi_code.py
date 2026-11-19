@@ -13,7 +13,21 @@ from pathlib import Path
 from typing import Any, Never
 from urllib.parse import unquote, unquote_to_bytes
 
-from .form import Image, Item, Result, SessionFailure, State, Steer, TextBlock, ToolCall, Trigger, Turn, unknown_record
+from .form import (
+    Image,
+    Item,
+    Response,
+    Result,
+    SessionFailure,
+    State,
+    Steer,
+    TextBlock,
+    ToolCall,
+    Trigger,
+    Turn,
+    Usage,
+    unknown_record,
+)
 from .lines import file_records
 
 _SESSION = re.compile(r"session_([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})")
@@ -338,7 +352,7 @@ class _NativeTurn:
     end: _Record | None = None
     records: list[_Record] = field(default_factory=list)
 
-    def project(self, cwd: str | None) -> Turn:
+    def project(self, cwd: str | None, counted: set[str]) -> Turn:
         state: State = "interrupted"
         kind = error = None
         if self.end is not None:
@@ -351,9 +365,13 @@ class _NativeTurn:
                     kind = reason
                     error = _error(self.end.data.get("error"))
         steers = tuple(Steer(_prompt(record), record.time()) for record in self.records if record.kind == "turn.steer")
+        request = next((record.data for record in reversed(self.records)
+                        if record.kind == "llm.request" and record.data.get("kind") == "loop"), {})
+        model = _string(request.get("model"))
+        effort = _string(request.get("thinkingEffort"))
         return Turn(self.key, _TRIGGERS.get(self.origin, "system"), self.prompt, self.start.time(),
                     self.end.time() if self.end is not None else self.last_at, state, error, kind,
-                    cwd, None, None, steers=steers)
+                    cwd, model, effort, usage=tuple(_responses(self, counted)), steers=steers)
 
 
 @dataclass
@@ -363,6 +381,7 @@ class _Lane:
     turns: dict[str, _NativeTurn] = field(default_factory=dict)
     current: _NativeTurn | None = None
     call_turns: dict[str, _NativeTurn] = field(default_factory=dict)
+    requests: dict[str, list[_Record]] = field(default_factory=dict)
 
     def append(self, record: _Record) -> None:
         data = record.data
@@ -377,6 +396,7 @@ class _Lane:
         if kind == "context.clear":
             self.turns.clear()
             self.call_turns.clear()
+            self.requests.clear()
             self.current = None
             return
         if kind == "turn.prompt":
@@ -384,10 +404,28 @@ class _Lane:
             if key is None or not origin:
                 record.invalid(kind)
             prompt = _prompt(record)
-            turn = _NativeTurn(key, origin, prompt, record, record.time(), records=[record])
+            records = [record, *self.requests.pop(key, [])]
+            turn = _NativeTurn(key, origin, prompt, record, record.time(), records=records)
             self.current = self.turns[key] = turn
             return
 
+        if kind == "llm.request":
+            request_kind = data.get("kind")
+            if request_kind == "compaction":
+                if self.current is not None:
+                    self.current.last_at = record.time()
+                return
+            if request_kind != "loop" or not _string(data.get("model")):
+                record.invalid(kind)
+            key = _request_turn(record)
+            if key is not None and key not in self.turns:
+                self.requests.setdefault(key, []).append(record)
+                return
+        if kind in {"step.begin", "step.end"}:
+            if not _string(data.get("uuid")):
+                record.invalid(kind)
+            if kind == "step.end":
+                _usage(record)
         turn = self.turns.get(key) if key is not None else self.current
         if kind == "tool.result" and (parent := _string(data.get("parentUuid"))):
             turn = self.call_turns.get(parent, turn)
@@ -601,3 +639,40 @@ def _image(home: Path, session: _SavedSession, part: dict[str, Any]) -> Image | 
     if media is not None and media.startswith("image/") and size is not None:
         return Image(media, size)
     return None
+
+
+_USAGE_FIELDS = ("inputOther", "inputCacheRead", "inputCacheCreation", "output")
+
+
+def _usage(record: _Record) -> Usage | None:
+    value = record.data.get("usage")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        record.invalid("step.end")
+    counts = [value.get(field, 0) for field in _USAGE_FIELDS]
+    if any(type(count) is not int or count < 0 for count in counts):
+        record.invalid("step.end")
+    return Usage.native(uncached=counts[0], cache_read=counts[1], cache_write=counts[2], output=counts[3])
+
+
+def _request_turn(record: _Record) -> str | None:
+    data = record.data
+    if location := _string(data.get("turnStep")):
+        turn, _, step = location.rpartition(".")
+        if not turn or not step:
+            record.invalid("llm.request")
+        return turn
+    return _turn_key(data.get("turnId"))
+
+
+def _responses(turn: _NativeTurn, counted: set[str]) -> Iterator[Response]:
+    starts: dict[str, datetime] = {}
+    for record in turn.records:
+        if record.kind == "step.begin":
+            starts.setdefault(record.data["uuid"], record.time())
+        elif record.kind == "step.end":
+            uuid: str = record.data["uuid"]
+            if uuid in starts and uuid not in counted and (usage := _usage(record)) is not None:
+                counted.add(uuid)
+                yield Response(starts[uuid], usage)
