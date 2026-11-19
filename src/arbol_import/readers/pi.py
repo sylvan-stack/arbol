@@ -8,12 +8,17 @@ from collections.abc import Generator, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from .form import Kind, SessionFailure, Source, unknown_record
 from .lines import file_records
 
 _NATIVE_ID = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
+_ENTRY_TYPES = (
+    "message", "thinking_level_change", "model_change", "usage", "compaction", "branch_summary",
+    "custom", "custom_message", "context_edit", "label", "session_info",
+)
+_ARCHIVE_ROLES = ("system", "custom", "bashExecution", "branchSummary", "compactionSummary")
 
 
 def _iso_time(value: object) -> datetime | None:
@@ -106,6 +111,10 @@ class _Entry:
     row: dict[str, Any]
 
     @property
+    def where(self) -> str:
+        return f"{self.file}:{self.line}"
+
+    @property
     def native_id(self) -> str | None:
         return _string(self.row.get("id"))
 
@@ -118,6 +127,10 @@ class _Entry:
         return "parentId" in self.row and (
             self.row["parentId"] is None or _string(self.row["parentId"]) is not None
         )
+
+    def bad(self, record_type: str) -> NoReturn:
+        unknown_record(record_type, self.where, conversation=True)
+        raise AssertionError("A malformed Pi conversation record must fail.")
 
 
 @dataclass
@@ -138,3 +151,56 @@ class _Scan:
         if row.get("type") == "session_info":
             name = _string(row.get("name"))
             self.title = name if name and name.strip() else None
+
+
+def _active_path(entries: list[_Entry]) -> list[_Entry]:
+    by_id: dict[str, _Entry] = {}
+    duplicate_ids: set[str] = set()
+    leaf = None
+    for entry in entries:
+        entry_type = entry.row.get("type")
+        native_id = entry.native_id
+        if entry_type not in _ENTRY_TYPES and not (
+            isinstance(entry_type, str) and entry_type != "session" and native_id is not None and entry.has_parent
+        ):
+            unknown_record(entry_type, entry.where, conversation=False)
+            continue
+        if native_id is not None:
+            if native_id in by_id:
+                duplicate_ids.add(native_id)
+            by_id[native_id] = entry
+        leaf = entry
+
+    # On reload, Pi treats the last entry as the leaf, even when it belongs to a newer branch from an older parent.
+    path = []
+    current = leaf
+    while current is not None:
+        if current.native_id is None or current.native_id in duplicate_ids or not current.has_parent:
+            current.bad("session-entry")
+        path.append(current)
+        parent_id = current.row["parentId"]
+        if parent_id is None:
+            break
+        parent = by_id.get(parent_id)
+        # Append-only ancestry goes backwards in file order, which also rules out cycles.
+        if parent is None or parent.line >= current.line:
+            current.bad("session-entry")
+        current = parent
+    return path[::-1]
+
+
+def _active_messages(entries: list[_Entry]) -> Iterator[tuple[_Entry, dict[str, Any]]]:
+    for entry in _active_path(entries):
+        record_type = entry.row.get("type")
+        if record_type != "message":
+            unknown_record(record_type, entry.where, conversation=False)
+            continue
+        message = entry.row.get("message")
+        if not isinstance(message, dict):
+            entry.bad("message")
+        role = message.get("role")
+        if role in _ARCHIVE_ROLES:
+            continue
+        if role not in ("user", "assistant", "toolResult") or entry.at is None:
+            entry.bad("message")
+        yield entry, message
