@@ -21,20 +21,24 @@ from typing import NoReturn
 from urllib.parse import unquote, urlsplit
 
 from .form import (
+    LIVE_WINDOW,
     ArchiveFile,
     ExportedRows,
+    Failed,
     HomeFile,
     Image,
     Item,
     Kind,
     Response,
     Result,
+    Session,
     SessionFailure,
     Source,
     State,
     Subagent,
     TextBlock,
     ToolCall,
+    Turn,
     Usage,
     unknown_record,
 )
@@ -92,14 +96,29 @@ def _copy_database(home: Path, destination: Path) -> datetime:
         os.close(home_fd)
 
 
+def _work_directory(path: Path, home: Path) -> Path:
+    work = path.resolve()
+    home_info = home.stat()
+    missing = []
+    for directory in (work, *work.parents):
+        try:
+            info = directory.stat()
+        except FileNotFoundError:
+            missing.append(directory)
+            continue
+        # Identity catches case-equivalent paths on case-insensitive volumes.
+        if not stat.S_ISDIR(info.st_mode) or os.path.samestat(home_info, info):
+            raise _unreadable("database set")
+    for directory in reversed(missing):
+        directory.mkdir(mode=0o700, exist_ok=True)
+    return work
+
+
 @contextmanager
 def _snapshot(source: Source, home: Path) -> Iterator[tuple[sqlite3.Connection, datetime]]:
     if source.work is None:
         raise _unreadable("database set")
-    work = source.work.resolve()
-    if work.is_relative_to(home):
-        raise _unreadable("database set")
-    work.mkdir(parents=True, exist_ok=True)
+    work = _work_directory(source.work, home)
 
     for _ in range(_COPY_ATTEMPTS):
         with TemporaryDirectory(prefix="mimo-", dir=work) as temporary:
@@ -110,6 +129,7 @@ def _snapshot(source: Source, home: Path) -> Iterator[tuple[sqlite3.Connection, 
             except (OSError, OverflowError, ValueError, sqlite3.Error, SessionFailure):
                 continue
             with closing(connection):
+                connection.execute("PRAGMA trusted_schema=OFF")
                 connection.row_factory = sqlite3.Row
                 yield connection, mtime
                 return
@@ -302,7 +322,7 @@ def _part(row: sqlite3.Row, facts: _KindFacts) -> _Part:
     record = state if kind == "tool" else data
     timing = _optional_object(record.get("time"), "part")
     started = _optional_time(timing.get("start"), "part") or created
-    ended = _optional_time(timing.get("end"), "part") or started
+    ended = _optional_time(timing.get("updated" if kind == "retry" else "end"), "part") or started
     metadata = _optional_object(data.get("metadata"), "part")
     state_metadata = _optional_object(state.get("metadata"), "part")
     call = _tool_call(data, state, state_metadata, started) if kind == "tool" else None
@@ -355,7 +375,9 @@ def _read_messages(
 ) -> tuple[list[_Message], list[sqlite3.Row]]:
     parts: dict[str, list[sqlite3.Row]] = defaultdict(list)
     for row in part_rows:
-        parts[_id(row["message_id"], "part")].append(row)
+        owner = row["message_id"]
+        if isinstance(owner, str):
+            parts[owner].append(row)
     messages = []
     message_rows = []
     for row in _message_rows(database, native_id):
@@ -465,11 +487,8 @@ def _turn_end(turn: _Turn) -> datetime:
     if turn.assistants and (completed := turn.assistants[-1].completed) is not None:
         return completed
     messages = [turn.user, *turn.assistants]
-    return max(
-        max(message.created, *(part.last_saved for part in message.parts))
-        if message.parts else message.created
-        for message in messages
-    )
+    last_saved = max(max(message.created, message.completed or message.created) for message in messages)
+    return max(last_saved, max((part.last_saved for message in messages for part in message.parts), default=last_saved))
 
 
 def _state(assistant: _Message | None) -> tuple[State, str | None, str | None]:
@@ -778,3 +797,61 @@ def _archive(
     if resolved == candidate and stat.S_ISREG(info.st_mode):
         return (exported, HomeFile(relative.as_posix())), len(outside)
     return (exported,), len(outside)
+
+
+def _turns(messages: list[_Message], directory: str) -> Iterator[Turn]:
+    turns, by_assistant = _main_turns(messages)
+    actors_by_turn = _actor_owners(messages, turns, by_assistant)
+    for turn in turns:
+        last = turn.assistants[-1] if turn.assistants else None
+        state, error, error_kind = _state(last)
+        actors = actors_by_turn.get(turn.user.id, [])
+        yield Turn(
+            turn_key=turn.user.id, trigger="typed", prompt=_prompt(turn.user), started_at=turn.user.created,
+            ended_at=_turn_end(turn), state=state, error=error, error_kind=error_kind, working_folder=directory,
+            model=turn.assistants[0].model if turn.assistants else None, effort=None,
+            usage=_responses(turn), items=tuple(_items(turn, actors)),
+            subagents=tuple(_subagent(actor) for actor in actors),
+        )
+
+
+def _read_session(
+    database: sqlite3.Connection, home: Path, source: Source, native_id: str, mtime: datetime,
+) -> Session | Failed:
+    facts = _KindFacts()
+    record = "session"
+    try:
+        row = _session_row(database, native_id)
+        info = _session_info(row, facts)
+        record = "actor registry"
+        _read_actor_facts(database, native_id, facts)
+        record = "part"
+        part_rows = list(_part_rows(database, native_id))
+        record = "message"
+        messages, message_rows = _read_messages(database, native_id, part_rows, facts)
+        record = "session archive"
+        archive, outside = _archive(home, native_id, mtime, info.directory, row, messages, message_rows, part_rows)
+        return Session(
+            tool="mimo", native_id=native_id, kind=_kind(native_id, facts), title=info.title,
+            created_at=info.created, tool_version=info.version, working_folder=info.directory,
+            origin={"directory": info.directory, "title_source": info.title_source, "slug": info.slug},
+            live=info.updated >= source.clock - LIVE_WINDOW,
+            turns=tuple(_turns(messages, info.directory)), archive_files=archive, files_not_archived=outside,
+        )
+    except SessionFailure as failure:
+        return Failed.of(failure, native_id=native_id, kind=_kind(native_id, facts))
+    except (sqlite3.Error, OSError, IndexError, RuntimeError, TypeError, ValueError, OverflowError):
+        return Failed.of(_unreadable(record), native_id=native_id, kind=_kind(native_id, facts))
+
+
+def read(source: Source) -> Iterator[Session | Failed]:
+    """Yield selected top-level sessions while the private database set is open."""
+    try:
+        home = source.home.resolve(strict=True)
+        with _snapshot(source, home) as (database, mtime):
+            for native_id in _session_ids(database, source):
+                yield _read_session(database, home, source, native_id, mtime)
+    except SessionFailure as failure:
+        yield Failed.of(failure, file=_DATABASE)
+    except (sqlite3.Error, OSError, RuntimeError, ValueError):
+        yield Failed.of(_unreadable("database set"), file=_DATABASE)
