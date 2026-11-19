@@ -13,7 +13,21 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NoReturn
 
-from .form import Image, Item, Kind, Result, SessionFailure, Source, State, TextBlock, ToolCall, Turn, unknown_record
+from .form import (
+    Image,
+    Item,
+    Kind,
+    Response,
+    Result,
+    SessionFailure,
+    Source,
+    State,
+    TextBlock,
+    ToolCall,
+    Turn,
+    Usage,
+    unknown_record,
+)
 from .lines import file_records
 
 _NATIVE_ID = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
@@ -330,8 +344,9 @@ def _turn(home: Path, rows: list[_Message], cwd: str) -> Turn:
     start, user = rows[0]
     turn_key = start.native_id
     assert turn_key is not None  # The active path validated it.
-    last_assistant = next((row for row in reversed(rows) if row[1]["role"] == "assistant"), None)
-    state, error, error_kind = _ending(last_assistant)
+    assistants = [row for row in rows if row[1]["role"] == "assistant"]
+    state, error, error_kind = _ending(assistants[-1] if assistants else None)
+    model, effort = _route(assistants[0]) if assistants else (None, None)
     return Turn(
         turn_key=turn_key,
         trigger="typed",
@@ -342,9 +357,43 @@ def _turn(home: Path, rows: list[_Message], cwd: str) -> Turn:
         error=error,
         error_kind=error_kind,
         working_folder=cwd,
-        model=None,
-        effort=None,
+        model=model,
+        effort=effort,
+        usage=tuple(_response(entry, message) for entry, message in assistants),
         items=tuple(_items(home, rows)),
+    )
+
+
+def _route(assistant: _Message) -> tuple[str, str | None]:
+    entry, message = assistant
+    provider = _string(message.get("provider"))
+    model = _string(message.get("model"))
+    if provider is None or model is None:
+        entry.bad("assistant-model")
+    return f"{provider}/{model}", _string(message.get("thinkingLevel"))
+
+
+def _tokens(entry: _Entry, usage: dict[str, Any], key: str) -> int:
+    value = usage.get(key, 0)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        entry.bad("assistant-usage")
+    return value
+
+
+def _response(entry: _Entry, message: dict[str, Any]) -> Response:
+    usage = message.get("usage")
+    if not isinstance(usage, dict) or "timestamp" not in message or _string(message.get("stopReason")) is None:
+        entry.bad("assistant")
+    # Pi's output count already includes any reasoning tokens. Its cost is a catalogue estimate.
+    return Response(
+        _native_time(entry, message),
+        Usage.native(
+            uncached=_tokens(entry, usage, "input"),
+            cache_read=_tokens(entry, usage, "cacheRead"),
+            cache_write=_tokens(entry, usage, "cacheWrite"),
+            output=_tokens(entry, usage, "output"),
+            reasoning=_tokens(entry, usage, "reasoning") if usage.get("reasoning") is not None else None,
+        ),
     )
 
 
