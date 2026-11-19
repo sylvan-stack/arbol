@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import sqlite3
 import stat
 from collections.abc import Generator, Iterator
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from struct import Struct, unpack
+from tempfile import TemporaryDirectory
+from typing import Any, BinaryIO
 
 from .form import SessionFailure, unknown_record
 from .lines import file_records
@@ -157,3 +162,186 @@ def _discover(home: Path) -> Iterator[Rollout]:
             except (OSError, RuntimeError, ValueError):
                 rollout.failure = SessionFailure("unreadable_session", f"{relative}: the rollout could not be read.")
             yield rollout
+
+
+_DB = "state_5.sqlite"
+_WAL = _DB + "-wal"
+_COPY_ATTEMPTS = 3
+_COPY_CHUNK = 1 << 20
+
+
+@dataclass
+class Catalogue:
+    threads: dict[str, Object] = field(default_factory=dict)
+    edges: list[Object] = field(default_factory=list)
+    mtime: datetime | None = None
+
+
+def _stamp(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+def _catalogue_file(home: Path, name: str) -> tuple[Path, os.stat_result] | None:
+    path = home / name
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return None
+    target = _inside(home, path)
+    if target is None:
+        raise OSError("Catalogue file is unavailable")
+    info = target.stat()
+    if not stat.S_ISREG(info.st_mode):
+        raise OSError("Catalogue file is not regular")
+    return target, info
+
+
+def _catalogue_pair(home: Path) -> dict[str, tuple[Path, os.stat_result]]:
+    files = {}
+    for name in (_DB, _WAL):
+        entry = _catalogue_file(home, name)
+        if entry is not None:
+            files[name] = entry
+    if _DB not in files:
+        raise OSError("Catalogue is unavailable")
+    return files
+
+
+def _pair_stamp(files: dict[str, tuple[Path, os.stat_result]]) -> dict[str, tuple[Path, tuple[int, ...]]]:
+    return {name: (path, _stamp(info)) for name, (path, info) in files.items()}
+
+
+def _open_catalogue(path: Path, expected: os.stat_result) -> BinaryIO:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    try:
+        if _stamp(os.fstat(descriptor)) != _stamp(expected):
+            raise OSError("Catalogue changed during snapshot")
+        stream = os.fdopen(descriptor, "rb")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return stream
+
+
+def _copy_catalogue(home: Path, private: Path) -> datetime:
+    before = _catalogue_pair(home)
+    expected = _pair_stamp(before)
+    for name, (path, info) in before.items():
+        with _open_catalogue(path, info) as original, (private / name).open("xb") as copy:
+            shutil.copyfileobj(original, copy, _COPY_CHUNK)
+            if _stamp(os.fstat(original.fileno())) != _stamp(info):
+                raise OSError("Catalogue changed during snapshot")
+    if _pair_stamp(_catalogue_pair(home)) != expected:
+        raise OSError("Catalogue changed during snapshot")
+    for name, (path, info) in before.items():
+        with _open_catalogue(path, info) as original, (private / name).open("rb") as copy:
+            while True:
+                chunk = copy.read(_COPY_CHUNK)
+                if original.read(_COPY_CHUNK) != chunk:
+                    raise OSError("Catalogue bytes changed during snapshot")
+                if not chunk:
+                    break
+            if _stamp(os.fstat(original.fileno())) != _stamp(info):
+                raise OSError("Catalogue changed during snapshot")
+    if _pair_stamp(_catalogue_pair(home)) != expected:
+        raise OSError("Catalogue changed during snapshot")
+    return datetime.fromtimestamp(before[_DB][1].st_mtime, UTC)
+
+
+def _wal_checksum(data: bytes, words: Struct, checksum: tuple[int, int] = (0, 0)) -> tuple[int, int]:
+    first, second = checksum
+    for left, right in words.iter_unpack(data):
+        first = (first + left + second) & 0xffffffff
+        second = (second + right + first) & 0xffffffff
+    return first, second
+
+
+def _verify_catalogue(private: Path) -> None:
+    # SQLite recovery stops at an invalid WAL frame. Verify the active frames
+    # ourselves so a corrupt committed overlay cannot silently look like an old DB.
+    with (private / _DB).open("rb") as database:
+        header = database.read(100)
+    if len(header) != 100 or header[:16] != b"SQLite format 3\x00":
+        raise ValueError("Invalid catalogue header")
+    wal = private / _WAL
+    if not wal.exists() or not wal.stat().st_size:
+        return
+    with wal.open("rb") as stream:
+        wal_header = stream.read(32)
+        magic = int.from_bytes(wal_header[:4], "big")
+        version = int.from_bytes(wal_header[4:8], "big")
+        page_size = int.from_bytes(wal_header[8:12], "big")
+        db_page_size = int.from_bytes(header[16:18], "big")
+        if db_page_size == 1:
+            db_page_size = 65536
+        if (
+            len(wal_header) != 32
+            or magic not in (0x377f0682, 0x377f0683)
+            or version != 3007000
+            or page_size != db_page_size
+            or page_size < 512 or page_size > 65536 or page_size & (page_size - 1)
+            or header[18:20] != b"\x02\x02"
+        ):
+            raise ValueError("Invalid catalogue WAL header")
+        words = Struct("<II" if magic == 0x377f0682 else ">II")
+        checksum = _wal_checksum(wal_header[:24], words)
+        if checksum != unpack(">II", wal_header[24:32]):
+            raise ValueError("Invalid catalogue WAL checksum")
+        while frame := stream.read(24):
+            if len(frame) != 24:
+                raise ValueError("Incomplete catalogue WAL frame")
+            # A WAL reset can leave intact frames from the previous generation.
+            if frame[8:12] != wal_header[16:20]:
+                break
+            page = stream.read(page_size)
+            if len(page) != page_size or frame[:4] == b"\0" * 4 or frame[12:16] != wal_header[20:24]:
+                raise ValueError("Invalid catalogue WAL frame")
+            checksum = _wal_checksum(page, words, _wal_checksum(frame[:8], words, checksum))
+            if checksum != unpack(">II", frame[16:24]):
+                raise ValueError("Invalid catalogue WAL frame checksum")
+
+
+def _catalogue_rows(connection: sqlite3.Connection, table: str) -> Iterator[Object]:
+    try:
+        cursor = connection.execute(f"SELECT * FROM {table}")
+        with closing(cursor):
+            columns = [column[0] for column in cursor.description]
+            for cells in cursor:
+                try:
+                    yield dict(zip(columns, (cell.decode("utf-8") if isinstance(cell, bytes) else cell
+                                             for cell in cells), strict=True))
+                except UnicodeError:
+                    continue
+    except sqlite3.Error:
+        return
+
+
+def _read_catalogue(home: Path, work: Path | None) -> Catalogue:
+    if work is None:
+        return Catalogue()
+    try:
+        work = work.resolve(strict=True)
+        if work.is_relative_to(home) or not work.is_dir():
+            return Catalogue()
+    except (OSError, RuntimeError, ValueError):
+        return Catalogue()
+    for _ in range(_COPY_ATTEMPTS):
+        try:
+            with TemporaryDirectory(prefix="codex-catalogue-", dir=work) as directory:
+                private = Path(directory)
+                mtime = _copy_catalogue(home, private)
+                _verify_catalogue(private)
+                uri = (private / _DB).as_uri() + "?mode=ro"
+                with closing(sqlite3.connect(uri, uri=True, timeout=0)) as connection:
+                    connection.text_factory = bytes
+                    connection.execute("PRAGMA trusted_schema=OFF")
+                    connection.execute("BEGIN")
+                    connection.execute("SELECT name FROM sqlite_schema LIMIT 1").fetchone()
+                    threads = {key: row for row in _catalogue_rows(connection, "threads")
+                               if (key := _id(row.get("id"))) is not None}
+                    edges = [row for row in _catalogue_rows(connection, "thread_spawn_edges")
+                             if _id(row.get("parent_thread_id")) and _id(row.get("child_thread_id"))]
+                return Catalogue(threads, edges, mtime)
+        except (OSError, RuntimeError, ValueError, sqlite3.Error):
+            continue
+    return Catalogue()
