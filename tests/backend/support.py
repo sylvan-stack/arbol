@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import tomllib
+from dataclasses import replace
 from functools import partial
 from hashlib import sha256
 from importlib import import_module
@@ -401,7 +402,12 @@ class SingleInstallation:
         return digests[0], digests[1]
 
     def open_admission(self) -> None:
-        """Run off the asyncio event loop: the operator gate runs its own SQL probes."""
+        """Run off the asyncio event loop: the operator gate runs its own SQL probes.
+
+        When the package admits no revision as low as the baseline, its database gets to the lowest one it admits
+        through the fenced upgrade of `database/README.md`, "Database recovery before reopening", before admission
+        reopens under the upgrade release.
+        """
         from arbol_backend.exchange_context import Context
         from arbol_backend.exchange_drain import begin_maintenance, freeze, reopen
         from arbol_backend.model import identity, parse
@@ -417,12 +423,44 @@ class SingleInstallation:
         if configured.build == "0":
             receipt = self.package / "database/migrations.toml"
 
-        def release() -> str:
-            return sha256(receipt.read_bytes()).hexdigest()
+        if self.schema == BASELINE:
+            def release() -> str:
+                return sha256(receipt.read_bytes()).hexdigest()
 
+            session = begin_maintenance(source, runtime=self.runtime)
+            freeze(context, source, session)
+            reopen(context, source, session, release=release(), schema=BASELINE, verify_release=release)
+            return
+
+        # Both releases are recorded before admission closes.
+        recovery = cluster.base / "recovery"
+        recovery.mkdir(mode=0o700)
+        prior, staged = self.release_records(recovery, configured.build, receipt, configured.compatibility)
         session = begin_maintenance(source, runtime=self.runtime)
-        freeze(context, source, session)
-        reopen(context, source, session, release=release(), schema=BASELINE, verify_release=release)
+        # The Build that was running closes admission: the package standing in for the prior release.
+        baseline = ((BASELINE["compatibilityVersion"], BASELINE["revision"]),)
+        freeze(Context(replace(configured, compatibility=baseline)), source, session)
+        snapshot, attempt = recovery / "snapshot", recovery / "restore-attempt"
+        self.fenced("recovery", "--database", cluster.database, "--socket", str(cluster.socket),
+                    "--port", str(cluster.port), "--user", cluster.role, "snapshot",
+                    "--release", str(recovery / "prior-release"), "--output", str(snapshot), "--session", session)
+        isolated = Cluster(empty=True)
+        try:
+            self.fenced("recovery", "--database", cluster.database, "--socket", str(isolated.socket),
+                        "--port", str(isolated.port), "--user", isolated.role,
+                        "restore", "--snapshot", str(snapshot), "--output", str(attempt))
+        finally:
+            isolated.close()
+        reached = self.fenced("upgrade", cluster.database, str(cluster.socket), str(cluster.port), cluster.role,
+                              str(self.schema["revision"]), session, prior, staged, str(snapshot),
+                              str(attempt / "restore.json"))
+        if reached != {"status": "ready", **self.schema}:
+            raise RuntimeError(f"The fenced upgrade did not reach {self.schema}: {reached}")
+
+        def verified() -> str:
+            return str(self.fenced("verify-release", str(recovery / "upgrade-release"), staged)["releaseSha256"])
+
+        reopen(context, source, session, release=staged, schema=self.schema, verify_release=verified)
 
     def close(self) -> None:
         self.cluster.close()
