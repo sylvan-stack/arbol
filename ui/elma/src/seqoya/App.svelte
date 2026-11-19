@@ -8,7 +8,7 @@
   import { AppChannel } from '../app-channel';
   import { Bridge, Refusal } from '../bridge';
   import { readSeqoyaAppearance, saveSeqoyaAppearance } from '../preferences';
-  import { withAllowances, type UsageEvidence } from './allowance-evidence';
+  import { mergeUsageEvidence, withAllowances, type UsageEvidence } from './allowance-evidence';
   import { withModelLabels } from './subscription-model-labels';
   import { rankVigor, retainAccounts, retainVigor } from './vigor-estimates';
 
@@ -20,14 +20,18 @@
   let vigorAccounts = $state<SubscriptionListing>();
   let evidence = $state<UsageEvidence>();
   let evidenceError = $state<string>();
+  let browserEvidence = $state<UsageEvidence>();
+  let browserIssues = $state<Record<string, string>>({});
+  let browserError = $state<string>();
+  const combinedEvidence = $derived(mergeUsageEvidence(evidence, browserEvidence));
   let now = $state(Date.now());
   const subscriptionView = $derived<SubscriptionView>({
-    ...subscriptions, listing: withAllowances(subscriptions.listing, vigor.rollup, evidence, now),
-    evidenceError: evidenceError ?? vigor.error,
+    ...subscriptions, listing: withAllowances(subscriptions.listing, vigor.rollup, combinedEvidence, now, browserIssues),
+    evidenceError: browserError ?? evidenceError ?? vigor.error,
   });
   const vigorView = $derived<VigorView>({
     ...vigor,
-    entries: rankVigor(vigor.rollup, withAllowances(vigorAccounts, vigor.rollup, evidence, now)),
+    entries: rankVigor(vigor.rollup, withAllowances(vigorAccounts, vigor.rollup, combinedEvidence, now)),
     accountIssues: [
       ...(subscriptions.error ? [subscriptions.error] : []),
       ...(evidenceError ? [evidenceError] : []),
@@ -39,6 +43,7 @@
   let activeTab = 'Subscriptions';
   let readSubscriptions: (() => Promise<void>) | undefined;
   let readVigor: (() => Promise<void>) | undefined;
+  let readBrowserUsage: (() => Promise<void>) | undefined;
   let readUsage: ((driver: string, subscription: string, startWindow?: boolean) => Promise<void>) | undefined;
   let retryWindowStarts: ((key?: string) => void) | undefined;
   let openUsagePage: ((destination: UsageDestination, driver: string, subscription: string) => Promise<void>) | undefined;
@@ -47,6 +52,7 @@
     if (retryStarts) retryWindowStarts?.();
     void readSubscriptions?.();
     void readVigor?.();
+    if (activeTab === 'Subscriptions') void readBrowserUsage?.();
   }
 
   function refreshUsage(driver: string, subscription: string) {
@@ -78,6 +84,7 @@
     let connection = 0;
     let evidenceRevision = 0;
     let listRequest: Promise<void> | undefined;
+    let browserRequest: number | undefined;
     const isCurrent = (requestedOn: number) => active && requestedOn === connection;
     const bridge = new Bridge({
       onhello: () => {
@@ -172,6 +179,30 @@
       }
     }
     readSubscriptions = reloadList;
+
+    readBrowserUsage = async () => {
+      if (!active || !subscriptions.connected || browserRequest === connection) return;
+      const requestedOn = connection;
+      browserRequest = requestedOn;
+      try {
+        const reply = await app.call('app.refreshSubscriptionDashboards');
+        if (!isCurrent(requestedOn)) return;
+        if (!reply.evidence || typeof reply.evidence !== 'object' || Array.isArray(reply.evidence)
+          || !reply.issues || typeof reply.issues !== 'object' || Array.isArray(reply.issues)
+          || Object.values(reply.issues).some((issue) => typeof issue !== 'string')) {
+          throw new Error('Invalid Arbol Browser usage reply.');
+        }
+        browserEvidence = reply.evidence as UsageEvidence;
+        browserIssues = reply.issues as Record<string, string>;
+        browserError = undefined;
+        now = Date.now();
+      } catch (error) {
+        if (isCurrent(requestedOn)) browserError = error instanceof Refusal ? error.message
+          : 'The App did not return readable Arbol Browser usage.';
+      } finally {
+        if (browserRequest === requestedOn) browserRequest = undefined;
+      }
+    };
 
     readVigor = async () => {
       if (!active || vigor.loading || !subscriptions.connected) return;
@@ -371,6 +402,7 @@
       active = false;
       readSubscriptions = undefined;
       readVigor = undefined;
+      readBrowserUsage = undefined;
       readUsage = undefined;
       retryWindowStarts = undefined;
       openUsagePage = undefined;

@@ -3,7 +3,7 @@ import { Refusal, type Fields } from './bridge';
 import type { WorkspaceTrunkSelector } from '../design-system/src/types';
 
 type TrunkMethod = 'app.currentTrunk' | 'app.listTrunks' | 'app.selectTrunk';
-type AppMethod = 'app.pickFolder' | 'app.openLink' | 'app.openSubscriptionUsage' | 'app.renameSubscription' | 'app.takeOpen' | 'app.readVigor' | TrunkMethod;
+type AppMethod = 'app.pickFolder' | 'app.openLink' | 'app.openSubscriptionUsage' | 'app.renameSubscription' | 'app.takeOpen' | 'app.readVigor' | 'app.refreshSubscriptionDashboards' | TrunkMethod;
 
 export function isTrunkCode(value: unknown): value is string {
  return typeof value === 'string' && /^[a-z][a-z0-9]{0,31}$/.test(value)
@@ -57,7 +57,8 @@ export class AppChannel {
   }
   const native=window.webkit?.messageHandlers?.arbolApp;
   if(native){const id='a'+(++this.next);return new Promise((resolve,reject)=>{
-   const timer=setTimeout(()=>{this.waiting.delete(id);reject(new Refusal({code:'no_answer',message:'The app did not answer in time.'}));},30000);
+   const timeout=method==='app.refreshSubscriptionDashboards'?120000:30000;
+   const timer=setTimeout(()=>{this.waiting.delete(id);reject(new Refusal({code:'no_answer',message:'The app did not answer in time.'}));},timeout);
    this.waiting.set(id,{resolve,reject,timer});try{native.postMessage(JSON.stringify({type:'call',id,method,params}));}catch{clearTimeout(timer);this.waiting.delete(id);reject(new Refusal({code:'disconnected',message:'The app is disconnected.'}));}
   });}
   // The relay's browser host answers locally. No app envelope reaches the Bridge.
@@ -66,6 +67,7 @@ export class AppChannel {
   if(method==='app.renameSubscription')return Promise.reject(new Refusal({code:'unknown_method',message:'Editing subscription names requires the native App.'}));
   if(method==='app.openSubscriptionUsage')return Promise.reject(new Refusal({code:'unknown_method',message:'Subscription browser profiles require the native App.'}));
   if(method==='app.readVigor')return Promise.reject(new Refusal({code:'unknown_method',message:'Vigor requires the native App.'}));
+  if(method==='app.refreshSubscriptionDashboards')return Promise.reject(new Refusal({code:'unknown_method',message:'Browser usage refresh requires the native App.'}));
   if(method==='app.currentTrunk'||method==='app.listTrunks'||method==='app.selectTrunk')return Promise.reject(new Refusal({code:'unknown_method',message:'Trunk selection requires the native App.'}));
   if(this.openTaken)return Promise.resolve({});this.openTaken=true;
   const chat=new URL(location.href).searchParams.get('open');return Promise.resolve(chat&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(chat)?{chat}:{});

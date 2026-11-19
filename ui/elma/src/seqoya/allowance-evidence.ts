@@ -39,9 +39,10 @@ interface WindowEstimate {
   };
 }
 
-/** The optional bounded projection returned by the native app.readVigor channel. */
+/** Bounded usage evidence returned by Seqoya's native app channel. */
 export interface UsageEvidence {
   windowEstimates?: WindowEstimate[];
+  browserReports?: BrowserReport[];
   claudeDashboard?: {
     subscription: string;
     createdAt: string;
@@ -86,6 +87,14 @@ type Credits = NonNullable<Quota['credits']>;
 type Result = VigorRollup['subscriptions'][number]['result'];
 type DriverReport = NonNullable<SubscriptionRecord['lastUsage']>;
 type DriverWindow = DriverReport['windows'][number];
+interface BrowserReport {
+  driver: string;
+  subscription: string;
+  createdAt: string;
+  checkedAt?: string | null;
+  report: DriverReport;
+  approximateWindows: string[];
+}
 const browserSource = 'Arbol Browser dashboard';
 const day = 86_400_000;
 const integer = new Intl.NumberFormat();
@@ -97,6 +106,20 @@ const planNames = { lite: 'Lite', standard: 'Standard', pro: 'Pro', max: 'Max' }
 function sameCreation(expected: string | undefined, current: string | undefined): boolean {
   const created = Date.parse(expected ?? '');
   return Number.isFinite(created) && created === Date.parse(current ?? '');
+}
+
+function newerReading<T extends { observedAt: string }>(stored?: T, browser?: T): T | undefined {
+  return browser && (!stored || Date.parse(browser.observedAt) > Date.parse(stored.observedAt)) ? browser : stored;
+}
+
+export function mergeUsageEvidence(stored?: UsageEvidence, browser?: UsageEvidence): UsageEvidence | undefined {
+  return browser ? {
+    ...stored,
+    browserReports: browser.browserReports,
+    claudeDashboard: newerReading(stored?.claudeDashboard, browser.claudeDashboard),
+    piChatGPT: newerReading(stored?.piChatGPT, browser.piChatGPT),
+    mimo: newerReading(stored?.mimo, browser.mimo),
+  } : stored;
 }
 
 function recentObservation(observedAt: string, now: number): boolean {
@@ -154,7 +177,7 @@ function mimoQuota(account: SubscriptionRecord, saved: Result | undefined, readi
   }
   if (manual && preferDashboard(manual.resetsAt, manual.observedAt, report, directWindow, now)) {
     const duration = radarWindow?.resetsAt && Date.parse(radarWindow.resetsAt) === Date.parse(manual.resetsAt)
-      ? radarWindow.windowMinutes ?? undefined : undefined;
+      ? radarWindow.windowMinutes ?? undefined : manual.browser && manual.plan === 'pro' ? 43_200 : undefined;
     const credits = { total: manual.totalCredits, remaining: manual.remainingCredits };
     if (validCredits(credits)) {
       quota = {
@@ -443,11 +466,38 @@ function matchingClaudeDashboard(
     ? reading : undefined;
 }
 
+function matchingBrowserReport(
+  driver: string, account: SubscriptionRecord, evidence: UsageEvidence | undefined, now: number,
+): BrowserReport | undefined {
+  if (account.state !== 'signed_in' || account.family !== account.id) return undefined;
+  return evidence?.browserReports?.find((entry) => entry.driver === driver && entry.subscription === account.id
+    && sameCreation(entry.createdAt, account.createdAt)
+    && (Date.parse(entry.createdAt) !== 0 || entry.checkedAt === account.checkedAt)
+    && Date.parse(entry.report.fetchedAt) <= now);
+}
+
 function subscriptionMetrics(
   driver: string, account: SubscriptionRecord, view: AllowanceView | undefined, evidence: UsageEvidence | undefined, now: number,
 ): SubscriptionMetrics {
   const report = account.lastUsage;
-  const rawWindows = report?.windows ?? [];
+  const driverWindows = report?.windows ?? [];
+  const browser = matchingBrowserReport(driver, account, evidence, now);
+  const browserReport = browser?.report;
+  const rawWindows = new Map(driverWindows.map((window) => [window.label, { window, report, browser: false, approximate: false }]));
+  if (browserReport) {
+    for (const window of browserReport.windows) {
+      const match = driverWindows.find((entry) => entry.label === window.label
+        || ((window.windowMinutes === 300 || window.windowMinutes === 10_080) && entry.windowMinutes === window.windowMinutes));
+      if (!match || (!match.resetsAt || !!window.resetsAt)
+        && preferDashboard(window.resetsAt ?? '', browserReport.fetchedAt, report, match, now)) {
+        const label = match?.label ?? (account.family === 'zai' && window.windowMinutes === 10_080 ? 'Weekly' : window.label);
+        rawWindows.set(label, {
+          window: { ...window, label }, report: browserReport, browser: true,
+          approximate: browser?.approximateWindows.includes(window.label) ?? false,
+        });
+      }
+    }
+  }
   const piChatGPT = driver === 'pi' && account.family === 'chatgpt';
   const dashboard = matchingClaudeDashboard(driver, account, evidence?.claudeDashboard, now);
   const claudeWindows = new Map<string, { minutes: number; captured: QuotaReading }>();
@@ -458,13 +508,11 @@ function subscriptionMetrics(
     ];
     for (const { label, minutes, captured } of candidates) {
       if (captured && preferDashboard(captured.resetsAt, dashboard.observedAt, report,
-        rawWindows.find((window) => window.label === label), now)) {
+        driverWindows.find((window) => window.label === label), now)) {
         claudeWindows.set(label, { minutes, captured });
       }
     }
   }
-  const calibrated = driver === 'codex' && account.family === 'chatgpt'
-    ? rawWindows.find((window) => window.kind === 'weekly' && window.windowMinutes === 10_080) : undefined;
   const kimi = driver === 'pi' && account.family === 'kimi-coding';
   const mimo = driver === 'mimo' && account.family === 'xiaomi';
   const passedBoundaries = new Set<number>();
@@ -473,8 +521,9 @@ function subscriptionMetrics(
     if (end <= now) passedBoundaries.add(end);
     return asWindow(reading, now, capacity, rolloverFor(driver, account.family, reading.windowMinutes));
   }
-  const windows = rawWindows.filter((window) => !claudeWindows.has(window.label)
-    && !(piChatGPT && view?.quota?.windows.some((entry) => entry.windowMinutes === window.windowMinutes))).map((window) => {
+  const windows = [...rawWindows.values()].filter(({ window }) => !claudeWindows.has(window.label)
+    && !(piChatGPT && view?.quota?.windows.some((entry) => entry.windowMinutes === window.windowMinutes))).map((entry) => {
+    const { window } = entry;
     const used = window.usedPercent;
     // The monthly membership credits expire at the reported refresh boundary.
     // https://www.kimi.com/en/help/membership/membership-update-rules
@@ -483,12 +532,14 @@ function subscriptionMetrics(
     );
     const pendingStart = rolloverFor(driver, account.family, window.windowMinutes) === 'startsOnUse'
       && used === 0 && !window.resetsAt;
-    const capacity = window === calibrated ? view?.capacity
+    const capacity = driver === 'codex' && account.family === 'chatgpt' && window.windowMinutes === 10_080 ? view?.capacity
       : windowCapacity(driver, account, window.label, evidence, now, window.resource);
     return project({
       label: window.label, resetsAt: window.resetsAt, windowMinutes: window.windowMinutes,
       expiresAt: terminal ? window.resetsAt : undefined, terminal, pendingStart,
-      observedAt: report?.fetchedAt, usedPercent: used, remainingPercent: used === undefined ? undefined : 100 - used,
+      source: entry.browser ? browserSource : undefined,
+      approximateReset: entry.approximate,
+      observedAt: entry.report?.fetchedAt, usedPercent: used, remainingPercent: used === undefined ? undefined : 100 - used,
     }, capacity);
   });
 
@@ -496,6 +547,7 @@ function subscriptionMetrics(
     for (const [label, { minutes, captured }] of claudeWindows) {
       windows.push(project({
         label, windowMinutes: minutes, resetsAt: captured.resetsAt, source: browserSource,
+        approximateReset: captured.approximateReset,
         observedAt: dashboard.observedAt, remainingPercent: captured.remainingPercent, usedPercent: 100 - captured.remainingPercent,
       }, windowCapacity(driver, account, label, evidence, now)));
     }
@@ -518,10 +570,14 @@ function subscriptionMetrics(
     }
   }
 
-  const balance = deepSeekBalance(account);
-  if (balance && report) {
+  const useBrowserBalance = !!browserReport?.extra?.balances?.length
+    && (!report?.extra?.balances?.length || Date.parse(browserReport.fetchedAt) > Date.parse(report.fetchedAt));
+  const balanceReport = useBrowserBalance ? browserReport : report;
+  const balance = deepSeekBalance(useBrowserBalance ? { ...account, lastUsage: browserReport } : account);
+  if (balance && balanceReport) {
     windows.push(asWindow({
-      label: 'API balance', resetsAt: null, observedAt: report.fetchedAt,
+      label: 'API balance', resetsAt: null, observedAt: balanceReport.fetchedAt,
+      source: useBrowserBalance ? browserSource : undefined,
       outputTokensRemaining: balance.tokens, model: 'DeepSeek Flash',
       estimateBasis: `${balance.amount} ${balance.currency} at ${balance.rate} ${balance.currency} per million output tokens.`,
     }, now));
@@ -539,6 +595,10 @@ function subscriptionMetrics(
     else if (piReading.capPercent < 100) issues.push('Pi has a separate app cap. These figures describe the shared plan.');
   }
   let limitResets = resetInventory(account, now);
+  if (browserReport?.extra?.rateLimitResetCredits && (!limitResets?.observedAt
+    || Date.parse(browserReport.fetchedAt) > Date.parse(limitResets.observedAt))) {
+    limitResets = resetInventory({ ...account, lastUsage: browserReport }, now);
+  }
   if (dashboard?.resetExpiries && (!limitResets?.observedAt
       || Date.parse(dashboard.observedAt) > Date.parse(limitResets.observedAt))) {
     const entries = dashboard.resetExpiries.filter((expiresAt) => Date.parse(expiresAt) > now)
@@ -557,13 +617,18 @@ function endTime(window: SubscriptionWindow) {
 
 export function withAllowances(
   listing: SubscriptionListing | undefined, rollup: VigorRollup | undefined, evidence: UsageEvidence | undefined, now: number,
+  browserIssues?: Record<string, string>,
 ): SubscriptionListing | undefined {
   if (!listing) return undefined;
   const saved = new Map(rollup?.subscriptions.map((entry) => [subscriptionKey(entry.driver, entry.subscription), entry.result]));
   return { drivers: listing.drivers.map((driver) => ({
     ...driver, subscriptions: driver.subscriptions?.map((account) => {
-      const view = allowance(driver.driver, account, saved.get(subscriptionKey(driver.driver, account.id)), evidence, now);
-      return { ...account, allowance: view, metrics: subscriptionMetrics(driver.driver, account, view, evidence, now) };
+      const key = subscriptionKey(driver.driver, account.id);
+      const view = allowance(driver.driver, account, saved.get(key), evidence, now);
+      const metrics = subscriptionMetrics(driver.driver, account, view, evidence, now);
+      const browserIssue = browserIssues?.[key];
+      if (browserIssue && account.state === 'signed_in') metrics.issues = [...(metrics.issues ?? []), browserIssue];
+      return { ...account, allowance: view, metrics };
     }),
   })) };
 }
