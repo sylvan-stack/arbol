@@ -11,6 +11,7 @@ from base64 import b64decode
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from hashlib import sha256
 from heapq import merge
 from pathlib import Path
 from socket import gethostname
@@ -18,13 +19,16 @@ from typing import Any, Never
 from urllib.parse import unquote, unquote_to_bytes
 
 from .form import (
+    Failed,
     HomeFile,
     Image,
     Item,
     Kind,
     Response,
     Result,
+    Session,
     SessionFailure,
+    Source,
     State,
     Steer,
     Subagent,
@@ -33,6 +37,7 @@ from .form import (
     Trigger,
     Turn,
     Usage,
+    live_by_mtime,
     unknown_record,
 )
 from .lines import file_records
@@ -74,15 +79,33 @@ def _children(home: Path, directory: Path) -> tuple[Path, ...]:
             from None
 
 
-def _discover(home: Path) -> dict[str, _SavedSession]:
-    sessions: dict[str, _SavedSession] = {}
-    for workspace in _children(home, home / "sessions"):
-        for folder in _children(home, workspace):
+def _discover(home: Path, sessions: dict[str, _SavedSession], *, report_unidentified: bool) -> Iterator[Failed]:
+    root = home / "sessions"
+    try:
+        workspaces = _children(home, root)
+    except SessionFailure as failure:
+        yield Failed.of(failure, file="sessions")
+        return
+    for workspace in workspaces:
+        try:
+            folders = _children(home, workspace)
+        except SessionFailure as failure:
+            if report_unidentified:
+                yield Failed.of(failure, file=workspace.relative_to(home).as_posix())
+            continue
+        for folder in folders:
+            if not folder.name.startswith("session_"):
+                continue
             match = _SESSION.fullmatch(folder.name)
-            if match and _eligible(home, folder, directory=True):
-                native_id = match[1].lower()
+            if match is None:
+                if report_unidentified and _eligible(home, folder, directory=True):
+                    relative = folder.relative_to(home).as_posix()
+                    unidentified = SessionFailure("unreadable_session", f"{relative}: invalid session folder identity.")
+                    yield Failed.of(unidentified, file=relative)
+                continue
+            native_id = match[1].lower()
+            if _eligible(home, folder, directory=True):
                 sessions.setdefault(native_id, _SavedSession(folder, workspace.name, native_id))
-    return sessions
 
 
 def _wires(home: Path, session: _SavedSession) -> dict[str, Path]:
@@ -100,7 +123,6 @@ def _wires(home: Path, session: _SavedSession) -> dict[str, Path]:
 class _State:
     title: str | None = None
     cwd: str | None = None
-    archived: bool | None = None
     forked_from: str | None = None
     created_at: datetime | None = None
 
@@ -134,13 +156,14 @@ def _state(home: Path, path: Path) -> _State:
         if not isinstance(value, dict):
             raise ValueError
         fork = value.get("forkedFrom")
+        archived = value.get("archived")
         if fork is not None and not isinstance(fork, str):
+            raise ValueError
+        if archived is not None and not isinstance(archived, bool):
             raise ValueError
     except (OSError, ValueError, RecursionError):
         raise SessionFailure("unreadable_session", f"{where}: could not read the session state.") from None
-    archived = value.get("archived")
-    return _State(_string(value.get("title")), _string(value.get("cwd")),
-                  archived if isinstance(archived, bool) else None, fork, _time(value.get("createdAt")))
+    return _State(_string(value.get("title")), _string(value.get("cwd")), fork, _time(value.get("createdAt")))
 
 
 @dataclass(frozen=True)
@@ -212,29 +235,50 @@ def _record_ids(row: dict[str, Any]) -> Iterator[str]:
             yield value
 
 
-def _records(home: Path, path: Path, copied: set[str]) -> Iterator[_Record]:
-    for where, row in _rows(home, path):
-        if copied.isdisjoint(_record_ids(row)):
-            yield _record(where, row)
+def _copy_signature(row: dict[str, Any]) -> bytes | None:
+    # The native fork copies whole wires. Several structural records, including turn
+    # bounds and loop requests, carry time and IDs but have no record UUID.
+    if row["type"] not in _CONVERSATION:
+        return None
+    encoded = json.dumps(row, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("ascii")
+    return sha256(encoded).digest()
+
+
+@dataclass
+class _ForkIndex:
+    uuids: set[str] = field(default_factory=set)
+    signatures: dict[str, set[bytes]] = field(default_factory=dict)
+
+    def has(self, agent: str, row: dict[str, Any]) -> bool:
+        ids = tuple(_record_ids(row))
+        if ids:
+            return not self.uuids.isdisjoint(ids)
+        inherited = self.signatures.get(agent)
+        return bool(inherited and _copy_signature(row) in inherited)
 
 
 def _fork_ids(home: Path, session: _SavedSession, state: _State,
-              inventory: dict[str, _SavedSession]) -> set[str]:
+              inventory: dict[str, _SavedSession]) -> _ForkIndex | None:
     if state.forked_from is None:
-        return set()
+        return None
     failure = SessionFailure("unreadable_session", f"{session.state.relative_to(home)}: fork source is unavailable.")
-    source = inventory.get(state.forked_from.lower())
+    source = inventory.get(state.forked_from.removeprefix("session_").lower())
     if source is None or source == session:
         raise failure
-    ids: set[str] = set()
+    copied = _ForkIndex()
     try:
-        for path in _wires(home, source).values():
+        for agent, path in _wires(home, source).items():
+            signatures = copied.signatures.setdefault(agent, set())
             for where, row in _rows(home, path):
                 _record(where, row)
-                ids.update(_record_ids(row))
-    except SessionFailure:
+                ids = tuple(_record_ids(row))
+                if ids:
+                    copied.uuids.update(ids)
+                elif (signature := _copy_signature(row)) is not None:
+                    signatures.add(signature)
+    except (SessionFailure, OSError, RecursionError):
         raise failure from None
-    return ids
+    return copied
 
 
 def _step_number(record: _Record) -> str | None:
@@ -242,7 +286,7 @@ def _step_number(record: _Record) -> str | None:
     return str(value) if type(value) is int or isinstance(value, str) else None
 
 
-def _undo(records: list[_Record], count: int) -> None:
+def _undo(records: list[_Record], count: int) -> list[_Record]:
     """Remove logical messages along with their loop items, usage and context copies."""
     groups: dict[tuple[str, str], int] = {}
     owners: dict[int, int] = {}
@@ -293,17 +337,31 @@ def _undo(records: list[_Record], count: int) -> None:
         if group is not None:
             owners[index] = group
     removed = set(sorted(set(owners.values()))[-count:])
-    records[:] = [record for index, record in enumerate(records) if owners.get(index) not in removed]
+    erased: list[_Record] = []
+    kept: list[_Record] = []
+    for index, record in enumerate(records):
+        (erased if owners.get(index) in removed else kept).append(record)
+    records[:] = kept
+    return erased
 
 
-def _context_edit(record: _Record, records: list[_Record]) -> None:
-    if record.kind == "context.clear":
-        records.clear()
-    elif record.kind == "context.undo":
-        count = record.data.get("count")
-        if type(count) is not int or count <= 0:
-            record.invalid("context.undo")
-        _undo(records, count)
+def _context_edit(record: _Record, records: list[_Record]) -> list[_Record]:
+    count = record.data.get("count")
+    if type(count) is not int or count <= 0:
+        record.invalid("context.undo")
+    return _undo(records, count)
+
+
+def _erased_launches(records: Iterable[_Record]) -> Iterator[tuple[str, datetime]]:
+    calls: dict[str, datetime] = {}
+    for record in records:
+        data = record.data
+        if record.kind == "tool.call":
+            calls[data["toolCallId"]] = record.time()
+        elif record.kind == "subagent.spawned":
+            call_id = _string(data.get("parentToolCallId"))
+            if call_id is not None and call_id in calls:
+                yield data["subagentId"], calls[call_id]
 
 
 _TRIGGERS: dict[str, Trigger] = {
@@ -313,6 +371,7 @@ _TRIGGERS: dict[str, Trigger] = {
     "system_trigger": "system",
 }
 _MEDIA_PARTS = frozenset({"image_url", "video_url", "audio_url"})
+_ARCHIVE_PARTS = frozenset({"think", "function", "tool_call_part"})
 
 
 def _turn_key(value: object) -> str | None:
@@ -331,7 +390,7 @@ def _parts(value: object, record: _Record) -> list[dict[str, Any]]:
         if kind == "text":
             if not isinstance(part.get("text"), str):
                 record.invalid(record.kind)
-        elif kind not in _MEDIA_PARTS and kind != "think":
+        elif kind not in _MEDIA_PARTS and kind not in _ARCHIVE_PARTS:
             record.invalid(record.kind)
         parts.append(part)
     return parts
@@ -346,7 +405,7 @@ def _prompt(record: _Record) -> str:
 
 
 def _error(value: object) -> str | None:
-    return _string(value) or _string(_object(value).get("message"))
+    return value if isinstance(value, str) else _string(_object(value).get("message"))
 
 
 @dataclass
@@ -390,6 +449,7 @@ class _Lane:
     call_turns: dict[str, _NativeTurn] = field(default_factory=dict)
     requests: dict[str, list[_Record]] = field(default_factory=dict)
     native_calls: dict[str, _NativeTurn] = field(default_factory=dict)
+    erased_launches: list[tuple[str, datetime]] = field(default_factory=list)
 
     def append(self, record: _Record) -> None:
         data = record.data
@@ -401,7 +461,12 @@ class _Lane:
         if kind == "metadata":
             self.version = self.version or _string(data.get("protocol_version"))
             return
+        if (kind not in _CONVERSATION and kind not in _LOOP_EVENTS and kind != "context.apply_compaction"
+                and not kind.startswith(("turn.", "prompt.", "subagent."))):
+            return
         if kind == "context.clear":
+            for cleared in self.turns.values():
+                self.erased_launches.extend(_erased_launches(cleared.records))
             self.turns.clear()
             self.call_turns.clear()
             self.requests.clear()
@@ -427,6 +492,8 @@ class _Lane:
             if request_kind != "loop" or not _string(data.get("model")):
                 record.invalid(kind)
             key = _request_turn(record)
+            fields = ("kind", "model", "thinkingEffort", "turnStep", "step", "stepUuid")
+            record = _Record(kind, record.at, record.where, {field: data[field] for field in fields if field in data})
             if key is not None and key not in self.turns:
                 self.requests.setdefault(key, []).append(record)
                 return
@@ -448,7 +515,8 @@ class _Lane:
             if turn is None and self.turns:
                 turn = next(reversed(self.turns.values()))
             if turn is not None:
-                _context_edit(record, turn.records)
+                erased = _context_edit(record, turn.records)
+                self.erased_launches.extend(_erased_launches(erased))
                 if not any(item.kind == "turn.prompt" for item in turn.records):
                     del self.turns[turn.key]
                     self.call_turns = {uuid: owner for uuid, owner in self.call_turns.items() if owner is not turn}
@@ -624,10 +692,12 @@ def _image(home: Path, session: _SavedSession, part: dict[str, Any]) -> Image | 
     native = _object(part.get("imageUrl"))
     metadata = _object(part.get("meta"))
     url = _string(native.get("url")) or ""
-    media = _string(native.get("mimeType", native.get("mediaType"))) or _string(metadata.get("mimeType"))
-    size = _size(native.get("size", native.get("byteLength")))
-    if size is None:
-        size = _size(metadata.get("size", metadata.get("byteLength")))
+    media = None
+    size = None
+    for evidence in (native, metadata, part):
+        media = media or _string(evidence.get("mimeType", evidence.get("mediaType")))
+        if size is None:
+            size = _size(evidence.get("size", evidence.get("byteLength")))
     path = None
     if url.startswith("data:"):
         header, separator, payload = url.removeprefix("data:").partition(",")
@@ -703,14 +773,17 @@ def _responses(turn: _NativeTurn, counted: set[str]) -> Iterator[Response]:
 @dataclass(frozen=True)
 class _Launch:
     parent_agent: str
-    parent_turn: _NativeTurn
-    call_id: str
+    parent_turn: _NativeTurn | None
+    call_id: str | None
     at: datetime
 
 
 def _launches(lanes: dict[str, _Lane]) -> dict[str, list[_Launch]]:
     launches: dict[str, list[_Launch]] = {}
     for agent, lane in lanes.items():
+        # Preserve evidence of a removed launch so its child cannot reappear as unlinked work.
+        for erased_child, at in lane.erased_launches:
+            launches.setdefault(erased_child, []).append(_Launch(agent, None, None, at))
         by_uuid = {record.data["uuid"]: (turn, record) for turn in lane.turns.values()
                    for record in turn.records if record.kind == "tool.call"}
         for turn in lane.turns.values():
@@ -752,6 +825,8 @@ def _route(agent: str, at: datetime, first_at: datetime, main: _Lane,
         launch = next((entry for entry in reversed(entries) if entry.at <= at), entries[0] if entries else None)
         if launch is None:
             return _turn_at(main, first_at), parent_call
+        if launch.parent_turn is None:
+            return None, None
         if parent_call is None:
             parent_call = launch.call_id
         if launch.parent_agent == "main":
@@ -956,3 +1031,49 @@ def _locked(home: Path, session: _SavedSession) -> bool:
             if _claim_is_live(claim):
                 return True
     return False
+
+
+def read(source: Source) -> Iterator[Session | Failed]:
+    """Yield selected sessions or their individual failures. Open native files read-only."""
+    try:
+        home = source.home.resolve()
+    except (OSError, ValueError, RuntimeError):
+        failure = SessionFailure("unreadable_session", "sessions: could not resolve the tool home.")
+        yield Failed.of(failure, file="sessions")
+        return
+
+    inventory: dict[str, _SavedSession] = {}
+    yield from _discover(home, inventory, report_unidentified=source.selected is None)
+    for session in inventory.values():
+        if not source.wants(session.native_id):
+            continue
+        lanes = {"main": _Lane()}
+        files = _RawFiles(home, session)
+        try:
+            state = _state(home, session.state)
+            wires = _wires(home, session)
+            copied = _fork_ids(home, session, state, inventory)
+            main = lanes["main"]
+            for agent, path in wires.items():
+                lane = lanes.setdefault(agent, _Lane())
+                for where, row in _rows(home, path):
+                    files.observe(row)
+                    if lane.first_at is None:
+                        lane.first_at = _time(row.get("created_at") if row["type"] == "metadata" else row.get("time"))
+                    if copied is None or not copied.has(agent, row):
+                        lane.append(_record(where, row))
+            created = main.first_at
+            if created is None:
+                created = state.created_at or datetime.fromtimestamp(session.main.stat().st_mtime, UTC)
+            files_to_archive = files.archive()
+            kind = _kind(lanes)
+            turns = tuple(_project(lanes, home, session, state.cwd))
+            live = live_by_mtime(wires.values(), source.clock) or _locked(home, session)
+            yield Session("kimi-code", session.native_id, kind, state.title, created, main.version,
+                          _origin(session, main), state.cwd, live, turns,
+                          files_to_archive, len(files.outside))
+        except SessionFailure as session_failure:
+            yield Failed.of(session_failure, native_id=session.native_id, kind=_kind(lanes))
+        except (OSError, UnicodeError, RecursionError):
+            failure = SessionFailure("unreadable_session", f"{session.folder.relative_to(home)}: could not read session.")
+            yield Failed.of(failure, native_id=session.native_id, kind=_kind(lanes))
