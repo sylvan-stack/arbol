@@ -83,10 +83,12 @@ def _discover(home: Path) -> Iterator[SessionFile | Failed]:
         return
     for folder in folders:
         try:
-            if _inside(home, folder) is None or not stat.S_ISDIR(folder.stat().st_mode):
+            if _inside(home, folder) is None:
+                raise _unreadable(home, folder)
+            if not stat.S_ISDIR(folder.stat().st_mode):
                 continue
             paths = sorted(folder.iterdir())
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError, SessionFailure):
             yield Failed.of(_unreadable(home, folder), file=folder.relative_to(home).as_posix())
             continue
         yield from (SessionFile(path) for path in paths if path.suffix == ".jsonl")
@@ -620,10 +622,10 @@ def _spill_path(record: Record, text: str) -> Path | None:
     return record.file.directory / "tool-results" / path
 
 
-def _spill_text(home: Path, record: Record, text: str) -> str:
+def _spill_result(home: Path, record: Record, text: str) -> tuple[str, tuple[Image, ...]]:
     path = _spill_path(record, text)
     if path is None:
-        return text
+        return text, ()
     folder = record.file.directory / "tool-results"
     try:
         resolved = _inside(home, path)
@@ -631,10 +633,16 @@ def _spill_text(home: Path, record: Record, text: str) -> str:
             resolved is None or not resolved.is_relative_to(folder)
             or not _archive_name(path.relative_to(home)) or not _archive_name(resolved.relative_to(home))
         ):
-            return text
-        return _regular(home, resolved).read_bytes().decode("utf-8")
+            return text, ()
+        saved = _regular(home, resolved).read_bytes().decode("utf-8")
+        content = json.loads(saved) if resolved.suffix == ".json" else None
     except (OSError, RuntimeError, ValueError, SessionFailure):
         raise SessionFailure("unreadable_session", f"{record.where(home)}: the tool result could not be read.") from None
+    # Claude can spill an array of native content blocks as JSON.
+    if isinstance(content, list) and any(isinstance(part, dict) and "type" in part for part in content):
+        _check_content(home, record, content, ("text", "image", *_ARCHIVE_BLOCKS))
+        return _text(content), _result_images(home, record, content)
+    return saved, ()
 
 
 def _result_image(home: Path, record: Record, part: dict[str, Any]) -> Image:
@@ -661,30 +669,43 @@ def _result_fields(value: Any) -> Any:
     return value
 
 
+def _result_blocks(record: Record) -> Iterator[dict[str, Any]]:
+    if record.row.get("type") == "user":
+        yield from (
+            block for block in _blocks(_message(record).get("content")) if block.get("type") == "tool_result"
+        )
+
+
+def _result_texts(content: object) -> Iterator[str]:
+    if isinstance(content, str):
+        yield content
+    else:
+        yield from (part["text"] for part in _blocks(content) if part.get("type") == "text")
+
+
+def _result_images(home: Path, record: Record, content: object) -> tuple[Image, ...]:
+    return tuple(_result_image(home, record, part) for part in _blocks(content) if part.get("type") == "image")
+
+
 def _native_results(home: Path, record: Record) -> dict[str, NativeResult]:
     results = {}
     native_fields = _object(record.row.get("toolUseResult"))
-    for block in _blocks(_message(record).get("content")):
-        if block.get("type") != "tool_result":
-            continue
+    for block in _result_blocks(record):
         content = block.get("content", "")
-        call_id = block["tool_use_id"]
-        images = tuple(
-            _result_image(home, record, part) for part in _blocks(content) if part.get("type") == "image"
-        )
+        images = list(_result_images(home, record, content))
         if record.duplicate:
             continue
-        parts = [content] if isinstance(content, str) else [
-            part["text"] for part in _blocks(content) if part.get("type") == "text"
-        ]
-        text = "\n".join(_spill_text(home, record, part) for part in parts)
+        texts = []
+        for part in _result_texts(content):
+            output_text, output_images = _spill_result(home, record, part)
+            texts.append(output_text)
+            images.extend(output_images)
         extras = {
             key: value for key, value in block.items() if key not in ("type", "tool_use_id", "is_error", "content")
         }
-        output = Result(text, _result_fields({**native_fields, **extras}) or None, images)
-        results[call_id] = NativeResult(output, not block.get("is_error", False))
+        output = Result("\n".join(texts), _result_fields({**native_fields, **extras}) or None, tuple(images))
+        results[block["tool_use_id"]] = NativeResult(output, not block.get("is_error", False))
     return results
-
 
 def _results(rows: Iterable[Record]) -> dict[str, NativeResult]:
     results: dict[str, NativeResult] = {}
@@ -1055,14 +1076,8 @@ def _archive_refs(archive: ArchiveFiles, rows: Iterable[Record]) -> None:
         for name in _backup_names(record):
             if "\x00" not in name and Path(name).parts:
                 archive.include(_history_path(archive.home, record, name), archive.home / "file-history")
-        for block in _blocks(_message(record).get("content")):
-            if block.get("type") != "tool_result":
-                continue
-            content = block.get("content", "")
-            parts = [content] if isinstance(content, str) else [
-                part["text"] for part in _blocks(content) if part.get("type") == "text"
-            ]
-            for text in parts:
+        for block in _result_blocks(record):
+            for text in _result_texts(block.get("content", "")):
                 path = _spill_path(record, text)
                 if path is not None:
                     archive.include(path, record.file.directory / "tool-results")
