@@ -9,9 +9,9 @@ from collections.abc import Generator, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
-from .form import Failed, SessionFailure, Source
+from .form import Failed, SessionFailure, Source, unknown_record
 from .lines import file_records
 
 
@@ -132,6 +132,15 @@ def _read_records(home: Path, path: Path) -> Generator[tuple[int, Any]]:
     yield from file_records(home, resolved.relative_to(home).as_posix())
 
 
+def _record_time(row: dict[str, Any]) -> datetime | None:
+    at = _time(row.get("timestamp"))
+    if at is None and row.get("type") == "file-history-snapshot":
+        snapshot = row.get("snapshot")
+        if isinstance(snapshot, dict):
+            return _time(snapshot.get("timestamp"))
+    return at
+
+
 def _order_file(home: Path, file: SessionFile) -> OrderedFile:
     modified = None
     number = 0
@@ -141,7 +150,7 @@ def _order_file(home: Path, file: SessionFile) -> OrderedFile:
         try:
             for line, row in stream:
                 number = line
-                at = _time(row.get("timestamp")) if isinstance(row, dict) else None
+                at = _record_time(row) if isinstance(row, dict) else None
                 if at is not None:
                     return OrderedFile(file, at, modified)
         finally:
@@ -204,11 +213,11 @@ def _ordered_sessions(home: Path, source: Source) -> Iterator[Failed | tuple[str
                 for number, raw in _read_records(home, file.path):
                     if ordered.lookahead_failure is not None and number >= ordered.failure_line:
                         raise ordered.lookahead_failure
-                    if not isinstance(raw, dict):
-                        continue
-                    uuid = raw.get("uuid")
+                    uuid = raw.get("uuid") if isinstance(raw, dict) else None
                     duplicate = isinstance(uuid, str) and (uuid in project_uuids or uuid in session_uuids)
-                    row = Record(file, (rank, number), raw, _time(raw.get("timestamp")), duplicate)
+                    row = _validated(home, file, (rank, number), raw, duplicate)
+                    if row is None:
+                        continue
                     if isinstance(uuid, str):
                         seen_here.add(uuid)
                     if source.wants(native_id):
@@ -227,3 +236,106 @@ def _ordered_sessions(home: Path, source: Source) -> Iterator[Failed | tuple[str
             finished = sessions.pop(native_id)
             if source.wants(native_id):
                 yield native_id, finished
+
+
+_USAGE_FIELDS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens")
+_MESSAGE_TYPES = ("user", "assistant")
+_ARCHIVE_BLOCKS = (
+    "thinking", "redacted_thinking", "document", "search_result", "tool_reference", "container_upload",
+    "server_tool_use", "web_search_tool_result", "web_fetch_tool_result", "code_execution_tool_result",
+    "bash_code_execution_tool_result", "text_editor_code_execution_tool_result", "mcp_tool_use", "mcp_tool_result",
+    "compaction",
+)
+_METADATA_TYPES = (
+    "summary", "system", "progress", "queue-operation", "bridge-session", "relocated", "custom-title", "ai-title",
+    "file-history-snapshot",
+)
+
+
+def _object(value: object) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _string(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _bad_record(home: Path, record: Record) -> NoReturn:
+    # Record types from unrecognised envelopes can contain arbitrary native text.
+    kind = record.row.get("type")
+    known = kind if kind in (*_MESSAGE_TYPES, *_METADATA_TYPES, "attachment") else None
+    unknown_record(known, record.where(home), conversation=True)
+    raise AssertionError("An unknown conversation record must fail.")
+
+
+def _check_content(home: Path, record: Record, content: object, allowed: tuple[str, ...]) -> None:
+    if isinstance(content, str):
+        return
+    if not isinstance(content, list):
+        _bad_record(home, record)
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") not in allowed:
+            _bad_record(home, record)
+        kind = block["type"]
+        if kind == "text" and not isinstance(block.get("text"), str):
+            _bad_record(home, record)
+        if kind == "tool_use" and (
+            not _string(block.get("id")) or not _string(block.get("name")) or "input" not in block
+        ):
+            _bad_record(home, record)
+        if kind == "tool_result":
+            if not _string(block.get("tool_use_id")) or type(block.get("is_error", False)) is not bool:
+                _bad_record(home, record)
+            _check_content(home, record, block.get("content", ""), ("text", "image", *_ARCHIVE_BLOCKS))
+
+
+def _validate_message(home: Path, record: Record) -> None:
+    row = record.row
+    kind = row["type"]
+    message = _object(row.get("message"))
+    if not message or message.get("role", kind) != kind or record.at is None:
+        _bad_record(home, record)
+    native_block = "tool_result" if kind == "user" else "tool_use"
+    _check_content(home, record, message.get("content"), ("text", "image", native_block, *_ARCHIVE_BLOCKS))
+    for name in ("uuid", "version", "cwd", "entrypoint", "permissionMode", "turnOrigin", "effort", "error"):
+        if row.get(name) is not None and not isinstance(row[name], str):
+            _bad_record(home, record)
+    for name in ("isMeta", "isCompactSummary", "isApiErrorMessage"):
+        if row.get(name) is not None and type(row[name]) is not bool:
+            _bad_record(home, record)
+    if kind == "assistant":
+        for name in ("id", "model", "stop_reason"):
+            if message.get(name) is not None and not isinstance(message[name], str):
+                _bad_record(home, record)
+        usage = message.get("usage")
+        if usage is not None and (
+            not isinstance(usage, dict) or any(
+                value is not None and (type(value) is not int or value < 0)
+                for value in (usage.get(name) for name in _USAGE_FIELDS)
+            )
+        ):
+            _bad_record(home, record)
+
+
+def _validated(
+    home: Path, file: SessionFile, position: tuple[int, int], raw: object, duplicate: bool
+) -> Record | None:
+    row = _object(raw)
+    kind = row.get("type")
+    record = Record(file, position, row, _record_time(row), duplicate)
+    if kind in _MESSAGE_TYPES:
+        _validate_message(home, record)
+    elif kind == "attachment":
+        attachment = _object(row.get("attachment"))
+        if not _string(attachment.get("type")):
+            _bad_record(home, record)
+        if attachment["type"] == "queued_command":
+            if record.at is None:
+                _bad_record(home, record)
+            _check_content(home, record, attachment.get("prompt"), ("text", "image"))
+    elif kind not in _METADATA_TYPES:
+        conversation = any(key in row for key in ("message", "attachment", "turnId", "role", "content"))
+        conversation = conversation or not isinstance(raw, dict) or kind in ("message", "turn", "result", "stream_event")
+        unknown_record(None, record.where(home), conversation=conversation)
+        return None
+    return record
