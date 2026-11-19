@@ -266,20 +266,28 @@ class SessionFailure(Exception):
 @dataclass(frozen=True)
 class Failed:
     """What a reader yields in place of a session it cannot read: the session's native ID, or the name of its file when
-    it failed before the ID was known, with no kind, and the failure's code and message (IMP-D13)."""
+    it failed before the ID was known, with no kind, and the failure's code and message (IMP-D13).
+
+    A session that fails after its native ID is known carries the kind its tool's table gives for the records read
+    before the failure (IMP-D16). The kind is optional only so that existing constructions keep working: a reader gives
+    it whenever the native ID is known."""
 
     native_id: str | None
     file: str | None
     code: FailureCode
     message: str
+    kind: Kind | None = None
 
     def __post_init__(self) -> None:
         if (self.native_id is None) == (self.file is None):
             raise ValueError("A failed session is named by its native ID or, before that is known, by its file.")
+        if self.kind is not None and self.native_id is None:
+            raise ValueError("A failed session named by its file has no kind.")
 
     @classmethod
-    def of(cls, failure: SessionFailure, *, native_id: str | None = None, file: str | None = None) -> Failed:
-        return cls(native_id, file, failure.code, failure.message)
+    def of(cls, failure: SessionFailure, *, native_id: str | None = None, file: str | None = None,
+           kind: Kind | None = None) -> Failed:
+        return cls(native_id, file, failure.code, failure.message, kind)
 
 
 RECORD_TYPE = re.compile(r"[A-Za-z0-9_.:/-]{1,64}")
