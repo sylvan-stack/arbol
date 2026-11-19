@@ -18,7 +18,7 @@ from struct import Struct, unpack
 from tempfile import TemporaryDirectory
 from typing import Any, BinaryIO
 
-from .form import SessionFailure, unknown_record
+from .form import Kind, SessionFailure, unknown_record
 from .lines import file_records, lines
 
 type Object = dict[str, Any]
@@ -821,3 +821,20 @@ def _body(home: Path, rollout: Rollout) -> Iterator[Record]:
                 # supply arbitrary strings that must stay out of the report.
                 label = kind if isinstance(kind, str) and kind in conversation else None
                 unknown_record(label, where, conversation=True)
+
+
+_SCHEDULED = "automation_heartbeat_scheduled"
+
+
+def _kind(native_id: str, rollout: Rollout, driver_ids: set[str], starts: list[str | None]) -> Kind:
+    originator = rollout.origin.get("originator")
+    source = rollout.origin.get("source")
+    if native_id in driver_ids or originator == "arbol-codex-driver":
+        return "arbol_driver"
+    if originator == "hook-probe" or (rollout.role is not None and rollout.role.startswith("probe_")):
+        return "probe"
+    if originator == "codex_exec" or source == "agent_created_thread" or source == {"custom": "agent_created_thread"}:
+        return "agent_launched"
+    if starts and all(trigger == _SCHEDULED for trigger in starts):
+        return "scheduled"
+    return "owner"
