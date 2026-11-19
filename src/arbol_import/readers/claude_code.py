@@ -21,6 +21,7 @@ from .form import (
     Kind,
     Response,
     Result,
+    Session,
     SessionFailure,
     Source,
     State,
@@ -203,6 +204,7 @@ class SessionRecords:
     files: list[OrderedFile] = field(default_factory=list)
     rows: list[Record] = field(default_factory=list)
     failure: SessionFailure | None = None
+    created_at: datetime | None = None
 
 
 def _ordered_rows(home: Path, ordered: OrderedFile) -> Iterator[tuple[int, Any]]:
@@ -247,6 +249,8 @@ def _ordered_sessions(home: Path, source: Source) -> Iterator[Failed | tuple[str
                     uuid = raw.get("uuid") if isinstance(raw, dict) else None
                     duplicate = isinstance(uuid, str) and (uuid in project_uuids or uuid in session_uuids)
                     row = _validated(home, file, (rank, number), raw, duplicate)
+                    if session.created_at is None and isinstance(raw, dict):
+                        session.created_at = row.at if row is not None else _record_time(raw)
                     if row is None:
                         continue
                     if isinstance(uuid, str):
@@ -1039,3 +1043,59 @@ def _archive(
     except OSError:
         raise SessionFailure("unreadable_session", "A session archive file could not be inspected.") from None
     return files, live, len(archive.outside)
+
+
+def _last_title(rows: Sequence[Record], record_type: str, field_name: str) -> str | None:
+    for record in reversed(rows):
+        if record.row.get("type") == record_type:
+            title = _string(record.row.get(field_name))
+            if title is not None:
+                return title
+    return None
+
+
+def _title(home: Path, session: SessionRecords) -> str | None:
+    title = _last_title(session.rows, "custom-title", "customTitle")
+    if title is not None:
+        return title
+    for top in reversed(session.files):
+        path = top.file.directory / "custom-title.json"
+        if not _present(home, path):
+            continue
+        value = _json_file(home, path)
+        title = _string(value) if isinstance(value, str) else _string(_object(value).get("customTitle"))
+        if title is None:
+            unknown_record("custom-title", path.relative_to(home).as_posix(), conversation=True)
+        return title
+    return _last_title(session.rows, "ai-title", "aiTitle")
+
+
+def _session(home: Path, source: Source, native_id: str, kind: Kind, session: SessionRecords) -> Session:
+    rows = session.rows
+    title = _title(home, session)
+    agents = _agent_logs(home, session.files)
+    files, live, outside = _archive(home, source.clock, session, agents)
+    first_prompt = next((row for row in rows if _user_prompt(row) is not None), None)
+    created_at = session.created_at
+    if created_at is None:
+        created_at = min(top.mtime for top in session.files if top.mtime is not None)
+    origin = {
+        name: value for name in ("entrypoint", "permissionMode", "turnOrigin")
+        if (value := _first_field(rows, name)) is not None
+    }
+    if rows:
+        origin["folder"] = rows[0].file.path.parent.name
+    return Session(
+        tool="claude-code",
+        native_id=native_id,
+        kind=kind,
+        title=title,
+        created_at=created_at,
+        tool_version=_string(first_prompt.row.get("version")) if first_prompt is not None else None,
+        origin=origin,
+        working_folder=_string(first_prompt.row.get("cwd")) if first_prompt is not None else None,
+        live=live,
+        turns=_project_turns(rows, agents),
+        archive_files=files,
+        files_not_archived=outside,
+    )
