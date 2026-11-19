@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from .form import (
+    HomeFile,
     Image,
     Item,
     Kind,
@@ -26,6 +27,7 @@ from .form import (
     ToolCall,
     Turn,
     Usage,
+    live_by_mtime,
     unknown_record,
 )
 from .lines import file_records
@@ -519,3 +521,32 @@ def _items(home: Path, rows: list[_Message]) -> Iterator[Item]:
                 started_at=_native_time(entry, part),
                 truncated=truncated,
             )
+
+
+def _archive(home: Path, scan: _Scan, clock: datetime) -> tuple[tuple[HomeFile, ...], bool, int]:
+    session = home / scan.file
+    files = {session}
+    outside: set[Path] = set()
+    for entry in scan.entries:
+        if entry.row.get("type") != "message":
+            continue
+        message = entry.row.get("message")
+        if not isinstance(message, dict) or message.get("role") != "toolResult":
+            continue
+        path = _spill_path(home, entry, message)
+        if path is None or path in files or path in outside:
+            continue
+        if not path.is_relative_to(home):
+            outside.add(path)
+            continue
+        try:
+            if stat.S_ISREG(path.stat().st_mode):
+                files.add(path)
+        except FileNotFoundError:
+            # An expired spill on an inactive branch supplies no archive file.
+            continue
+        except OSError:
+            raise _spill_failure(entry) from None
+    ordered = (session, *sorted(files - {session}))
+    archive = tuple(HomeFile(path.relative_to(home).as_posix()) for path in ordered)
+    return archive, live_by_mtime(ordered, clock), len(outside)
