@@ -19,7 +19,19 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import NoReturn
 
-from .form import Image, Kind, Result, SessionFailure, Source, State, TextBlock, ToolCall, unknown_record
+from .form import (
+    Image,
+    Kind,
+    Response,
+    Result,
+    SessionFailure,
+    Source,
+    State,
+    TextBlock,
+    ToolCall,
+    Usage,
+    unknown_record,
+)
 
 _DATABASE = "mimocode.db"
 _DATABASE_FILES = (_DATABASE, f"{_DATABASE}-wal", f"{_DATABASE}-shm")
@@ -192,6 +204,7 @@ class _Message:
     error_text: str | None
     model: str | None
     summary: bool
+    usage: Usage
 
 
 def _unknown(record: str) -> NoReturn:
@@ -312,12 +325,13 @@ def _message(row: sqlite3.Row, parts: list[sqlite3.Row], facts: _KindFacts) -> _
     summary = data.get("summary", False) if role == "assistant" else False
     if not isinstance(summary, bool):
         _unknown("message")
+    usage = _usage(data.get("tokens")) if role == "assistant" else Usage()
     name = data.get("agent")
     if lane != "main" and isinstance(name, str) and name.startswith("probe-"):
         facts.probe_actor = True
     return _Message(
         message_id, lane, role, parent, created, data, tuple(_part(part, facts) for part in parts),
-        completed, finish, error_kind, error_text, model, summary,
+        completed, finish, error_kind, error_text, model, summary, usage,
     )
 
 
@@ -510,3 +524,26 @@ def _tool_call(data: _Object, state: _Object, metadata: _Object, started: dateti
             fields["exitCode"] = fields.pop("exit")
         result = Result(output, fields or None, images)
     return ToolCall(call_id, None, name, arguments, result, status == "completed", error, None, started)
+
+
+def _count(value: object) -> int:
+    if type(value) is not int or value < 0:
+        _unknown("message")
+    return value
+
+
+def _usage(value: object) -> Usage:
+    tokens = _optional_object(value, "message")
+    cache = _optional_object(tokens.get("cache"), "message")
+    reasoning = tokens.get("reasoning")
+    return Usage.native(
+        uncached=_count(tokens.get("input", 0)),
+        cache_read=_count(cache.get("read", 0)),
+        cache_write=_count(cache.get("write", 0)),
+        output=_count(tokens.get("output", 0)),
+        reasoning=None if reasoning is None else _count(reasoning),
+    )
+
+
+def _responses(turn: _Turn) -> tuple[Response, ...]:
+    return tuple(Response(message.created, message.usage) for message in turn.assistants)
