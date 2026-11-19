@@ -9,10 +9,13 @@ import os
 import plistlib
 import re
 import shutil
+import stat
 import subprocess
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager, suppress
 from pathlib import Path
+from threading import Event
+from time import monotonic
 from unicodedata import normalize
 from uuid import uuid4
 
@@ -21,6 +24,7 @@ from .admission import lock
 QUEUE = ".arbol-released"
 SWEEP_LOCK = ".sweep.lock"
 SWEEP_INTERVAL = 25 * 60
+REMOVAL_SECONDS = 60
 RUN_ID = re.compile(r"[0-9a-f]{32}")
 LOG = logging.getLogger(__name__)
 
@@ -143,20 +147,75 @@ def release_run(home: Path, run: Path, evidence: Path, *, expected: os.stat_resu
     return root / QUEUE / name
 
 
-async def remove_run(path: Path) -> None:
+async def remove_on_device(path: Path) -> bool:
     # The filesystem limit is enforced during traversal, even for a late mount.
     process = await asyncio.create_subprocess_exec(
         "/bin/rm", "-rfx", "--", str(path),
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     try:
-        if await asyncio.wait_for(process.wait(), timeout=60):
-            raise OSError("The released run could not be fully removed.")
+        return await asyncio.wait_for(process.wait(), timeout=REMOVAL_SECONDS) == 0
     except (TimeoutError, asyncio.CancelledError):
         with suppress(ProcessLookupError):
             process.kill()
         await process.wait()
         raise
+
+
+def unseal_directories(path: Path, expected: os.stat_result, stop: Event) -> bool:
+    """Add owner-write to normal sealed directories, with descriptors pinned to the released tree."""
+    owner = os.getuid()
+    deadline = monotonic() + REMOVAL_SECONDS
+    changed = False
+    with directory(path) as root_fd:
+        if not os.path.samestat(os.fstat(root_fd), expected):
+            raise ValueError("The released run changed before directory preparation.")
+        for _, children, _, fd in os.fwalk(".", dir_fd=root_fd, follow_symlinks=False):
+            if stop.is_set() or monotonic() >= deadline:
+                break
+            info = os.fstat(fd)
+            descend: list[str] = []
+            if info.st_dev == expected.st_dev and info.st_uid == owner:
+                for name in children:
+                    try:
+                        child = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue
+                    if stat.S_ISDIR(child.st_mode) and child.st_dev == expected.st_dev and child.st_uid == owner:
+                        descend.append(name)
+                mode = stat.S_IMODE(info.st_mode)
+                readable = stat.S_IRUSR | stat.S_IXUSR
+                if mode & readable == readable and not mode & stat.S_IWUSR:
+                    os.fchmod(fd, mode | stat.S_IWUSR)
+                    changed = True
+            children[:] = descend
+    return changed
+
+
+async def remove_run(path: Path, expected: os.stat_result | None = None) -> None:
+    current = path.lstat()
+    if not stat.S_ISDIR(current.st_mode) or (expected is not None and not os.path.samestat(current, expected)):
+        raise ValueError("The released run no longer names the verified directory.")
+    if await remove_on_device(path):
+        return
+    stop = Event()
+    repair = asyncio.create_task(asyncio.to_thread(unseal_directories, path, current, stop))
+    try:
+        changed = await asyncio.shield(repair)
+    except asyncio.CancelledError:
+        stop.set()
+        # Keep the sweep lock until the descriptor walk has stopped.
+        while not repair.done():
+            try:
+                await asyncio.shield(repair)
+            except (asyncio.CancelledError, OSError, ValueError):
+                pass
+        repair.exception()
+        raise
+    if (changed and not contains_path(path, await asyncio.to_thread(attached_paths))
+            and os.path.samestat(current, path.lstat()) and await remove_on_device(path)):
+        return
+    raise OSError("The released run could not be fully removed.")
 
 
 async def sweep(home: Path) -> None:
@@ -188,7 +247,7 @@ async def sweep(home: Path) -> None:
                         continue
                     if not os.path.samestat(info, path.lstat()):
                         continue
-                    await remove_run(path)
+                    await remove_run(path, info)
             except FileNotFoundError:
                 continue
             except (OSError, ValueError) as error:
