@@ -5,13 +5,13 @@ from __future__ import annotations
 import json
 import re
 import stat
-from collections.abc import Generator, Iterator
+from collections.abc import Generator, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NoReturn
 
-from .form import Failed, SessionFailure, Source, unknown_record
+from .form import Failed, Kind, SessionFailure, Source, unknown_record
 from .lines import file_records
 
 
@@ -303,6 +303,8 @@ def _validate_message(home: Path, record: Record) -> None:
     for name in ("isMeta", "isCompactSummary", "isApiErrorMessage"):
         if row.get(name) is not None and type(row[name]) is not bool:
             _bad_record(home, record)
+    if kind == "user" and _user_prompt(record) is not None and not _string(row.get("uuid")):
+        _bad_record(home, record)
     if kind == "assistant":
         for name in ("id", "model", "stop_reason"):
             if message.get(name) is not None and not isinstance(message[name], str):
@@ -339,3 +341,79 @@ def _validated(
         unknown_record(None, record.where(home), conversation=conversation)
         return None
     return record
+
+
+# Exact first prompts from the Claude Driver live checks (archived dev.py),
+# the recorded continuity probe, and Arbol's C14 and C44 conformance sources.
+_PROBE_PROMPTS = frozenset({
+    "Answer with the single word: ready",
+    "Use AskUserQuestion to ask Ready? with options Ready and Later. Then use Bash to run printf ready. Finish with ready.",
+    "Start one Haiku sub-agent in the background. Tell it to run printf ready and return ready. Wait for it and finish with ready.",
+    "Remember the word willow. Answer only ready.",
+    "What word did I give you? Answer only that word.",
+    "Use Bash to run sleep 8 then printf ready.",
+    "Remember probe.",
+    "history-user-secret",
+    "answer",
+})
+_INTERRUPTED = "[Request interrupted by user"
+_REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
+_COMMAND_WRAPPER = re.compile(
+    r"<(command-name|command-message|command-args|local-command-stdout)>.*?</\1>", re.DOTALL
+)
+
+
+def _blocks(content: object) -> list[dict[str, Any]]:
+    return [_object(part) for part in content] if isinstance(content, list) else []
+
+
+def _text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    return "\n".join(block["text"] for block in _blocks(content) if block.get("type") == "text")
+
+
+def _message(row: Record) -> dict[str, Any]:
+    return _object(row.row.get("message"))
+
+
+def _interruption(record: Record) -> bool:
+    return record.row.get("type") == "user" and _REMINDER.sub(
+        "", _text(_message(record).get("content"))
+    ).lstrip().startswith(_INTERRUPTED)
+
+
+def _user_prompt(record: Record) -> str | None:
+    row = record.row
+    if row.get("type") != "user" or row.get("isMeta") or row.get("isCompactSummary"):
+        return None
+    content = _message(record).get("content")
+    blocks = _blocks(content)
+    if row.get("toolUseResult") is not None or any(block.get("type") == "tool_result" for block in blocks):
+        return None
+    text = _text(content)
+    prompt = _REMINDER.sub("", text)
+    if prompt.lstrip().startswith(_INTERRUPTED):
+        return None
+    if text.strip() and not _COMMAND_WRAPPER.sub("", prompt).strip():
+        if not any(block.get("type") == "image" for block in blocks):
+            return None
+    return prompt
+
+
+def _first_field(records: Sequence[Record], name: str) -> str | None:
+    return next((value for record in records if (value := _string(record.row.get(name))) is not None), None)
+
+
+def _kind(native_id: str, driver_ids: set[str], records: Sequence[Record]) -> Kind:
+    if native_id in driver_ids or any(record.row.get("version") == "synthetic-arbol" for record in records):
+        return "arbol_driver"
+    if _first_field(records, "entrypoint") != "sdk-cli":
+        return "owner"
+    if records[0].file.path.parent.name.startswith("-private-tmp-") and not any(
+        record.row.get("type") == "bridge-session" for record in records
+    ):
+        first_prompt = next((prompt for row in records if (prompt := _user_prompt(row)) is not None), None)
+        if first_prompt in _PROBE_PROMPTS:
+            return "probe"
+    return "agent_launched"
