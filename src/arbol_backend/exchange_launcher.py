@@ -95,9 +95,10 @@ def select_build(context: Context, command: Command, *, timeout: float) -> str |
                     or not isinstance(record["status"], str)
                     or any(type(record[field]) is not bool for field in ("fits", "runnable", "chosen"))):
                 raise ValueError
-            fits = record_layout == layout and any(
+            declaration = record["schemaCompatibility"]
+            fits = record_layout == layout and declaration is not None and any(
                 version == compatibility and minimum <= revision
-                for version, minimum in schema_compatibility(record["schemaCompatibility"])
+                for version, minimum in schema_compatibility(declaration)
             )
             if record["fits"] != fits:
                 raise ValueError
