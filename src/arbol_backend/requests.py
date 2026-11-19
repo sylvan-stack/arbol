@@ -8,9 +8,11 @@ import re
 import stat
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from uuid import uuid4
 
 from .bridge import MAX_LINE, Error, Params, uuid_id
+from .exchange_context import Refusal
 from .model import Identity
 
 NAME = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
@@ -20,6 +22,41 @@ OWN_NAME = re.compile(rf"(?:{NAME}\.json|\.{NAME}\.{NAME}\.tmp)")
 def private(info: os.stat_result) -> bool:
     return (stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
             and stat.S_IMODE(info.st_mode) == 0o600 and info.st_nlink == 1)
+
+
+@dataclass(frozen=True)
+class CapturedRequest:
+    data: bytes
+    inode: tuple[int, int]
+    chat: object
+    replaces: object
+
+
+def capture(path: Path, deadline: float) -> CapturedRequest:
+    """Read the caller's file once and keep the exact bytes passed to the Trunk."""
+    data = bytearray()
+    try:
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK), "rb") as stream:
+            source = os.fstat(stream.fileno())
+            if not stat.S_ISREG(source.st_mode) or source.st_size > MAX_LINE:
+                raise ValueError
+            while len(data) <= MAX_LINE:
+                if time.monotonic() >= deadline:
+                    raise Refusal("no_answer", "The start time limit expired while reading the request.")
+                chunk = stream.read(min(65536, MAX_LINE + 1 - len(data)))
+                if not chunk:
+                    break
+                data.extend(chunk)
+        if len(data) > MAX_LINE:
+            raise ValueError
+        fields = json.loads(data.decode("utf-8"))
+        if not isinstance(fields, dict):
+            raise ValueError
+    except (OSError, ValueError, RecursionError):
+        raise Refusal("invalid_input", "The start request must be a readable JSON object of at most 16 MiB.") from None
+    if time.monotonic() >= deadline:
+        raise Refusal("no_answer", "The start time limit expired while reading the request.")
+    return CapturedRequest(bytes(data), (source.st_dev, source.st_ino), fields.get("chat"), fields.get("replaces"))
 
 
 @dataclass

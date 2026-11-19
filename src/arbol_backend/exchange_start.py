@@ -11,16 +11,18 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, BinaryIO
 
+from .chat_data import refuse_imported
 from .database import Unavailable
 from .exchange_admission import GENERATION_ENV, Admission
 from .exchange_command import UUID, Command
 from .exchange_context import Context, Refusal
 from .exchange_launcher import MAX_REPLY, Reply, object_line, select_build
 from .model import BUILD_ID, Refused, private_directory
+from .requests import capture
 
 ACCEPT_SECONDS = 20.0
 UNRESOLVED = {"no_answer", "in_progress"}
@@ -52,6 +54,34 @@ async def receipt(context: Context, exchange: str, timeout: float, *, wait_for_c
     if not accepted(value, exchange):
         raise Refusal("no_answer", "The database returned an unreadable Exchange receipt.")
     return Reply(value)
+
+
+def target_id(value: object, field: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not UUID.fullmatch(value):
+        raise Refusal("invalid_input", f"The request's {field} must be a lower-case UUID.")
+    return value
+
+
+async def guard_target(context: Context, chat: str | None, replaces: str | None, timeout: float) -> None:
+    database = context.database()
+    try:
+        async with asyncio.timeout(timeout), database.session(snapshot=True) as session:
+            if replaces is not None:
+                rows = await session.execute("SELECT chat_id::text FROM public.exchanges WHERE id=%s", [replaces])
+                if not rows:
+                    raise Refusal("not_found", "The Exchange to replace was not found.")
+                saved_chat: str = rows[0][0]
+                if chat is not None and chat != saved_chat:
+                    raise Refusal("invalid_input", "The handed chat differs from the replaced Exchange's chat.")
+                chat = saved_chat
+            assert chat is not None
+            await refuse_imported(session, chat)
+    except TimeoutError:
+        raise Refusal("database_unavailable", "The installation database could not confirm the target chat.") from None
+    finally:
+        await database.close()
 
 
 @contextmanager
@@ -141,7 +171,22 @@ def start(context: Context, command: Command, *, timeout: float = ACCEPT_SECONDS
         raise
     if prior is not None:
         return prior
-    with admission.lease("normal", generation=generation), launch_lock(context, exchange) as (lock, lock_path):
+    with admission.lease("normal", generation=generation), ExitStack() as stack:
+        captured = None
+        request_refusal = None
+        try:
+            captured = capture(request, deadline)
+            chat = target_id(command.options.get("--chat", captured.chat), "chat")
+            replaces = target_id(command.options.get("--replaces", captured.replaces), "replaces")
+        except Refusal as capture_error:
+            # An earlier launch can still have a receipt to recover without usable input.
+            if not any(os.path.lexists(path) for path in (*folders, lock_file)):
+                raise
+            request_refusal = capture_error
+        else:
+            if chat is not None or replaces is not None:
+                asyncio.run(guard_target(context, chat, replaces, max(0, deadline - time.monotonic())))
+        lock, lock_path = stack.enter_context(launch_lock(context, exchange))
         try:
             prior = asyncio.run(receipt(context, exchange, max(0, deadline - time.monotonic()), wait_for_commit=True))
         except Refused:
@@ -151,6 +196,10 @@ def start(context: Context, command: Command, *, timeout: float = ACCEPT_SECONDS
             return prior
         if any(os.path.lexists(path) for path in folders):
             raise Refusal("in_progress", "The Exchange already has a pending folder. Resolve it before retrying.")
+        if request_refusal is not None:
+            forget(lock_path)
+            raise request_refusal
+        assert captured is not None
         try:
             selected = select_build(context, command, timeout=max(0, deadline - time.monotonic()))
         except Refusal:
@@ -164,22 +213,31 @@ def start(context: Context, command: Command, *, timeout: float = ACCEPT_SECONDS
             raise Refusal("no_answer", "The start time limit expired during Build selection.")
         assert command.code is not None
         try:
-            request_info = request.lstat()
+            # The offset is rewound before the Trunk opens its inherited snapshot via /dev/fd.
+            snapshot = stack.enter_context(tempfile.TemporaryFile())
+            snapshot.write(captured.data)
+            snapshot.flush()
+            snapshot.seek(0)
+            # A late acceptance can still write to this anonymous output after the caller exits.
+            output = stack.enter_context(tempfile.TemporaryFile())
         except OSError:
-            request_info = None
+            forget(lock_path)
+            raise Refusal("runtime_unavailable", "Cannot prepare the private start files.") from None
+        if time.monotonic() >= deadline:
+            forget(lock_path)
+            raise Refusal("no_answer", "The start time limit expired while preparing the request snapshot.")
+        snapshot_fd = snapshot.fileno()
         arguments = [str(context.bin_dir / "arbol-trunk"), command.code, "-v", selected, "run", "--detach",
-                     "--exchange", exchange, "--request", str(request), *command.forward]
-        # An anonymous output file keeps a late acceptance independent of the caller.
-        with tempfile.TemporaryFile() as output:
-            try:
-                env = {**context.environment(), GENERATION_ENV: generation}
-                child = subprocess.Popen(arguments, env=env, start_new_session=True,
-                                         stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.DEVNULL,
-                                         pass_fds=(lock,))
-            except (OSError, ValueError):
-                forget(lock_path)
-                raise Refusal("trunk_unavailable", "Cannot start the selected Trunk launcher.") from None
-            value = wait_reply(child, output, deadline)
+                     "--exchange", exchange, "--request", f"/dev/fd/{snapshot_fd}", *command.forward]
+        try:
+            env = {**context.environment(), GENERATION_ENV: generation}
+            child = subprocess.Popen(arguments, env=env, start_new_session=True,
+                                     stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.DEVNULL,
+                                     pass_fds=(lock, snapshot_fd))
+        except (OSError, ValueError):
+            forget(lock_path)
+            raise Refusal("trunk_unavailable", "Cannot start the selected Trunk launcher.") from None
+        value = wait_reply(child, output, deadline)
         if value is not None and accepted(value, exchange):
             if not value["duplicate"] and (value["trunk"] != command.code or value["build"] != selected):
                 raise Refusal("no_answer", "The receipt did not match the selected Trunk Build.")
@@ -191,11 +249,10 @@ def start(context: Context, command: Command, *, timeout: float = ACCEPT_SECONDS
         else:
             raise Refusal("no_answer", "The start could not be confirmed. Recover it using the same Exchange UUID.")
         forget(lock_path)
-        if request_info is not None and stat.S_ISREG(request_info.st_mode):
-            try:
-                current = request.lstat()
-                if (current.st_dev, current.st_ino) == (request_info.st_dev, request_info.st_ino):
-                    forget(request)
-            except OSError:
-                pass
+        try:
+            current = request.lstat()
+            if (current.st_dev, current.st_ino) == captured.inode:
+                forget(request)
+        except OSError:
+            pass
         return Reply(value, status)
