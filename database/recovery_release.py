@@ -158,7 +158,9 @@ def save_sources(checkout: Path, commit: str, destination: Path) -> None:
     git(repository_root(checkout), "archive", "--format=tar", f"--output={destination}", commit)
 
 
-def retain_source(checkout: Path, commit: str, output: Path) -> dict[str, str]:
+def retain_source(
+    checkout: Path, commit: str, output: Path, *, native_consumer_parent: str | None = None,
+) -> dict[str, str]:
     repository = repository_root(checkout)
     source_tree = commit_id(git(repository, "rev-parse", f"{commit}^{{tree}}").decode().strip())
     archive = output / "source.tar"
@@ -167,13 +169,20 @@ def retain_source(checkout: Path, commit: str, output: Path) -> dict[str, str]:
     git(output, "init", "--bare", "--initial-branch=recovery", "--template=", str(retained))
     # A transport fetch writes independent objects and preserves the original
     # commit. The shallow boundary excludes earlier revisions from the record.
+    refs = [f"{commit}:refs/heads/recovery"]
+    if native_consumer_parent is not None:
+        refs.append(f"{native_consumer_parent}:refs/heads/native-consumer-parent")
     git(retained, "-c", "protocol.file.allow=always", "fetch", "--no-tags", "--no-write-fetch-head",
-        "--depth=1", "--no-recurse-submodules", repository.as_uri(), f"{commit}:refs/heads/recovery")
+        "--depth=1", "--no-recurse-submodules", repository.as_uri(), *refs)
     git(retained, "fsck", "--full", "--no-reflogs")
     retained_commit, retained_tree = git(retained, "rev-parse", "HEAD", "HEAD^{tree}").decode().splitlines()
     if (retained_commit != commit or retained_tree != source_tree
             or os.path.lexists(retained / "objects/info/alternates")):
         raise RecoveryError("The retained Git repository differs from the selected source.")
+    if native_consumer_parent is not None:
+        retained_parent = git(retained, "rev-parse", "refs/heads/native-consumer-parent").decode().strip()
+        if retained_parent != native_consumer_parent:
+            raise RecoveryError("The retained Git repository lacks the Browser Native predecessor.")
     with tempfile.NamedTemporaryFile(prefix=".source-", dir=output) as comparison:
         git(retained, "archive", "--format=tar", f"--output={comparison.name}", commit)
         archive_digest = digest(archive)
@@ -331,6 +340,187 @@ def driver_metadata_evidence(
                        "archiveSha256": distribution["sha256"], "executableSha256": files[interpreter]}}
 
 
+def browser_files(folder: Path) -> dict[str, str]:
+    return {name: sha(b"symlink\0" + os.fsencode(value["link"])) if "link" in value else value["sha256"]
+            for name, value in tree(folder).items() if isinstance(value, dict)}
+
+
+def browser_literal(source: str, name: str) -> str:
+    match = re.search(rf"^(?:export )?const {re.escape(name)} = '([^'\n]+)';$", source, re.MULTILINE)
+    if match is None:
+        raise RecoveryError(f"The committed Browser recipe does not identify {name}.")
+    return match[1]
+
+
+def browser_admission(
+    audit: dict[str, Any], recipe: str, checkout: Path, commit: str, output: Path,
+) -> dict[str, Any]:
+    review = commit_id(audit["reviewHandover"])
+    forester = Path(browser_literal(recipe, "foresterRoot"))
+    handover = browser_literal(recipe, "handoverPath")
+    origin = git(forester, "remote", "get-url", "origin").decode().strip()
+    if origin not in {"git@github.com:sylvan-stack/forester-artifacts.git",
+                      "https://github.com/sylvan-stack/forester-artifacts.git"}:
+        raise RecoveryError("The Browser review is outside its published authority.")
+    git(forester, "merge-base", "--is-ancestor", review, "refs/remotes/origin/main")
+    text = source_file(forester, review, "", handover).decode()
+    blocks = re.findall(r"<!-- ABR-29-HOST-SOURCE-ADMISSION:BEGIN -->\s*([\s\S]*?)\s*"
+                        r"<!-- ABR-29-HOST-SOURCE-ADMISSION:END -->", text)
+    if len(blocks) != 1:
+        raise RecoveryError("The published Browser admission is missing or ambiguous.")
+    admission = json.loads(blocks[0])
+    fields = ("productDigest", "productSources", "productOutputs", "compilerInputs")
+    if admission.get("status") != "accepted" or any(admission.get(key) != audit[key] for key in fields):
+        raise RecoveryError("The signed Browser does not match its published admission.")
+    admitted_commit = commit_id(admission["sourceGit"])
+    git(checkout, "merge-base", "--is-ancestor", admitted_commit, commit)
+    # The Browser signer uses Node's English collation recursively. Invoke only
+    # this pure JSON canonicalizer to compare its signed digest across languages.
+    algorithm = ("let input=''; for await (const chunk of process.stdin) input+=chunk;"
+                 "const canon=JSON.stringify(JSON.parse(input),(_k,x)=>x&&typeof x==='object'&&!Array.isArray(x)"
+                 "?Object.fromEntries(Object.entries(x).sort(([a],[b])=>a.localeCompare(b,'en'))):x);"
+                 "process.stdout.write(canon)")
+    node = shutil.which("node")
+    if node is None:
+        raise RecoveryError("The Browser recovery toolchain requires Node.")
+    canonical_review = subprocess.run(
+        [node, "--input-type=module", "--eval", algorithm], check=True, capture_output=True, timeout=30,
+        env={"PATH": "/usr/bin:/bin", "LANG": "C"},
+        input=canonical({"foresterCommit": review, "handoverPath": handover, "admission": admission}),
+    ).stdout
+    if sha(canonical_review) != audit["reviewDigest"]:
+        raise RecoveryError("The published Browser admission differs from the signed policy digest.")
+    write_private(output / "browser-admission.json", admission)
+    checkpoint, verdict = admission["sourceCheckpoint"], admission["sourceVerdict"]
+    retain_pinned_input(Path(checkpoint["path"]), output / "browser-source-checkpoint.json", checkpoint["sha256"])
+    retain_pinned_input(Path(verdict["path"]), output / "browser-source-verdict.md", verdict["sha256"])
+    checked = document(output / "browser-source-checkpoint.json")
+    if (checked.get("source") != admitted_commit or checked.get("ordinal") != admission["acceptedSourceOrdinal"]
+            or any(admission[key] != checked.get(key) for key in fields)
+            or not re.search(r"^Accepted\.?\s*$", (output / "browser-source-verdict.md").read_text(), re.I | re.M)
+            or checkpoint["sha256"] not in (output / "browser-source-verdict.md").read_text()):
+        raise RecoveryError("The retained Browser source verdict and checkpoint do not match.")
+    return {"foresterCommit": review, "origin": origin, "handoverPath": handover,
+            "sourceCommit": admitted_commit, "reviewDigest": audit["reviewDigest"]}
+
+
+def retain_browser_consumer(platform: str, compiler: dict[str, Any], output: Path) -> dict[str, str]:
+    manifest = Path(browser_literal(platform, "frozenConsumer"))
+    expected = browser_literal(platform, "frozenDigest")
+    original = manifest.parent.resolve(strict=True)
+    retained = output / "browser-native-inputs"
+    retained.mkdir(mode=0o700)
+
+    def retain(path: Path, checksum: str) -> Path:
+        if path.resolve(strict=True) != path:
+            raise RecoveryError("A Browser qualification input is not physical.")
+        target = retained / path.relative_to(original)
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        retain_pinned_input(path, target, checksum)
+        return target
+
+    consumer = document(retain(manifest, expected))
+    if consumer.get("pageAdmission") is not False:
+        raise RecoveryError("Browser native qualification requires its isolated consumer.")
+    header_root = Path(browser_literal(platform, "officialHeaders"))
+    for name, checksum in compiler["native"]["headerHashes"].items():
+        retain(header_root / relative(name), checksum)
+    review = consumer["sourceReviewManifest"]
+    frozen = document(retain(Path(review["path"]), review["sha256"]))
+    record = frozen["sourceRecord"]
+    if record != consumer["sourceRecord"]:
+        raise RecoveryError("The Browser native source records disagree.")
+    sources = document(retain(Path(record["path"]), record["sha256"]))
+    for root, files in ((Path(frozen["frozenSource"]), sources["sources"]),
+                        (Path(frozen["frozenDist"]), frozen["compiledInventory"])):
+        for name, checksum in files.items():
+            retain(root / relative(name), checksum)
+    inventory = consumer["bundle"]["inventory"]
+    inventory_doc = document(retain(Path(inventory["path"]), inventory["sha256"]))
+    candidate = Path(consumer["candidate"])
+    copied = retained / candidate.relative_to(original)
+    retain_signed_app(candidate, copied)
+    compatibility = consumer["manifest"]
+    compatibility_path = copied / Path(compatibility["path"]).relative_to(candidate)
+    if browser_files(copied) != inventory_doc["files"] or digest(compatibility_path) != compatibility["sha256"]:
+        raise RecoveryError("The retained Browser Native fixture differs from the pinned input.")
+    return {"originalDirectory": str(original), "path": retained.name, "manifestSha256": expected,
+            "sourceParent": commit_id(consumer["parent"])}
+
+
+def browser_package_evidence(
+    folder: Path, record: dict[str, Any], checkout: Path, commit: str, prefix: str, output: Path,
+) -> dict[str, Any]:
+    app = folder / "app/ArbolBrowser.app"
+    if app.resolve(strict=True) != app or not app.is_dir():
+        raise RecoveryError("The working Browser needs its physical signed host.")
+    publisher = json.loads(source_file(checkout, commit, prefix, "native/publisher-requirement.json"))
+    identifier = publisher["bundleIdentifier"]
+    if not LABEL.fullmatch(identifier):
+        raise RecoveryError("The Browser publisher identifier is invalid.")
+    subprocess.run(["/usr/bin/codesign", "--verify", "--strict", "--deep", "-R",
+                    f'={publisher["requirement"]} and identifier "{identifier}"', str(app)],
+                   check=True, capture_output=True, timeout=60)
+    resources = app / "Contents/Resources"
+    policy_path = resources / "host-policy.json"
+    metadata_path = resources / "browser/metadata.json"
+    compat_path = resources / "native-compatibility.json"
+    policy, metadata, compat = map(document, (policy_path, metadata_path, compat_path))
+    inner_entry = (resources / "browser/bin/arbol-browser").read_bytes()
+    original_operand = b'"$(/usr/bin/dirname -- "$0")/.."'
+    mounted_operand = b'"$(/usr/bin/dirname -- "$0")/../app/ArbolBrowser.app/Contents/Resources/browser"'
+    if (inner_entry.count(original_operand) != 1
+            or inner_entry.replace(original_operand, mounted_operand) != (folder / record["entry"]).read_bytes()):
+        raise RecoveryError("The Browser Build entry differs from its signed host entry.")
+    audits = list(folder.glob(".host-preparation-*.app.signature-audit.json"))
+    if len(audits) != 1 or not stat.S_ISREG(audits[0].lstat().st_mode):
+        raise RecoveryError("The signed Browser Build has no unique signature audit.")
+    audit = document(audits[0])
+    identity = {"repositoryDigest": sha(os.fsencode(record["source"]["repository"])),
+                "commit": commit, "branch": record["source"]["branch"], "uncommittedChanges": False}
+    signed_digests = {"policyDigest": digest(policy_path), "metadataDigest": digest(metadata_path),
+                      "compatibilityDigest": digest(compat_path)}
+    expected_component = {"name": record["component"], "version": record["packageVersion"],
+                          "build": record["build"], "contract": record["contract"],
+                          "profileFormat": record["dataFormat"]}
+    if (policy.get("format") != 1 or policy.get("build") != record["build"] or policy.get("buildRoot") != str(folder)
+            or policy.get("metadataDigest") != signed_digests["metadataDigest"]
+            or policy.get("compatibilityDigest") != signed_digests["compatibilityDigest"]
+            or metadata.get("component") != expected_component or metadata.get("sourceIdentity") != identity
+            or audit.get("sourceIdentity") != identity or audit.get("publisher") != publisher
+            or any(audit.get(key) != value for key, value in signed_digests.items())
+            or any(audit.get(key) != policy.get(key) for key in ("sourceDigest", "productDigest", "reviewDigest"))
+            or audit.get("sourceDigest") != metadata.get("sourceDigest")
+            or any(audit.get(key) != metadata["host"].get(key) for key in ("productDigest", "compileDigest"))
+            or document(resources / "publisher-requirement.json") != publisher
+            or compat.get("publisherTeam") != publisher["team"] or compat.get("bundleIdentifier") != identifier
+            or audit.get("files") != browser_files(app)):
+        raise RecoveryError("The Browser signature audit, publisher, signed policy or source does not match the Build.")
+    recipe = source_file(checkout, commit, prefix, "scripts/package-host.mjs").decode()
+    review = browser_admission(audit, recipe, checkout, commit, output)
+    for name, expected in audit["productSources"].items():
+        data = source_file(checkout, commit, prefix, name)
+        if name == "arbol-build.json":
+            config = json.loads(data)
+            del config["checks"]
+            data = json.dumps(config, ensure_ascii=False, separators=(",", ":")).encode()
+        if sha(data) != expected:
+            raise RecoveryError(f"The admitted Browser product differs from the selected source: {name}.")
+    platform = source_file(checkout, commit, prefix, "scripts/compile-platform.mjs").decode()
+    compiler = audit["compilerInputs"]
+    native_input = retain_browser_consumer(platform, compiler, output)
+    stock = Path(browser_literal(recipe, "preservedStockArchive"))
+    stock_pin = re.search(r"export const stockElectronArchive = Object\.freeze\(\{ name: '[^']+',\s*"
+                          r"sha256: '([0-9a-f]{64})' \}\);", recipe)
+    if stock_pin is None:
+        raise RecoveryError("The exact Browser Electron archive pin is unavailable.")
+    retain_pinned_input(stock, output / stock.name, stock_pin[1])
+    write_private(output / "browser-signature-audit.json", audit)
+    return {"review": review, "nativeInput": native_input, "publisher": publisher, "policySha256": signed_digests["policyDigest"],
+            "compileSha256": audit["compileDigest"], "compilerInputs": compiler,
+            "stockElectron": {"originalPath": str(stock), "path": stock.name, "sha256": stock_pin[1]}}
+
+
 def capture_build(
     item: dict[str, Any], output: Path, index: int, inventory: dict[str, Any],
 ) -> dict[str, Any]:
@@ -368,6 +558,7 @@ def capture_build(
     payload = folder
     sealed = folder / "driver-payload"
     git_tree = None
+    native_consumer_parent = None
     if os.path.lexists(sealed) or (layout >= 2 and component in SEALED_LAYOUT_2):
         git_tree = commit_id(git(checkout, "rev-parse", f"{commit}^{{tree}}").decode().strip())
         evidence["sealedPayload"] = sealed_payload_evidence(sealed, component, build, commit, git_tree)
@@ -433,6 +624,10 @@ def capture_build(
             name = "mimo-native-candidate"
             retain_pinned_input(Path(item["nativeCandidate"]), output / name, native_pin[1], executable=True)
             evidence["nativeCandidate"] = {"path": name, "sha256": native_pin[1]}
+    elif component == "arbol-browser":
+        browser = browser_package_evidence(folder, record, checkout, commit, prefix, output)
+        evidence["browser"] = browser
+        native_consumer_parent = browser["nativeInput"]["sourceParent"]
     elif not component.endswith("-driver") or layout != 1:
         raise RecoveryError("The Build has no verifiable package manifest.")
 
@@ -446,7 +641,7 @@ def capture_build(
     else:
         before = tree(folder, exclude=frozenset(MUTABLE_BUILD_FILES))
         evidence["installedFilesSha256"] = sha(canonical(before))
-    evidence["gitSource"] = retain_source(checkout, commit, output)
+    evidence["gitSource"] = retain_source(checkout, commit, output, native_consumer_parent=native_consumer_parent)
     return {"component": component, "build": build, "root": record.get("root"), "entry": str(entry),
             "packageVersion": version, "installationLayout": layout, "sourceCommit": commit,
             "componentPath": prefix.rstrip("/"),
