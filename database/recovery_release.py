@@ -15,8 +15,15 @@ import tempfile
 import tomllib
 from collections.abc import Iterator
 from contextlib import contextmanager
+from importlib import import_module
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from archive_volume import Archive, ArchiveUnavailable, require_archive
+else:
+    _archive = import_module(".archive_volume", __package__) if __package__ else import_module("archive_volume")
+    Archive, ArchiveUnavailable, require_archive = _archive.Archive, _archive.ArchiveUnavailable, _archive.require_archive
 
 COMMIT = re.compile(r"[0-9a-f]{40}")
 DIGEST = re.compile(r"[0-9a-f]{64}")
@@ -63,16 +70,31 @@ def private_dir(path: Path) -> Path:
     return path
 
 
+def recovery_dir(path: Path, archive: Archive | None) -> Path:
+    """Keep local inputs private and validate Mercury by volume and path."""
+    if archive is None:
+        return private_dir(path)
+    checked = archive.backup_path(path)
+    if not checked.is_dir():
+        raise RecoveryError("A recovery directory is required on Mercury.")
+    return checked
+
+
 @contextmanager
-def publish_directory(destination: Path) -> Iterator[Path]:
-    parent = private_dir(destination.parent)
+def publish_directory(destination: Path, *, archive: Archive | None = None) -> Iterator[Path]:
+    parent = recovery_dir(destination.parent, archive)
     destination = parent / destination.name
+    if archive is not None:
+        archive.backup_path(destination, allow_missing=True)
     if os.path.lexists(destination):
         raise RecoveryError("The recovery output already exists.")
     with tempfile.TemporaryDirectory(prefix=".recovery-", dir=parent) as temporary:
         staging = Path(temporary) / "output"
         staging.mkdir(mode=0o700)
         yield staging
+        if archive is not None:
+            archive.backup_path(staging)
+            archive.backup_path(destination, allow_missing=True)
         if os.path.lexists(destination):
             raise RecoveryError("The recovery output already exists.")
         staging.rename(destination)
@@ -190,7 +212,17 @@ def python_evidence(
     for name in ("package.json", "pyproject.toml", ".python-version", "uv.lock", "arbol-build.json",
                  "scripts/python-distribution.json"):
         path = folder / name
-        if path.is_file() and path.read_bytes() != source_file(checkout, commit, prefix, name):
+        if not path.is_file():
+            continue
+        original = source_file(checkout, commit, prefix, name)
+        if name == "package.json" and manifest["component"] == "arbol":
+            expected = json.loads(original)
+            for key in ("schemaCompatibility", "installationLayout"):
+                if key in manifest:
+                    expected[key] = manifest[key]
+            if document(path) == expected:
+                continue
+        if path.read_bytes() != original:
             raise RecoveryError(f"Packaged input differs from its Git revision: {name}.")
     return {"python": python, "uvVersion": pin["uvVersion"], "lockSha256": sha(lock), "dependencies": dependencies}
 
@@ -213,17 +245,25 @@ def capture_build(
     entry = relative(record["entry"])
     build_config = json.loads(source_file(checkout, commit, prefix, "arbol-build.json"))
     version = json.loads(source_file(checkout, commit, prefix, "package.json"))["version"]
+    layout = record.get("installationLayout", 1)
+    source_layout = build_config.get("installationLayout", 1)
+    entry_path = folder / entry
     if (build_config["component"] != component or build_config["entry"] != record["entry"]
-            or version != record["packageVersion"] or not os.access(folder / entry, os.X_OK)):
+            or type(layout) is not int or layout < 1 or type(source_layout) is not int or source_layout != layout
+            or build_config.get("schemaCompatibility") != record.get("schemaCompatibility")
+            or version != record["packageVersion"] or not entry_path.resolve(strict=True).is_relative_to(folder)
+            or not entry_path.is_file() or not os.access(entry_path, os.X_OK)):
         raise RecoveryError("Build identity, entry or package version differs from its committed configuration.")
 
     evidence: dict[str, Any] = {}
     manifest_file = folder / "package-manifest.json"
     if manifest_file.is_file():
         manifest = document(manifest_file)
+        packaged_layout = manifest.get("installationLayout", 1)
         if (manifest.get("format") != 1 or manifest.get("candidate", False) is not False
+                or type(packaged_layout) is not int or packaged_layout != layout
                 or any(manifest.get(key) != record.get(key)
-                       for key in ("component", "build", "entry", "packageVersion", "root"))
+                       for key in ("component", "build", "entry", "packageVersion", "root", "schemaCompatibility"))
                 or manifest["source"].get("commit") != commit
                 or manifest["source"].get("uncommittedChanges") is not False
                 or manifest["source"].get("componentPath", prefix.rstrip("/")) != prefix.rstrip("/")):
@@ -234,11 +274,12 @@ def capture_build(
             evidence.update(python_evidence(manifest, checkout, commit, prefix, folder))
         if component == "arbol" and inventory["kind"] == "legacy":
             # Packaging read this from another checkout; the Arbol commit cannot identify those bytes.
-            packaged_layout = folder / "tests/backend/layout.sql"
+            contract_layout = folder / "tests/backend/layout.sql"
             expected = manifest["contractLayoutSha256"]
-            if not DIGEST.fullmatch(expected) or digest(packaged_layout) != expected:
+            if not DIGEST.fullmatch(expected) or digest(contract_layout) != expected:
                 raise RecoveryError("The exact packaged Root Contract SQL is unresolved.")
-            evidence["rootContract"] = {"sha256": expected, "path": "tests/backend/layout.sql"}
+            shutil.copy2(contract_layout, output / "root-contract.sql")
+            evidence["rootContract"] = {"sha256": expected, "path": "root-contract.sql"}
         if component == "arbol" and "renderer" in manifest:
             renderer = manifest["renderer"]
             bundled = folder / relative(renderer["path"])
@@ -266,20 +307,26 @@ def capture_build(
         save_sources(renderer_checkout, renderer_commit, output / "renderer-source.tar")
         save_sources(design_checkout, evidence["renderer"]["designCommit"], output / "design-source.tar")
         evidence["nativeToolchain"] = "Preserved signed executable; exact compiler version not emitted by this packager."
-    else:
+    elif not component.endswith("-driver") or layout != 1:
         raise RecoveryError("The Build has no verifiable package manifest.")
+    elif record.get("checks") != [{"name": check["name"], "passed": True} for check in build_config["checks"]]:
+        raise RecoveryError("The legacy Driver Build record differs from its committed checks.")
 
-    package = output / "package"
     exclude = frozenset(MUTABLE_BUILD_FILES)
     before = tree(folder, exclude=exclude)
-    shutil.copytree(folder, package, symlinks=True, ignore=lambda path, names: (
-        set(names) & exclude if Path(path) == folder else set()
-    ))
-    if tree(package) != before:
-        raise RecoveryError("The selected Build changed while copying.")
+    if component == "arbol-app":
+        package = output / "package"
+        shutil.copytree(folder, package, symlinks=True, ignore=lambda path, names: (
+            set(names) & exclude if Path(path) == folder else set()
+        ))
+        if tree(package) != before:
+            raise RecoveryError("The selected App Build changed while copying.")
+    else:
+        evidence["installedFilesSha256"] = sha(canonical(before))
     save_sources(checkout, commit, output / "source.tar")
     return {"component": component, "build": build, "root": record.get("root"), "entry": str(entry),
-            "packageVersion": version, "sourceCommit": commit, "componentPath": prefix.rstrip("/"),
+            "packageVersion": version, "installationLayout": layout, "sourceCommit": commit,
+            "componentPath": prefix.rstrip("/"),
             "buildConfigurationSha256": sha(source_file(checkout, commit, prefix, "arbol-build.json")),
             "evidence": evidence, "savedAt": f"builds/{index}"}
 
@@ -302,6 +349,7 @@ def copy_configuration(files: dict[str, str], destination: Path) -> list[str]:
 
 
 def record_release(inventory_path: Path, destination: Path) -> str:
+    archive = require_archive()
     private_dir(inventory_path.parent)
     inventory = document(inventory_path)
     kind = inventory["kind"]
@@ -311,7 +359,7 @@ def record_release(inventory_path: Path, destination: Path) -> str:
     required = {"installation", "root"} if kind == "legacy" else {"installation"}
     if not isinstance(configuration, dict) or not required <= configuration.keys():
         raise RecoveryError("Installation and applicable legacy settings must be saved.")
-    with publish_directory(destination) as output:
+    with publish_directory(destination, archive=archive) as output:
         builds = []
         problems = []
         for index, item in enumerate(inventory["builds"]):
@@ -342,10 +390,11 @@ def record_release(inventory_path: Path, destination: Path) -> str:
         return digest(receipt)
 
 
-def verify_release(folder: Path, expected: str | None = None) -> tuple[dict[str, Any], str]:
-    folder = private_dir(folder)
+def verify_release(folder: Path, expected: str | None = None, *,
+                   archive: Archive | None = None) -> tuple[dict[str, Any], str]:
+    folder = recovery_dir(folder, archive)
     path = folder / "release.json"
-    if path.is_symlink():
+    if not stat.S_ISREG(path.lstat().st_mode):
         raise RecoveryError("The release record must be a private regular file.")
     data = path.read_bytes()
     actual = sha(data)
@@ -366,6 +415,9 @@ def main() -> int:
     args = parser.parse_args()
     try:
         result = record_release(args.inventory, args.output)
+    except ArchiveUnavailable as error:
+        print(json.dumps({"status": error.code, "message": str(error)}), file=sys.stderr)
+        return 1
     except RecoveryError as error:
         print(str(error), file=sys.stderr)
         return 1
