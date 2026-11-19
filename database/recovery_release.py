@@ -227,6 +227,27 @@ def python_evidence(
     return {"python": python, "uvVersion": pin["uvVersion"], "lockSha256": sha(lock), "dependencies": dependencies}
 
 
+def retain_signed_app(app: Path, destination: Path) -> str:
+    """Save the exact signed native bundle and verify that the copied payload still validates."""
+    if app.suffix != ".app" or not stat.S_ISDIR(app.lstat().st_mode):
+        raise RecoveryError("The App entry must be inside a native bundle.")
+    before = tree(app)
+    for bundle in (app, destination):
+        if bundle == destination:
+            subprocess.run(
+                ["/usr/bin/ditto", "--rsrc", "--extattr", "--acl", str(app), str(destination)],
+                capture_output=True, check=True, timeout=120,
+            )
+        verified = subprocess.run(
+            ["/usr/bin/codesign", "--verify", "--strict", str(bundle)], capture_output=True, check=False, timeout=60,
+        )
+        if verified.returncode:
+            raise RecoveryError("The selected App or retained copy did not verify against its code signature.")
+    if tree(destination) != before:
+        raise RecoveryError("The retained App differs from the exact signed bundle.")
+    return sha(canonical(before))
+
+
 def capture_build(
     item: dict[str, Any], output: Path, index: int, inventory: dict[str, Any],
 ) -> dict[str, Any]:
@@ -291,12 +312,8 @@ def capture_build(
             design = evidence["renderer"]["designCommit"]
             save_sources(Path(inventory["designCheckout"]), design, output / "design-source.tar")
     elif component == "arbol-app":
-        # This legacy packager signs the App and embeds a separate renderer receipt instead of package-manifest.json.
+        # The native App embeds a separate renderer receipt instead of package-manifest.json.
         app = folder / entry.parts[0]
-        verified = subprocess.run(["/usr/bin/codesign", "--verify", "--strict", str(app)],
-                                  capture_output=True, check=False, timeout=60)
-        if verified.returncode:
-            raise RecoveryError("The selected App payload no longer verifies against its code signature.")
         renderer_commit = commit_id(source_file(checkout, commit, prefix, "renderer-source.txt").decode().strip())
         renderer_checkout = Path(inventory["rendererCheckout"])
         design_checkout = Path(inventory["designCheckout"])
@@ -312,16 +329,15 @@ def capture_build(
     elif record.get("checks") != [{"name": check["name"], "passed": True} for check in build_config["checks"]]:
         raise RecoveryError("The legacy Driver Build record differs from its committed checks.")
 
-    exclude = frozenset(MUTABLE_BUILD_FILES)
-    before = tree(folder, exclude=exclude)
     if component == "arbol-app":
         package = output / "package"
-        shutil.copytree(folder, package, symlinks=True, ignore=lambda path, names: (
-            set(names) & exclude if Path(path) == folder else set()
-        ))
-        if tree(package) != before:
-            raise RecoveryError("The selected App Build changed while copying.")
+        package.mkdir(mode=0o700)
+        app_name = entry.parts[0]
+        bundle_sha256 = retain_signed_app(folder / app_name, package / app_name)
+        write_private(package / "build.json", record)
+        evidence["signedApp"] = {"path": f"package/{app_name}", "filesSha256": bundle_sha256}
     else:
+        before = tree(folder, exclude=frozenset(MUTABLE_BUILD_FILES))
         evidence["installedFilesSha256"] = sha(canonical(before))
     save_sources(checkout, commit, output / "source.tar")
     return {"component": component, "build": build, "root": record.get("root"), "entry": str(entry),
