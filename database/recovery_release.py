@@ -297,6 +297,40 @@ def sealed_payload_evidence(payload: Path, component: str, build: str, commit: s
     return {"descriptorSha256": str(verified.digest), "manifestSha256": str(descriptor["payloadManifestSha256"])}
 
 
+def retain_pinned_input(source: Path, destination: Path, expected: str, *, executable: bool = False) -> None:
+    if (not DIGEST.fullmatch(expected) or source.is_symlink() or not source.is_file()
+            or (executable and not os.access(source, os.X_OK)) or digest(source) != expected):
+        raise RecoveryError(f"The exact recovery input is unavailable: {destination.name}.")
+    shutil.copyfile(source, destination)
+    destination.chmod(0o700 if executable else 0o600)
+    if digest(destination) != expected:
+        raise RecoveryError(f"A pinned input changed while copying: {destination.name}.")
+
+
+def driver_metadata_evidence(
+    folder: Path, record: dict[str, Any], checkout: Path, commit: str, prefix: str, *, git_tree: str | None,
+) -> dict[str, Any]:
+    path = folder / "package-metadata.json"
+    metadata = document(path)
+    pin = json.loads(source_file(checkout, commit, prefix, "scripts/python-distribution.json"))
+    distribution = pin["distributions"][metadata["target"]]
+    if (metadata.get("component") != record["component"] or metadata.get("version") != record["packageVersion"]
+            or metadata.get("sourceCommit") != commit or metadata.get("uncommittedChanges") is not False
+            or (git_tree is not None and metadata.get("sourceTree") != git_tree)
+            or metadata.get("python") != pin["version"] or metadata.get("distribution") != pin["release"]
+            or metadata.get("archiveSha256") != distribution["sha256"]):
+        raise RecoveryError("The Driver package metadata differs from the selected Build or its committed Python pin.")
+    files = metadata["files"]
+    interpreter = "runtime/python/bin/python3.14"
+    check_hashes(folder, files)
+    if interpreter not in files or not os.access(folder / interpreter, os.X_OK):
+        raise RecoveryError("The Driver package does not verify its interpreter.")
+    return {"packageMetadataSha256": digest(path), "uvVersion": pin["uvVersion"],
+            "python": {"version": pin["version"], "target": metadata["target"], "provider": pin["provider"],
+                       "release": pin["release"], "archiveUrl": distribution["url"],
+                       "archiveSha256": distribution["sha256"], "executableSha256": files[interpreter]}}
+
+
 def capture_build(
     item: dict[str, Any], output: Path, index: int, inventory: dict[str, Any],
 ) -> dict[str, Any]:
@@ -333,6 +367,7 @@ def capture_build(
     evidence: dict[str, Any] = {}
     payload = folder
     sealed = folder / "driver-payload"
+    git_tree = None
     if os.path.lexists(sealed) or (layout >= 2 and component in SEALED_LAYOUT_2):
         git_tree = commit_id(git(checkout, "rev-parse", f"{commit}^{{tree}}").decode().strip())
         evidence["sealedPayload"] = sealed_payload_evidence(sealed, component, build, commit, git_tree)
@@ -388,6 +423,16 @@ def capture_build(
         save_sources(renderer_checkout, renderer_commit, output / "renderer-source.tar")
         save_sources(design_checkout, evidence["renderer"]["designCommit"], output / "design-source.tar")
         evidence["nativeToolchain"] = "Preserved signed executable; exact compiler version not emitted by this packager."
+    elif component in {"arbol-pi-driver", "arbol-mimo-driver"} and (payload / "package-metadata.json").is_file():
+        evidence.update(driver_metadata_evidence(payload, record, checkout, commit, prefix, git_tree=git_tree))
+        if component == "arbol-mimo-driver" and layout >= 2:
+            native_source = source_file(checkout, commit, prefix, "src/arbol_mimo_driver/native_version.py").decode()
+            native_pin = re.search(r'^NATIVE_SHA256 = "([0-9a-f]{64})"$', native_source, re.MULTILINE)
+            if native_pin is None or not isinstance(item.get("nativeCandidate"), str):
+                raise RecoveryError("The exact Mimo native qualification candidate is required.")
+            name = "mimo-native-candidate"
+            retain_pinned_input(Path(item["nativeCandidate"]), output / name, native_pin[1], executable=True)
+            evidence["nativeCandidate"] = {"path": name, "sha256": native_pin[1]}
     elif not component.endswith("-driver") or layout != 1:
         raise RecoveryError("The Build has no verifiable package manifest.")
 
