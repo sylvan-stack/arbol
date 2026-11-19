@@ -16,6 +16,7 @@ ENTRIES = [
     "src/pages/SeqoyaLab.svelte",
     "src/assets/SeqoyaLab.png",
     "src/sections/ElmaFrame.svelte",
+    "src/sections/ExchangeDetails.svelte",
     "src/sections/Response.svelte",
     "src/sections/ResponseReader.svelte",
     "src/sections/PinnedMessage.svelte",

@@ -2,7 +2,7 @@
  import { tick,type ComponentProps } from 'svelte';
  import Response from './Response.svelte';
  export interface ReadPosition {top:number;following:boolean}
- let {identity,response,snapshot=0,positions=new Map<string,ReadPosition>()}:{identity:string;response:ComponentProps<typeof Response>;snapshot?:number;positions?:Map<string,ReadPosition>}=$props();
+ let {identity,response,snapshot=0,positions=new Map<string,ReadPosition>(),oninspect}:{identity:string;response:ComponentProps<typeof Response>;snapshot?:number;positions?:Map<string,ReadPosition>;oninspect?:()=>void}=$props();
  let area=$state<HTMLDivElement>(),content=$state<HTMLDivElement>(),beacon=$state(false);
  let active='',generation=-1,wasComplete=false,following=true,desired:number|'threshold'|null=null,programmatic=false,frame=0;
  const bottom=()=>area?Math.max(0,area.scrollHeight-area.clientHeight):0;
@@ -14,6 +14,13 @@
  function scroll(){if(!area)return;if(!programmatic){desired=null;following=bottom()-area.scrollTop<=2;save();}const marker=area.querySelector<HTMLElement>('[data-answer-threshold]');beacon=!response.streaming&&!!marker&&marker.getBoundingClientRect().top>=area.getBoundingClientRect().bottom;}
  function jumpAnswer(){release();const top=answerTop();if(top!==null)move(top);measure();}
  export function scrollToEdge(edge:'top'|'bottom'){release();following=edge==='bottom'&&!!response.streaming;move(edge==='top'?0:bottom());measure();}
+ function inspect(event: MouseEvent | KeyboardEvent) {
+  if (!oninspect || !event.metaKey || event.defaultPrevented || ('key' in event && event.key !== 'Enter')) return;
+  if (event.target instanceof Element && event.target.closest('a,button,input,select,textarea,summary,[contenteditable]')) return;
+  event.preventDefault();
+  area?.focus({preventScroll:true});
+  oninspect();
+ }
  function keys(event:KeyboardEvent){if(!area||event.defaultPrevented||document.querySelector('dialog[open]')||!event.metaKey||!event.shiftKey||!event.altKey||!['Digit7','Digit8'].includes(event.code))return;event.preventDefault();release();const stops=[0,answerTop(),bottom()].filter((v):v is number=>v!==null).sort((a,b)=>a-b).filter((v,i,values)=>i===0||v-values[i-1]>1);const current=area.scrollTop;move(event.code==='Digit7'?(stops.find(v=>v>current+2)??bottom()):([...stops].reverse().find(v=>v<current-2)??0));measure();}
  $effect.pre(()=>{identity;snapshot;if(area&&active)save();});
  $effect(()=>{const key=identity,nextGeneration=snapshot,complete=!response.streaming;response.blocks;if(!area)return;
@@ -26,7 +33,11 @@
 </script>
 <svelte:window onkeydown={keys}/>
 <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions (Wheel, touch and scrolling keys control this focusable reading region, without an activation action.) -->
-<div class="response-scroll" role="region" tabindex="0" aria-label="Response reading area" bind:this={area} onscroll={scroll} onwheel={event=>{if(event.deltaY<0)release();else if(event.deltaY)desired=null;}} ontouchstart={release} onpointerdown={event=>{if(event.target===area)release();}} onkeydown={event=>{if(!event.metaKey&&['ArrowUp','ArrowDown','PageUp','PageDown','Home','End',' '].includes(event.key))release();}}>
+<div class="response-scroll" class:phase-tint={oninspect && (response.blocks?.length ?? 0) > 0} role="region" tabindex="0" aria-label="Response reading area" aria-keyshortcuts={oninspect ? 'Meta+Enter' : undefined} bind:this={area} onscroll={scroll} onwheel={event=>{if(event.deltaY<0)release();else if(event.deltaY)desired=null;}} ontouchstart={release} onpointerdown={event=>{if(event.target===area)release();}} onclick={inspect} onkeydown={event=>{inspect(event);if(!event.metaKey&&['ArrowUp','ArrowDown','PageUp','PageDown','Home','End',' '].includes(event.key))release();}}>
  <div bind:this={content}>{#key snapshot}<Response {...response} showBeacon={beacon} onbeacon={jumpAnswer}/>{/key}</div>
 </div>
-<style>.response-scroll{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;overflow-anchor:none;position:relative}.response-scroll:focus-visible{outline:2px solid var(--focus);outline-offset:-2px}</style>
+<style>
+ .response-scroll{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;overflow-anchor:none;position:relative}
+ .response-scroll:focus-visible{outline:2px solid var(--focus);outline-offset:-2px}
+ .phase-tint{background:color-mix(in srgb, #75b5d8 6%, var(--canvas))}
+</style>

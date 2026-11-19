@@ -9,11 +9,61 @@
  import Button from '../design-system/src/components/Button.svelte';
  import ConfirmAction from '../design-system/src/patterns/ConfirmAction.svelte';
  import ResponseReader from '../design-system/src/sections/ResponseReader.svelte';
+ import ExchangeDetails, { type PhaseName } from '../design-system/src/sections/ExchangeDetails.svelte';
+ import { Refusal, describe } from './bridge';
+ import { isSteadyExchange, PhaseDetailsReader } from './phase-details';
  import Composer from '../design-system/src/sections/Composer.svelte';
  import { ElmaWindow } from './window.svelte';
  let view=$state<ElmaWindow>();
  let reader=$state<{scrollToEdge:(edge:'top'|'bottom')=>void}>();
- onMount(()=>{const model=new ElmaWindow();view=model;return()=>model.close();});
+ type Inspection = { reader: PhaseDetailsReader; phase?: PhaseName; busy: boolean; problem: string };
+ let inspection = $state.raw<Inspection>();
+ let detailsTimer: ReturnType<typeof setTimeout> | undefined;
+
+ onMount(() => {
+  const model = new ElmaWindow();
+  view = model;
+  return () => { closePhaseDetails(); model.close(); };
+ });
+
+ function closePhaseDetails() {
+  clearTimeout(detailsTimer);
+  detailsTimer = undefined;
+  inspection = undefined;
+ }
+
+ function openPhaseDetails() {
+  const exchange = view?.exchange;
+  if (!view || !exchange || !isSteadyExchange(exchange) || inspection) return;
+  const source = new PhaseDetailsReader(view.bridge, exchange.exchange);
+  inspection = { reader: source, busy: false, problem: '' };
+  void readPhaseDetails(source);
+ }
+
+ async function readPhaseDetails(source: PhaseDetailsReader) {
+  const isCurrent = () => inspection?.reader === source && view?.exchange?.exchange === source.exchange;
+  if (!inspection || !isCurrent() || inspection.busy) return;
+  const terminal = view?.complete ?? false;
+  inspection = { ...inspection, busy: true, problem: '' };
+  let problem = '';
+  try {
+   await source.read(isCurrent);
+  } catch (error) {
+   problem = error instanceof Refusal ? describe(error.detail) : 'Phase details could not be read.';
+  }
+  if (!inspection || !isCurrent()) return;
+  const phases = source.phases;
+  const phase = inspection.phase ?? (phases.includes('execution') && view?.response.length
+   ? 'execution' : source.currentPhase ?? phases.at(-1));
+  inspection = { ...inspection, phase, busy: false, problem };
+  if (!terminal && !problem) {
+   detailsTimer = setTimeout(() => void readPhaseDetails(source), 750);
+  }
+ }
+
+ $effect(() => {
+  if (inspection && view?.exchange?.exchange !== inspection.reader.exchange) closePhaseDetails();
+ });
  function keys(event:KeyboardEvent){if(!view||event.defaultPrevented||document.querySelector('dialog[open]'))return;if(event.ctrlKey&&event.shiftKey&&event.metaKey&&!event.altKey&&event.key.toLowerCase()==='c'){event.preventDefault();view.openLatest();return;}if(view.rename&&!view.rename.busy)return;if(event.key==='Enter'&&event.shiftKey&&!event.metaKey&&!event.ctrlKey&&!event.altKey){event.preventDefault();view.openQuick();return;}if(event.key==='Backspace'&&event.metaKey&&!event.ctrlKey&&!event.altKey&&!event.shiftKey){event.preventDefault();view.startArchive();return;}if(event.altKey&&!event.ctrlKey&&!event.metaKey&&!event.shiftKey&&(event.key==='0'||event.code==='Digit0')){event.preventDefault();void view.toggleOngoing();return;}if(event.ctrlKey&&!event.metaKey&&!event.altKey&&!event.shiftKey){if(view.composerBusy){event.preventDefault();return;}if(/^[1-9]$/.test(event.key)){const row=view.routes[Number(event.key)-1];if(row){event.preventDefault();void view.routing.choose(row.driver,row.subscription);}}else if(event.key.toLowerCase()==='m'){event.preventDefault();view.routing.nextModel();}else if(event.key==='Tab'){event.preventDefault();view.routing.nextEffort();}return;}if(!event.metaKey||event.altKey)return;if(!event.ctrlKey&&!event.shiftKey&&event.key==='Escape'){event.preventDefault();view.stopCurrent();return;}if(!event.ctrlKey&&!event.shiftKey&&/^[0-9]$/.test(event.key)){event.preventDefault();if(event.key==='0')void view.pickOther(true);else{const repo=view.repositories[Number(event.key)-1];if(repo)view.newChat(repo.folder);}return;}if(event.key.toLowerCase()==='p'){event.preventDefault();if(view.info)view.historyOpen=!view.historyOpen;}else if(!view.historyOpen&&(event.key==='['||event.code==='BracketLeft')){event.preventDefault();void view.older();}else if(!view.historyOpen&&(event.key===']'||event.code==='BracketRight')){event.preventDefault();view.newer();}}
 
 </script>
@@ -32,11 +82,18 @@
   {#if view.actionNotice}<p class="connection" role="status">{view.actionNotice}</p>{/if}
   {#if view.actionProblem}<p class="problem" role="alert">{view.actionProblem}</p>{/if}
   <section class="chat" aria-label="Chat">
-   {#if view.exchange}<PinnedMessage text={view.prompt} index={view.turn} total={view.info?.exchangeCount??0} busy={view.pageBusy} onolder={()=>void view?.older()} onnewer={()=>view?.newer()} onhistory={()=>{if(view)view.historyOpen=true;}}/><ResponseReader bind:this={reader} identity={(view.info?.chat??'')+':'+view.exchange.exchange} snapshot={view.snapshotRevision} positions={view.readingPositions} response={{blocks:view.response,streaming:!view.complete,statusLabel:view.statusLabel,acceptedAt:view.exchange.acceptedAt,startedAt:view.startedAt,endedAt:view.endedAt,now:view.now,error:view.error,signIn:view.signIn,onretry:view.failureActions?()=>void view?.recoverFailure():undefined,oncontinue:view.failureActions?()=>void view?.recoverFailure(true):undefined,failureBusy:view.failureBusy,questions:view.questions,onanswer:(question,answer)=>void view?.answer(question,answer),notes:view.responseNotes,openTools:view.openTools,onToolOpen:(id,open)=>{if(view)view.openTools[id]=open;},onloadTool:tool=>view!.loadTool(tool),onopenLink:url=>view!.openLink(url)}}/>
+   {#if view.exchange}<PinnedMessage text={view.prompt} index={view.turn} total={view.info?.exchangeCount??0} busy={view.pageBusy} onolder={()=>void view?.older()} onnewer={()=>view?.newer()} onhistory={()=>{if(view)view.historyOpen=true;}}/><ResponseReader bind:this={reader} oninspect={isSteadyExchange(view.exchange) ? openPhaseDetails : undefined} identity={(view.info?.chat??'')+':'+view.exchange.exchange} snapshot={view.snapshotRevision} positions={view.readingPositions} response={{blocks:view.response,streaming:!view.complete,statusLabel:view.statusLabel,acceptedAt:view.exchange.acceptedAt,startedAt:view.startedAt,endedAt:view.endedAt,now:view.now,error:view.error,signIn:view.signIn,onretry:view.failureActions?()=>void view?.recoverFailure():undefined,oncontinue:view.failureActions?()=>void view?.recoverFailure(true):undefined,failureBusy:view.failureBusy,questions:view.questions,onanswer:(question,answer)=>void view?.answer(question,answer),notes:view.responseNotes,openTools:view.openTools,onToolOpen:(id,open)=>{if(view)view.openTools[id]=open;},onloadTool:tool=>view!.loadTool(tool),onopenLink:url=>view!.openLink(url)}}/>
    {:else if view.restoring}<p class="empty" role="status">Restoring selected turn…</p>{/if}
    {#if view.drafts.current}{@const draft=view.drafts.current}<Composer firstSapling empty={!view.info} repository={view.repository} route={view.route} context={view.info?.chat??view.folder} value={draft.text} bind:expanded={view.composerOpen} readOnly={!draft.ready||draft.recovery!==null} busy={view.composerBusy} onsend={()=>view?.requestSend()} status={view.composerStatus} problem={[draft.sendProblem,draft.pastes.problem,draft.problem,draft.storageProblem].filter(Boolean).join(" · ")} conflict={draft.conflict} recovery={draft.recovery} onRestore={()=>draft.restore()} onDiscardRecovery={()=>draft.discardRecovery()} oninput={(text,edit)=>draft.input(text,edit)} onpaste={(event,selection)=>{const text=event.clipboardData?.getData("text/plain")??"";if(draft.ready&&!view!.composerBusy&&draft.recovery===null&&draft.pastes.paste(text,selection))event.preventDefault();}} onblur={()=>void draft.flush()} onKeepMine={()=>draft.keepMine()} onTakeTheirs={()=>draft.takeTheirs()} onTop={()=>reader?.scrollToEdge('top')} onBottom={()=>reader?.scrollToEdge('bottom')}/>{/if}
   </section>
 
+ {#if inspection && view.exchange?.exchange === inspection.reader.exchange}
+  <ExchangeDetails data={inspection.phase ? inspection.reader.snapshot(inspection.phase, view.complete) : null}
+    phases={inspection.reader.phases} phase={inspection.phase} busy={inspection.busy} problem={inspection.problem}
+    onphase={phase => { if (inspection) inspection = { ...inspection, phase }; }}
+    onretry={() => { if (inspection) void readPhaseDetails(inspection.reader); }}
+    onclose={closePhaseDetails} />
+ {/if}
  {#if view.latestOpen}<Modal title="Latest chats" initialFocus="button[data-command-row]" onclose={()=>{if(view)view.latestOpen=false;}}>{#if !view.chats.ready}<p role="status">Loading latest chats…</p>{/if}{#if view.chats.problem}<p role="alert">{view.chats.problem}</p><button onclick={()=>view?.chats.retry()}>Retry latest chats</button>{/if}{#if view.latestProblem}<Notice tone="urgent" role="alert" message={view.latestProblem}/>{/if}{#if view.latestBusy}<p role="status">Saving Draft and opening chat…</p>{/if}{#if view.chats.ready||view.chats.rows.length}<CommandPalette title="Chats" emptyLabel="No other recent chats." searchable={false} rows={view.latestRows.map(row=>({...row,disabled:view!.latestBusy}))} onselect={chat=>void view?.chooseLatest(chat)}/>{/if}</Modal>{/if}
  {#if view.quickOpen}<Modal title="Quick actions" initialFocus="button[data-command-row]" onclose={()=>{if(view)view.quickOpen=false;}}><CommandPalette title="Chat actions" searchable={false} numbered={false} rows={[{id:'rename',label:'Rename chat session',shortcut:'R',disabled:view.metadataBusy},{id:'archive',label:'Archive',shortcut:'A',disabled:view.metadataBusy},{id:'copy',label:'Copy session ID',shortcut:'C'}]} onselect={id=>view?.quickAction(id)}/></Modal>{/if}
  {#if view.archive?.phase==='confirm'}<ConfirmAction title="Archive chat?" description="Save this Draft, stop a running answer first, and wait for its end to be saved before archiving. The chat and its messages are kept." action="Archive" oncancel={()=>view?.cancelArchive()} onconfirm={()=>void view?.confirmArchive()}/>{:else if view.archive}<p class="connection" role="status">{view.archive.phase==='stopping'?'Waiting for the response to be saved…':view.archive.phase==='marking'?'Archiving chat…':'Saving Draft before archiving…'}</p>{#if view.archive.phase!=='marking'}<button onclick={()=>view?.cancelArchive()}>Cancel archive</button>{/if}{/if}
