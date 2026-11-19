@@ -5,7 +5,10 @@ import re
 import resource
 import signal
 import sys
+from pathlib import Path
 from types import FrameType
+
+from arbol_installation.build_output import release_run
 
 from .config import JS_SPACE, component_name, locations
 from .launcher import json_line, standard_descriptors, write_all
@@ -25,7 +28,8 @@ USAGE = ("arbol-builds build <component> [--repo <folder>] "
          "| list [<component>] | show <component>[@<build>] "
          "| withdraw <component>@<build> --reason <text> "
          "| lock <component>@<build> | unlock <component>@<build> | prune <component> --keep <n> | prune --unused "
-         "[--registry-dir <folder>] [--bin-dir <folder>]; a Trunk is the component arbol-trunk/<code name>")
+         "[--registry-dir <folder>] [--bin-dir <folder>] | release-run <run-directory> --evidence <report>"
+         "; a Trunk is the component arbol-trunk/<code name>")
 COMMANDS = ("build", "list", "show", "withdraw", "prune", "lock", "unlock")
 SAFE_INTEGER = 2**53 - 1
 
@@ -81,6 +85,14 @@ def main(args: list[str]) -> int:
         if args[:1] == ["driver-state"]:
             from .driver_state import command as driver_state_command
             return driver_state_command(args[1:], locations().registry)
+        if args[:1] == ["release-run"]:
+            words, values = options(args[1:], ["--evidence"])
+            if len(words) != 1 or "--evidence" not in values:
+                raise ValueError("Usage: arbol-builds release-run <run-directory> --evidence <report>.")
+            run = Path(words[0]).expanduser().absolute()
+            queued = release_run(Path.home(), run, Path(values["--evidence"]))
+            output({"run": str(run), "queued": str(queued)})
+            return 0
         if args == ["--help"]:
             output({"usage": USAGE})
             return 0
