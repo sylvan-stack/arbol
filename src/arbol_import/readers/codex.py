@@ -24,19 +24,23 @@ from urllib.parse import unquote_to_bytes
 from .form import (
     ArchiveFile,
     ExportedRows,
+    Failed,
     HomeFile,
     Image,
     Item,
     Kind,
     Response,
     Result,
+    Session,
     SessionFailure,
+    Source,
     State,
     Steer,
     Subagent,
     TextBlock,
     ToolCall,
     Trigger,
+    Turn,
     Usage,
     live_by_mtime,
     unknown_record,
@@ -1432,3 +1436,97 @@ def _session_archive(home: Path, catalogue: Catalogue, inventory: Inventory, fam
     except OSError:
         raise SessionFailure("unreadable_session", f"{root.chosen.relative}: rollout times could not be read.") from None
     return tuple(archive), len(outside), live
+
+
+def _assemble_turns(root: Lane, descendants: list[tuple[Thread, Lane]], native_id: str) -> tuple[Turn, ...]:
+    agents = _agents(root, descendants, native_id)
+    turns = []
+    for index, native in enumerate(root.turns):
+        start = native.start
+        if start is None or native.turn_id is None:
+            continue
+        trigger = start.data["trigger"]
+        prompt, steers = _prompt(native.records, trigger)
+        state, error, error_kind = _terminal(native.end)
+        context = _turn_context(native)
+        items = list(root.items.get(index, ()))
+        subagents = []
+        for agent, calls in sorted(agents.get(index, ()), key=lambda entry: entry[0].first_record_at):
+            subagents.append(agent)
+            items.extend(calls)
+        turns.append(Turn(
+            turn_key=native.turn_id,
+            trigger=_trigger(trigger),
+            prompt=prompt,
+            started_at=start.at,
+            ended_at=native.end_at,
+            state=state,
+            error=error,
+            error_kind=error_kind,
+            working_folder=context.get("cwd"),
+            model=context.get("model"),
+            effort=context.get("effort"),
+            usage=_responses(native),
+            items=tuple(items),
+            subagents=tuple(subagents),
+            steers=steers,
+        ))
+    return tuple(turns)
+
+
+def _read_session(home: Path, source: Source, root: Thread, inventory: Inventory, catalogue: Catalogue,
+                  titles: dict[str, str], driver_ids: set[str]) -> Session | Failed:
+    starts: list[str | None] = []
+    try:
+        if not root.copies and root.chosen.failure is not None:
+            raise root.chosen.failure
+        root_turns = _read_lane(home, root.chosen, starts)
+        family = list(inventory.family(root))
+        descendants = []
+        for thread in family:
+            for broken in thread.broken:
+                if broken.failure is not None:
+                    raise broken.failure
+            if thread is not root:
+                native = _read_lane(home, thread.chosen, [])
+                descendants.append((thread, _project_lane(native, thread.native_id)))
+        created_at = root.chosen.created_at
+        if created_at is None:
+            raise SessionFailure("unknown_format", f"{root.chosen.relative}: the session header has no creation time.")
+        title, cwd = _session_metadata(root, catalogue, titles)
+        archive, outside, live = _session_archive(home, catalogue, inventory, family, source.clock)
+        return Session(
+            tool="codex",
+            native_id=root.native_id,
+            kind=_kind(root.native_id, root.chosen, driver_ids, starts),
+            title=title,
+            created_at=created_at,
+            tool_version=root.chosen.version,
+            origin=root.chosen.origin,
+            working_folder=cwd,
+            live=live,
+            turns=_assemble_turns(_project_lane(root_turns, None), descendants, root.native_id),
+            archive_files=archive,
+            files_not_archived=outside,
+        )
+    except SessionFailure as failure:
+        return Failed.of(failure, native_id=root.native_id, kind=_kind(root.native_id, root.chosen, driver_ids, starts))
+
+
+def read(source: Source) -> Iterator[Session | Failed]:
+    """Yield one supported Codex session or local failure per selected root."""
+    try:
+        home = source.home.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        return
+    driver_ids = _driver_ids(source.driver_state)
+    catalogue = _read_catalogue(home, source.work)
+    titles = _titles(home)
+    inventory = _inventory(home, catalogue)
+    for root in inventory.roots:
+        if source.wants(root.native_id):
+            yield _read_session(home, source, root, inventory, catalogue, titles, driver_ids)
+    if source.selected is None:
+        for broken in inventory.unidentified:
+            if broken.failure is not None:
+                yield Failed.of(broken.failure, file=broken.relative)
