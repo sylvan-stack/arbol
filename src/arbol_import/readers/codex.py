@@ -8,17 +8,19 @@ import re
 import shutil
 import sqlite3
 import stat
+from base64 import b64decode
 from collections import defaultdict
 from collections.abc import Generator, Iterator
 from contextlib import closing
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from struct import Struct, unpack
 from tempfile import TemporaryDirectory
 from typing import Any, BinaryIO
+from urllib.parse import unquote_to_bytes
 
-from .form import Kind, SessionFailure, State, Steer, TextBlock, Trigger, unknown_record
+from .form import Image, Item, Kind, Result, SessionFailure, State, Steer, TextBlock, ToolCall, Trigger, unknown_record
 from .lines import file_records, lines
 
 type Object = dict[str, Any]
@@ -686,7 +688,7 @@ def _response_fields(payload: Object, kind: str, descendant: bool) -> Object:
         call_id = _optional_string(payload.get("call_id"))
         if kind == "custom_tool_call_output" and not call_id:
             raise _Shape
-        return {"call_id": call_id, "output": output}
+        return {"call_id": call_id, "result": _tool_result(output) if call_id else None}
     if kind not in _RESPONSE_ONLY_IN_ARCHIVE:
         raise _Shape
     return {}
@@ -724,7 +726,8 @@ def _event_fields(payload: Object, kind: str) -> Object:
         _optional_string(item.get("call_id", item.get("callId")))
         if item_kind == "CommandExecution":
             _optional_int(item.get("exit_code", item.get("exitCode")))
-        return {"item": item, "start": _unix_time(payload.get("started_at_ms"), 1000),
+        return {"item": item, "call_id": _optional_string(payload.get("call_id", payload.get("callId"))),
+                "start": _unix_time(payload.get("started_at_ms"), 1000),
                 "end": _unix_time(payload.get("completed_at_ms"), 1000)}
     if kind not in _EVENT_ONLY_IN_ARCHIVE:
         raise _Shape
@@ -816,7 +819,7 @@ def _body(home: Path, rollout: Rollout) -> Generator[Record]:
                 if at is None:
                     raise _Shape
                 yield _conversation(rollout, line, row, kind, at, ordinal)
-            except _Shape:
+            except (_Shape, RecursionError):
                 # Report only the known envelope kind. An unknown payload may
                 # supply arbitrary strings that must stay out of the report.
                 label = kind if isinstance(kind, str) and kind in conversation else None
@@ -944,3 +947,161 @@ def _assistant_text(record: Record) -> TextBlock | None:
     if record.kind == "message" and record.data["role"] == "assistant" and record.data["text"] is not None:
         return TextBlock(record.data["text"], record.at)
     return None
+
+
+def _inline_image(value: str) -> Image | None:
+    if not value.lower().startswith("data:image/"):
+        return None
+    media, separator, data = value[5:].partition(",")
+    if not separator:
+        raise _Shape
+    media_type, *parameters = media.split(";")
+    try:
+        raw = unquote_to_bytes(data)
+        size = len(b64decode(raw, validate=True)) if any(option.lower() == "base64" for option in parameters) else len(raw)
+    except (ValueError, UnicodeError) as error:
+        raise _Shape from error
+    return Image(media_type, size)
+
+
+def _without_images(value: Any, images: list[Image]) -> Any:
+    if isinstance(value, str):
+        image = _inline_image(value)
+        if image is not None:
+            images.append(image)
+            return {"media_type": image.media_type, "size": image.size}
+        return value
+    if isinstance(value, list):
+        return [_without_images(item, images) for item in value]
+    if not isinstance(value, dict):
+        return value
+    if value.get("type") in ("input_image", "output_image", "image"):
+        url = value.get("image_url")
+        encoded = value.get("data")
+        media = value.get("mimeType", value.get("media_type"))
+        if isinstance(url, str):
+            image = _inline_image(url)
+        elif isinstance(encoded, str) and isinstance(media, str) and media.startswith("image/"):
+            try:
+                image = Image(media, len(b64decode(encoded, validate=True)))
+            except (ValueError, UnicodeError) as error:
+                raise _Shape from error
+        else:
+            image = None
+        if image is not None:
+            images.append(image)
+        return {"type": value["type"]}
+    if value.get("type") == "encrypted_content":
+        return {"type": "encrypted_content"}
+    return {key: _without_images(item, images) for key, item in value.items()}
+
+
+def _json_object_or_list(text: str) -> Object | list[Any] | None:
+    if not text.lstrip().startswith(("{", "[")):
+        return None
+    try:
+        value = json.loads(text)
+    except (ValueError, RecursionError):
+        return None
+    return value if isinstance(value, (dict, list)) else None
+
+
+def _result_text(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "\n".join(part["text"] for part in value
+                         if isinstance(part, dict) and isinstance(part.get("text"), str))
+    if isinstance(value, dict):
+        for name in ("output", "text", "message", "content"):
+            part = value.get(name)
+            if isinstance(part, (str, list)):
+                return _result_text(part)
+    return ""
+
+
+def _tool_result(raw: Any) -> Result:
+    images: list[Image] = []
+    value = raw
+    if isinstance(raw, str):
+        decoded = _json_object_or_list(raw)
+        if decoded is not None:
+            value = decoded
+    clean = _without_images(value, images)
+    text = _result_text(clean)
+    if isinstance(raw, str) and value is not raw and not text:
+        text = raw if clean == value else json.dumps(clean, ensure_ascii=True)
+    fields = clean if isinstance(clean, dict) else {"content": clean} if isinstance(clean, list) else None
+    return Result(text, fields, tuple(images))
+
+
+def _native_error(result: Result) -> tuple[bool, str | None]:
+    fields = result.fields or {}
+    error = fields.get("error")
+    failed = (
+        (error is not None and error is not False)
+        or fields.get("type") == "error"
+        or fields.get("success") is False
+        or fields.get("isError", fields.get("is_error")) is True
+    )
+    return failed, (_result_text(error) or result.text or None) if failed else None
+
+
+def _work_link(record: Record, item: Object) -> str | None:
+    value = item.get("call_id", item.get("callId")) or record.data.get("call_id")
+    return value if isinstance(value, str) and value else None
+
+
+@dataclass(frozen=True)
+class ProjectedCall:
+    item: ToolCall
+    output_at: datetime | None
+
+
+def _direct_calls(records: list[Record], agent: str | None) -> dict[int, ProjectedCall]:
+    calls: dict[str, Record] = {}
+    outputs: dict[tuple[str, str], Record] = {}
+    command_codes: dict[str, int] = {}
+    for record in records:
+        if record.kind in _CALL_KINDS:
+            calls.setdefault(record.data["call_id"], record)
+        elif record.kind in _OUTPUT_KINDS and record.data["call_id"]:
+            outputs.setdefault((record.kind, record.data["call_id"]), record)
+        elif record.kind == "exec_command_end":
+            if record.data["call_id"] and record.data["exit_code"] is not None:
+                command_codes[record.data["call_id"]] = record.data["exit_code"]
+        elif record.kind == "item_completed":
+            item = record.data.get("item")
+            if item is not None and item["type"] == "CommandExecution":
+                call_id = _work_link(record, item) or item["id"]
+                code = item.get("exit_code", item.get("exitCode"))
+                if code is not None:
+                    command_codes[call_id] = code
+
+    projected = {}
+    for call_id, record in calls.items():
+        output = outputs.get((record.kind + "_output", call_id))
+        exit_code = command_codes.get(call_id)
+        ok, error = False, None
+        result = None
+        if output is not None:
+            result = output.data["result"]
+            if result is not None:
+                failed, error = _native_error(result)
+                if exit_code is not None:
+                    result = replace(result, fields={**(result.fields or {}), "exit_code": exit_code})
+                ok = exit_code == 0 if exit_code is not None else not failed
+                error = None if ok else error or result.text or None
+        item = ToolCall(call_id, agent, record.data["name"], record.data["input"], result,
+                        ok, error, None, record.at)
+        projected[record.line] = ProjectedCall(item, output.at if output is not None else None)
+    return projected
+
+
+def _turn_items(turn: NativeTurn, projected: dict[int, ProjectedCall], *, text: bool) -> Iterator[Item]:
+    for record in turn.records:
+        call = projected.get(record.line)
+        if call is not None:
+            yield call.item
+        elif text and (block := _assistant_text(record)) is not None:
+            yield block
