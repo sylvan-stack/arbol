@@ -89,3 +89,43 @@ def _snapshot(source: Source, home: Path) -> Iterator[tuple[sqlite3.Connection, 
                 yield connection, mtime
                 return
     raise _unreadable("database set")
+
+
+def _session_ids(database: sqlite3.Connection, source: Source) -> Iterator[str]:
+    for row in database.execute("SELECT id FROM session WHERE parent_id IS NULL ORDER BY time_created, id"):
+        native_id = row["id"]
+        if not isinstance(native_id, str) or not native_id:
+            raise _unreadable("session")
+        if source.wants(native_id):
+            yield native_id
+
+
+def _session_row(database: sqlite3.Connection, native_id: str) -> sqlite3.Row:
+    row = database.execute(
+        "SELECT * FROM session WHERE id = ? AND parent_id IS NULL", (native_id,)
+    ).fetchone()
+    if not isinstance(row, sqlite3.Row):
+        raise _unreadable("session")
+    return row
+
+
+def _message_rows(database: sqlite3.Connection, native_id: str) -> Iterator[sqlite3.Row]:
+    yield from database.execute(
+        "SELECT * FROM message WHERE session_id = ? ORDER BY time_created, id", (native_id,)
+    )
+
+
+def _part_rows(database: sqlite3.Connection, native_id: str) -> Iterator[sqlite3.Row]:
+    yield from database.execute(
+        "SELECT * FROM part WHERE session_id = ? ORDER BY id", (native_id,)
+    )
+
+
+def _actor_names(database: sqlite3.Connection, native_id: str) -> Iterator[sqlite3.Row]:
+    registry = database.execute(
+        "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'actor_registry'"
+    ).fetchone()
+    if registry is not None:
+        yield from database.execute(
+            "SELECT actor_id, agent FROM actor_registry WHERE session_id = ? ORDER BY actor_id", (native_id,)
+        )
