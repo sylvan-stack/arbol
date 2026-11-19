@@ -30,6 +30,7 @@ from .form import (
     SessionFailure,
     State,
     Steer,
+    Subagent,
     TextBlock,
     ToolCall,
     Trigger,
@@ -79,6 +80,7 @@ class Rollout:
     created_at: datetime | None = None
     version: str | None = None
     role: str | None = None
+    agent_path: str | None = None
     history_start: int | None = None
     origin: Object = field(default_factory=dict)
     failure: SessionFailure | None = None
@@ -129,6 +131,8 @@ def _header(rollout: Rollout, row: object, line: int) -> None:
         spawn = {}
     role = meta.get("agent_role", meta.get("agent_type", spawn.get("agent_role", spawn.get("agent_type"))))
     rollout.role = role if isinstance(role, str) else None
+    agent_path = meta.get("agent_path", spawn.get("agent_path"))
+    rollout.agent_path = agent_path if isinstance(agent_path, str) else None
     parents = [meta.get("parent_thread_id"), spawn.get("parent_thread_id")]
     if meta.get("attached_thread") is True:
         parents.append(meta.get("forked_from_id"))
@@ -149,6 +153,7 @@ def _header(rollout: Rollout, row: object, line: int) -> None:
         or any(meta.get(name) is not None and not isinstance(meta[name], str)
                for name in ("originator", "thread_source", "cwd", "cli_version"))
         or (role is not None and rollout.role is None)
+        or (agent_path is not None and rollout.agent_path is None)
     ):
         unknown_record("session_meta", where, conversation=True)
 
@@ -1114,15 +1119,6 @@ def _direct_calls(records: list[Record], agent: str | None) -> dict[int, Project
     return projected
 
 
-def _turn_items(turn: NativeTurn, projected: dict[int, ProjectedCall], *, text: bool) -> Iterator[Item]:
-    for record in turn.records:
-        call = projected.get(record.line)
-        if call is not None:
-            yield call.item
-        elif text and (block := _assistant_text(record)) is not None:
-            yield block
-
-
 def _work_times(record: Record) -> tuple[datetime, datetime]:
     end: datetime = record.data["end"] or record.at
     start: datetime = record.data["start"] or end
@@ -1248,3 +1244,138 @@ def _responses(turn: NativeTurn) -> tuple[Response, ...]:
 
 def _turn_context(turn: NativeTurn) -> Object:
     return next((record.data for record in reversed(turn.records) if record.kind == "turn_context"), {})
+
+
+@dataclass
+class Lane:
+    turns: list[NativeTurn]
+    items: dict[int, list[Item]]
+    # The root turn hosting each already-projected call in this lane.
+    call_turns: dict[str, int] = field(default_factory=dict)
+
+
+def _project_lane(native_turns: list[NativeTurn], agent: str | None) -> Lane:
+    records = sorted((record for turn in native_turns for record in turn.records), key=lambda record: record.line)
+    direct = _direct_calls(records, agent)
+    work = _code_mode_work(records, direct)
+    call_owners = {direct[record.line].item.call_id: index
+                   for index, turn in enumerate(native_turns) for record in turn.records if record.line in direct}
+    items: dict[int, list[tuple[int, Item]]] = defaultdict(list)
+    for index, turn in enumerate(native_turns):
+        for record in turn.records:
+            if entry := direct.get(record.line):
+                items[index].append((record.line, entry.item))
+            elif entry := work.get(record.line):
+                parent_id = entry.item.parent_call_id
+                if parent_id is not None:
+                    items[call_owners[parent_id]].append((record.line, entry.item))
+            elif agent is None and (block := _assistant_text(record)) is not None:
+                items[index].append((record.line, block))
+    ordered = {index: [item for _, item in sorted(entries, key=lambda entry: entry[0])]
+               for index, entries in items.items()}
+    return Lane(native_turns, ordered)
+
+
+def _identifies_spawn(value: object, native_id: str, agent_path: str | None) -> bool:
+    if isinstance(value, str):
+        # Some result shapes wrap the spawn object in a structured text part.
+        decoded = _json_object_or_list(value)
+        return decoded is not None and _identifies_spawn(decoded, native_id, agent_path)
+    if isinstance(value, list):
+        return any(_identifies_spawn(entry, native_id, agent_path) for entry in value)
+    if not isinstance(value, dict):
+        return False
+    if any(value.get(key) == native_id for key in ("agent_id", "new_agent_id", "agent_thread_id", "child_thread_id", "thread_id")):
+        return True
+    if agent_path is not None and any(value.get(key) == agent_path for key in ("task_name", "agent_path")):
+        return True
+    # These native envelopes can contain either structured or textual output.
+    return any(_identifies_spawn(value.get(key), native_id, agent_path)
+               for key in ("content", "structuredContent", "structured_content", "output", "text"))
+
+
+def _launch(parent: Lane | None, thread: Thread) -> ToolCall | None:
+    if parent is None:
+        return None
+    candidates = []
+    for items in parent.items.values():
+        for item in items:
+            if not isinstance(item, ToolCall) or not item.ok or item.result is None:
+                continue
+            name = item.name.rsplit("::", 1)[-1]
+            if name not in ("spawn_agent", "spawn_agents", "fork_agent"):
+                continue
+            if (_identifies_spawn(item.result.fields, thread.native_id, thread.chosen.agent_path)
+                    or _identifies_spawn(item.result.text, thread.native_id, thread.chosen.agent_path)):
+                candidates.append(item)
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _root_turn_at(turns: list[NativeTurn], at: datetime) -> int | None:
+    indices = [
+        index for index, turn in enumerate(turns)
+        if turn.start is not None and turn.start.at <= at <= turn.end_at and at != turn.next_start
+    ]
+    return indices[0] if len(indices) == 1 else None
+
+
+def _assigned_turn(turn: NativeTurn, root: Lane, root_ids: dict[str, int], launch_turn: int | None) -> int | None:
+    native_roots = {record.root_turn_id for record in turn.records if record.root_turn_id}
+    if native_roots:
+        if len(native_roots) == 1:
+            return root_ids.get(next(iter(native_roots)))
+        # Conflicting causal IDs cannot justify attaching this work to a turn.
+        return None
+    if turn.turn_id in root_ids:
+        return root_ids[turn.turn_id]
+    if launch_turn is not None:
+        return launch_turn
+    return _root_turn_at(root.turns, turn.first_at)
+
+
+@dataclass
+class AgentWork:
+    turns: list[NativeTurn] = field(default_factory=list)
+    calls: list[ToolCall] = field(default_factory=list)
+    usage: Usage = field(default_factory=Usage)
+
+    def info(self, agent: str, call_id: str | None) -> Subagent:
+        first = min(self.turns, key=lambda turn: turn.records[0].line).first_at
+        native_turns = [turn for turn in self.turns if turn.start is not None]
+        last = max(native_turns or self.turns, key=lambda turn: turn.records[-1].line)
+        return Subagent(agent, call_id, first, _terminal(last.end)[0] == "failed", self.usage)
+
+
+def _agents(root: Lane, descendants: list[tuple[Thread, Lane]], root_id: str
+            ) -> dict[int, list[tuple[Subagent, list[ToolCall]]]]:
+    root_ids = {turn.turn_id: index for index, turn in enumerate(root.turns)
+                if turn.start is not None and turn.turn_id is not None}
+    for index in root_ids.values():
+        for item in root.items.get(index, ()):
+            if isinstance(item, ToolCall):
+                root.call_turns[item.call_id] = index
+    family = {root_id: root}
+    assigned: dict[int, list[tuple[Subagent, list[ToolCall]]]] = defaultdict(list)
+    for thread, lane in descendants:
+        parent = family.get(thread.parent) if thread.parent else None
+        launch = _launch(parent, thread)
+        launch_turn = parent.call_turns.get(launch.call_id) if parent is not None and launch is not None else None
+        per_turn: dict[int, AgentWork] = defaultdict(AgentWork)
+        for index, native_turn in enumerate(lane.turns):
+            target = _assigned_turn(native_turn, root, root_ids, launch_turn)
+            if target is None:
+                continue
+            work = per_turn[target]
+            work.turns.append(native_turn)
+            for response in _responses(native_turn):
+                work.usage += response.usage
+            launch_id = launch.call_id if launch is not None and launch_turn == target else None
+            for item in lane.items.get(index, ()):
+                if isinstance(item, ToolCall):
+                    lane.call_turns[item.call_id] = target
+                    work.calls.append(replace(item, parent_call_id=item.parent_call_id or launch_id))
+        family[thread.native_id] = lane
+        for target, work in per_turn.items():
+            launch_id = launch.call_id if launch is not None and launch_turn == target else None
+            assigned[target].append((work.info(thread.native_id, launch_id), work.calls))
+    return assigned
