@@ -178,3 +178,36 @@ def _record(where: str, row: dict[str, Any]) -> _Record:
                 record.invalid(kind)
             return _Record(loop_kind, at, where, event)
     return record
+
+
+def _record_ids(row: dict[str, Any]) -> Iterator[str]:
+    if value := _string(row.get("uuid")):
+        yield value
+    if row.get("type") == "context.append_loop_event":
+        if value := _string(_object(row.get("event")).get("uuid")):
+            yield value
+
+
+def _records(home: Path, path: Path, copied: set[str]) -> Iterator[_Record]:
+    for where, row in _rows(home, path):
+        if copied.isdisjoint(_record_ids(row)):
+            yield _record(where, row)
+
+
+def _fork_ids(home: Path, session: _SavedSession, state: _State,
+              inventory: dict[str, _SavedSession]) -> set[str]:
+    if state.forked_from is None:
+        return set()
+    failure = SessionFailure("unreadable_session", f"{session.state.relative_to(home)}: fork source is unavailable.")
+    source = inventory.get(state.forked_from.lower())
+    if source is None or source == session:
+        raise failure
+    ids: set[str] = set()
+    try:
+        for path in _wires(home, source).values():
+            for where, row in _rows(home, path):
+                _record(where, row)
+                ids.update(_record_ids(row))
+    except SessionFailure:
+        raise failure from None
+    return ids
