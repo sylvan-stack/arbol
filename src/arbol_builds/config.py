@@ -4,7 +4,10 @@ import json
 import os
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+
+from arbol_installation.paths import installation_root
 
 from .launcher import (
     COMPONENT_PATTERN,
@@ -32,8 +35,8 @@ class Locations:
 
 
 def locations() -> Locations:
-    home = os.path.expanduser("~")
-    return Locations(os.path.join(home, "Library/Application Support/Arbol/builds"), os.path.join(home, ".local/bin"))
+    home = Path.home()
+    return Locations(str(installation_root(home) / "builds"), str(home / ".local/bin"))
 
 
 def component_name(name: str) -> str:

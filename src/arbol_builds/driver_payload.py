@@ -16,6 +16,8 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from arbol_installation.paths import installation_root
+
 from .driver_admission import (
     COMPONENTS,
     LIMIT,
@@ -465,7 +467,7 @@ def _candidate_acceptance(registry: Path, component: str) -> tuple[str, Object]:
     if (uname.sysname != "Darwin" or value["platform"] != {
             "system": "Darwin", "release": uname.release, "machine": uname.machine}):
         refuse()
-    installed = Path(pwd.getpwuid(os.getuid()).pw_dir) / "Library/Application Support/Arbol/builds"
+    installed = installation_root(Path(pwd.getpwuid(os.getuid()).pw_dir)) / "builds"
     if registry == installed.resolve():
         refuse()
     return digest, value
@@ -600,7 +602,7 @@ def verify_acceptance(authority: Authority, payload: Payload, *, digest: str | N
     if (uname.sysname != "Darwin" or value["platform"] != {
             "system": "Darwin", "release": uname.release, "machine": uname.machine}):
         refuse()
-    installed = Path(pwd.getpwuid(os.getuid()).pw_dir) / "Library/Application Support/Arbol/builds"
+    installed = installation_root(Path(pwd.getpwuid(os.getuid()).pw_dir)) / "builds"
     if value["status"] == "candidate" and authority.registry == installed.resolve():
         refuse()
     gate = verify_gate(authority.registry)

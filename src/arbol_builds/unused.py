@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from arbol_installation.admission import Admission, AdmissionRefusal, runtime_folder
+from arbol_installation.paths import installation_root
 
 from .config import Locations
 from .driver_payload import retention_status
@@ -36,7 +37,7 @@ from .service import build_details, components_in, prune_protections, remove_bui
 
 
 def read_days(home: Path | None = None) -> float | None:
-    path = (home or Path.home()) / '.arbol/arbol-builds.json'
+    path = installation_root(home) / 'arbol-builds.json'
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
     except FileNotFoundError:

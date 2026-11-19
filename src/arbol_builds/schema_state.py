@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import unquote, urlsplit
 
+from arbol_installation.paths import database_settings
+
 from .launcher import positive
 
 SCHEMA_STATUS_SECONDS = 10
@@ -29,10 +31,9 @@ class SchemaState(NamedTuple):
 
 def read_schema() -> SchemaState:
     """Use the release staged beside the launcher or registry tool, with the one configured database name."""
-    home = Path.home()
     tool = Path(sys.argv[0]).resolve().parent / ".arbol-builds" / "schema" / "migrate_schema.py"
     try:
-        settings = json.loads((home / ".arbol" / "database.json").read_text(encoding="utf-8"))
+        settings = json.loads(database_settings().read_text(encoding="utf-8"))
         if not isinstance(settings, dict) or set(settings) != {"address", "database"}:
             return SchemaState("unavailable")
         name, address = settings["database"], settings["address"]

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from arbol_installation.admission import Admission, AdmissionRefusal, runtime_folder
+from arbol_installation.paths import installation_root, prepare_installation
 
 from .config import Locations, default_repository, description, load_json
 from .launcher import (
@@ -111,6 +112,8 @@ def save_record(folder: str, record: Record) -> None:
 
 def reserve(registry: str, component: str) -> tuple[str, str]:
     """The folder and the number of a new Build: one more than the highest numbered folder."""
+    if Path(registry).resolve() == (installation_root() / "builds").resolve():
+        prepare_installation()
     root = os.path.join(registry, component)
     make_dirs(root, 0o700)
     number = max((int(name, 16) for name in numbered_folders(root)), default=0) + 1
@@ -124,14 +127,12 @@ def reserve(registry: str, component: str) -> tuple[str, str]:
             number += 1
 
 
-def module_text(name: str) -> str:
-    """A module of this package as a launcher holds it: without its imports from the package, since the text of the
-    modules before it in the launcher defines the names they import."""
-    with open(os.path.join(PACKAGE, name), encoding="utf-8") as stream:
-        source = stream.read()
+def module_text(name: str, folder: Path = Path(PACKAGE)) -> str:
+    """Inline a module, omitting imports supplied by the preceding launcher source."""
+    source = (folder / name).read_text(encoding="utf-8")
     lines = source.split("\n")
     for node in reversed(ast.parse(source).body):
-        if isinstance(node, ast.ImportFrom) and node.level > 0:
+        if isinstance(node, ast.ImportFrom) and (node.level > 0 or node.module == "arbol_installation.paths"):
             del lines[node.lineno - 1:node.end_lineno]
     return "\n".join(lines)
 
@@ -154,7 +155,8 @@ def launcher_source(registry: str, component: str, python: str) -> bytes:
     else:
         body = module_text("launcher.py")
         call = f"sys.exit(launch({os.path.abspath(registry)!r}, {component!r}, sys.argv[1:]))"
-    return f"{first}\n{LAUNCHER_MARK}\n{SIGINT_LINE}\n{body}\n{call}\n".encode("utf-8", "surrogateescape")
+    paths = module_text("paths.py", Path(PACKAGE).parent / "arbol_installation")
+    return f"{first}\n{LAUNCHER_MARK}\n{SIGINT_LINE}\n{paths}\n{body}\n{call}\n".encode("utf-8", "surrogateescape")
 
 
 def early_driver_signals(source: bytes) -> bytes:
