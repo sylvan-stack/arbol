@@ -147,7 +147,8 @@ class Cluster:
     role = "bkd"
     port = 5432
 
-    def __init__(self, *, baseline: Path | None = None) -> None:
+    def __init__(self, *, baseline: Path | None = None, empty: bool = False) -> None:
+        """With `empty`, start the cluster only: no database, as an isolated restore requires."""
         if not (PG / "initdb").is_file():
             raise RuntimeError("The private PostgreSQL checks require installed PostgreSQL 17 tools.")
         self.temp = tempfile.TemporaryDirectory(prefix="ab-pg-", dir="/tmp")
@@ -192,6 +193,8 @@ class Cluster:
                 time.sleep(0.05)
             else:
                 raise RuntimeError("Private PostgreSQL startup deadline.")
+            if empty:
+                return
             subprocess.run(
                 [str(PG / "createdb"), "-h", str(self.socket), "-p", "5432", "-U", "bkd", "arbol_test"],
                 capture_output=True,
