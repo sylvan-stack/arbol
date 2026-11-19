@@ -476,6 +476,20 @@ def upgrade(
         raise Refusal("invalid_input", "An exclusive maintenance session ID is required.")
     if not CHECKSUM.fullmatch(request.prior_release) or not CHECKSUM.fullmatch(request.upgrade_release):
         raise Refusal("invalid_input", "Name both releases by their lowercase SHA-256 digests.")
+    archive = import_module(".archive_volume", __package__) if __package__ else import_module("archive_volume")
+    try:
+        storage = archive.require_archive()
+    except archive.ArchiveUnavailable as error:
+        raise Refusal(error.code, str(error)) from None
+
+    def check_archive() -> None:
+        try:
+            storage.backup_path(request.snapshot_dir)
+            storage.backup_path(request.restore_receipt)
+        except archive.ArchiveUnavailable as error:
+            raise Refusal(error.code, str(error)) from None
+
+    check_archive()
     release_checksum = sha256(f"{request.upgrade_release}:{manifest.checksum}".encode("ascii")).hexdigest()
     with target.connect() as connection, ExitStack() as held:
         source = target.identity(connection)
@@ -511,6 +525,8 @@ def upgrade(
                 release_sha256=request.prior_release,
                 maintenance_session=session,
             )
+        except archive.ArchiveUnavailable as error:
+            raise Refusal(error.code, str(error)) from None
         except Exception:
             raise Refusal("recovery_refused", "The archive or isolated restore receipt does not verify.") from None
         if (
@@ -520,6 +536,7 @@ def upgrade(
         ):
             raise Refusal("recovery_refused", "The isolated restore receipt changed or could not be verified.")
 
+        check_archive()
         if pin is None:
             with connection.transaction():
                 connection.execute(
@@ -533,6 +550,7 @@ def upgrade(
                 )
 
         def verify_pin() -> None:
+            check_archive()
             if _read_pin(connection, session) != expected:
                 raise Refusal("invalid", "The original upgrade checkpoint could not be verified.")
 
