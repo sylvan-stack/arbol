@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -263,11 +264,24 @@ class Cluster:
 BASELINE = {"revision": 1, "compatibilityVersion": 1}
 
 
+def reach(package: Path, compatibility: tuple[tuple[int, int], ...]) -> dict[str, int]:
+    """The lowest revision of the package's migrations that its `schemaCompatibility` admits."""
+    with (package / "database/migrations.toml").open("rb") as stream:
+        migrations = tomllib.load(stream)["migrations"]
+    for entry in migrations:
+        revision, version = entry["revision"], entry["compatibility_version"]
+        if any(version == supported and revision >= minimum for supported, minimum in compatibility):
+            return {"revision": revision, "compatibilityVersion": version}
+    raise RuntimeError("No migration of this package reaches a revision its schemaCompatibility admits.")
+
+
 class SingleInstallation:
     """Canonical database and one private home/runtime/bin for the backend and its children."""
 
     def __init__(self, package: Path = ROOT) -> None:
         self.package = package.resolve()
+        # The pair the backend reports once admission is open; open_admission sets it from the package.
+        self.schema = dict(BASELINE)
         self.cluster = Cluster(baseline=self.package)
         try:
             base = self.cluster.base
@@ -298,6 +312,7 @@ class SingleInstallation:
 
         cluster = self.cluster
         configured = identity(self.package, parse(["backend", *self.options()]), home=self.home)
+        self.schema = reach(self.package, configured.compatibility)
         context = Context(configured)
         oid = int(cluster.sql(b"SELECT oid FROM pg_database WHERE datname = current_database()"))
         source: dict[str, str | int] = {"host": str(cluster.socket), "port": cluster.port,
