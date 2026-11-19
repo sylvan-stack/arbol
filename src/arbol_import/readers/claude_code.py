@@ -202,6 +202,15 @@ class SessionRecords:
     failure: SessionFailure | None = None
 
 
+def _ordered_rows(home: Path, ordered: OrderedFile) -> Iterator[tuple[int, Any]]:
+    for number, raw in _read_records(home, ordered.file.path):
+        if ordered.lookahead_failure is not None and number >= ordered.failure_line:
+            raise ordered.lookahead_failure
+        yield number, raw
+    if ordered.lookahead_failure is not None:
+        raise ordered.lookahead_failure
+
+
 def _ordered_sessions(home: Path, source: Source) -> Iterator[Failed | tuple[str, SessionRecords]]:
     files = []
     for file in _discover(home):
@@ -231,9 +240,7 @@ def _ordered_sessions(home: Path, source: Source) -> Iterator[Failed | tuple[str
         seen_here: set[str] = set()
         if session.failure is None:
             try:
-                for number, raw in _read_records(home, file.path):
-                    if ordered.lookahead_failure is not None and number >= ordered.failure_line:
-                        raise ordered.lookahead_failure
+                for number, raw in _ordered_rows(home, ordered):
                     uuid = raw.get("uuid") if isinstance(raw, dict) else None
                     duplicate = isinstance(uuid, str) and (uuid in project_uuids or uuid in session_uuids)
                     row = _validated(home, file, (rank, number), raw, duplicate)
@@ -243,8 +250,6 @@ def _ordered_sessions(home: Path, source: Source) -> Iterator[Failed | tuple[str
                         seen_here.add(uuid)
                     if source.wants(native_id):
                         session.rows.append(row)
-                if ordered.lookahead_failure is not None:
-                    raise ordered.lookahead_failure
             except SessionFailure as error:
                 session.failure = error
             except (OSError, RecursionError):
@@ -689,3 +694,178 @@ def _responses(rows: Iterable[Record]) -> dict[tuple[int, int], Response]:
             ),
         )
     return responses
+
+
+def _children(home: Path, directory: Path) -> list[Path]:
+    try:
+        return sorted(directory.iterdir()) if _inside(home, directory) is not None else []
+    except FileNotFoundError:
+        return []
+    except (OSError, RuntimeError, ValueError):
+        raise _unreadable(home, directory) from None
+
+
+def _present(home: Path, path: Path) -> bool:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        raise _unreadable(home, path) from None
+    return True
+
+
+def _json_file(home: Path, path: Path) -> Any:
+    try:
+        return json.loads(_regular(home, path).read_bytes())
+    except (OSError, ValueError, RecursionError):
+        raise _unreadable(home, path) from None
+
+
+def _agent_link(home: Path, path: Path) -> str | None:
+    meta = path.with_suffix(".meta.json")
+    if not _present(home, meta):
+        return None
+    value = _json_file(home, meta)
+    if not isinstance(value, dict) or (
+        value.get("toolUseId") is not None and not _string(value["toolUseId"])
+    ):
+        unknown_record(None, meta.relative_to(home).as_posix(), conversation=True)
+    return _string(value.get("toolUseId"))
+
+
+def _agent_files(home: Path, file: SessionFile) -> Iterator[tuple[Path, str | None]]:
+    root = file.directory / "subagents"
+    for path in _children(home, root):
+        if path.name.startswith("agent-") and path.suffix == ".jsonl":
+            yield path, None
+    for workflow in _children(home, root / "workflows"):
+        if workflow.name.startswith("wf_"):
+            for path in _children(home, workflow):
+                if path.name.startswith("agent-") and path.suffix == ".jsonl":
+                    yield path, workflow.name
+
+
+@dataclass
+class AgentLog:
+    native_id: str
+    workflow_id: str | None
+    launch_id: str | None
+    rows: list[Record] = field(default_factory=list)
+
+    @property
+    def first_at(self) -> datetime | None:
+        return next((row.at for row in self.rows if row.at is not None and not row.duplicate), None)
+
+
+def _agent_logs(home: Path, files: Sequence[OrderedFile]) -> dict[str, AgentLog]:
+    inputs = [
+        (_order_file(home, SessionFile(path)), top.file, workflow)
+        for top in files for path, workflow in _agent_files(home, top.file)
+    ]
+    inputs.sort(key=lambda entry: (entry[0].at, entry[0].file.path))
+    logs: dict[str, AgentLog] = {}
+    seen: dict[str, set[str]] = {}
+    for rank, (ordered, owner, workflow) in enumerate(inputs):
+        path = ordered.file.path
+        native_id = path.stem.removeprefix("agent-")
+        launch = _agent_link(home, path)
+        log = logs.setdefault(native_id, AgentLog(native_id, workflow, launch))
+        if log.launch_id is None:
+            log.launch_id = launch
+        if log.workflow_id is None:
+            log.workflow_id = workflow
+        earlier = seen.setdefault(native_id, set())
+        current: set[str] = set()
+        try:
+            for number, raw in _ordered_rows(home, ordered):
+                uuid = _string(raw.get("uuid")) if isinstance(raw, dict) else None
+                row = _validated(home, owner, (rank, number), raw, uuid in earlier, stream_path=path)
+                if row is not None:
+                    log.rows.append(row)
+                    if uuid is not None:
+                        current.add(uuid)
+        except (OSError, RecursionError):
+            raise _unreadable(home, path) from None
+        earlier.update(current)
+    return logs
+
+
+@dataclass(frozen=True)
+class Launch:
+    call_id: str
+    turn: int | None
+    agent: str | None
+
+
+_WORKFLOW_RUN = re.compile(r"^Run ID: (wf_[\w-]+)\s*$", re.MULTILINE)
+
+
+def _launches(
+    turns: Sequence[Turn], agent_items: dict[str, tuple[Item, ...]],
+) -> tuple[dict[str, Launch], dict[str, Launch]]:
+    calls: dict[str, Launch] = {}
+    named: dict[str, Launch] = {}
+
+    def add(items: Iterable[Item], turn: int | None, agent: str | None) -> None:
+        for item in items:
+            if not isinstance(item, ToolCall) or item.name not in ("Agent", "Task", "Workflow"):
+                continue
+            launch = Launch(item.call_id, turn, agent)
+            calls.setdefault(launch.call_id, launch)
+            if item.result is None:
+                continue
+            fields = item.result.fields or {}
+            if item.name == "Workflow":
+                run = _WORKFLOW_RUN.search(item.result.text)
+                identifier = _string(fields.get("runId")) or _string(fields.get("workflowRunId"))
+                if run is not None:
+                    identifier = run[1]
+            else:
+                identifier = _string(fields.get("agentId"))
+            if identifier is not None:
+                named.setdefault(identifier, launch)
+
+    for index, turn in enumerate(turns):
+        add(turn.items, index, None)
+    for agent_id, items in agent_items.items():
+        add(items, None, agent_id)
+    return calls, named
+
+
+def _locate_turn(turns: Sequence[Turn], at: datetime | None) -> int | None:
+    if at is None:
+        return None
+    return next((
+        index for index in range(len(turns) - 1, -1, -1)
+        if turns[index].started_at <= at <= turns[index].ended_at
+    ), None)
+
+
+def _placements(
+    turns: Sequence[Turn], logs: dict[str, AgentLog], agent_items: dict[str, tuple[Item, ...]],
+) -> Iterator[tuple[int, AgentLog, str | None]]:
+    calls, named = _launches(turns, agent_items)
+    parents = {
+        agent_id: calls.get(log.launch_id or "") or named.get(agent_id) or named.get(log.workflow_id or "")
+        for agent_id, log in logs.items()
+    }
+    for agent_id, log in logs.items():
+        root = agent_id
+        link = parents[root]
+        seen = {root}
+        launch = link
+        while launch is not None and launch.agent is not None and launch.agent not in seen:
+            root = launch.agent
+            seen.add(root)
+            launch = parents[root]
+        if launch is None:
+            turn_index = _locate_turn(turns, logs[root].first_at)
+        elif launch.agent is None:
+            turn_index = launch.turn
+        else:
+            # A circular native link has no usable launch ancestry.
+            link = None
+            turn_index = _locate_turn(turns, log.first_at)
+        if turn_index is not None and log.first_at is not None:
+            yield turn_index, log, link.call_id if link is not None else None
