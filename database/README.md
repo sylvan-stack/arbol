@@ -44,19 +44,28 @@ The probe's checks:
 ## Database recovery before reopening
 
 For every schema change, including an additive one, first stage the upgrade
-release and identify the exact previous release and database. Stop admission,
+release and identify the exact previous release and database. Verify the
+Mercury archive before changing admission.
+
+```bash
+uv run --no-sync python database/archive_volume.py
+```
+
+Continue on `ready`. An `archive_unavailable` result means the required volume
+or its Arbol root could not be verified. After preflight, stop admission,
 drain and settle accepted Exchanges, pause listeners and pruning, and acquire
 the exclusive maintenance handoff after all writers have stopped. Keep
 admission closed through capture, isolated restore, migration, verification
 and any recovery. The operator lock may end when a command exits; durable
 exclusive admission must survive that exit.
 
-Create an owner-only directory outside Git and the live data directory. Keep
-the release, snapshot, and restore records there. Use an explicit inventory of
+Create a new recovery directory under `/Volumes/Mercury/Arbol/backups/`. Put
+both release records, the snapshot and the restore receipt in that directory.
+Use an explicit inventory of
 the Builds actually selected by the release: Arbol, the applicable Root
 manager, App, Trunks and Drivers. Reconfirm the inventory and effective
 configuration against the installation or staged release before recording it.
-For example, save a private JSON inventory alongside the recovery directories:
+Save the input JSON inventory in an owner-only operator directory outside Git.
 
 ```json
 {
@@ -90,19 +99,17 @@ exports, Driver tokens or runtime logs in the inventory.
 
 ```bash
 uv run --no-sync python database/recovery_release.py \
-  --inventory "$recovery/inventory.json" --output "$recovery/prior-release"
+  --inventory "$inventory" --output "$recovery/prior-release"
 ```
 
 Repeat for the staged release in a separate directory. Save the returned
 `releaseSha256` values. The recorder verifies source and package evidence and
-preserves the selected packages, source archives, locked inputs, build
-configuration and private recovery files. Unresolved required inputs refuse
-publication. The legacy Arbol package retains the exact external Root Contract
-SQL under `package/tests/backend/layout.sql` and checks it against
-`contractLayoutSha256`; a current checkout of that SQL is not proof of what was
-packaged. Where the old App package did not record its native compiler version,
-use the preserved signed App for exact recovery. A rebuild needs independent
-evidence of any unrecorded build tool versions.
+preserves the source archives, locked inputs, Build configuration and referenced
+recovery files. Unresolved required inputs refuse publication. Legacy release
+records retain the exact packaged Root Contract SQL as `root-contract.sql`
+after checking it against `contractLayoutSha256`. Use the recorded signed App
+bundle and its Build record for exact App recovery. Reproduce other unavailable
+Builds from their recorded source and locked inputs.
 
 For a current installation, with the authoritative maintenance session still
 held by the runtime, capture one named database:
@@ -143,7 +150,7 @@ uv run --no-sync python database/recovery.py \
 ```
 
 Keep `snapshot.json`, `database.dump`, the exact release directory, and
-`restore-attempt/restore.json` together in private storage. The snapshot
+`restore-attempt/restore.json` together on Mercury. The snapshot
 records the release directory's path; retain that path while using the proof.
 The restore provisions missing role names without passwords, preserves
 database ownership and grants, and verifies the recovered ledger, table
@@ -170,7 +177,8 @@ If a migration fails before reopening, keep all writers fenced. Retry from
 the verified committed ledger prefix using the same original receipt,
 session, releases, and target revision; or restore the previous release:
 
-1. Verify the original archive, release inputs and isolated restore evidence
+1. Run `python database/archive_volume.py` and require `ready` before invoking
+   a live restore, including direct `pg_restore`. Verify the original archive, release inputs and isolated restore evidence
    again. If the isolated restore must be repeated, use fresh isolated state.
    Record which verified archive and installation target are being recovered.
 2. With the durable fence held, stop the remaining clients of the affected
@@ -184,9 +192,9 @@ session, releases, and target revision; or restore the previous release:
    and replacement assigns a new database OID. Keep the fence closed and
    explicitly verify the recovered identity before rebinding admission. If
    the replacement fails, the target is incomplete; keep it closed.
-3. Restore the saved configuration and select the exact preserved Builds or
-   rebuild the matching release from the recorded Git commits, Build commands,
-   locks, toolchain and external inputs. For legacy recovery, restore the
+3. Restore the saved configuration and signed App. Select the remaining
+   preserved Builds or rebuild them from the recorded Git commits, Build
+   commands, locks, toolchain and external inputs. For legacy recovery, restore the
    matching settings and Builds for each affected source and keep new writers
    fenced.
 4. Verify the recovered schema, representative data, configured target,
@@ -197,7 +205,8 @@ session, releases, and target revision; or restore the previous release:
 
 ## Recovery after reopening
 
-Repair forward by default. To use an older archive, enter maintenance again,
+Repair forward by default. To use an older archive, verify Mercury with
+`archive_volume.py` before entering maintenance again,
 drain and settle accepted work, and establish exclusive admission. Preserve
 the current database and affected persistent files first. Verify that every
 write accepted since the older snapshot is captured and can be reapplied
