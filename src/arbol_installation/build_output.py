@@ -8,6 +8,7 @@ import logging
 import os
 import plistlib
 import re
+import shutil
 import subprocess
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager, suppress
@@ -66,39 +67,79 @@ def contains_path(directory: Path, paths: set[Path]) -> bool:
     return any(Path(normalize("NFC", str(path)).casefold()).is_relative_to(prefix) for path in paths)
 
 
-def release_run(home: Path, run: Path, evidence: Path) -> Path:
-    """Hand off one run after its runner has stopped using the directory."""
-    root = home.resolve() / "Builds"
-    run = run.expanduser().absolute()
+@contextmanager
+def open_run(root: Path, run: Path) -> Iterator[tuple[int, int, int]]:
     parts = run.relative_to(root).parts
     if (len(parts) not in (2, 3) or (parts[0].casefold() == "sylvan-stack" and len(parts) != 3)
             or any(part.startswith(".") for part in parts)):
         raise ValueError("Expected one run under ~/Builds/<repository> or ~/Builds/<org>/<repository>.")
-    report = evidence.expanduser().resolve(strict=True)
-    if not report.is_file() or contains_path(root, {report}):
-        raise ValueError("Save the run's evidence in a regular file outside ~/Builds before release.")
     with ExitStack() as stack:
         root_fd = stack.enter_context(directory(root))
         parent_fd = root_fd
         for part in parts[:-1]:
             parent_fd = stack.enter_context(directory(part, parent_fd))
         run_fd = stack.enter_context(directory(parts[-1], parent_fd))
-        run_info = os.fstat(run_fd)
-        device = os.fstat(root_fd).st_dev
-        if run_info.st_dev != device:
+        if os.fstat(run_fd).st_dev != os.fstat(root_fd).st_dev:
             raise ValueError("The run must be on the same filesystem as ~/Builds.")
+        yield root_fd, parent_fd, run_fd
+
+
+def empty_run(home: Path, run: Path) -> os.stat_result:
+    """Verify that a runner starts with sole ownership of a fresh output folder."""
+    with open_run(home.resolve() / "Builds", run) as (_, _, run_fd):
+        if os.listdir(run_fd):
+            raise ValueError("Automatic release requires a new, empty run directory.")
+        return os.fstat(run_fd)
+
+
+def evidence_destination(home: Path, target: Path) -> Path:
+    target = target.expanduser().absolute()
+    target = target.parent.resolve(strict=True) / target.name
+    if contains_path(home.resolve() / "Builds", {target}) or os.path.lexists(target):
+        raise ValueError("Choose a new evidence directory outside ~/Builds, with an existing parent.")
+    return target
+
+
+def save_evidence(home: Path, target: Path, *sources: Path) -> None:
+    """Copy the runner's evidence into a new private directory before release."""
+    target = evidence_destination(home, target)
+    target.mkdir(mode=0o700)
+    for source in sources:
+        destination = target / source.name
+        if source.is_symlink():
+            raise ValueError(f"Evidence must be a physical file or directory: {source}")
+        if source.is_dir():
+            shutil.copytree(source, destination, symlinks=True)
+        elif source.is_file():
+            shutil.copy2(source, destination)
+        else:
+            raise ValueError(f"Evidence is missing or unreadable: {source}")
+
+
+def release_run(home: Path, run: Path, evidence: Path, *, expected: os.stat_result | None = None) -> Path:
+    """Hand off one run after its runner has stopped using the directory."""
+    root = home.resolve() / "Builds"
+    run = run.expanduser().absolute()
+    report = evidence.expanduser().resolve(strict=True)
+    if not report.is_file() or contains_path(root, {report}):
+        raise ValueError("Save the run's evidence in a regular file outside ~/Builds before release.")
+    with open_run(root, run) as (root_fd, parent_fd, run_fd):
+        run_info = os.fstat(run_fd)
+        if expected is not None and not os.path.samestat(run_info, expected):
+            raise ValueError("The runner's original output directory has been replaced.")
+        device = os.fstat(root_fd).st_dev
         if contains_path(run, attached_paths()):
             raise ValueError("The run has an attached disk image. Release it after the image is detached.")
         with suppress(FileExistsError):
             os.mkdir(QUEUE, mode=0o700, dir_fd=root_fd)
-        queue_fd = stack.enter_context(directory(QUEUE, root_fd, private=True))
-        if os.fstat(queue_fd).st_dev != device:
-            raise ValueError("The build output queue must be on the same filesystem as ~/Builds.")
-        current = os.stat(parts[-1], dir_fd=parent_fd, follow_symlinks=False)
-        if (current.st_dev, current.st_ino) != (run_info.st_dev, run_info.st_ino):
-            raise ValueError("The run directory changed while preparing its release.")
-        name = uuid4().hex
-        os.rename(parts[-1], name, src_dir_fd=parent_fd, dst_dir_fd=queue_fd)
+        with directory(QUEUE, root_fd, private=True) as queue_fd:
+            if os.fstat(queue_fd).st_dev != device:
+                raise ValueError("The build output queue must be on the same filesystem as ~/Builds.")
+            current = os.stat(run.name, dir_fd=parent_fd, follow_symlinks=False)
+            if not os.path.samestat(current, run_info):
+                raise ValueError("The run directory changed while preparing its release.")
+            name = uuid4().hex
+            os.rename(run.name, name, src_dir_fd=parent_fd, dst_dir_fd=queue_fd)
     return root / QUEUE / name
 
 

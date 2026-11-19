@@ -8,9 +8,9 @@ import sys
 from pathlib import Path
 from types import FrameType
 
-from arbol_installation.build_output import release_run
+from arbol_installation.build_output import contains_path, empty_run, evidence_destination, release_run, save_evidence
 
-from .config import JS_SPACE, component_name, locations
+from .config import JS_SPACE, component_name, default_repository, locations
 from .launcher import json_line, standard_descriptors, write_all
 from .service import (
     Stop,
@@ -24,7 +24,7 @@ from .service import (
 )
 from .unused import prune_unused
 
-USAGE = ("arbol-builds build <component> [--repo <folder>] "
+USAGE = ("arbol-builds build <component> [--repo <folder>] [--release-to <new-evidence-directory>] "
          "| list [<component>] | show <component>[@<build>] "
          "| withdraw <component>@<build> --reason <text> "
          "| lock <component>@<build> | unlock <component>@<build> | prune <component> --keep <n> | prune --unused "
@@ -89,15 +89,17 @@ def main(args: list[str]) -> int:
             words, values = options(args[1:], ["--evidence"])
             if len(words) != 1 or "--evidence" not in values:
                 raise ValueError("Usage: arbol-builds release-run <run-directory> --evidence <report>.")
-            run = Path(words[0]).expanduser().absolute()
-            queued = release_run(Path.home(), run, Path(values["--evidence"]))
-            output({"run": str(run), "queued": str(queued)})
+            requested_run = Path(words[0]).expanduser().absolute()
+            queued = release_run(Path.home(), requested_run, Path(values["--evidence"]))
+            output({"run": str(requested_run), "queued": str(queued)})
             return 0
         if args == ["--help"]:
             output({"usage": USAGE})
             return 0
-        words, values = options(args, ["--registry-dir", "--bin-dir", "--repo", "--reason", "--keep", "--unused"],
-                                 {"--unused"})
+        words, values = options(
+            args, ["--registry-dir", "--bin-dir", "--repo", "--reason", "--keep", "--unused", "--release-to"],
+            {"--unused"},
+        )
         command = words[0] if words else None
         target = words[1] if len(words) > 1 else None
         unused = command == "prune" and "--unused" in values
@@ -106,7 +108,7 @@ def main(args: list[str]) -> int:
         if "--unused" in values and (command != "prune" or len(words) > 1 or "--keep" in values):
             raise ValueError("--unused applies only to prune without a component or --keep.")
         for key in values:
-            if ((key == "--repo" and command != "build")
+            if ((key in ("--repo", "--release-to") and command != "build")
                     or (key == "--reason" and command != "withdraw")
                     or (key == "--keep" and command != "prune")):
                 raise ValueError(f"Option {key} does not apply to {command}.")
@@ -144,7 +146,21 @@ def main(args: list[str]) -> int:
                 raise ValueError("--keep must be a positive whole number.")
             output(prune_builds(paths.registry, component, int(keep), bin_dir=paths.bin))
         else:
-            stop = Stop()
+            home = Path.home()
+            archive = None
+            run = None
+            run_info = None
+            if "--release-to" in values:
+                registry = Path(paths.registry)
+                run = registry.parent
+                if (not {"--registry-dir", "--bin-dir"} <= values.keys() or registry.name != "registry"
+                        or Path(paths.bin) != run / "bin"):
+                    raise ValueError("--release-to requires isolated registry and bin siblings in one new run.")
+                if contains_path(run, {Path(paths.repo or default_repository(component)).resolve()}):
+                    raise ValueError("The Build's source must be outside a run that will be released.")
+                run_info = empty_run(home, run)
+                archive = evidence_destination(home, Path(values["--release-to"]))
+            stop = Stop(check_group_exit=archive is not None)
 
             def request(number: int, frame: FrameType | None) -> None:
                 stop.request()
@@ -155,6 +171,19 @@ def main(args: list[str]) -> int:
             finally:
                 for name, handler in previous.items():
                     signal.signal(name, handler)
+            if archive is not None and run is not None:
+                cleanup: dict[str, str] = {"run": str(run)}
+                try:
+                    if stop.requested or not stop.groups_ended:
+                        raise ValueError("The Build did not confirm that all command groups ended normally.")
+                    folder = Path(paths.registry) / component / record["build"]
+                    save_evidence(home, archive, folder / "build.json", folder / "build.log")
+                    cleanup["evidence"] = str(archive)
+                    cleanup["queued"] = str(release_run(home, run, archive / "build.json", expected=run_info))
+                except (OSError, ValueError) as error:
+                    cleanup["error"] = str(error)
+                output({**record, "runRelease": cleanup})
+                return 0 if record["status"] == "working" and "queued" in cleanup else 1
             output(record)
             return 0 if record["status"] == "working" else 1
         return 0
