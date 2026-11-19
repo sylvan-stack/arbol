@@ -18,8 +18,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import NoReturn
+from urllib.parse import unquote, urlsplit
 
 from .form import (
+    ArchiveFile,
+    ExportedRows,
+    HomeFile,
     Image,
     Item,
     Kind,
@@ -657,3 +661,120 @@ def _subagent(actor: _Actor) -> Subagent:
     return Subagent(
         actor.lane, actor.launch.call_id if actor.launch else None, actor.messages[0].created, state == "failed", usage,
     )
+
+
+def _diff_paths(diffs: object) -> Iterator[str]:
+    if isinstance(diffs, list):
+        for diff in diffs:
+            if isinstance(diff, dict) and isinstance(name := diff.get("file"), str):
+                yield name
+
+
+def _file_urls(file: _Object) -> Iterator[str]:
+    if isinstance(url := file.get("url"), str) and url[:5].lower() == "file:":
+        yield url
+    source = file.get("source")
+    if isinstance(source, dict):
+        if source.get("type") in ("file", "symbol") and isinstance(name := source.get("path"), str):
+            yield name
+        if isinstance(uri := source.get("uri"), str) and uri[:5].lower() == "file:":
+            yield uri
+
+
+def _part_files(part: _Part) -> Iterator[str]:
+    if part.kind == "file":
+        if part.data.get("mime") != "application/x-directory":
+            yield from _file_urls(part.data)
+    elif part.kind == "patch":
+        files = part.data.get("files")
+        if isinstance(files, list):
+            yield from (path for path in files if isinstance(path, str))
+    elif part.kind == "tool":
+        state = _object(part.data.get("state"), "part")
+        metadata = _optional_object(state.get("metadata"), "part")
+        if isinstance(path := metadata.get("outputPath"), str):
+            yield path
+        if part.tool is not None and part.tool.result is not None:
+            for attachment in _attachments(state.get("attachments")):
+                if attachment.get("mime") != "application/x-directory":
+                    yield from _file_urls(attachment)
+
+
+def _outside_reference(home: Path, directory: Path, name: str) -> str | None:
+    if not name or "\x00" in name:
+        return None
+    if name[:5].lower() == "file:":
+        try:
+            url = urlsplit(name)
+        except ValueError:
+            return None
+        if url.netloc.lower() not in ("", "localhost"):
+            return url._replace(query="", fragment="").geturl()
+        name = unquote(url.path)
+        if not name or "\x00" in name:
+            return None
+    path = directory / name
+    if not path.is_absolute():
+        return None
+    try:
+        reference = path.resolve()
+    except (OSError, RuntimeError, ValueError):
+        reference = Path(os.path.abspath(path))
+    return str(reference) if not reference.is_relative_to(home) else None
+
+
+def _outside_files(
+    home: Path, directory: Path, session: sqlite3.Row, messages: list[_Message],
+) -> set[str]:
+    outside: set[str] = set()
+    for message in messages:
+        summary = message.data.get("summary")
+        if isinstance(summary, dict):
+            outside.update(
+                path for name in _diff_paths(summary.get("diffs"))
+                if (path := _outside_reference(home, directory, name)) is not None
+            )
+        for part in message.parts:
+            outside.update(
+                path for name in _part_files(part) if (path := _outside_reference(home, directory, name)) is not None
+            )
+    if "summary_diffs" in session.keys() and isinstance(raw_diffs := session["summary_diffs"], str):
+        try:
+            diffs = json.loads(raw_diffs)
+        except (ValueError, RecursionError):
+            return outside
+        outside.update(
+            path for name in _diff_paths(diffs) if (path := _outside_reference(home, directory, name)) is not None
+        )
+    return outside
+
+
+def _archive(
+    home: Path, native_id: str, mtime: datetime, directory: str, session: sqlite3.Row,
+    messages: list[_Message], message_rows: list[sqlite3.Row], part_rows: list[sqlite3.Row],
+) -> tuple[tuple[ArchiveFile, ...], int]:
+    if native_id in (".", "..") or any(char in native_id for char in ("/", "\\", "\x00")):
+        _unknown("session")
+
+    data = {
+        "session": dict(session),
+        "message": [dict(row) for row in message_rows],
+        "part": [dict(row) for row in part_rows],
+    }
+    content = json.dumps(data, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("ascii")
+    exported = ExportedRows(f"{_DATABASE}#{native_id}.json", content, mtime)
+
+    outside = _outside_files(home, Path(directory), session, messages)
+    relative = Path("storage", "session_diff", f"{native_id}.json")
+    candidate = home / relative
+    try:
+        info = candidate.lstat()
+    except FileNotFoundError:
+        return (exported,), len(outside)
+    resolved = candidate.resolve()
+    if not resolved.is_relative_to(home):
+        outside.add(str(resolved))
+    # The listed diff must not alias an in-home credential or another session's file.
+    if resolved == candidate and stat.S_ISREG(info.st_mode):
+        return (exported, HomeFile(relative.as_posix())), len(outside)
+    return (exported,), len(outside)
