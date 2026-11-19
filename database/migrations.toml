@@ -26,3 +26,11 @@ id = "session-imports"
 file = "003-session-imports.sql"
 sha256 = "35fbfcf66b6e0b9e927aea9be4786827ad168781ad4066aaf41d4cbd19a5e7a3"
 compatibility_version = 1
+
+[[migrations]]
+revision = 4
+predecessor = 3
+id = "exchange-phase-details"
+file = "004-exchange-phase-details.sql"
+sha256 = "94bf7eb33700279641b5cfefff7170cfc2caaa89d12a6a81aacc66a0f9580889"
+compatibility_version = 1
