@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -17,7 +18,7 @@ from tempfile import TemporaryDirectory
 from typing import Any, BinaryIO
 
 from .form import SessionFailure, unknown_record
-from .lines import file_records
+from .lines import file_records, lines
 
 type Object = dict[str, Any]
 
@@ -345,3 +346,25 @@ def _read_catalogue(home: Path, work: Path | None) -> Catalogue:
         except (OSError, RuntimeError, ValueError, sqlite3.Error):
             continue
     return Catalogue()
+
+
+def _titles(home: Path) -> dict[str, str]:
+    titles: dict[str, str] = {}
+    path = _inside(home, home / "session_index.jsonl")
+    if path is None:
+        return titles
+    try:
+        if not stat.S_ISREG(path.stat().st_mode):
+            return titles
+        with path.open("rb") as stream:
+            for _, raw in lines(stream):
+                try:
+                    row = json.loads(raw)
+                except (ValueError, RecursionError):
+                    continue
+                if isinstance(row, dict) and (native_id := _id(row.get("id"))) is not None:
+                    if isinstance(row.get("thread_name"), str):
+                        titles[native_id] = row["thread_name"]
+    except OSError:
+        pass
+    return titles
