@@ -15,6 +15,11 @@ from .metadata import Attention, Layout, inspect, iso
 TOOL_BYTES = 8192
 
 
+async def refuse_imported(database: Database | Session, chat: str) -> None:
+    if await database.execute("SELECT 1 FROM public.chat_imports WHERE chat_id=%s", [chat]):
+        raise Error("imported_chat")
+
+
 def route(value: Any) -> Params:
     if not isinstance(value, dict):
         return {}

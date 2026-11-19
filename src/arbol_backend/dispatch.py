@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .bridge import SOURCES, Error, Params, Registry, uuid_id
+from .chat_data import refuse_imported
 from .chats import Chats
 from .database import protected_thread
 from .drafts import MAX_REVISION, Drafts, content, folder
@@ -71,8 +72,9 @@ class Dispatch:
         registry.method("exchange.sendAgain", self.send, self.again_params)
 
     async def send_params(self, params: Params) -> Params:
-        result: Params = {"chat": uuid_id(params.get("chat")), "exchange": uuid_id(params.get("exchange")),
-                          "message": content(params.get("message"), message=True),
+        chat, exchange = uuid_id(params.get("chat")), uuid_id(params.get("exchange"))
+        await refuse_imported(self.chats.database, chat)
+        result: Params = {"chat": chat, "exchange": exchange, "message": content(params.get("message"), message=True),
                           "workingFolder": folder(params.get("workingFolder"))}
         if not Path(result["workingFolder"]).is_dir():
             raise Error("invalid_input")
@@ -93,16 +95,18 @@ class Dispatch:
         previous, exchange = uuid_id(params.get("exchange")), uuid_id(params.get("newExchange"))
         if previous == exchange:
             raise Error("invalid_input")
-        trunk = selected_trunk(params)
-        route = await self.chats.catalogues.route(params.get("route"))
         async with self.chats.reader.session() as (session, _):
             rows = await session.execute("SELECT chat_id,working_folder FROM exchanges WHERE id=%s", [previous])
-        if not rows:
-            raise Error("not_found")
+            if not rows:
+                raise Error("not_found")
+            chat = uuid_id(str(rows[0][0]))
+            await refuse_imported(session, chat)
+        trunk = selected_trunk(params)
+        route = await self.chats.catalogues.route(params.get("route"))
         path = folder(rows[0][1])
         if not Path(path).is_dir():
             raise Error("invalid_input")
-        return {"chat": uuid_id(str(rows[0][0])), "exchange": exchange, "replaces": previous,
+        return {"chat": chat, "exchange": exchange, "replaces": previous,
                 "route": route, "workingFolder": path, **trunk}
 
     def active(self, exchange: str) -> bool:
@@ -182,6 +186,8 @@ class Dispatch:
                     or not isinstance(error.get("message"), str)):
                 raise Error("no_answer")
             code = error["code"]
+            if code == "imported_chat":
+                raise Error(code)
             source = error.get("source", "runtime" if code in RUNTIME_CODES else "trunk")
             if code == "schema_invalid":
                 code = "schema_incompatible"
@@ -218,6 +224,7 @@ class Dispatch:
     async def dispatch(self, params: Params, entry: Entry) -> Params | Error:
         exchange = params["exchange"]
         try:
+            await refuse_imported(self.chats.database, params["chat"])
             prior = await self.drafts.receipt(exchange, params["chat"])
             if prior is not None:
                 result = self.result(prior, params)
