@@ -147,9 +147,38 @@ def source_file(checkout: Path, commit: str, prefix: str, name: str) -> bytes:
     return git(checkout, "show", f"{commit}:{prefix}{relative(name).as_posix()}")
 
 
+def repository_root(checkout: Path) -> Path:
+    root = Path(os.fsdecode(git(checkout, "rev-parse", "--show-toplevel").rstrip(b"\n")))
+    return root.resolve(strict=True)
+
+
 def save_sources(checkout: Path, commit: str, destination: Path) -> None:
     # git archive writes directly to the private staging directory.
-    git(checkout, "archive", "--format=tar", f"--output={destination}", commit)
+    git(repository_root(checkout), "archive", "--format=tar", f"--output={destination}", commit)
+
+
+def retain_source(checkout: Path, commit: str, output: Path) -> dict[str, str]:
+    repository = repository_root(checkout)
+    source_tree = commit_id(git(repository, "rev-parse", f"{commit}^{{tree}}").decode().strip())
+    archive = output / "source.tar"
+    retained = output / "source.git"
+    git(repository, "archive", "--format=tar", f"--output={archive}", commit)
+    git(output, "init", "--bare", "--initial-branch=recovery", "--template=", str(retained))
+    # A transport fetch writes independent objects and preserves the original
+    # commit. The shallow boundary excludes earlier revisions from the record.
+    git(retained, "-c", "protocol.file.allow=always", "fetch", "--no-tags", "--no-write-fetch-head",
+        "--depth=1", "--no-recurse-submodules", repository.as_uri(), f"{commit}:refs/heads/recovery")
+    git(retained, "fsck", "--full", "--no-reflogs")
+    retained_commit, retained_tree = git(retained, "rev-parse", "HEAD", "HEAD^{tree}").decode().splitlines()
+    if (retained_commit != commit or retained_tree != source_tree
+            or os.path.lexists(retained / "objects/info/alternates")):
+        raise RecoveryError("The retained Git repository differs from the selected source.")
+    with tempfile.NamedTemporaryFile(prefix=".source-", dir=output) as comparison:
+        git(retained, "archive", "--format=tar", f"--output={comparison.name}", commit)
+        archive_digest = digest(archive)
+        if digest(Path(comparison.name)) != archive_digest:
+            raise RecoveryError("The retained Git sources differ from the selected source archive.")
+    return {"tree": source_tree, "repository": retained.name, "archive": archive.name, "archiveSha256": archive_digest}
 
 
 def check_hashes(folder: Path, hashes: object) -> None:
@@ -339,7 +368,7 @@ def capture_build(
     else:
         before = tree(folder, exclude=frozenset(MUTABLE_BUILD_FILES))
         evidence["installedFilesSha256"] = sha(canonical(before))
-    save_sources(checkout, commit, output / "source.tar")
+    evidence["gitSource"] = retain_source(checkout, commit, output)
     return {"component": component, "build": build, "root": record.get("root"), "entry": str(entry),
             "packageVersion": version, "installationLayout": layout, "sourceCommit": commit,
             "componentPath": prefix.rstrip("/"),
