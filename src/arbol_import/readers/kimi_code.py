@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import re
+from base64 import b64decode
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Never
+from urllib.parse import unquote, unquote_to_bytes
 
-from .form import Item, Result, SessionFailure, State, Steer, TextBlock, ToolCall, Trigger, Turn, unknown_record
+from .form import Image, Item, Result, SessionFailure, State, Steer, TextBlock, ToolCall, Trigger, Turn, unknown_record
 from .lines import file_records
 
 _SESSION = re.compile(r"session_([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})")
@@ -516,4 +519,85 @@ def _result(home: Path, session: _SavedSession, record: _Record) -> tuple[Result
     ok = result.get("isError") is not True
     error = None if ok else _error(result.get("error")) or text or _string(result.get("note"))
     fields = {key: value for key, value in result.items() if key not in {"output", "isError"}}
-    return Result(text, fields or None), ok, error
+    images = tuple(image for part in parts if (image := _image(home, session, part)) is not None)
+    return Result(text, fields or None, images), ok, error
+
+
+_FILE_ID = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*")
+_BLOB_HASH = re.compile(r"[0-9a-fA-F]{64}")
+
+
+def _file_name(url: str) -> str:
+    return unquote(url.removeprefix("kimi-file://").partition("?")[0])
+
+
+def _upload(home: Path, name: str) -> tuple[Path | None, str | None]:
+    if not _FILE_ID.fullmatch(name):
+        return None, None
+    directory = home / "files"
+    metadata = directory / "meta" / f"{name}.json"
+    if _eligible(home, metadata):
+        try:
+            with metadata.open("rb") as stream:
+                value = _object(json.load(stream))
+        except (OSError, ValueError, RecursionError):
+            value = {}
+        key = _string(value.get("key")) or ""
+        if (value.get("version") == 1 and _FILE_ID.fullmatch(key)
+                and (key == name or key.startswith(f"{name}."))):
+            saved = directory / key
+            if _eligible(home, saved):
+                return saved, _string(value.get("mediaType"))
+    try:
+        path = next((path for path in _children(home, directory)
+                     if (path.name == name or path.name.startswith(f"{name}."))
+                     and ".tmp." not in path.name and _eligible(home, path)), None)
+    except SessionFailure:
+        return None, None
+    return path, None
+
+
+def _size(value: object) -> int | None:
+    return value if type(value) is int and value >= 0 else None
+
+
+def _image(home: Path, session: _SavedSession, part: dict[str, Any]) -> Image | None:
+    if part["type"] != "image_url":
+        return None
+    native = _object(part.get("imageUrl"))
+    metadata = _object(part.get("meta"))
+    url = _string(native.get("url")) or ""
+    media = _string(native.get("mimeType", native.get("mediaType"))) or _string(metadata.get("mimeType"))
+    size = _size(native.get("size", native.get("byteLength")))
+    if size is None:
+        size = _size(metadata.get("size", metadata.get("byteLength")))
+    path = None
+    if url.startswith("data:"):
+        header, separator, payload = url.removeprefix("data:").partition(",")
+        media = media or header.partition(";")[0]
+        if separator and size is None:
+            try:
+                raw = unquote_to_bytes(payload)
+                size = len(b64decode(raw, validate=True)) if header.endswith(";base64") else len(raw)
+            except (ValueError, UnicodeError):
+                return None
+    elif url.startswith("blobref:"):
+        blob_media, separator, hash_value = url.removeprefix("blobref:").partition(";")
+        media = media or blob_media
+        if separator and _BLOB_HASH.fullmatch(hash_value):
+            path = session.folder / "blobs" / hash_value
+    elif url.startswith("kimi-file://"):
+        path, mime = _upload(home, _file_name(url))
+        media = media or mime
+    elif not url.startswith("ms://"):
+        return None
+
+    if path is not None and _eligible(home, path):
+        media = media or mimetypes.guess_file_type(path)[0]
+        try:
+            size = path.stat().st_size if size is None else size
+        except OSError:
+            pass
+    if media is not None and media.startswith("image/") and size is not None:
+        return Image(media, size)
+    return None
