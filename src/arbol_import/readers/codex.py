@@ -18,7 +18,7 @@ from struct import Struct, unpack
 from tempfile import TemporaryDirectory
 from typing import Any, BinaryIO
 
-from .form import Kind, SessionFailure, unknown_record
+from .form import Kind, SessionFailure, State, Steer, Trigger, unknown_record
 from .lines import file_records, lines
 
 type Object = dict[str, Any]
@@ -783,7 +783,7 @@ def _conversation(rollout: Rollout, line: int, row: Object, kind: str,
     return Record(kind, at, line, ordinal, turn, root, data)
 
 
-def _body(home: Path, rollout: Rollout) -> Iterator[Record]:
+def _body(home: Path, rollout: Rollout) -> Generator[Record]:
     conversation = {"response_item", "event_msg", "turn_context", "token_usage_record"}
     with closing(_records(home, rollout.relative)) as records:
         first = next(records, None)
@@ -838,3 +838,103 @@ def _kind(native_id: str, rollout: Rollout, driver_ids: set[str], starts: list[s
     if starts and all(trigger == _SCHEDULED for trigger in starts):
         return "scheduled"
     return "owner"
+
+
+@dataclass
+class NativeTurn:
+    turn_id: str | None
+    records: list[Record] = field(default_factory=list)
+    start: Record | None = None
+    end: Record | None = None
+    next_start: datetime | None = None
+
+    @property
+    def first_at(self) -> datetime:
+        return self.records[0].at
+
+    @property
+    def end_at(self) -> datetime:
+        if self.end is not None:
+            return self.end.at
+        if self.next_start is not None:
+            return self.next_start
+        return self.records[-1].at
+
+
+def _read_lane(home: Path, rollout: Rollout, starts: list[str | None]) -> list[NativeTurn]:
+    turns: dict[str | None, NativeTurn] = {}
+    active: NativeTurn | None = None
+    with closing(_body(home, rollout)) as records:
+        for record in records:
+            if record.kind == "task_started":
+                starts.append(record.data["trigger"])
+                turn = turns.setdefault(record.turn_id, NativeTurn(record.turn_id))
+                if active is not None and active is not turn:
+                    active.next_start = record.at
+                if turn.start is None:
+                    turn.start = record
+                active = turn if turn.end is None and turn.next_start is None else None
+            elif record.turn_id:
+                turn = turns.setdefault(record.turn_id, NativeTurn(record.turn_id))
+            elif active is not None:
+                turn = active
+            elif record.kind in _ENDINGS:
+                # A legacy abort can close the active turn, if there is one.
+                continue
+            else:
+                turn = turns.setdefault(None, NativeTurn(None))
+            turn.records.append(record)
+            if record.kind in _ENDINGS and turn.start is not None and turn.end is None and turn.next_start is None:
+                turn.end = record
+                if active is turn:
+                    active = None
+    return sorted(turns.values(), key=lambda turn: turn.start.line if turn.start else turn.records[0].line)
+
+
+def _terminal(end: Record | None) -> tuple[State, str | None, str | None]:
+    if end is None:
+        return "interrupted", None, None
+    native_error = end.data["error"]
+    reason = end.data["reason"]
+    if end.kind == "task_complete" and native_error is None:
+        return "completed", None, None
+    if end.kind == "turn_aborted" and reason == "interrupted":
+        return "cancelled", None, None
+    error_text = native_error if isinstance(native_error, str) else None
+    error_kind: str | None = None
+    if isinstance(native_error, dict):
+        error_text = native_error.get("message", native_error.get("text"))
+        info = native_error.get("codex_error_info", native_error.get("kind", native_error.get("type")))
+        if isinstance(info, str):
+            error_kind = info
+        elif isinstance(info, dict) and len(info) == 1:
+            error_kind = next(iter(info))
+    if end.kind == "turn_aborted":
+        error_kind = reason
+    elif end.kind != "task_complete":
+        error_kind = error_kind or reason or end.kind
+    return "failed", error_text, error_kind or end.kind
+
+
+def _trigger(name: str | None) -> Trigger:
+    if name in ("composer", "edit_user_message"):
+        return "typed"
+    if name == _SCHEDULED:
+        return "scheduled"
+    return "system"
+
+
+def _prompt(records: list[Record], trigger: str | None) -> tuple[str, tuple[Steer, ...]]:
+    typed: list[Steer] = []
+    first_harness: str | None = None
+    for record in records:
+        if record.kind != "message" or record.data["role"] != "user":
+            continue
+        text = record.data["text"]
+        if record.data["typed"]:
+            typed.append(Steer(text or "", record.at))
+        elif first_harness is None and text is not None:
+            first_harness = text
+    if typed:
+        return typed[0].text, tuple(typed[1:])
+    return (first_harness if first_harness is not None else trigger or ""), ()
