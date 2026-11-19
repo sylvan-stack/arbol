@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import re
 import stat
 from collections.abc import Generator, Iterator
@@ -10,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NoReturn
 
-from .form import Kind, SessionFailure, Source, State, Turn, unknown_record
+from .form import Image, Item, Kind, Result, SessionFailure, Source, State, TextBlock, ToolCall, Turn, unknown_record
 from .lines import file_records
 
 _NATIVE_ID = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
@@ -311,4 +313,90 @@ def _turn(rows: list[_Message], cwd: str) -> Turn:
         working_folder=cwd,
         model=None,
         effort=None,
+        items=tuple(_items(rows)),
     )
+
+
+def _image(entry: _Entry, part: dict[str, Any]) -> Image:
+    media_type = _string(part.get("mimeType"))
+    data = part.get("data")
+    if media_type is None or not isinstance(data, str):
+        entry.bad("image")
+    try:
+        return Image(media_type, len(base64.b64decode(data, validate=True)))
+    except (binascii.Error, ValueError):
+        entry.bad("image")
+
+
+def _without_image_bytes(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_without_image_bytes(item) for item in value]
+    if isinstance(value, dict):
+        image = value.get("type") == "image" and isinstance(value.get("mimeType"), str)
+        return {key: _without_image_bytes(item) for key, item in value.items() if not (image and key == "data")}
+    return value
+
+
+def _result(entry: _Entry, message: dict[str, Any]) -> tuple[Result, bool, bool]:
+    content = message.get("content")
+    parts = list(_parts(entry, content, ("text", "image")))
+    output = "\n".join(part["text"] for part in parts if part["type"] == "text")
+    images = tuple(_image(entry, part) for part in parts if part["type"] == "image")
+    is_error = message.get("isError", False)
+    if not isinstance(is_error, bool):
+        entry.bad("tool-result")
+    details = message.get("details")
+    truncated = False
+    if isinstance(details, dict):
+        truncation = details.get("truncation")
+        truncated = truncation is True or (isinstance(truncation, dict) and truncation.get("truncated") is True)
+        fields = {key: value for key, value in details.items() if key not in ("truncation", "fullOutputPath")}
+    else:
+        fields = {"details": details} if details is not None else {}
+    return Result(output, _without_image_bytes(fields) or None, images), is_error, truncated
+
+
+def _results(rows: list[_Message]) -> dict[str, _Message]:
+    results: dict[str, _Message] = {}
+    for entry, message in rows:
+        if message["role"] != "toolResult":
+            continue
+        call_id = _string(message.get("toolCallId"))
+        if call_id is None or call_id in results:
+            entry.bad("tool-result")
+        _native_time(entry, message)
+        results[call_id] = (entry, message)
+    return results
+
+
+def _items(rows: list[_Message]) -> Iterator[Item]:
+    results = _results(rows)
+    calls: set[str] = set()
+    for entry, message in rows:
+        if message["role"] != "assistant":
+            continue
+        for part in _parts(entry, message.get("content"), ("text", "thinking", "toolCall")):
+            if part["type"] == "text":
+                yield TextBlock(part["text"], _entry_time(entry))
+            if part["type"] != "toolCall":
+                continue
+            call_id = _string(part.get("id"))
+            name = _string(part.get("name"))
+            arguments = part.get("arguments")
+            if call_id is None or call_id in calls or name is None or not isinstance(arguments, dict):
+                entry.bad("tool-call")
+            calls.add(call_id)
+            saved = results.get(call_id)
+            result, is_error, truncated = _result(*saved) if saved is not None else (None, False, False)
+            yield ToolCall(
+                call_id=call_id,
+                agent=None,
+                name=name,
+                input=arguments,
+                result=result,
+                ok=result is not None and not is_error,
+                error=result.text if result is not None and is_error else None,
+                parent_call_id=None,
+                started_at=_native_time(entry, part),
+                truncated=truncated,
+            )
