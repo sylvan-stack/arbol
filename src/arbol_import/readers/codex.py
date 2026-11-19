@@ -21,7 +21,21 @@ from tempfile import TemporaryDirectory
 from typing import Any, BinaryIO
 from urllib.parse import unquote_to_bytes
 
-from .form import Image, Item, Kind, Result, SessionFailure, State, Steer, TextBlock, ToolCall, Trigger, unknown_record
+from .form import (
+    Image,
+    Item,
+    Kind,
+    Response,
+    Result,
+    SessionFailure,
+    State,
+    Steer,
+    TextBlock,
+    ToolCall,
+    Trigger,
+    Usage,
+    unknown_record,
+)
 from .lines import file_records, lines
 
 type Object = dict[str, Any]
@@ -736,9 +750,12 @@ def _event_fields(payload: Object, kind: str) -> Object:
 def _usage_fields(payload: Object) -> Object:
     usage = _object(payload.get("usage"))
     counts = {}
-    for field_name in ("input_tokens", "cached_input_tokens", "cache_write_input_tokens",
-                       "output_tokens", "reasoning_output_tokens"):
-        count = _optional_int(usage.get(field_name))
+    for field_name, alias in (
+        ("input_tokens", "input"), ("cached_input_tokens", "cached_input"),
+        ("cache_write_input_tokens", "cache_write_input"), ("output_tokens", "output"),
+        ("reasoning_output_tokens", "reasoning_output"),
+    ):
+        count = _optional_int(usage.get(field_name, usage.get(alias)))
         if count is not None and count < 0:
             raise _Shape
         counts[field_name] = count
@@ -1210,3 +1227,24 @@ def _code_mode_work(records: list[Record], projected: dict[int, ProjectedCall]) 
             used_ids.add(native_id)
             result[line] = ProjectedCall(_work_call(record, matches[0].item, start), end)
     return result
+
+
+def _responses(turn: NativeTurn) -> tuple[Response, ...]:
+    recorded: dict[str, Response] = {}
+    for record in turn.records:
+        if record.kind != "token_usage_record" or record.data["response_id"] in recorded:
+            continue
+        counts = record.data["usage"]
+        usage = Usage(
+            input_tokens=counts["input_tokens"],
+            cached_input_tokens=counts["cached_input_tokens"] or 0,
+            cache_write_tokens=counts["cache_write_input_tokens"] or 0,
+            output_tokens=counts["output_tokens"],
+            reasoning_tokens=counts["reasoning_output_tokens"],
+        )
+        recorded[record.data["response_id"]] = Response(record.data["start"] or record.at, usage)
+    return tuple(recorded.values())
+
+
+def _turn_context(turn: NativeTurn) -> Object:
+    return next((record.data for record in reversed(turn.records) if record.kind == "turn_context"), {})
