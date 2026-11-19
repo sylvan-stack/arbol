@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
-from .paths import installation_root, prepare_installation
+from .paths import INSTALLATION_LAYOUT, installation_root, prepare_installation
 
 Mode = Literal["normal", "controlled"]
 Source = dict[str, str | int]
@@ -110,7 +110,7 @@ class State:
     release: str | None
 
 
-def read_state(folder: int) -> State:
+def read_state(folder: int, *, layout: int = INSTALLATION_LAYOUT) -> State:
     fd = os.open(STATE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)
     try:
         private_file(os.fstat(fd))
@@ -121,7 +121,7 @@ def read_state(folder: int) -> State:
         os.close(fd)
     value = json.loads(raw)
     if (not isinstance(value, dict) or value.keys() != {"format", "state", "generation", "source", "session", "release"}
-            or type(value["format"]) is not int or value["format"] != 1):
+            or type(value["format"]) is not int or value["format"] != layout):
         raise ValueError("Unknown admission format.")
     phase, generation, session, release = (value[key] for key in ("state", "generation", "session", "release"))
     if (phase not in ("normal", "draining", "exclusive")
@@ -193,8 +193,8 @@ def directory_lease(runtime: Path, mode: Mode, generation: str | None) -> Iterat
             lease.pid = -1
 
 
-def staged_state(folder: int, state: State) -> str:
-    value = {"format": 1, "state": state.phase, "generation": state.generation,
+def staged_state(folder: int, state: State, *, layout: int = INSTALLATION_LAYOUT) -> str:
+    value = {"format": layout, "state": state.phase, "generation": state.generation,
              "source": state.source, "session": state.session, "release": state.release}
     name = f".{uuid4().hex}.tmp"
     fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder)
@@ -209,12 +209,12 @@ def staged_state(folder: int, state: State) -> str:
     return name
 
 
-def write_state(folder: int, state: State) -> None:
+def write_state(folder: int, state: State, *, layout: int = INSTALLATION_LAYOUT) -> None:
     """Publish one complete transition under the gate, never overwrite in place."""
     previous = staged_state(folder, read_state(folder)) if state.phase == "normal" else None
     name = None
     try:
-        name = staged_state(folder, state)
+        name = staged_state(folder, state, layout=layout)
         os.replace(name, STATE, src_dir_fd=folder, dst_dir_fd=folder)
         try:
             os.fsync(folder)
@@ -235,6 +235,30 @@ def write_state(folder: int, state: State) -> None:
                     os.unlink(item, dir_fd=folder)
                 except FileNotFoundError:
                     pass
+
+
+def convert_admission_layout(runtime: Path, *, session: str, before: int, after: int) -> None:
+    """Change the state marker while keeping an exclusive fence and its permanent lock files."""
+    if {before, after} != {1, INSTALLATION_LAYOUT}:
+        raise ValueError("Select the two supported installation layouts for conversion.")
+    with (
+        directory(runtime) as folder,
+        lock(folder, OWNER, fcntl.LOCK_EX),
+        lock(folder, GATE, fcntl.LOCK_EX),
+        lock(folder, WRITERS, fcntl.LOCK_EX),
+    ):
+        already_converted = False
+        try:
+            state = read_state(folder, layout=before)
+        except ValueError:
+            state = read_state(folder, layout=after)
+            already_converted = True
+        if state.phase != "exclusive" or state.session != session:
+            raise AdmissionRefusal("maintenance", "Layout conversion requires its exclusive maintenance session.")
+        if already_converted:
+            os.fsync(folder)
+        else:
+            write_state(folder, state, layout=after)
 
 
 def prepare_directory(runtime: Path) -> None:
