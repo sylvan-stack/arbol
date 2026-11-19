@@ -1379,3 +1379,11 @@ def _agents(root: Lane, descendants: list[tuple[Thread, Lane]], root_id: str
             launch_id = launch.call_id if launch is not None and launch_turn == target else None
             assigned[target].append((work.info(thread.native_id, launch_id), work.calls))
     return assigned
+
+
+def _session_metadata(root: Thread, catalogue: Catalogue, titles: dict[str, str]) -> tuple[str | None, str | None]:
+    title = catalogue.threads.get(root.native_id, {}).get("title")
+    if not isinstance(title, str) or not title:
+        title = titles.get(root.native_id)
+    cwd = root.chosen.origin.get("cwd")
+    return title, cwd if isinstance(cwd, str) else None
