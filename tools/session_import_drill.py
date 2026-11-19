@@ -22,6 +22,7 @@ import subprocess
 import sys
 import time
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -271,3 +272,94 @@ class Drill:
     def source_identity(self) -> dict[str, Any]:
         oid = int(self.cluster.psql("SELECT oid FROM pg_database WHERE datname = current_database()"))
         return {"host": str(self.cluster.socket), "port": PORT, "database": DATABASE, "databaseOid": oid}
+
+    # --- 4.2 The fenced upgrade ------------------------------------------------------------------------------------
+
+    def context(self, build: Any) -> Any:
+        from arbol_backend.exchange_context import Context
+        from arbol_backend.model import identity, parse
+
+        return Context(identity(build.folder, parse(["backend"]), home=self.home))
+
+    def release(self, label: str, build: Any) -> tuple[Path, str]:
+        """A release record by `recovery_release.py`, from a private inventory of the Builds the release selects."""
+        if label in self.releases:
+            return self.releases[label]
+        folder = private_folder(self.out / f"release-{label}")
+        checkout = ARBOL_CHECKOUT if build is self.prior else Path(
+            json.loads((build.folder / "build.json").read_text())["source"]["repository"])
+        inventory = {
+            "kind": "current",
+            "builds": [{"directory": str(build.folder), "checkout": str(checkout)},
+                       {"directory": str(self.trunk.folder), "checkout": str(TRUNK_CHECKOUT)}],
+            "configuration": {"installation": str(self.settings / "database.json")},
+            "designCheckout": str(DESIGN_CHECKOUT),
+        }
+        private_json(folder / "inventory.json", inventory)
+        digest = self.tool("database/recovery_release.py", "--inventory", str(folder / "inventory.json"),
+                           "--output", str(folder / "release"))["releaseSha256"]
+        self.releases[label] = (folder / "release", digest)
+        return self.releases[label]
+
+    def verified(self, label: str) -> Callable[[], str]:
+        from recovery_release import verify_release
+
+        folder, _ = self.releases[label]
+        return lambda: verify_release(folder)[1]
+
+    def open_admission(self, build: Any, label: str, schema: dict[str, int]) -> None:
+        """First activation: close admission, freeze, then reopen to the verified release."""
+        from arbol_backend.exchange_drain import begin_maintenance, freeze, reopen
+
+        _, digest = self.release(label, build)
+        source = self.source_identity
+        session = begin_maintenance(source, runtime=self.runtime)
+        freeze(self.context(build), source, session)
+        reopen(self.context(build), source, session, release=digest, schema=schema, verify_release=self.verified(label))
+
+    def maintenance(self, prior: Any) -> tuple[dict[str, Any], str]:
+        from arbol_backend.exchange_drain import begin_maintenance, freeze
+
+        source = self.source_identity
+        session = begin_maintenance(source, runtime=self.runtime)
+        freeze(self.context(prior), source, session)
+        return source, session
+
+    def fenced_upgrade(self, step: str, *, prior: tuple[Any, str], upgrade: tuple[Any, str], target: int,
+                       held: tuple[dict[str, Any], str] | None = None) -> dict[str, Any]:
+        """The fenced upgrade of `database/README.md`: release records, the exclusive session, the snapshot, the
+        verified isolated restore, `migrate_schema.py upgrade`, then reopening to the upgrade release."""
+        from arbol_backend.exchange_drain import reopen
+
+        prior_folder, prior_digest = self.release(prior[1], prior[0])
+        upgrade_folder, upgrade_digest = self.release(upgrade[1], upgrade[0])
+        source, session = held or self.maintenance(prior[0])
+        if upgrade[0] is not prior[0]:
+            self.stage_tools(upgrade[0])
+        attempt = private_folder(self.out / f"upgrade-{target}")
+        self.tool("database/recovery.py", "--database", DATABASE, "--socket", str(self.cluster.socket), "--port",
+                  str(PORT), "--user", ROLE, "snapshot", "--session", session, "--release", str(prior_folder),
+                  "--output", str(attempt / "snapshot"))
+        self.restores += 1
+        restore = Cluster(self.live / f"restore-{self.restores}").create(database=False)
+        try:
+            self.tool("database/recovery.py", "--database", DATABASE, "--socket", str(restore.socket), "--port",
+                      str(PORT), "--user", ROLE, "restore", "--snapshot", str(attempt / "snapshot"), "--output",
+                      str(attempt / "restore-attempt"))
+        finally:
+            restore.stop()
+        receipt = json.loads((attempt / "restore-attempt/restore.json").read_text())
+        self.checked(step, "isolated-restore-verified", receipt.get("status") == "verified",
+                     snapshotSha256=receipt.get("snapshotSha256"), targetCluster=receipt.get("targetCluster"))
+        status = self.tool("database/migrate_schema.py", "--socket", str(self.cluster.socket), "--port", str(PORT),
+                           "--user", ROLE, "--database", DATABASE, "upgrade", "--target-revision", str(target),
+                           "--maintenance-session", session, "--prior-release", prior_digest, "--upgrade-release",
+                           upgrade_digest, "--snapshot-dir", str(attempt / "snapshot"), "--restore-receipt",
+                           str(attempt / "restore-attempt/restore.json"))
+        schema = {"revision": target, "compatibilityVersion": 1}
+        self.checked(step, "upgrade-ready", status == {"status": "ready", **schema}, status=status)
+        reopen(self.context(upgrade[0]), source, session, release=upgrade_digest, schema=schema,
+               verify_release=self.verified(upgrade[1]))
+        self.record(step, "reopened", True, build=upgrade[0].number, release=upgrade_digest, prior=prior_digest,
+                    session=session)
+        return {"session": session, "prior": prior_digest, "upgrade": upgrade_digest}
