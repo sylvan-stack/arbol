@@ -31,7 +31,7 @@ from arbol_backend.bridge import Params, decode, encode  # noqa: E402
 from arbol_backend.database import Database, Session  # noqa: E402
 from arbol_backend.model import Identity, identity, parse  # noqa: E402
 from arbol_backend.server import Backend  # noqa: E402
-from backend.support import BASELINE, Cluster, Frame, SingleInstallation  # noqa: E402
+from backend.support import Cluster, Frame, SingleInstallation  # noqa: E402
 
 
 def chat(n: int) -> str:
@@ -177,7 +177,8 @@ class InstallationWindows(BridgeWindows):
         super().check_hello(value)
         self.assertEqual(value["bridge"], 2)
         self.assertEqual(value["build"], self.backend.identity.build)
-        self.assertEqual(value["installation"], {"database": "ready", "schema": BASELINE, "maintenance": "normal"})
+        self.assertEqual(value["installation"],
+                         {"database": "ready", "schema": self.fixture.schema, "maintenance": "normal"})
 
 
 # Archived complete imports; restore needed names in their original scope, not at this file tail.
