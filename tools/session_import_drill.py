@@ -13,16 +13,20 @@ result line holds chat text.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import time
 import tomllib
+import uuid
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -363,3 +367,103 @@ class Drill:
         self.record(step, "reopened", True, build=upgrade[0].number, release=upgrade_digest, prior=prior_digest,
                     session=session)
         return {"session": session, "prior": prior_digest, "upgrade": upgrade_digest}
+
+    # --- 4.3 Populating and Exchanges -------------------------------------------------------------------------------
+
+    @contextmanager
+    def backend(self, build: Any) -> Any:
+        """The Build's own backend on the private home; closing its stdin stops it."""
+        child = subprocess.Popen([str(build.folder / "bin/arbol"), "backend"], cwd=self.work, env=self.environment(),
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+        try:
+            assert child.stdout is not None
+            ready = json.loads(child.stdout.readline() or b"null")
+            require(isinstance(ready, dict), f"Backend {build.number} did not report ready.")
+            yield child
+        finally:
+            assert child.stdin is not None
+            child.stdin.close()
+            try:
+                child.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                os.killpg(child.pid, signal.SIGTERM)
+                child.wait(timeout=30)
+
+    async def bridge(self) -> Any:
+        from tools.backend_journeys import Bridge
+
+        return await Bridge.connect(self.runtime / "backend.sock")
+
+    def state(self, exchange: str) -> str | None:
+        row = self.cluster.psql(f"SELECT state FROM exchanges WHERE id = '{exchange}'").strip()
+        return row or None
+
+    async def settled(self, exchange: str, seconds: float = 120) -> str:
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            state = self.state(exchange)
+            if state not in (None, "open"):
+                return state
+            await asyncio.sleep(0.25)
+        raise DrillError("An Exchange did not settle in time.")
+
+    async def send(self, bridge: Any, name: str, *, chat: str | None = None, model: str = "complete",
+                   **extra: Any) -> dict[str, Any]:
+        chat = chat or self.chats.setdefault(name, str(uuid.uuid4()))
+        exchange = str(uuid.uuid4())
+        reply = await bridge.call("chat.send", {"chat": chat, "exchange": exchange, "workingFolder": str(self.work),
+                                                "message": f"Fictional drill message {name}.",
+                                                "route": {**ROUTE, "model": model}, **extra})
+        self.exchanges[name] = exchange
+        return {"chat": chat, "exchange": exchange, "reply": reply}
+
+    async def populate(self, step: str, build: Any, prefix: str) -> None:
+        """Fictional chats with completed, failed and cancelled Exchanges, one sent again, a renamed title, a
+        Draft and chat marks, through the Build's Bridge and the trivial Trunk."""
+        with self.backend(build):
+            bridge = await self.bridge()
+            try:
+                done = await self.send(bridge, f"{prefix}-completed")
+                require("result" in done["reply"], f"A send through {build.number} was refused: {done['reply']}")
+                completed = await self.settled(done["exchange"])
+                failed_send = await self.send(bridge, f"{prefix}-failed", model="unlisted-fixture-model")
+                failed = await self.settled(failed_send["exchange"]) if "result" in failed_send["reply"] else None
+                hold = await self.send(bridge, f"{prefix}-cancelled", model="hold")
+                await bridge.until(lambda: (self.control / f"{hold['exchange']}.1" / "process.json").exists(), 60)
+                stop = await bridge.call("exchange.stop", {"exchange": hold["exchange"]})
+                cancelled = await self.settled(hold["exchange"])
+                again_id = str(uuid.uuid4())
+                again = await bridge.call("exchange.sendAgain", {"exchange": done["exchange"], "newExchange": again_id,
+                                                                 "route": {**ROUTE, "model": "complete"}})
+                again_state = await self.settled(again_id) if "result" in again else None
+                rename = await bridge.call("chat.rename", {"chat": done["chat"], "title": f"Fictional {prefix} chat"})
+                draft = await bridge.call("draft.save", {"chat": hold["chat"], "text": "Fictional draft text.",
+                                                         "baseRevision": None})
+                mark = await bridge.call("chat.mark", {"chat": failed_send["chat"], "ongoing": True})
+                archive = await bridge.call("chat.mark", {"chat": hold["chat"], "archived": True})
+            finally:
+                await bridge.close()
+        replaced = self.cluster.psql(f"SELECT replaced_by FROM exchanges WHERE id = '{done['exchange']}'").strip()
+        outcome = {"completed": completed, "failed": failed, "cancelled": cancelled, "sentAgain": again_state,
+                   "stopReply": "result" in stop, "replacedBy": replaced == again_id, "renamed": "result" in rename,
+                   "draft": "result" in draft, "ongoing": "result" in mark, "archived": "result" in archive}
+        self.checked(step, f"populated-through-{build.number}",
+                     outcome == {"completed": "completed", "failed": "failed", "cancelled": "cancelled",
+                                 "sentAgain": "completed", "stopReply": True, "replacedBy": True, "renamed": True,
+                                 "draft": True, "ongoing": True, "archived": True}, **outcome)
+
+    async def exchange_round(self, step: str, build: Any) -> None:
+        """Start and settle an Exchange in an existing chat and in a new chat through the Build."""
+        with self.backend(build):
+            bridge = await self.bridge()
+            try:
+                existing = next(iter(self.chats.values()))
+                old = await self.send(bridge, f"r3-{build.number}-existing", chat=existing)
+                new = await self.send(bridge, f"r3-{build.number}-new")
+                states = (await self.settled(old["exchange"]) if "result" in old["reply"] else old["reply"],
+                          await self.settled(new["exchange"]) if "result" in new["reply"] else new["reply"])
+            finally:
+                await bridge.close()
+        self.checked(step, f"exchanges-settle-through-{build.number}", states == ("completed", "completed"),
+                     states=states)
