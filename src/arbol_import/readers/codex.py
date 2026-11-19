@@ -529,3 +529,295 @@ def _inventory(home: Path, catalogue: Catalogue) -> Inventory:
         else:
             children[parent].append(thread)
     return Inventory(roots, children, unidentified, outside)
+
+
+@dataclass(frozen=True)
+class Record:
+    kind: str
+    at: datetime
+    line: int
+    ordinal: int | None
+    turn_id: str | None
+    root_turn_id: str | None
+    data: Object
+
+
+_RESPONSE_ONLY_IN_ARCHIVE = frozenset("""
+    agent_message reasoning local_shell_call tool_search_call tool_search_output
+    web_search_call image_generation_call compaction compaction_trigger context_compaction
+    additional_tools configuration_update ghost_snapshot
+    mcp_list_tools mcp_approval_request mcp_approval_response computer_call
+    computer_call_output shell_call shell_call_output other
+""".split())
+_EVENT_ONLY_IN_ARCHIVE = frozenset("""
+    error warning auth_recovery_started auth_recovery_completed guardian_warning
+    realtime_conversation_started realtime_conversation_realtime realtime_conversation_closed
+    realtime_conversation_sdp realtime_conversation_list_voices_response model_reroute
+    model_verification turn_moderation_metadata safety_buffering context_compacted
+    thread_rolled_back thread_settings_applied token_count agent_message user_message
+    agent_reasoning agent_reasoning_raw_content agent_reasoning_section_break session_configured
+    environment_connected environment_disconnected thread_goal_updated thread_queue_changed
+    mcp_startup_update mcp_startup_complete mcp_tool_call_begin mcp_tool_call_end
+    web_search_begin web_search_end image_generation_begin image_generation_end
+    exec_command_begin exec_command_output_delta terminal_interaction view_image_tool_call
+    exec_approval_request network_approval_resolved request_permissions request_user_input
+    dynamic_tool_call_request dynamic_tool_call_response elicitation_request elicitation_abandoned
+    apply_patch_approval_request guardian_assessment deprecation_notice stream_error patch_apply_begin
+    patch_apply_updated patch_apply_end turn_diff plan_update shutdown_complete entered_review_mode
+    exited_review_mode raw_response_item raw_response_completed private_session_event item_started
+    hook_started hook_completed agent_message_content_delta plan_delta reasoning_content_delta
+    reasoning_raw_content_delta collab_agent_spawn_begin collab_agent_spawn_end
+    collab_agent_interaction_begin collab_agent_interaction_end collab_waiting_begin collab_waiting_end
+    collab_close_begin collab_close_end collab_resume_begin collab_resume_end sub_agent_activity
+""".split())
+_ITEM_ONLY_IN_ARCHIVE = frozenset("""
+    UserMessage FunctionCallOutput HookPrompt AgentMessage Plan Reasoning DynamicToolCall
+    CollabAgentToolCall SubAgentActivity WebSearch ImageView Extension ImageGeneration
+    EnteredReviewMode ExitedReviewMode ContextCompaction
+""".split())
+_WORK_ITEMS = frozenset({"CommandExecution", "McpToolCall", "FileChange"})
+_OUTPUT_KINDS = frozenset({"function_call_output", "custom_tool_call_output"})
+_CALL_KINDS = frozenset({"function_call", "custom_tool_call"})
+_ENDINGS = frozenset({
+    "task_complete", "turn_aborted", "task_ended", "turn_ended", "task_failed", "turn_failed",
+    "task_cancelled", "turn_cancelled", "task_canceled", "turn_canceled",
+    "task_interrupted", "turn_interrupted", "task_finished", "turn_finished",
+})
+
+
+class _Shape(ValueError):
+    """A consumed conversation field does not have its native shape."""
+
+
+def _object(value: object) -> Object:
+    if not isinstance(value, dict):
+        raise _Shape
+    return value
+
+
+def _optional_string(value: object) -> str | None:
+    if value is None or isinstance(value, str):
+        return value
+    raise _Shape
+
+
+def _first_string(*values: object) -> str | None:
+    for value in values:
+        if text := _optional_string(value):
+            return text
+    return None
+
+
+def _string(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    raise _Shape
+
+
+def _required_id(value: object) -> str:
+    if isinstance(value, str) and value:
+        return value
+    raise _Shape
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    if type(value) is int:
+        return value
+    raise _Shape
+
+
+def _unix_time(value: object, scale: int = 1) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise _Shape
+    if value == 0:
+        return None
+    try:
+        return datetime.fromtimestamp(value / scale, UTC)
+    except (OSError, OverflowError, ValueError) as error:
+        raise _Shape from error
+
+
+def _response_fields(payload: Object, kind: str, descendant: bool) -> Object:
+    if kind == "message":
+        role = _string(payload.get("role"))
+        content = payload.get("content")
+        if role not in ("assistant", "user", "system", "developer", "tool", "function") or not isinstance(content, list):
+            raise _Shape
+        raw_metadata = payload.get("internal_chat_message_metadata_passthrough")
+        metadata = _object(raw_metadata) if raw_metadata is not None else {}
+        kinds = metadata.get("content_item_kinds", payload.get("content_item_kinds"))
+        if kinds is not None and (not isinstance(kinds, list) or any(not isinstance(name, str) for name in kinds)):
+            raise _Shape
+        parts = []
+        for entry in content:
+            part = _object(entry)
+            if part.get("type") in ("input_text", "output_text"):
+                value = _string(part.get("text"))
+                if not descendant and role in ("assistant", "user"):
+                    parts.append(value)
+            elif part.get("type") not in ("input_image", "input_audio", "output_image"):
+                raise _Shape
+        return {"role": role, "text": "\n".join(parts) if parts else None, "typed": kinds == ["user.text"]}
+    if kind in _CALL_KINDS:
+        argument = "input" if kind == "custom_tool_call" else "arguments"
+        name = _required_id(payload.get("name"))
+        namespace = _optional_string(payload.get("namespace"))
+        if argument not in payload:
+            raise _Shape
+        return {"call_id": _required_id(payload.get("call_id")),
+                "name": f"{namespace}::{name}" if namespace else name,
+                "input": payload[argument]}
+    if kind in _OUTPUT_KINDS:
+        output = payload.get("output")
+        if not isinstance(output, (str, dict, list)):
+            raise _Shape
+        if isinstance(output, list):
+            for value_part in output:
+                part = _object(value_part)
+                part_kind = _string(part.get("type"))
+                if part_kind in ("text", "input_text", "output_text"):
+                    _string(part.get("text"))
+                elif part_kind not in ("image", "input_image", "output_image", "input_audio", "encrypted_content"):
+                    raise _Shape
+        call_id = _optional_string(payload.get("call_id"))
+        if kind == "custom_tool_call_output" and not call_id:
+            raise _Shape
+        return {"call_id": call_id, "output": output}
+    if kind not in _RESPONSE_ONLY_IN_ARCHIVE:
+        raise _Shape
+    return {}
+
+
+def _event_fields(payload: Object, kind: str) -> Object:
+    if kind == "task_started":
+        attribution = _object(payload["turn_attribution"]) if payload.get("turn_attribution") is not None else {}
+        return {"trigger": _first_string(attribution.get("turn_trigger"), payload.get("turn_trigger"),
+                                         payload.get("trigger"))}
+    if kind in _ENDINGS:
+        error = payload.get("error")
+        if error is not None and not isinstance(error, (dict, str)):
+            raise _Shape
+        if isinstance(error, dict):
+            _optional_string(error.get("message", error.get("text")))
+            info = error.get("codex_error_info", error.get("kind", error.get("type")))
+            if info is not None and not isinstance(info, (str, dict)):
+                raise _Shape
+        reason = _optional_string(payload.get("reason"))
+        if kind == "turn_aborted" and not reason:
+            raise _Shape
+        return {"error": error, "reason": reason}
+    if kind == "exec_command_end":
+        return {"call_id": _optional_string(payload.get("call_id")),
+                "exit_code": _optional_int(payload.get("exit_code"))}
+    if kind in ("item_started", "item_completed"):
+        item = _object(payload.get("item"))
+        item_kind = _string(item.get("type"))
+        if item_kind in _ITEM_ONLY_IN_ARCHIVE:
+            return {}
+        if item_kind not in _WORK_ITEMS:
+            raise _Shape
+        _required_id(item.get("id"))
+        _optional_string(item.get("call_id", item.get("callId")))
+        if item_kind == "CommandExecution":
+            _optional_int(item.get("exit_code", item.get("exitCode")))
+        return {"item": item, "start": _unix_time(payload.get("started_at_ms"), 1000),
+                "end": _unix_time(payload.get("completed_at_ms"), 1000)}
+    if kind not in _EVENT_ONLY_IN_ARCHIVE:
+        raise _Shape
+    return {}
+
+
+def _usage_fields(payload: Object) -> Object:
+    usage = _object(payload.get("usage"))
+    counts = {}
+    for field_name in ("input_tokens", "cached_input_tokens", "cache_write_input_tokens",
+                       "output_tokens", "reasoning_output_tokens"):
+        count = _optional_int(usage.get(field_name))
+        if count is not None and count < 0:
+            raise _Shape
+        counts[field_name] = count
+    if counts["input_tokens"] is None or counts["output_tokens"] is None:
+        raise _Shape
+    started = payload.get("response_started_at")
+    if isinstance(started, str):
+        started = _time(started)
+        if started is None:
+            raise _Shape
+    elif started is not None:
+        started = _unix_time(started)
+    else:
+        started = _unix_time(payload.get("response_started_at_ms"), 1000)
+    return {"response_id": _required_id(payload.get("response_id")), "usage": counts, "start": started}
+
+
+def _conversation(rollout: Rollout, line: int, row: Object, kind: str,
+                  at: datetime, ordinal: int | None) -> Record:
+    payload = _object(row.get("payload"))
+    metadata = payload.get("internal_chat_message_metadata_passthrough")
+    metadata = _object(metadata) if metadata is not None else {}
+    attribution = payload.get("turn_attribution")
+    attribution = _object(attribution) if attribution is not None else {}
+    turn = _first_string(payload.get("turn_id"), metadata.get("turn_id"), attribution.get("turn_id"),
+                         row.get("turn_id"))
+    root = _first_string(payload.get("root_turn_id"), attribution.get("root_turn_id"),
+                         metadata.get("root_turn_id"), row.get("root_turn_id"))
+    if kind == "response_item":
+        kind = _string(payload.get("type"))
+        data = _response_fields(payload, kind, rollout.parent is not None)
+    elif kind == "event_msg":
+        kind = _string(payload.get("type"))
+        kind = {"turn_started": "task_started", "turn_complete": "task_complete"}.get(kind, kind)
+        if kind in _ENDINGS | {"task_started"} and kind != "turn_aborted" and not turn:
+            raise _Shape
+        data = _event_fields(payload, kind)
+    elif kind == "turn_context":
+        data = {name: _optional_string(payload.get(name)) for name in ("cwd", "model", "effort")}
+    else:
+        if not turn:
+            raise _Shape
+        data = _usage_fields(payload)
+    return Record(kind, at, line, ordinal, turn, root, data)
+
+
+def _body(home: Path, rollout: Rollout) -> Iterator[Record]:
+    conversation = {"response_item", "event_msg", "turn_context", "token_usage_record"}
+    with closing(_records(home, rollout.relative)) as records:
+        first = next(records, None)
+        if first is None:
+            raise SessionFailure("unreadable_session", f"{rollout.relative}: the rollout header disappeared.")
+        current = Rollout(rollout.relative)
+        _header(current, first[1], first[0])
+        if (current.native_id, current.parent, current.history_start) != (
+            rollout.native_id, rollout.parent, rollout.history_start
+        ):
+            raise SessionFailure("unreadable_session", f"{rollout.relative}: the rollout changed while it was read.")
+        for line, raw in records:
+            where = f"{rollout.relative}:{line}"
+            kind: object = None
+            try:
+                row = _object(raw)
+                kind = _string(row.get("type"))
+                ordinal = _optional_int(row.get("ordinal"))
+                if ordinal is not None and ordinal < 0:
+                    raise _Shape
+                if rollout.history_start is not None:
+                    if ordinal is None:
+                        raise _Shape
+                    if ordinal < rollout.history_start:
+                        continue
+                if kind not in conversation:
+                    unknown_record(kind, where, conversation=False)
+                    continue
+                at = _time(row.get("timestamp"))
+                if at is None:
+                    raise _Shape
+                yield _conversation(rollout, line, row, kind, at, ordinal)
+            except _Shape:
+                # Report only the known envelope kind. An unknown payload may
+                # supply arbitrary strings that must stay out of the report.
+                label = kind if isinstance(kind, str) and kind in conversation else None
+                unknown_record(label, where, conversation=True)
