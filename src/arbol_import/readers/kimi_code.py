@@ -4,17 +4,21 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
 import re
+import subprocess
 from base64 import b64decode
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from heapq import merge
 from pathlib import Path
+from socket import gethostname
 from typing import Any, Never
 from urllib.parse import unquote, unquote_to_bytes
 
 from .form import (
+    HomeFile,
     Image,
     Item,
     Kind,
@@ -562,7 +566,9 @@ def _result(home: Path, session: _SavedSession, record: _Record) -> tuple[Result
     text = output if isinstance(output, str) else _text(parts)
     if name := _spill_name(result, text):
         path = _spill_path(session, name)
-        if path.is_relative_to(session.folder / "tool-results") and _eligible(home, path):
+        directory = session.folder / "tool-results"
+        if (path.is_relative_to(directory) and _eligible(home, path)
+                and not any(_forbidden(part) for part in path.relative_to(directory).parts)):
             try:
                 text = path.read_text(encoding="utf-8", newline="")
             except (OSError, UnicodeError):
@@ -582,10 +588,10 @@ def _file_name(url: str) -> str:
     return unquote(url.removeprefix("kimi-file://").partition("?")[0])
 
 
-def _upload(home: Path, name: str) -> tuple[Path | None, str | None]:
+def _upload(home: Path, name: str, directory: Path | None = None) -> tuple[Path | None, str | None]:
     if not _FILE_ID.fullmatch(name):
         return None, None
-    directory = home / "files"
+    directory = directory or home / "files"
     metadata = directory / "meta" / f"{name}.json"
     if _eligible(home, metadata):
         try:
@@ -595,14 +601,14 @@ def _upload(home: Path, name: str) -> tuple[Path | None, str | None]:
             value = {}
         key = _string(value.get("key")) or ""
         if (value.get("version") == 1 and _FILE_ID.fullmatch(key)
-                and (key == name or key.startswith(f"{name}."))):
+                and (key == name or key.startswith(f"{name}.")) and not _forbidden(key)):
             saved = directory / key
             if _eligible(home, saved):
                 return saved, _string(value.get("mediaType"))
     try:
         path = next((path for path in _children(home, directory)
                      if (path.name == name or path.name.startswith(f"{name}."))
-                     and ".tmp." not in path.name and _eligible(home, path)), None)
+                     and ".tmp." not in path.name and not _forbidden(path.name)), None)
     except SessionFailure:
         return None, None
     return path, None
@@ -638,7 +644,10 @@ def _image(home: Path, session: _SavedSession, part: dict[str, Any]) -> Image | 
         if separator and _BLOB_HASH.fullmatch(hash_value):
             path = session.folder / "blobs" / hash_value
     elif url.startswith("kimi-file://"):
-        path, mime = _upload(home, _file_name(url))
+        name = _file_name(url)
+        path, mime = _upload(home, name)
+        if path is None or not _eligible(home, path):
+            path, mime = _upload(home, name, session.folder / "media")
         media = media or mime
     elif not url.startswith("ms://"):
         return None
@@ -820,3 +829,130 @@ def _origin(session: _SavedSession, main: _Lane) -> dict[str, str]:
     if main.turns:
         origin["originKind"] = next(iter(main.turns.values())).origin
     return origin
+
+
+_ARCHIVE_TREES = ("blobs", "tool-results", "file-history", "tasks", "plans", "media", "media-originals")
+_EXCLUDED = frozenset({
+    "logs", "locks", "credentials", "oauth", "server.token", "device_id", "server",
+    "search-index", "cache", "image-upload-cache",
+})
+_FILE_REFERENCE = re.compile(r"""kimi-file://[^\s"'<>\])}]+""")
+
+
+def _forbidden(name: str) -> bool:
+    name = name.lower()
+    return name in _EXCLUDED or name.startswith("config.toml") or name.endswith((".wal", ".index", ".postings"))
+
+
+@dataclass
+class _RawFiles:
+    home: Path
+    session: _SavedSession
+    uploads: set[str] = field(default_factory=set)
+    outside: set[Path] = field(default_factory=set)
+
+    def escapes(self, path: Path) -> bool:
+        try:
+            absolute = Path(os.path.abspath(path))
+            resolved = path.resolve()
+        except (OSError, ValueError, RuntimeError):
+            return False
+        if absolute.is_relative_to(self.home) and resolved.is_relative_to(self.home):
+            return False
+        self.outside.add(resolved)
+        return True
+
+    def observe(self, row: dict[str, Any]) -> None:
+        values: list[object] = [row]
+        while values:
+            value = values.pop()
+            if isinstance(value, dict):
+                values.extend(value.values())
+            elif isinstance(value, list):
+                values.extend(value)
+            elif isinstance(value, str) and "kimi-file://" in value:
+                self.uploads.update(_file_name(match[0]) for match in _FILE_REFERENCE.finditer(value))
+
+        if row.get("type") == "context.append_loop_event":
+            event = _object(row.get("event"))
+            if event.get("type") == "tool.result":
+                result = _object(event.get("result"))
+                output = result.get("output")
+                if isinstance(output, list):
+                    output = "".join(_string(_object(part).get("text")) or "" for part in output)
+                if name := _spill_name(result, _string(output) or ""):
+                    self.escapes(_spill_path(self.session, name))
+
+    def archive(self) -> tuple[HomeFile, ...]:
+        result: set[Path] = set()
+        pending = [self.session.folder / name for name in _ARCHIVE_TREES]
+        while pending:
+            path = pending.pop()
+            if _forbidden(path.name) or self.escapes(path):
+                continue
+            if _eligible(self.home, path, directory=True):
+                pending.extend(_children(self.home, path))
+            elif _eligible(self.home, path):
+                result.add(path)
+
+        agents = self.session.folder / "agents"
+        self.escapes(agents)
+        listed = [self.session.state, *(agent / "wire.jsonl" for agent in _children(self.home, agents)
+                                       if not _forbidden(agent.name))]
+        for path in listed:
+            if not self.escapes(path) and _eligible(self.home, path):
+                result.add(path)
+        for name in self.uploads:
+            named = self.home / "files" / name
+            if not self.escapes(named):
+                upload, _ = _upload(self.home, name)
+                if upload is not None and not self.escapes(upload) and _eligible(self.home, upload):
+                    result.add(upload)
+        return tuple(HomeFile(path.relative_to(self.home).as_posix()) for path in sorted(result))
+
+
+def _claim_is_live(claim: dict[str, Any]) -> bool:
+    pid = _size(claim.get("pid"))
+    host = _string(claim.get("hostname"))
+    started = _time(claim.get("startedAt"))
+    if not pid or pid > 2**31 - 1 or not host or started is None:
+        return False
+    if host != gethostname():
+        # The native locker treats a claim from another host as held.
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-p", str(pid), "-o", "stat=", "-o", "lstart="],
+            env={**os.environ, "LC_ALL": "C", "TZ": "UTC"},
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=1, check=False,
+        )
+        if result.returncode != 0:
+            return False
+        status, date = result.stdout.split(None, 1)
+        if status.startswith("Z"):
+            return False
+        process_started = datetime.strptime(date.strip(), "%a %b %d %H:%M:%S %Y").replace(tzinfo=UTC)
+        return process_started <= started
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return True
+
+
+def _locked(home: Path, session: _SavedSession) -> bool:
+    directory = home / "locks" / "sessions"
+    for name in (session.folder.name, session.native_id):
+        path = directory / f"{name}.lock"
+        if _eligible(home, path):
+            try:
+                with path.open("rb") as stream:
+                    claim = _object(json.load(stream))
+            except (OSError, ValueError, RecursionError):
+                continue
+            if _claim_is_live(claim):
+                return True
+    return False
