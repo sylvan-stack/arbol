@@ -17,7 +17,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import NoReturn
 
-from .form import Kind, SessionFailure, Source, State, unknown_record
+from .form import Kind, SessionFailure, Source, State, TextBlock, unknown_record
 
 _DATABASE = "mimocode.db"
 _DATABASE_FILES = (_DATABASE, f"{_DATABASE}-wal", f"{_DATABASE}-shm")
@@ -170,6 +170,8 @@ class _Part:
     data: _Object
     created: datetime
     synthetic: bool
+    started: datetime
+    last_saved: datetime
 
 
 @dataclass(frozen=True)
@@ -186,6 +188,7 @@ class _Message:
     error_kind: str | None
     error_text: str | None
     model: str | None
+    summary: bool
 
 
 def _unknown(record: str) -> NoReturn:
@@ -271,7 +274,11 @@ def _part(row: sqlite3.Row, facts: _KindFacts) -> _Part:
     elif kind == "file":
         _string(data.get("mime"), "part")
         _string(data.get("url"), "part")
-    part = _Part(_id(row["id"], "part"), kind, data, _time(row["time_created"], "part"), synthetic)
+    created = _time(row["time_created"], "part")
+    timing = _optional_object(data.get("time"), "part")
+    started = _optional_time(timing.get("start"), "part") or created
+    ended = _optional_time(timing.get("end"), "part") or started
+    part = _Part(_id(row["id"], "part"), kind, data, created, synthetic, started, max(created, started, ended))
     metadata = _optional_object(data.get("metadata"), "part")
     state = _object(data.get("state"), "part") if kind == "tool" else {}
     state_metadata = _optional_object(state.get("metadata"), "part")
@@ -295,12 +302,15 @@ def _message(row: sqlite3.Row, parts: list[sqlite3.Row], facts: _KindFacts) -> _
     finish = _optional_string(data.get("finish"), "message")
     error_kind, error_text = _message_error(data.get("error"))
     model = _assistant_model(data) if role == "assistant" else None
+    summary = data.get("summary", False) if role == "assistant" else False
+    if not isinstance(summary, bool):
+        _unknown("message")
     name = data.get("agent")
     if lane != "main" and isinstance(name, str) and name.startswith("probe-"):
         facts.probe_actor = True
     return _Message(
         message_id, lane, role, parent, created, data, tuple(_part(part, facts) for part in parts),
-        completed, finish, error_kind, error_text, model,
+        completed, finish, error_kind, error_text, model, summary,
     )
 
 
@@ -420,7 +430,7 @@ def _turn_end(turn: _Turn) -> datetime:
         return completed
     messages = [turn.user, *turn.assistants]
     return max(
-        max(message.created, *(part.created for part in message.parts))
+        max(message.created, *(part.last_saved for part in message.parts))
         if message.parts else message.created
         for message in messages
     )
@@ -433,3 +443,9 @@ def _state(assistant: _Message | None) -> tuple[State, str | None, str | None]:
         if assistant.finish == "stop":
             return "completed", None, None
     return "interrupted", None, None
+
+
+def _text_block(message: _Message, part: _Part) -> TextBlock | None:
+    if part.kind == "text" and not part.synthetic and not message.summary:
+        return TextBlock(_string(part.data.get("text"), "part"), part.started)
+    return None
