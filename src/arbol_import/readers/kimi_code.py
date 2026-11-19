@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Never
 
-from .form import SessionFailure, State, Steer, Trigger, Turn, unknown_record
+from .form import Item, SessionFailure, State, Steer, TextBlock, Trigger, Turn, unknown_record
 from .lines import file_records
 
 _SESSION = re.compile(r"session_([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})")
@@ -412,6 +412,8 @@ class _Lane:
                 if self.current is turn:
                     self.current = None
             return
+        if kind == "content.part":
+            _content(record)
         if kind == "turn.steer":
             _prompt(record)
             if turn is None or turn.end is not None:
@@ -435,3 +437,19 @@ class _Lane:
                 turn.records.append(record)
             if kind == "tool.call" and (uuid := _string(data.get("uuid"))):
                 self.call_turns[uuid] = turn
+
+
+def _content(record: _Record) -> TextBlock | None:
+    part = _object(record.data.get("part"))
+    _parts([part], record)
+    if part["type"] == "text":
+        return TextBlock(part["text"], _time(record.data.get("startedAt")) or record.time())
+    return None
+
+
+def _items(turn: _NativeTurn, home: Path, session: _SavedSession, *,
+           agent: str | None = None, parent_call: str | None = None) -> Iterator[Item]:
+    if agent is None:
+        for record in turn.records:
+            if record.kind == "content.part" and (item := _content(record)) is not None:
+                yield item
