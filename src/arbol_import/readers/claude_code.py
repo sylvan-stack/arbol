@@ -18,6 +18,7 @@ from .form import (
     Image,
     Item,
     Kind,
+    Response,
     Result,
     SessionFailure,
     Source,
@@ -27,6 +28,7 @@ from .form import (
     ToolCall,
     Trigger,
     Turn,
+    Usage,
     unknown_record,
 )
 from .lines import file_records
@@ -516,9 +518,14 @@ def _steers(rows: Iterable[Record]) -> Iterator[Steer]:
             yield Steer(_REMINDER.sub("", _text(attachment.get("prompt"))), _at(row))
 
 
-def _turn(group: TurnRecords) -> Turn:
+def _turn(
+    group: TurnRecords,
+    results: dict[str, NativeResult],
+    responses: dict[tuple[int, int], Response],
+) -> Turn:
     rows = group.rows
     start = rows[0]
+    assistant = next((record for record in rows if record.row.get("type") == "assistant"), None)
     ending = _ending(rows)
     if ending is None:
         ending = Ending(next(row.at for row in reversed(rows) if row.at is not None), "interrupted")
@@ -532,8 +539,10 @@ def _turn(group: TurnRecords) -> Turn:
         error=ending.error,
         error_kind=ending.kind,
         working_folder=_string(start.row.get("cwd")),
-        model=None,
-        effort=None,
+        model=_string(_message(assistant).get("model")) if assistant is not None else None,
+        effort=_string(assistant.row.get("effort")) if assistant is not None else None,
+        usage=tuple(responses[row.position] for row in rows if row.position in responses),
+        items=tuple(_items(rows, results)),
         steers=tuple(_steers(rows)),
     )
 
@@ -656,3 +665,27 @@ def _items(
                     parent_call_id=parent_call,
                     started_at=_at(record),
                 )
+
+
+def _responses(rows: Iterable[Record]) -> dict[tuple[int, int], Response]:
+    responses = {}
+    seen: set[str] = set()
+    for record in rows:
+        if record.duplicate or record.row.get("type") != "assistant":
+            continue
+        message = _message(record)
+        identifier = _string(message.get("id"))
+        if not identifier or identifier in seen:
+            continue
+        seen.add(identifier)
+        usage = _object(message.get("usage"))
+        responses[record.position] = Response(
+            _at(record),
+            Usage.native(
+                uncached=usage.get("input_tokens") or 0,
+                cache_read=usage.get("cache_read_input_tokens") or 0,
+                cache_write=usage.get("cache_creation_input_tokens") or 0,
+                output=usage.get("output_tokens") or 0,
+            ),
+        )
+    return responses
