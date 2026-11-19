@@ -18,7 +18,7 @@ from struct import Struct, unpack
 from tempfile import TemporaryDirectory
 from typing import Any, BinaryIO
 
-from .form import Kind, SessionFailure, State, Steer, Trigger, unknown_record
+from .form import Kind, SessionFailure, State, Steer, TextBlock, Trigger, unknown_record
 from .lines import file_records, lines
 
 type Object = dict[str, Any]
@@ -938,3 +938,9 @@ def _prompt(records: list[Record], trigger: str | None) -> tuple[str, tuple[Stee
     if typed:
         return typed[0].text, tuple(typed[1:])
     return (first_harness if first_harness is not None else trigger or ""), ()
+
+
+def _assistant_text(record: Record) -> TextBlock | None:
+    if record.kind == "message" and record.data["role"] == "assistant" and record.data["text"] is not None:
+        return TextBlock(record.data["text"], record.at)
+    return None
