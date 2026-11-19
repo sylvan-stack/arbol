@@ -211,3 +211,72 @@ def _fork_ids(home: Path, session: _SavedSession, state: _State,
     except SessionFailure:
         raise failure from None
     return ids
+
+
+def _step_number(record: _Record) -> str | None:
+    value = record.data.get("step")
+    return str(value) if type(value) is int or isinstance(value, str) else None
+
+
+def _undo(records: list[_Record], count: int) -> None:
+    """Remove logical messages along with their loop items, usage and context copies."""
+    groups: dict[tuple[str, str], int] = {}
+    owners: dict[int, int] = {}
+    step_ids: dict[str, int] = {}
+    call_ids: dict[str, int] = {}
+    results: dict[str, int] = {}
+    latest_step = None
+    latest_result = None
+    for index, record in enumerate(records):
+        data = record.data
+        kind = record.kind
+        group = None
+        if kind in {"turn.prompt", "turn.steer"}:
+            message_id = _string(data.get("promptId" if kind == "turn.prompt" else "messageId"))
+            group = groups.setdefault(("message", message_id or record.where), index)
+        elif kind in {"llm.request", "step.begin", "step.end", "content.part", "tool.call"}:
+            if kind == "llm.request" and data.get("kind") != "loop":
+                continue
+            step = _step_number(record)
+            if kind == "llm.request" and isinstance(data.get("turnStep"), str):
+                step = data["turnStep"].rpartition(".")[2]
+            step_id = _string(data.get("stepUuid", data.get("uuid")))
+            if step_id is not None:
+                group = step_ids.get(step_id)
+            if group is None:
+                group = groups.setdefault(("step", step or step_id or record.where), index)
+            if step_id is not None:
+                step_ids[step_id] = group
+            latest_step = group
+            if kind == "tool.call" and (call_id := _string(data.get("toolCallId"))):
+                call_ids[call_id] = group
+        elif kind == "tool.result":
+            call_id = _string(data.get("toolCallId")) or _string(data.get("parentUuid")) or record.where
+            group = results.setdefault(call_id, index)
+            latest_result = group
+        elif kind == "subagent.spawned":
+            group = call_ids.get(_string(data.get("parentToolCallId")) or "")
+        elif kind == "context.append_message":
+            message = _object(data.get("message"))
+            role = message.get("role")
+            message_id = _string(message.get("id"))
+            if role == "assistant":
+                group = latest_step
+            elif role == "tool":
+                group = results.get(_string(message.get("toolCallId")) or "", latest_result)
+            if group is None:
+                group = groups.setdefault(("message", message_id or record.where), index)
+        if group is not None:
+            owners[index] = group
+    removed = set(sorted(set(owners.values()))[-count:])
+    records[:] = [record for index, record in enumerate(records) if owners.get(index) not in removed]
+
+
+def _context_edit(record: _Record, records: list[_Record]) -> None:
+    if record.kind == "context.clear":
+        records.clear()
+    elif record.kind == "context.undo":
+        count = record.data.get("count")
+        if type(count) is not int or count <= 0:
+            record.invalid("context.undo")
+        _undo(records, count)
