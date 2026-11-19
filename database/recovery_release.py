@@ -284,7 +284,8 @@ def capture_build(
     record = document(folder / "build.json")
     component = record["component"]
     build = record["build"]
-    if record.get("status") != "working" or not re.fullmatch(r"[1-9a-z][0-9a-z]*", build):
+    if (record.get("status") != "working" or record.get("prunedAt") is not None
+            or not re.fullmatch(r"[1-9a-z][0-9a-z]*", build)):
         raise RecoveryError("Select a working, numbered Build.")
     source = record["source"]
     if source.get("uncommittedChanges") is not False:
@@ -304,6 +305,9 @@ def capture_build(
             or version != record["packageVersion"] or not entry_path.resolve(strict=True).is_relative_to(folder)
             or not entry_path.is_file() or not os.access(entry_path, os.X_OK)):
         raise RecoveryError("Build identity, entry or package version differs from its committed configuration.")
+    expected_checks = [{"name": check["name"], "passed": True} for check in build_config["checks"]]
+    if record.get("checks") != expected_checks:
+        raise RecoveryError("The Build has not recorded every committed check as successful.")
 
     evidence: dict[str, Any] = {}
     manifest_file = folder / "package-manifest.json"
@@ -355,8 +359,6 @@ def capture_build(
         evidence["nativeToolchain"] = "Preserved signed executable; exact compiler version not emitted by this packager."
     elif not component.endswith("-driver") or layout != 1:
         raise RecoveryError("The Build has no verifiable package manifest.")
-    elif record.get("checks") != [{"name": check["name"], "passed": True} for check in build_config["checks"]]:
-        raise RecoveryError("The legacy Driver Build record differs from its committed checks.")
 
     if component == "arbol-app":
         package = output / "package"
