@@ -22,6 +22,11 @@ from .views import View
 
 async def page_params(params: Params) -> Params:
     result: Params = {"limit": integer(params.get("limit", 100), 1, 200)}
+    if "archived" in params:
+        archived = params["archived"]
+        if type(archived) is not bool:
+            raise Error("invalid_input")
+        result["archived"] = archived
     if "before" in params:
         before = params["before"]
         if not isinstance(before, dict):
@@ -157,7 +162,8 @@ class Chats:
 
     async def page(self, params: Params) -> Params:
         snapshot = await self.list_view.snapshot({})
-        rows = self.visible(snapshot.event)
+        rows = ([row for row in snapshot.event["chats"] if row.get("archived") is True]
+                if params.get("archived") else self.visible(snapshot.event))
         if before := params.get("before"):
             rows = [row for row in rows if (row["activityAt"], row["chat"]) < (before["activityAt"], before["chat"])]
         return {"chats": rows[:params["limit"]]}
