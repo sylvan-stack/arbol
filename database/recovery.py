@@ -22,6 +22,7 @@ from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
 if TYPE_CHECKING:
+    from archive_volume import Archive, ArchiveUnavailable, require_archive
     from database_server import BIN, MAJOR, Places, environment
     from migrate_schema import Database, Refusal, Target, database_target
     from recovery_release import (
@@ -30,8 +31,8 @@ if TYPE_CHECKING:
         canonical,
         digest,
         document,
-        private_dir,
         publish_directory,
+        recovery_dir,
         sha,
         verify_release,
         write_private,
@@ -41,13 +42,15 @@ else:
     def sibling(name: str) -> Any:
         return importlib.import_module(f".{name}", __package__) if __package__ else importlib.import_module(name)
 
+    _archive = sibling("archive_volume")
+    Archive, ArchiveUnavailable, require_archive = _archive.Archive, _archive.ArchiveUnavailable, _archive.require_archive
     _server = sibling("database_server")
     BIN, MAJOR, Places, environment = _server.BIN, _server.MAJOR, _server.Places, _server.environment
     _migration = sibling("migrate_schema")
     Refusal, database_target = _migration.Refusal, _migration.database_target
     _release = sibling("recovery_release")
     DIGEST, RecoveryError, canonical, digest = _release.DIGEST, _release.RecoveryError, _release.canonical, _release.digest
-    document, private_dir, publish_directory = _release.document, _release.private_dir, _release.publish_directory
+    document, publish_directory, recovery_dir = _release.document, _release.publish_directory, _release.recovery_dir
     sha, verify_release, write_private = _release.sha, _release.verify_release, _release.write_private
 
 Identity = dict[str, str | int]
@@ -123,21 +126,21 @@ def control_identity(connection: Database) -> str | None:
     return None
 
 
-def installation_cluster() -> str:
-    info = tool("pg_controldata", [str(Places(Path.home()).data)])
+def installation_cluster(data: Path | None = None) -> str:
+    info = tool("pg_controldata", [str(data if data is not None else Places(Path.home()).data)])
     match = re.search(r"^Database system identifier:\s*([0-9]+)$", info, re.MULTILINE)
     if match is None:
         raise RecoveryError("The installed PostgreSQL cluster identity is unavailable.")
     return match[1]
 
 
-def cluster_identity(connection: Database, target: Target) -> str:
+def cluster_identity(connection: Database, target: Target, data: Path | None = None) -> str:
     actual = control_identity(connection)
     if target.host.startswith("/"):
         if actual is None:
             raise RecoveryError("The private source role must be able to read its PostgreSQL cluster identity.")
         return actual
-    expected = installation_cluster()
+    expected = installation_cluster(data)
     if actual is not None and actual != expected:
         raise RecoveryError("The installed endpoint and data directory identify different PostgreSQL clusters.")
     return expected
@@ -244,8 +247,11 @@ def check_archive_name(path: Path, database: str) -> None:
 
 def capture(
     target: Target, release_dir: Path, destination: Path, *, maintenance_session: str, exclusive: Exclusive,
-    legacy_release: str | None = None,
+    legacy_release: str | None = None, installed_data: Path | None = None,
 ) -> Path:
+    storage = require_archive()
+    destination = storage.backup_path(destination, allow_missing=True)
+    release_dir = recovery_dir(release_dir, storage)
     if not SESSION.fullmatch(maintenance_session):
         raise RecoveryError("An explicit maintenance session is required.")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_. -]*", target.database) or target.database != target.database.strip():
@@ -256,11 +262,10 @@ def capture(
         check_version(connection)
         source = source_identity(connection, target.host, target.port)
         # The interlock prevents reopening until publication and remains exclusive on failure.
-        with exclusive(source, maintenance_session) as held, publish_directory(destination) as staging:
+        with exclusive(source, maintenance_session) as held, publish_directory(destination, archive=storage) as staging:
             if held != maintenance_session:
                 raise RecoveryError("The exclusive handoff belongs to a different maintenance session.")
-            release_dir = private_dir(release_dir)
-            release, release_sha256 = verify_release(release_dir)
+            release, release_sha256 = verify_release(release_dir, archive=storage)
             if release["kind"] != ("legacy" if legacy_release is not None else "current"):
                 raise RecoveryError("The release record does not describe the requested database kind.")
             if legacy_release is not None:
@@ -272,7 +277,7 @@ def capture(
                 connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
                 if source_identity(connection, target.host, target.port) != source:
                     raise RecoveryError("The source changed before the snapshot.")
-                cluster = cluster_identity(connection, target)
+                cluster = cluster_identity(connection, target, installed_data)
                 data = observations(connection, legacy_release)
                 roles = required_roles(connection)
                 exported = connection.execute("SELECT pg_catalog.pg_export_snapshot()").fetchone()
@@ -300,9 +305,12 @@ def production_exclusive(source: Identity, session: str) -> AbstractContextManag
     return cast(AbstractContextManager[str], boundary(source, session))
 
 
-def read_private(path: Path) -> tuple[dict[str, Any], str]:
+def read_private(path: Path, *, storage: Archive | None = None) -> tuple[dict[str, Any], str]:
+    if storage is not None:
+        path = storage.backup_path(path)
     info = path.lstat()
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+    if (not stat.S_ISREG(info.st_mode)
+            or (storage is None and (info.st_uid != os.getuid() or info.st_mode & 0o077))):
         raise RecoveryError("Recovery receipts and archives must be private regular files.")
     payload = path.read_bytes()
     value = json.loads(payload)
@@ -311,16 +319,17 @@ def read_private(path: Path) -> tuple[dict[str, Any], str]:
     return value, sha(payload)
 
 
-def validate_snapshot(snapshot_dir: Path) -> tuple[dict[str, Any], str, Path]:
-    folder = private_dir(snapshot_dir)
-    snapshot, checksum = read_private(folder / SNAPSHOT)
-    archive = folder / ARCHIVE
+def validate_snapshot(snapshot_dir: Path, *, storage: Archive | None = None) -> tuple[dict[str, Any], str, Path]:
+    folder = recovery_dir(snapshot_dir, storage)
+    snapshot, checksum = read_private(folder / SNAPSHOT, storage=storage)
+    archive = storage.backup_path(folder / ARCHIVE) if storage is not None else folder / ARCHIVE
     info = archive.lstat()
     if (snapshot.get("format") != 1 or snapshot.get("kind") != "arbol-recovery-snapshot"
-            or not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077
+            or not stat.S_ISREG(info.st_mode)
+            or (storage is None and (info.st_uid != os.getuid() or info.st_mode & 0o077))
             or snapshot.get("archiveSha256") != digest(archive)):
         raise RecoveryError("The private archive differs from its snapshot receipt.")
-    verify_release(Path(snapshot["releaseDirectory"]), snapshot["releaseSha256"])
+    verify_release(Path(snapshot["releaseDirectory"]), snapshot["releaseSha256"], archive=storage)
     return snapshot, checksum, archive
 
 
@@ -369,7 +378,7 @@ def restore(target: Target, snapshot_dir: Path, attempt_dir: Path) -> Path:
                 "target": {"host": target.host, "port": target.port, "database": target.database},
                 "targetCluster": cluster, "startedAt": timestamp(),
             })
-        attempt_dir = private_dir(attempt_dir)
+        attempt_dir = recovery_dir(attempt_dir, None)
         with connection.transaction():
             for role in roles:
                 existing = connection.execute("SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = %s", (role,))
@@ -410,7 +419,7 @@ def verify_recovery(
 ) -> dict[str, Any]:
     """Verify the existing proof against the caller's live exclusive handoff and starting pair."""
     snapshot, snapshot_sha256, _ = validate_snapshot(snapshot_dir)
-    receipt, receipt_sha256 = read_private(private_dir(restore_receipt.parent) / restore_receipt.name)
+    receipt, receipt_sha256 = read_private(recovery_dir(restore_receipt.parent, None) / restore_receipt.name)
     expected = {"source": source, "schema": schema, "releaseSha256": release_sha256,
                 "maintenanceSession": maintenance_session}
     if any(snapshot.get(key) != value or receipt.get(key) != value for key, value in expected.items()):
@@ -457,6 +466,9 @@ def main(argv: list[str] | None = None, *, exclusive: Exclusive | None = None) -
                 raise RecoveryError("Legacy capture requires the cutover adapter that verifies both writer sets are fenced.")
             result = capture(target, args.release, args.output, maintenance_session=args.session,
                              exclusive=exclusive or production_exclusive, legacy_release=args.legacy_release)
+    except ArchiveUnavailable as error:
+        print(json.dumps({"status": error.code, "message": str(error)}), file=sys.stderr)
+        return 1
     except (RecoveryError, Refusal) as error:
         print(str(error), file=sys.stderr)
         return 1
