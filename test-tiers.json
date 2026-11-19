@@ -6,7 +6,7 @@
   "counting": "Static definitions and separately labelled programs/scenario functions; not runtime-discovered cases.",
   "mid_review": "Individually reviewed against the raised mid-tier bar under SYL-327; source inspection only, no execution.",
   "counts": {
-    "python_active": 94,
+    "python_active": 96,
     "python_commented": 0,
     "programs_active": 35,
     "node_cases_commented": 0,
@@ -16,15 +16,15 @@
     "low_removed_previously": 12,
     "mimo_registry_cases_active": 0,
     "mimo_registry_cases_commented": 0,
-    "mid_available": 150,
+    "mid_available": 151,
     "mid_by_kind": {
       "entrypoint": 2,
       "scenario": 43,
       "support": 2,
-      "python": 86,
+      "python": 87,
       "program": 17
     },
-    "top_available": 6,
+    "top_available": 7,
     "low_removed_SYL_327": 505,
     "low_removed_total": 517,
     "mid_superseded_commented": 2
@@ -1563,7 +1563,7 @@
       "status": "active",
       "line_before": 216,
       "end_before": 246,
-      "reason": "Delays one completed database write while another window changes settings. Observes the real Bridge subscription to reject stale publication after the older reply resumes. Uses the private canonical PostgreSQL baseline and the Bridge 2 singleton endpoint.",
+      "reason": "Delays one completed database write while another window changes settings. Observes the real Bridge subscription to reject stale publication after the older reply resumes. Uses the private canonical PostgreSQL baseline, brought to the Build's lowest admitted schema revision through the fenced upgrade (SIM-22), and the Bridge 2 singleton endpoint.",
       "review": "individual",
       "line": 16,
       "file_sha256": "ec38e4a2c9645b2583e53c4009ebef7cb71f85fbf55dd5cf95a31ce7b2310c4b",
@@ -4761,6 +4761,41 @@
       "previous_line": 18,
       "selector": "test_top_exchange_groups.GroupIdentity.test_reused_or_unanchored_group_is_never_killed_after_term",
       "support_file": "tests/exchange_groups_support.py"
+    },
+    {
+      "repo": "arbol",
+      "file": "tests/top/test_top_session_imports.py",
+      "id": "tests/top/test_top_session_imports.py::ImportedChats.test_import_bypass_ends_with_its_transaction",
+      "name": "test_import_bypass_ends_with_its_transaction",
+      "class": "ImportedChats",
+      "kind": "python",
+      "tier": "top",
+      "status": "active",
+      "reason": "On revision 3's SQL over the canonical baseline of a private cluster, one session inserts Exchanges for an imported and a plain chat: refused with P0001 imported_chat, accepted, accepted inside a transaction with SET LOCAL arbol.importing = 'on', and refused again in the next transaction, where the setting reads ''. A bypass that outlived the importer's transaction would let a later send add an Exchange to an imported chat (IMP-0.16).",
+      "review": "individual",
+      "line": 45,
+      "file_sha256": "01590d2670ef70682afafacaa91e7d87c12dc7b00f26b1e749d00bfdd2cfc092",
+      "selector": "test_top_session_imports.ImportedChats.test_import_bypass_ends_with_its_transaction",
+      "support_file": "tests/backend/support.py",
+      "admitted_by": "SIM-3"
+    },
+    {
+      "repo": "arbol",
+      "file": "tests/mid/test_mid_import_lines.py",
+      "id": "tests/mid/test_mid_import_lines.py::Lines.test_records_split_at_newline_bytes_across_chunks_of_a_zstd_stream",
+      "name": "test_records_split_at_newline_bytes_across_chunks_of_a_zstd_stream",
+      "class": "Lines",
+      "kind": "python",
+      "tier": "mid",
+      "status": "available",
+      "reason": "Reads a zstd session file whose records cross and end exactly at 64 KiB chunk boundaries, hold raw U+2028, U+2029 and U+0085 in strings and a raw CR between tokens, and end with an unfinished record; the records yielded must equal the list the test wrote, and the file cut inside a frame fails unreadable_session naming only the file. A record lost, split or merged at a chunk boundary, or an unfinished record imported as finished, corrupts the imported session (IMP-1.2). Distinct from the event-file top case: a buffer carried across reads of a decompression stream and the separators str.splitlines honours. Top tier on merit; mid until the packaged image holds arbol_import (SIM-13), when SIM-14 moves it.",
+      "review": "individually-reviewed-higher-bar",
+      "line": 27,
+      "file_sha256": "03ad6ff4323fd42b7c09a70dad2cdde966464caac86cafc2ba1eadbb67b920e7",
+      "selector": "test_mid_import_lines.Lines.test_records_split_at_newline_bytes_across_chunks_of_a_zstd_stream",
+      "description": "import.line-splitting; import.unreadable-session",
+      "execution": "explicit-testing-task-only",
+      "admitted_by": "SIM-3"
     }
   ],
   "removed_low": [
