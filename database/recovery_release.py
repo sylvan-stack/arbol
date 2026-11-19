@@ -567,10 +567,10 @@ def capture_build(
     manifest_file = payload / "package-manifest.json"
     if manifest_file.is_file():
         manifest = document(manifest_file)
-        # Sealed Driver manifests predate the installation layout declaration.
-        # Their exact Build/source identity was verified above and the layout is
-        # bound by the committed description and registry record.
-        packaged_layout = manifest.get("installationLayout", layout if payload == sealed else 1)
+        # The sealed Driver and classifier manifests originally omitted this
+        # field. Their committed description and registry bind the layout.
+        layout_in_description = payload == sealed or component == "arbol-classifier"
+        packaged_layout = manifest.get("installationLayout", layout if layout_in_description else 1)
         if (manifest.get("format") != 1 or manifest.get("candidate", False) is not False
                 or type(packaged_layout) is not int or packaged_layout != layout
                 or any(manifest.get(key) != record.get(key)
