@@ -293,6 +293,22 @@ def fenced_step(arguments: list[str]) -> int:
     """
     runtime, action, *rest = arguments
     release: Any = import_module("recovery_release")
+    if action == "release":
+        # The owner's decision of 19 November 2026 (SIM-22): record_release accepts only working Builds, and the
+        # package is still building while its gate runs, so the fixture writes a disposable stand-in in the format
+        # verify_release checks, with the recorder's own helpers.
+        destination, receipt, configuration, build, commit, declared, role = rest
+        with release.publish_directory(Path(destination)) as output:
+            labels = release.copy_configuration({"installation": configuration}, output / "configuration")
+            inputs = release.copy_configuration({}, output / "inputs")
+            entry = {"component": "arbol", "build": build, "sourceCommit": commit,
+                     "receiptSha256": release.digest(Path(receipt)), "schemaCompatibility": json.loads(declared),
+                     "standIn": f"{role}: disposable test state of SingleInstallation, not recorded by record_release"}
+            release.write_private(output / "release.json", {
+                "format": 1, "kind": "current", "builds": [entry], "configuration": labels, "inputs": inputs,
+                "files": release.tree(output)})
+        print(json.dumps({"releaseSha256": release.verify_release(Path(destination))[1]}))
+        return 0
     if action == "verify-release":
         folder, expected = rest
         print(json.dumps({"releaseSha256": release.verify_release(Path(folder), expected)[1]}))
@@ -359,6 +375,30 @@ class SingleInstallation:
         if not isinstance(value, dict):
             raise RuntimeError(f"The fenced {arguments[0]} step gave no result object.")
         return value
+
+    def source_commit(self, build: str) -> str:
+        if build != "0":
+            return str(json.loads((self.package / "package-manifest.json").read_bytes())["source"]["commit"])
+
+        def git(*arguments: str) -> str:
+            return subprocess.run(["git", *arguments], cwd=self.package, capture_output=True, check=True,
+                                  timeout=10).stdout.decode().strip()
+
+        return git("rev-parse", "HEAD") + ("-dirty" if git("status", "--porcelain") else "")
+
+    def release_records(self, recovery: Path, build: str, receipt: Path,
+                        compatibility: tuple[tuple[int, int], ...]) -> tuple[str, str]:
+        """The prior release, standing in for the Build at the baseline, and the upgrade release: their digests."""
+        commit = self.source_commit(build)
+        digests = []
+        for name, declared in (("prior-release", ((BASELINE["compatibilityVersion"], BASELINE["revision"]),)),
+                               ("upgrade-release", compatibility)):
+            pairs = json.dumps([{"compatibilityVersion": version, "minRevision": minimum}
+                                for version, minimum in declared])
+            reply = self.fenced("release", str(recovery / name), str(receipt), str(self.settings / "database.json"),
+                                build, commit, pairs, name)
+            digests.append(str(reply["releaseSha256"]))
+        return digests[0], digests[1]
 
     def open_admission(self) -> None:
         """Run off the asyncio event loop: the operator gate runs its own SQL probes."""
