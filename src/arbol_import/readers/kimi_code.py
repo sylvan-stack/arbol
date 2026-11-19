@@ -6,9 +6,10 @@ import json
 import mimetypes
 import re
 from base64 import b64decode
-from collections.abc import Iterator
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from heapq import merge
 from pathlib import Path
 from typing import Any, Never
 from urllib.parse import unquote, unquote_to_bytes
@@ -21,6 +22,7 @@ from .form import (
     SessionFailure,
     State,
     Steer,
+    Subagent,
     TextBlock,
     ToolCall,
     Trigger,
@@ -382,6 +384,7 @@ class _Lane:
     current: _NativeTurn | None = None
     call_turns: dict[str, _NativeTurn] = field(default_factory=dict)
     requests: dict[str, list[_Record]] = field(default_factory=dict)
+    native_calls: dict[str, _NativeTurn] = field(default_factory=dict)
 
     def append(self, record: _Record) -> None:
         data = record.data
@@ -397,6 +400,7 @@ class _Lane:
             self.turns.clear()
             self.call_turns.clear()
             self.requests.clear()
+            self.native_calls.clear()
             self.current = None
             return
         if kind == "turn.prompt":
@@ -429,6 +433,12 @@ class _Lane:
         turn = self.turns.get(key) if key is not None else self.current
         if kind == "tool.result" and (parent := _string(data.get("parentUuid"))):
             turn = self.call_turns.get(parent, turn)
+        if kind == "subagent.spawned":
+            if not _string(data.get("subagentId")):
+                record.invalid(kind)
+            call_uuid = _string(data.get("parentToolCallUuid")) or ""
+            call_id = _string(data.get("parentToolCallId")) or ""
+            turn = self.call_turns.get(call_uuid) or self.native_calls.get(call_id) or turn
         if kind == "context.undo":
             if turn is None and self.turns:
                 turn = next(reversed(self.turns.values()))
@@ -437,6 +447,7 @@ class _Lane:
                 if not any(item.kind == "turn.prompt" for item in turn.records):
                     del self.turns[turn.key]
                     self.call_turns = {uuid: owner for uuid, owner in self.call_turns.items() if owner is not turn}
+                    self.native_calls = {key: owner for key, owner in self.native_calls.items() if owner is not turn}
                     if self.current is turn:
                         self.current = None
                 else:
@@ -480,6 +491,7 @@ class _Lane:
                 turn.records.append(record)
             if kind == "tool.call" and (uuid := _string(data.get("uuid"))):
                 self.call_turns[uuid] = turn
+                self.native_calls[data['toolCallId']] = turn
 
 
 def _content(record: _Record) -> TextBlock | None:
@@ -676,3 +688,109 @@ def _responses(turn: _NativeTurn, counted: set[str]) -> Iterator[Response]:
             if uuid in starts and uuid not in counted and (usage := _usage(record)) is not None:
                 counted.add(uuid)
                 yield Response(starts[uuid], usage)
+
+
+@dataclass(frozen=True)
+class _Launch:
+    parent_agent: str
+    parent_turn: _NativeTurn
+    call_id: str
+    at: datetime
+
+
+def _launches(lanes: dict[str, _Lane]) -> dict[str, list[_Launch]]:
+    launches: dict[str, list[_Launch]] = {}
+    for agent, lane in lanes.items():
+        by_uuid = {record.data["uuid"]: (turn, record) for turn in lane.turns.values()
+                   for record in turn.records if record.kind == "tool.call"}
+        for turn in lane.turns.values():
+            calls = {record.data["toolCallId"]: (turn, record)
+                     for record in turn.records if record.kind == "tool.call"}
+            for record in turn.records:
+                if record.kind != "subagent.spawned":
+                    continue
+                data = record.data
+                uuid = _string(data.get("parentToolCallUuid")) or ""
+                call_id = _string(data.get("parentToolCallId")) or ""
+                parent = by_uuid.get(uuid) or calls.get(call_id)
+                if parent is None:
+                    continue
+                parent_turn, call = parent
+                child: str = data["subagentId"]
+                launches.setdefault(child, []).append(_Launch(agent, parent_turn, call.data["toolCallId"], call.time()))
+    for entries in launches.values():
+        entries.sort(key=lambda launch: launch.at)
+    return launches
+
+
+def _turn_at(lane: _Lane, at: datetime) -> _NativeTurn | None:
+    for turn in reversed(lane.turns.values()):
+        end = turn.end.time() if turn.end is not None else turn.last_at
+        if turn.start.time() <= at <= end:
+            return turn
+    return None
+
+
+def _route(agent: str, at: datetime, first_at: datetime, main: _Lane,
+           launches: dict[str, list[_Launch]]) -> tuple[_NativeTurn | None, str | None]:
+    """Find the main turn and the immediate launch call, walking parent lanes."""
+    parent_call = None
+    visited = set()
+    while agent not in visited:
+        visited.add(agent)
+        entries = launches.get(agent, [])
+        launch = next((entry for entry in reversed(entries) if entry.at <= at), entries[0] if entries else None)
+        if launch is None:
+            return _turn_at(main, first_at), parent_call
+        if parent_call is None:
+            parent_call = launch.call_id
+        if launch.parent_agent == "main":
+            return launch.parent_turn, parent_call
+        agent = launch.parent_agent
+        at = first_at = launch.parent_turn.start.time()
+    return _turn_at(main, first_at), None
+
+
+@dataclass
+class _ChildWork:
+    first_at: datetime
+    parent_call: str | None
+    failed: bool = False
+    usage: Usage = field(default_factory=Usage)
+    items: list[Item] = field(default_factory=list)
+
+
+def _item_time(item: Item) -> datetime:
+    return item.at if isinstance(item, TextBlock) else item.started_at
+
+
+def _project(lanes: dict[str, _Lane], home: Path, session: _SavedSession, cwd: str | None) -> Iterator[Turn]:
+    main = lanes["main"]
+    launches = _launches(lanes)
+    children: dict[str, dict[str, _ChildWork]] = {}
+    for agent, lane in lanes.items():
+        if agent == "main" or lane.first_at is None:
+            continue
+        counted: set[str] = set()
+        native_turns: Iterable[_NativeTurn | None] = lane.turns.values() or (None,)
+        for index, turn in enumerate(native_turns):
+            at = turn.start.time() if turn is not None else lane.first_at
+            first_at = lane.first_at if index == 0 else at
+            root, parent_call = _route(agent, at, first_at, main, launches)
+            if root is None:
+                continue
+            work = children.setdefault(root.key, {}).setdefault(agent, _ChildWork(first_at, parent_call))
+            if turn is not None:
+                work.failed = turn.end is not None and turn.end.data["reason"] not in ("cancelled", "completed")
+                for response in _responses(turn, counted):
+                    work.usage += response.usage
+                work.items.extend(_items(turn, home, session, agent=agent, parent_call=parent_call))
+
+    counted_main: set[str] = set()
+    for turn in main.turns.values():
+        root_items = _items(turn, home, session)
+        agents = children.get(turn.key, {})
+        items = tuple(merge(root_items, *(work.items for work in agents.values()), key=_item_time))
+        subagents = tuple(Subagent(agent, work.parent_call, work.first_at, work.failed, work.usage)
+                         for agent, work in agents.items())
+        yield replace(turn.project(cwd, counted_main), items=items, subagents=subagents)
