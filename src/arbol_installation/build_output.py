@@ -1,9 +1,13 @@
-"""Release completed build and test output for local cleanup."""
+"""Release completed build and test output and sweep the private queue."""
 
 from __future__ import annotations
 
+import asyncio
+import fcntl
+import logging
 import os
 import plistlib
+import re
 import subprocess
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager, suppress
@@ -11,7 +15,13 @@ from pathlib import Path
 from unicodedata import normalize
 from uuid import uuid4
 
+from .admission import lock
+
 QUEUE = ".arbol-released"
+SWEEP_LOCK = ".sweep.lock"
+SWEEP_INTERVAL = 25 * 60
+RUN_ID = re.compile(r"[0-9a-f]{32}")
+LOG = logging.getLogger(__name__)
 
 
 @contextmanager
@@ -90,3 +100,66 @@ def release_run(home: Path, run: Path, evidence: Path) -> Path:
         name = uuid4().hex
         os.rename(parts[-1], name, src_dir_fd=parent_fd, dst_dir_fd=queue_fd)
     return root / QUEUE / name
+
+
+async def remove_run(path: Path) -> None:
+    # The filesystem limit is enforced during traversal, even for a late mount.
+    process = await asyncio.create_subprocess_exec(
+        "/bin/rm", "-rfx", "--", str(path),
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        if await asyncio.wait_for(process.wait(), timeout=60):
+            raise OSError("The released run could not be fully removed.")
+    except (TimeoutError, asyncio.CancelledError):
+        with suppress(ProcessLookupError):
+            process.kill()
+        await process.wait()
+        raise
+
+
+async def sweep(home: Path) -> None:
+    queue = home.resolve() / "Builds" / QUEUE
+    with ExitStack() as stack:
+        try:
+            root_fd = stack.enter_context(directory(queue.parent))
+            queue_fd = stack.enter_context(directory(QUEUE, root_fd, private=True))
+        except FileNotFoundError:
+            return
+        device = os.fstat(root_fd).st_dev
+        if os.fstat(queue_fd).st_dev != device:
+            raise ValueError("The build output queue must be on the same filesystem as ~/Builds.")
+        runs = [name for name in os.listdir(queue_fd) if RUN_ID.fullmatch(name)]
+        if not runs:
+            return
+        with suppress(FileExistsError):
+            os.close(os.open(SWEEP_LOCK, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=queue_fd))
+        try:
+            stack.enter_context(lock(queue_fd, SWEEP_LOCK, fcntl.LOCK_EX))
+        except BlockingIOError:
+            return  # Another backend is sweeping this installation's queue.
+        for name in runs:
+            path = queue / name
+            try:
+                with directory(name, queue_fd) as run_fd:
+                    info = os.fstat(run_fd)
+                    if info.st_dev != device or contains_path(path, await asyncio.to_thread(attached_paths)):
+                        continue
+                    if not os.path.samestat(info, path.lstat()):
+                        continue
+                    await remove_run(path)
+            except FileNotFoundError:
+                continue
+            except (OSError, ValueError) as error:
+                LOG.warning("Deferred cleanup of %s: %s", path, error)
+
+
+async def sweep_periodically(home: Path) -> None:
+    clock = asyncio.get_running_loop().time
+    while True:
+        next_sweep = clock() + SWEEP_INTERVAL
+        try:
+            await sweep(home)
+        except (OSError, ValueError) as error:
+            LOG.warning("Deferred build output cleanup: %s", error)
+        await asyncio.sleep(max(0, next_sweep - clock()))
