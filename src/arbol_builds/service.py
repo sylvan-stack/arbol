@@ -561,7 +561,7 @@ def last_start(folder: str) -> str | None:
 def build_details(registry: str, record: Record) -> Record:
     """Derived inventory fields never become part of build.json."""
     started = last_start(os.path.join(registry, record["component"], record["build"]))
-    return {**record, "lastStart": started,
+    return {**record, "installationLayout": installation_layout(record), "lastStart": started,
             "unusedSince": started or record.get("finishedAt") or record["startedAt"]}
 
 

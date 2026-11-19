@@ -2,9 +2,9 @@
 
 arbol-builds writes the text of this module, followed by one call of launch(), into the file
 named after each component: that file is the launcher (service.write_launcher). The launcher
-arbol-trunk holds it too, before the text of roots.py and trunk_launcher.py. The module
-therefore uses the standard library only and imports nothing of this package. The tool imports
-the same functions, so the launcher and the tool judge a record in the same way.
+arbol-trunk holds it too, before its schema reader and selector. The generated launcher also
+contains the installation layout constant. The tool imports the same functions, so the launcher
+and the tool judge a record in the same way.
 """
 
 import fcntl
@@ -18,6 +18,8 @@ import sys  # noqa: F401  (the line arbol-builds appends calls sys.exit)
 import time
 from collections.abc import Callable
 from typing import Any
+
+from arbol_installation.paths import INSTALLATION_LAYOUT
 
 type Record = dict[str, Any]
 
@@ -158,6 +160,10 @@ def installation_layout(record: Record) -> int | None:
     return value if type(value) is int and positive(value) else None
 
 
+def layout_fits(record: Record) -> bool:
+    return installation_layout(record) == INSTALLATION_LAYOUT
+
+
 def backend_fits(record: Record, pair: tuple[int, int] | None) -> bool:
     if pair is None or "root" in record:
         return False
@@ -271,7 +277,8 @@ def named_runnable(registry: str, record: Record) -> bool:
 
 
 def default_record(registry: str, records: list[Record]) -> Record | None:
-    return next((record for record in records if record["status"] == "working" and runnable(registry, record)), None)
+    return next((record for record in records if record["status"] == "working" and layout_fits(record)
+                 and runnable(registry, record)), None)
 
 
 def plain(value: object) -> object:
@@ -414,7 +421,8 @@ def launch(registry: str, component: str, args: list[str], *, schema: tuple[int,
         signal.signal(signal.SIGINT, signal.SIG_DFL)
     use_descriptor: int | None = None
     try:
-        records = read_records(registry, component)
+        registered = read_records(registry, component)
+        records = [record for record in registered if layout_fits(record)]
         if component == "arbol":
             if schema is None:
                 code, message = schema_error or ("schema_invalid", "The installed schema has not been verified.")
@@ -423,8 +431,8 @@ def launch(registry: str, component: str, args: list[str], *, schema: tuple[int,
             records = [record for record in records if backend_fits(record, schema)]
         available = [record["build"] for record in records if named_runnable(registry, record)]
         selected: Record | None = None
-        explicit_selection = args[:1] == ["-v"]
-        if explicit_selection:
+        number: str | None = None
+        if args[:1] == ["-v"]:
             number = args[1] if len(args) > 1 else ""
             if number and BUILD_PATTERN.fullmatch(number):
                 selected = next((record for record in records
@@ -433,9 +441,18 @@ def launch(registry: str, component: str, args: list[str], *, schema: tuple[int,
         else:
             selected = default_record(registry, records)
         if selected is None:
-            message = (f"No runnable Build selected for {component}. "
-                       f"Available Builds: {', '.join(available) or 'none'}.")
-            write_all(1, json_line({"error": {"code": "build_unavailable", "message": message, "available": available}}))
+            eligible = {record["build"] for record in records}
+            incompatible = any(
+                record["build"] not in eligible and (
+                    (record["status"] == "working" and runnable(registry, record)) if number is None
+                    else (record["build"] == number and named_runnable(registry, record))
+                )
+                for record in registered
+            )
+            code = "no_fit" if incompatible else "build_unavailable"
+            message = (f"No runnable Build selected for {component} on installation layout {INSTALLATION_LAYOUT}. "
+                       f"Compatible runnable Builds: {', '.join(available) or 'none'}.")
+            write_all(1, json_line({"error": {"code": code, "message": message, "available": available}}))
             return 1
         line = warning(component, selected)
         if line is not None:
@@ -459,7 +476,7 @@ def launch(registry: str, component: str, args: list[str], *, schema: tuple[int,
         # a caller copy. Other components retain their exact environment behavior.
         if component == "arbol-browser":
             os.environ["ARBOL_BROWSER_SELECTION"] = json.dumps({
-                "format": 1, "build": selected["build"], "explicit": explicit_selection,
+                "format": 1, "build": selected["build"], "explicit": number is not None,
                 "directory": os.path.realpath(os.path.join(registry, component, selected["build"])),
                 "guard": os.path.realpath(os.path.join(registry, component, ".uses", selected["build"])),
             }, separators=(",", ":"))

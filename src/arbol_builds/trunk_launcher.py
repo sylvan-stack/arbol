@@ -6,6 +6,8 @@ The generated arbol-trunk launcher embeds this module after the registry and sch
 import os
 import signal
 
+from arbol_installation.paths import INSTALLATION_LAYOUT
+
 from .launcher import (
     BUILD_PATTERN,
     COMMAND_WORDS,
@@ -16,7 +18,9 @@ from .launcher import (
     default_record,
     executable_entry,
     hold_build_use,
+    installation_layout,
     json_line,
+    layout_fits,
     named_runnable,
     read_records,
     readable,
@@ -81,8 +85,8 @@ def known_trunk(registry: str, code: str) -> bool:
 
 
 def fits(record: Record, pair: SchemaPair | None) -> bool:
-    """The installed compatibility version matches, and the installed revision meets the Build's minimum."""
-    return pair is not None and any(
+    """Check installation layout and then the independent installed schema pair."""
+    return layout_fits(record) and pair is not None and any(
         item["compatibilityVersion"] == pair.compatibility_version and item["minRevision"] <= pair.revision
         for item in record.get("schemaCompatibility", [])
     )
@@ -114,7 +118,7 @@ def pick_build(registry: str, component: str, number: str | None, pair: SchemaPa
         else:
             why = f"{label} does not fit"
     available = [record["build"] for record in records if fits(record, pair) and named_runnable(registry, record)]
-    raise Refused("no_fit", f"{why} the installed schema at revision {pair.revision} "
+    raise Refused("no_fit", f"{why} installation layout {INSTALLATION_LAYOUT} and schema revision {pair.revision} "
                             f"(compatibility version {pair.compatibility_version}). "
                             f"Compatible runnable Builds: {', '.join(available) or 'none'}.", available)
 
@@ -138,6 +142,7 @@ def trunk_list(registry: str, schema: SchemaState, codes: list[str]) -> dict[str
         selected = chosen(registry, records, schema.pair)
         trunks.append({"trunk": code, "default": code == DEFAULT_TRUNK, "builds": [
             {"build": record["build"], "status": record["status"],
+             "installationLayout": installation_layout(record),
              "schemaCompatibility": record.get("schemaCompatibility"),
              "fits": fits(record, schema.pair), "runnable": named_runnable(registry, record),
              "chosen": record is selected}
@@ -145,7 +150,7 @@ def trunk_list(registry: str, schema: SchemaState, codes: list[str]) -> dict[str
     schema_view: dict[str, object] = {"status": schema.status}
     if schema.pair is not None:
         schema_view.update(revision=schema.pair.revision, compatibilityVersion=schema.pair.compatibility_version)
-    return {"schema": schema_view, "trunks": trunks}
+    return {"schema": schema_view, "installationLayout": INSTALLATION_LAYOUT, "trunks": trunks}
 
 
 def launch_trunk(registry: str, args: list[str]) -> int:
