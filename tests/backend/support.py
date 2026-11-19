@@ -288,11 +288,21 @@ FENCED = ("import sys; from pathlib import Path; package = Path(sys.argv[1]); "
 def fenced_step(arguments: list[str]) -> int:
     """In the child: one fenced step, printing one JSON object.
 
-    Snapshot, restore and upgrade run what the command lines of `recovery.py` and `migrate_schema.py` run. The one
-    difference is the `exclusive` adapter: it holds the fixture's runtime instead of the installed one, as
-    `database/README.md` says qualification does.
+    Snapshot, restore and upgrade use the production implementation with the disposable runtime and archive.
     """
     runtime, action, *rest = arguments
+    storage: Any = import_module("archive_volume")
+    archive_root = (Path(runtime).parent / "recovery").resolve(strict=True)
+
+    class DisposableArchive:
+        def backup_path(self, path: Path, *, allow_missing: bool = False) -> Path:
+            canonical = path.resolve(strict=not allow_missing)
+            if path != canonical or not canonical.is_relative_to(archive_root):
+                raise storage.ArchiveUnavailable("The fixture only uses its own disposable archive.")
+            return canonical
+
+    # Bind the child process's test-only archive before recovery imports the checker.
+    storage.require_archive = DisposableArchive
     release: Any = import_module("recovery_release")
     if action == "release":
         # The owner's decision of 19 November 2026 (SIM-22): record_release accepts only working Builds, and the
