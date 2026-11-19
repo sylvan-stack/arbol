@@ -10,7 +10,7 @@
   "schemaCompatibility": [
     {
       "compatibilityVersion": 1,
-      "minRevision": 2
+      "minRevision": 3
     }
   ]
 }

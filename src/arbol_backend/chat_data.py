@@ -96,7 +96,8 @@ class Reader:
                 "e.accepted_at,e.ended_at,coalesce((SELECT left(m.text,200) FROM exchanges first "
                 "JOIN messages m ON m.exchange_id=first.id AND m.position=0 "
                 "WHERE first.chat_id=c.id AND first.replaced_by IS NULL ORDER BY first.number LIMIT 1),''),"
-                + local + " FROM chats c "
+                + local + ",ci.tool,ci.kind FROM chats c "
+                "LEFT JOIN public.chat_imports ci ON ci.chat_id=c.id "
                 "LEFT JOIN LATERAL (SELECT * FROM exchanges WHERE chat_id=c.id AND replaced_by IS NULL "
                 "ORDER BY number DESC LIMIT 1) e ON true "
                 + ("LEFT JOIN chat_marks cm ON cm.chat_id=c.id " if layout.own else "")
@@ -104,7 +105,7 @@ class Reader:
             summaries: list[Params] = []
             for row in rows:
                 (chat, title, created, exchange, number, state, error, trunk, build, saved_route, folder, accepted, ended,
-                 first, has_draft, ongoing, archived) = row
+                 first, has_draft, ongoing, archived, tool, kind) = row
                 activity: datetime = max(accepted, ended) if ended else accepted or created
                 value: Params = {"chat": str(chat), "title": title, "firstMessage": first,
                                  "activityAt": iso(activity), "hasDraft": has_draft, "ongoing": ongoing}
@@ -117,6 +118,8 @@ class Reader:
                     value["workingFolder"] = folder
                 if archived is not None:
                     value["archived"] = True
+                if tool is not None:
+                    value["imported"] = {"tool": tool, "kind": kind}
                 summaries.append(value)
             summaries.sort(key=lambda row: (row["activityAt"], row["chat"]), reverse=True)
             return {"kind": "snapshot", "chats": summaries}
@@ -195,7 +198,10 @@ class Reader:
     async def chat(self, params: Params) -> Params:
         chat = params["chat"]
         async with self.session() as (session, layout):
-            headers = await session.execute("SELECT title,created_at FROM chats WHERE id=%s", [chat])
+            headers = await session.execute(
+                "SELECT c.title,c.created_at,ci.tool,ci.kind FROM chats c "
+                "LEFT JOIN public.chat_imports ci ON ci.chat_id=c.id WHERE c.id=%s", [chat],
+            )
             counts = await session.execute(
                 "SELECT count(*) FROM exchanges WHERE chat_id=%s AND replaced_by IS NULL", [chat]
             )
@@ -214,7 +220,10 @@ class Reader:
             info: Params = {"chat": chat, "firstMessage": first[0][0] if first else "", "title": headers[0][0] if headers else None,
                             "exchangeCount": counts[0][0], "usage": totals}
             if headers:
-                info["createdAt"] = iso(headers[0][1])
+                _, created, tool, kind = headers[0]
+                info["createdAt"] = iso(created)
+                if tool is not None:
+                    info["imported"] = {"tool": tool, "kind": kind}
             exchanges, more = await self.exchanges(session, layout, chat)
             local: Params = {"draft": None, "settings": {}, "marks": {"ongoing": False}}
             if layout.own:
