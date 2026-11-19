@@ -11,6 +11,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+from arbol_installation.paths import installation_root, prepare_installation
+
 from .model import AgentRecord
 
 IDENTIFIER = re.compile(r"[A-Za-z0-9-]+")
@@ -21,7 +23,7 @@ def folder() -> Path:
     override = os.environ.get("ARBOL_AGENTS_DIR")
     if override:
         return Path(os.path.abspath(os.path.expanduser(override)))
-    return Path.home() / "Library" / "Application Support" / "Arbol" / "agents"
+    return installation_root() / "agents"
 
 
 class Store:
@@ -58,6 +60,8 @@ class Store:
 
     @contextmanager
     def locked(self) -> Iterator[None]:
+        if self.folder == installation_root() / "agents":
+            prepare_installation()
         self.folder.mkdir(parents=True, mode=0o700, exist_ok=True)
         os.chmod(self.folder, 0o700)
         descriptor = os.open(self.folder / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
