@@ -17,7 +17,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import NoReturn
 
-from .form import Kind, SessionFailure, Source, unknown_record
+from .form import Kind, SessionFailure, Source, State, unknown_record
 
 _DATABASE = "mimocode.db"
 _DATABASE_FILES = (_DATABASE, f"{_DATABASE}-wal", f"{_DATABASE}-shm")
@@ -181,6 +181,11 @@ class _Message:
     created: datetime
     data: _Object
     parts: tuple[_Part, ...]
+    completed: datetime | None
+    finish: str | None
+    error_kind: str | None
+    error_text: str | None
+    model: str | None
 
 
 def _unknown(record: str) -> NoReturn:
@@ -192,6 +197,10 @@ def _string(value: object, record: str) -> str:
     if not isinstance(value, str):
         _unknown(record)
     return value
+
+
+def _optional_string(value: object, record: str) -> str | None:
+    return None if value is None else _string(value, record)
 
 
 def _id(value: object, record: str) -> str:
@@ -236,6 +245,10 @@ def _time(value: object, record: str) -> datetime:
         _unknown(record)
 
 
+def _optional_time(value: object, record: str) -> datetime | None:
+    return None if value is None else _time(value, record)
+
+
 def _session_info(row: sqlite3.Row, facts: _KindFacts) -> _SessionInfo:
     facts.title = _string(row["title"], "session")
     facts.directory = _string(row["directory"], "session")
@@ -276,10 +289,19 @@ def _message(row: sqlite3.Row, parts: list[sqlite3.Row], facts: _KindFacts) -> _
     lane = _id(row["agent_id"], "message")
     created = _time(row["time_created"], "message")
     message_id = _id(row["id"], "message")
+    message_time = _optional_object(data.get("time"), "message")
+    _optional_time(message_time.get("created"), "message")
+    completed = _optional_time(message_time.get("completed"), "message")
+    finish = _optional_string(data.get("finish"), "message")
+    error_kind, error_text = _message_error(data.get("error"))
+    model = _assistant_model(data) if role == "assistant" else None
     name = data.get("agent")
     if lane != "main" and isinstance(name, str) and name.startswith("probe-"):
         facts.probe_actor = True
-    return _Message(message_id, lane, role, parent, created, data, tuple(_part(part, facts) for part in parts))
+    return _Message(
+        message_id, lane, role, parent, created, data, tuple(_part(part, facts) for part in parts),
+        completed, finish, error_kind, error_text, model,
+    )
 
 
 def _read_messages(
@@ -377,3 +399,37 @@ def _main_turns(messages: list[_Message]) -> tuple[list[_Turn], dict[str, _Turn]
             owner.assistants.append(message)
             owner_by_assistant[message.id] = owner
     return turns, owner_by_assistant
+
+
+def _message_error(value: object) -> tuple[str | None, str | None]:
+    if value is None:
+        return None, None
+    error = _object(value, "message")
+    details = _optional_object(error.get("data"), "message")
+    return _id(error.get("name"), "message"), _optional_string(details.get("message"), "message")
+
+
+def _assistant_model(data: _Object) -> str | None:
+    provider = _optional_string(data.get("providerID"), "message")
+    model = _optional_string(data.get("modelID"), "message")
+    return f"{provider}/{model}" if provider and model else None
+
+
+def _turn_end(turn: _Turn) -> datetime:
+    if turn.assistants and (completed := turn.assistants[-1].completed) is not None:
+        return completed
+    messages = [turn.user, *turn.assistants]
+    return max(
+        max(message.created, *(part.created for part in message.parts))
+        if message.parts else message.created
+        for message in messages
+    )
+
+
+def _state(assistant: _Message | None) -> tuple[State, str | None, str | None]:
+    if assistant is not None:
+        if assistant.error_kind is not None:
+            return "failed", assistant.error_text, assistant.error_kind
+        if assistant.finish == "stop":
+            return "completed", None, None
+    return "interrupted", None, None
