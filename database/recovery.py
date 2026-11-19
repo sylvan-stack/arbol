@@ -355,9 +355,11 @@ def check_isolated(connection: Database, target: Target, snapshot: dict[str, Any
 
 
 def restore(target: Target, snapshot_dir: Path, attempt_dir: Path) -> Path:
+    storage = require_archive()
+    attempt_dir = storage.backup_path(attempt_dir, allow_missing=True)
     if not target.host.startswith("/"):
         raise RecoveryError("Restore requires an explicit isolated private socket.")
-    snapshot, snapshot_sha256, archive = validate_snapshot(snapshot_dir)
+    snapshot, snapshot_sha256, archive = validate_snapshot(snapshot_dir, storage=storage)
     if target.database != snapshot["source"]["database"]:
         raise RecoveryError("The fresh isolated database must use the original archive's database name.")
     check_archive_name(archive, target.database)
@@ -371,14 +373,14 @@ def restore(target: Target, snapshot_dir: Path, attempt_dir: Path) -> Path:
         if not isinstance(roles, list) or any(not isinstance(role, str) or not role for role in roles):
             raise RecoveryError("The archive role inventory is invalid.")
         # Publish an incomplete record before the first mutation, so command loss is never proof.
-        with publish_directory(attempt_dir) as staging:
+        with publish_directory(attempt_dir, archive=storage) as staging:
             write_private(staging / "restore.json", {
                 "format": 1, "kind": "arbol-recovery-restore", "status": "incomplete",
                 "snapshotSha256": snapshot_sha256, "archiveSha256": snapshot["archiveSha256"],
                 "target": {"host": target.host, "port": target.port, "database": target.database},
                 "targetCluster": cluster, "startedAt": timestamp(),
             })
-        attempt_dir = recovery_dir(attempt_dir, None)
+        attempt_dir = recovery_dir(attempt_dir, storage)
         with connection.transaction():
             for role in roles:
                 existing = connection.execute("SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = %s", (role,))
@@ -397,7 +399,7 @@ def restore(target: Target, snapshot_dir: Path, attempt_dir: Path) -> Path:
     if recovered != snapshot["observation"] or recovered["schema"] != snapshot["schema"]:
         raise RecoveryError("The recovered schema or representative rows differ from the source snapshot.")
     # Recheck private dependencies and archive after the database operation, before marking success.
-    _, verified_sha256, _ = validate_snapshot(snapshot_dir)
+    _, verified_sha256, _ = validate_snapshot(snapshot_dir, storage=storage)
     if verified_sha256 != snapshot_sha256:
         raise RecoveryError("The recovery inputs changed during restore.")
     result = {"format": 1, "kind": "arbol-recovery-restore", "status": "verified",
@@ -406,8 +408,8 @@ def restore(target: Target, snapshot_dir: Path, attempt_dir: Path) -> Path:
               "sourceCluster": snapshot["sourceCluster"], "target": recovered_target, "targetCluster": cluster,
               "schema": recovered["schema"], "observation": recovered, "releaseSha256": snapshot["releaseSha256"],
               "maintenanceSession": snapshot["maintenanceSession"], "verifiedAt": timestamp()}
-    receipt = attempt_dir / "restore.json"
-    final = attempt_dir / ".verified.json"
+    receipt = storage.backup_path(attempt_dir / "restore.json")
+    final = storage.backup_path(attempt_dir / ".verified.json", allow_missing=True)
     write_private(final, result)
     final.replace(receipt)
     return receipt
@@ -418,8 +420,9 @@ def verify_recovery(
     release_sha256: str, maintenance_session: str,
 ) -> dict[str, Any]:
     """Verify the existing proof against the caller's live exclusive handoff and starting pair."""
-    snapshot, snapshot_sha256, _ = validate_snapshot(snapshot_dir)
-    receipt, receipt_sha256 = read_private(recovery_dir(restore_receipt.parent, None) / restore_receipt.name)
+    storage = require_archive()
+    snapshot, snapshot_sha256, _ = validate_snapshot(snapshot_dir, storage=storage)
+    receipt, receipt_sha256 = read_private(restore_receipt, storage=storage)
     expected = {"source": source, "schema": schema, "releaseSha256": release_sha256,
                 "maintenanceSession": maintenance_session}
     if any(snapshot.get(key) != value or receipt.get(key) != value for key, value in expected.items()):
@@ -456,6 +459,7 @@ def main(argv: list[str] | None = None, *, exclusive: Exclusive | None = None) -
     isolated.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
+        require_archive()
         if args.command == "restore" and args.socket is None:
             raise RecoveryError("Restore requires an explicit isolated private socket.")
         target = database_target(args.database, socket=args.socket, port=args.port, user=args.user)
