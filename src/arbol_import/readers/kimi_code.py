@@ -17,6 +17,7 @@ from urllib.parse import unquote, unquote_to_bytes
 from .form import (
     Image,
     Item,
+    Kind,
     Response,
     Result,
     SessionFailure,
@@ -794,3 +795,28 @@ def _project(lanes: dict[str, _Lane], home: Path, session: _SavedSession, cwd: s
         subagents = tuple(Subagent(agent, work.parent_call, work.first_at, work.failed, work.usage)
                          for agent, work in agents.items())
         yield replace(turn.project(cwd, counted_main), items=items, subagents=subagents)
+
+
+# Tracked Forester and Arbol evidence gives counts but no exact Kimi installation probe prompts (IMP-D28).
+_PROBE_PROMPTS: frozenset[str] = frozenset()
+
+
+def _kind(lanes: dict[str, _Lane]) -> Kind:
+    main = lanes["main"]
+    if len(main.turns) == 1:
+        turn = next(iter(main.turns.values()))
+        if turn.prompt in _PROBE_PROMPTS and not any(
+            record.kind == "tool.call"
+            for lane in lanes.values()
+            for agent_turn in lane.turns.values()
+            for record in agent_turn.records
+        ):
+            return "probe"
+    return "owner"
+
+
+def _origin(session: _SavedSession, main: _Lane) -> dict[str, str]:
+    origin = {"workspace": session.workspace}
+    if main.turns:
+        origin["originKind"] = next(iter(main.turns.values())).origin
+    return origin
