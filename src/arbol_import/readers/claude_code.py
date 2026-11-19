@@ -15,6 +15,7 @@ from typing import Any, NoReturn
 
 from .form import (
     Failed,
+    HomeFile,
     Image,
     Item,
     Kind,
@@ -30,6 +31,7 @@ from .form import (
     Trigger,
     Turn,
     Usage,
+    live_by_mtime,
     unknown_record,
 )
 from .lines import file_records
@@ -275,7 +277,7 @@ _ARCHIVE_BLOCKS = (
 )
 _METADATA_TYPES = (
     "summary", "system", "progress", "queue-operation", "bridge-session", "relocated", "custom-title", "ai-title",
-    "file-history-snapshot",
+    "file-history-snapshot", "file-history-delta",
 )
 
 
@@ -559,11 +561,11 @@ class NativeResult:
     ok: bool
 
 
-_SPILLED = re.compile(r"\A<persisted-output>\s*[^\n]*?Full output saved to:[ \t]*([^\r\n]+)")
+_SPILLED = re.compile(r"\A<persisted-output>.*?Full output saved to:[ \t]*([^\r\n<]+)", re.DOTALL)
 
 
 def _spill_path(record: Record, text: str) -> Path | None:
-    match = _SPILLED.match(text)
+    match = _SPILLED.match(text[:4096])
     if match is None:
         return None
     path = Path(match[1].strip())
@@ -581,9 +583,12 @@ def _spill_text(home: Path, record: Record, text: str) -> str:
     folder = record.file.directory / "tool-results"
     try:
         resolved = _inside(home, path)
-        if resolved is None or not resolved.is_relative_to(folder):
+        if (
+            resolved is None or not resolved.is_relative_to(folder)
+            or not _archive_name(path.relative_to(home)) or not _archive_name(resolved.relative_to(home))
+        ):
             return text
-        return _regular(home, resolved).read_text(encoding="utf-8")
+        return _regular(home, resolved).read_bytes().decode("utf-8")
     except (OSError, RuntimeError, ValueError, SessionFailure):
         raise SessionFailure("unreadable_session", f"{record.where(home)}: the tool result could not be read.") from None
 
@@ -904,3 +909,133 @@ def _project_turns(rows: Sequence[Record], agents: dict[str, AgentLog]) -> tuple
         replace(turn, items=(*turn.items, *nested[index]), subagents=tuple(subagents[index]))
         for index, turn in enumerate(turns)
     )
+
+
+_EXCLUDED = frozenset({
+    ".credentials.json", "credentials", "credentials.json", "oauth", "oauth.json", "auth",
+    "auth.json", "mcp-auth.json", "server.token", "token", "tokens", "device_id", "device-id",
+    "installation_id", "config", "configuration", "settings", "cache", "caches", "debug", "logs",
+    "log", "memory", "search-index", "__pycache__", ".git", ".env",
+})
+
+
+def _archive_name(relative: Path) -> bool:
+    for part in relative.parts:
+        name = part.casefold()
+        if (
+            name in _EXCLUDED or name.startswith((".env.", "settings.", "config."))
+            or name.endswith((".log", ".token", ".wal", ".index", ".postings"))
+        ):
+            return False
+    return True
+
+
+@dataclass
+class ArchiveFiles:
+    home: Path
+    regular: dict[Path, Path] = field(default_factory=dict)
+    outside: set[Path] = field(default_factory=set)
+
+    def resolve(self, path: Path) -> Path | None:
+        try:
+            resolved = path.resolve()
+        except (OSError, RuntimeError, ValueError):
+            if path.is_relative_to(self.home):
+                raise _unreadable(self.home, path) from None
+            self.outside.add(path)
+            return None
+        if not resolved.is_relative_to(self.home):
+            self.outside.add(resolved)
+            return None
+        if not path.is_relative_to(self.home):
+            return None
+        if _archive_name(path.relative_to(self.home)) and _archive_name(resolved.relative_to(self.home)):
+            return resolved
+        return None
+
+    def include(self, path: Path, boundary: Path) -> None:
+        resolved = self.resolve(path)
+        if resolved is None or not resolved.is_relative_to(boundary):
+            return
+        try:
+            if stat.S_ISREG(resolved.stat().st_mode):
+                self.regular[path] = resolved
+        except FileNotFoundError:
+            pass
+        except OSError:
+            raise _unreadable(self.home, path) from None
+
+    def session_tree(self, directory: Path) -> None:
+        root = self.resolve(directory)
+        if root is None or root != directory:
+            return
+
+        def walk_error(error: OSError) -> None:
+            if not isinstance(error, FileNotFoundError):
+                raise _unreadable(self.home, directory) from None
+
+        for parent, folders, files in directory.walk(on_error=walk_error):
+            folders[:] = [name for name in folders if _archive_name(Path(name))]
+            for name in files:
+                self.include(parent / name, directory)
+
+
+def _backup_names(record: Record) -> Iterator[str]:
+    kind = record.row.get("type")
+    if kind == "file-history-snapshot":
+        snapshot = _object(record.row.get("snapshot"))
+        backups = _object(snapshot.get("trackedFileBackups"))
+        for backup in backups.values():
+            if name := _string(_object(backup).get("backupFileName")):
+                yield name
+    elif kind == "file-history-delta":
+        if name := _string(_object(record.row.get("backup")).get("backupFileName")):
+            yield name
+
+
+def _history_path(home: Path, record: Record, name: str) -> Path:
+    path = Path(name)
+    if path.is_absolute():
+        return path
+    if path.parts[0] == "file-history":
+        return home / path
+    native_id = _string(record.row.get("sessionId"))
+    if not native_id or Path(native_id).name != native_id or native_id in (".", ".."):
+        native_id = record.file.native_id
+    return home / "file-history" / native_id / path
+
+
+def _archive_refs(archive: ArchiveFiles, rows: Iterable[Record]) -> None:
+    for record in rows:
+        for name in _backup_names(record):
+            if "\x00" not in name and Path(name).parts:
+                archive.include(_history_path(archive.home, record, name), archive.home / "file-history")
+        for block in _blocks(_message(record).get("content")):
+            if block.get("type") != "tool_result":
+                continue
+            content = block.get("content", "")
+            parts = [content] if isinstance(content, str) else [
+                part["text"] for part in _blocks(content) if part.get("type") == "text"
+            ]
+            for text in parts:
+                path = _spill_path(record, text)
+                if path is not None:
+                    archive.include(path, record.file.directory / "tool-results")
+
+
+def _archive(
+    home: Path, clock: datetime, session: SessionRecords, agents: dict[str, AgentLog],
+) -> tuple[tuple[HomeFile, ...], bool, int]:
+    archive = ArchiveFiles(home)
+    for top in session.files:
+        archive.include(top.file.path, top.file.path.parent)
+        archive.session_tree(top.file.directory)
+    _archive_refs(archive, session.rows)
+    for agent in agents.values():
+        _archive_refs(archive, agent.rows)
+    files = tuple(HomeFile(path.relative_to(home).as_posix()) for path in sorted(archive.regular))
+    try:
+        live = live_by_mtime(archive.regular.values(), clock)
+    except OSError:
+        raise SessionFailure("unreadable_session", "A session archive file could not be inspected.") from None
+    return files, live, len(archive.outside)
