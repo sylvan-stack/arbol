@@ -368,3 +368,37 @@ def _titles(home: Path) -> dict[str, str]:
     except OSError:
         pass
     return titles
+
+
+def _directory_entries(root: Path, path: Path) -> Iterator[Path]:
+    directory = _inside(root, path)
+    if directory is not None:
+        try:
+            for child in directory.iterdir():
+                yield path / child.name
+        except OSError:
+            return
+
+
+def _driver_ids(state: Path | None) -> set[str]:
+    found: set[str] = set()
+    if state is None:
+        return found
+    try:
+        state = state.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        return found
+    for subscription in _directory_entries(state, state / "subscriptions"):
+        for entry in _directory_entries(state, subscription / "chats"):
+            path = _inside(state, entry)
+            if path is None or entry.suffix != ".json":
+                continue
+            try:
+                if not stat.S_ISREG(path.stat().st_mode):
+                    continue
+                data = json.loads(path.read_bytes())
+            except (OSError, ValueError, RecursionError):
+                continue
+            if isinstance(data, dict) and (native_id := _id(data.get("conversation"))) is not None:
+                found.add(native_id)
+    return found
