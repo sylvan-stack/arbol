@@ -8,14 +8,20 @@ from collections.abc import Iterator
 from compression import zstd
 from compression.zstd import ZstdError
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, Protocol
 
 from .form import SessionFailure
 
 CHUNK = 1 << 16
 
 
-def lines(stream: BinaryIO) -> Iterator[tuple[int, bytes]]:
+class ByteStream(Protocol):
+    """What the line reader reads: an open binary file or a decompression stream such as `zstd.ZstdFile`."""
+
+    def read(self, size: int = -1, /) -> bytes: ...
+
+
+def lines(stream: ByteStream) -> Iterator[tuple[int, bytes]]:
     """The complete lines of a binary stream, an open file or a decompression stream alike, numbered from 1, without
     their `\\n`. Only the byte `\\n` ends a line: never `\\r`, U+2028 or the other separators `str.splitlines` honours."""
     buffer = bytearray()
@@ -30,7 +36,7 @@ def lines(stream: BinaryIO) -> Iterator[tuple[int, bytes]]:
         del buffer[:start]
 
 
-def records(stream: BinaryIO, file: str) -> Iterator[tuple[int, Any]]:
+def records(stream: ByteStream, file: str) -> Iterator[tuple[int, Any]]:
     """Each complete line decoded as JSON, with its number. `file` names the file within the tool's home for messages.
     An I/O error, a corrupt compressed stream, a line that is not JSON or a file that disappears while it is read
     fails the session with `unreadable_session` (IMP-D13); no message quotes the line."""
