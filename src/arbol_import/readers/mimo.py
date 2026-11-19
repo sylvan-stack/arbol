@@ -13,7 +13,7 @@ import stat
 from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -21,12 +21,14 @@ from typing import NoReturn
 
 from .form import (
     Image,
+    Item,
     Kind,
     Response,
     Result,
     SessionFailure,
     Source,
     State,
+    Subagent,
     TextBlock,
     ToolCall,
     Usage,
@@ -619,3 +621,39 @@ def _actor_owners(
         if owner is not None:
             assigned[owner.user.id].append(_Actor(lane, records, launches.get(lane)))
     return assigned
+
+
+def _items(turn: _Turn, actors: list[_Actor]) -> Iterator[Item]:
+    work: list[tuple[_Message, _Launch | None]] = [(message, None) for message in turn.assistants]
+    for actor in actors:
+        work.extend((message, actor.launch) for message in actor.messages if message.role == "assistant")
+
+    for message, launch in sorted(work, key=lambda record: _message_order(record[0])):
+        for part in message.parts:
+            if part.tool is not None:
+                if message.lane == "main":
+                    yield part.tool
+                else:
+                    yield replace(
+                        part.tool, agent=message.lane, parent_call_id=launch.call_id if launch else None,
+                    )
+            elif message.lane == "main" and (text := _text_block(message, part)) is not None:
+                yield text
+
+
+def _subagent(actor: _Actor) -> Subagent:
+    usage = Usage()
+    last_user = None
+    for message in actor.messages:
+        if message.role == "user":
+            last_user = message.id
+        else:
+            usage += message.usage
+    last_assistant = next(
+        (message for message in reversed(actor.messages) if message.parent is not None and message.parent == last_user),
+        None,
+    )
+    state, _, _ = _state(last_assistant)
+    return Subagent(
+        actor.lane, actor.launch.call_id if actor.launch else None, actor.messages[0].created, state == "failed", usage,
+    )
