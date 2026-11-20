@@ -2,19 +2,23 @@
   import Tooltip from '../components/Tooltip.svelte';
   import {
     allowanceWindowLabel, allowanceWindowType, formatSubscriptionCardTime,
-    type SubscriptionWindow,
+    type SubscriptionBalance, type SubscriptionWindow,
   } from './seqoya-subscriptions';
 
-  let { window, apiAccess = false }: { window: SubscriptionWindow; apiAccess?: boolean } = $props();
+  let { window, balance }: { window: SubscriptionWindow; balance?: never } | {
+    window?: never; balance: SubscriptionBalance;
+  } = $props();
   const percent = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
   const significant = new Intl.NumberFormat('en-GB', { maximumSignificantDigits: 3, useGrouping: false });
-  const remaining = $derived(window.next === 'awaitingRenewal' ? undefined : share(window.remainingPercent));
+  const date = new Intl.DateTimeFormat(undefined, { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
+  const quotaRemaining = $derived(window?.next === 'awaitingRenewal' ? undefined : share(window?.remainingPercent));
+  const balanceUsed = $derived(share(balance?.usedPercent));
+  const remaining = $derived(balanceUsed === undefined ? quotaRemaining : 100 - balanceUsed);
   const used = $derived(remaining === undefined ? undefined : 100 - remaining);
-  const unknown = $derived(apiAccess ? 'Unavailable' : 'Awaiting reading');
-  const timeLeft = $derived(window.next === 'awaitingRenewal' ? 'Awaiting next allowance'
-    : window.pendingStart ? 'Starts with next use' : window.resetsAt === null ? 'No scheduled end'
-    : (window.approximateReset ? '≈ ' : '') + duration(window.remainingMinutes));
-  const resetTip = $derived([
+  const timeLeft = $derived(window?.next === 'awaitingRenewal' ? 'Awaiting next allowance'
+    : window?.pendingStart ? 'Starts with next use' : window?.resetsAt === null ? 'No scheduled end'
+    : (window?.approximateReset ? '≈ ' : '') + duration(window?.remainingMinutes));
+  const resetTip = $derived(window ? [
     window.resetsAt ? (window.approximateReset ? 'Resets around ' : 'Resets at ') + formatSubscriptionCardTime(window.resetsAt)
       : window.pendingStart ? 'Resets at: five hours after the next use'
       : window.resetsAt === null ? 'No scheduled reset' : 'Reset time awaits a provider reading.',
@@ -22,16 +26,16 @@
       : window.expiresAt ? 'Allowance expires ' + formatSubscriptionCardTime(window.expiresAt) + '.' : '',
     window.source && window.observedAt
       ? window.source + ' · Read ' + formatSubscriptionCardTime(window.observedAt) : '',
-  ].filter(Boolean).join('\n'));
-  const estimateTip = $derived([window.model, window.estimateBasis,
-    window.terminal && window.expiresAt ? 'Allowance expires ' + formatSubscriptionCardTime(window.expiresAt) : '',
+  ].filter(Boolean).join('\n') : '');
+  const estimateTip = $derived([window?.model, window?.estimateBasis,
+    window?.terminal && window.expiresAt ? 'Allowance expires ' + formatSubscriptionCardTime(window.expiresAt) : '',
   ].filter(Boolean).join(' · ') || undefined);
 
   function share(value?: number): number | undefined {
     return value !== undefined && Number.isFinite(value) ? Math.min(100, Math.max(0, value)) : undefined;
   }
   function duration(value?: number) {
-    if (value === undefined) return unknown;
+    if (value === undefined) return 'Awaiting reading';
     if (value < 1) return 'Under 1 min';
     const minutes = Math.floor(value);
     const days = Math.floor(minutes / 1440);
@@ -40,7 +44,7 @@
       minutes % 60 ? minutes % 60 + ' min' : ''].filter(Boolean).join(' ');
   }
   function amount(value?: number, rate = false) {
-    if (value === undefined) return apiAccess ? 'Unavailable' : 'Needs estimate';
+    if (value === undefined) return 'Unavailable';
     const rounded = Number(value.toPrecision(3));
     const tokens = rounded >= 1e6 ? significant.format(rounded / 1e6) + 'M'
       : rounded >= 1e3 ? significant.format(rounded / 1e3) + 'k' : significant.format(rounded);
@@ -48,23 +52,46 @@
   }
 </script>
 
-<section class="allowance stack" aria-label={window.label} data-window-type={allowanceWindowType(window)}>
-  <h3 class="window-divider" title={window.label}>
-    <span>{allowanceWindowLabel(window)}</span>
-  </h3>
+{#snippet progress(label: string, availableLabel: string)}
   <div class="allowance-progress">
-    <div class="bar" role="progressbar" aria-label={window.label + ' remaining allowance'}
+    <div class="bar" role="progressbar" aria-label={label}
       aria-valuemin="0" aria-valuemax="100" aria-valuenow={remaining}
-      aria-valuetext={remaining === undefined ? unknown : percent.format(remaining) + '% remaining'}>
+      aria-valuetext={remaining === undefined ? 'Unavailable' : percent.format(remaining) + '% ' + availableLabel.toLowerCase()}>
       {#if remaining !== undefined}
         <span class="remaining" style:width={remaining + '%'}></span>
       {/if}
     </div>
     <div class="bar-labels">
-      <span>Remaining <strong>{remaining === undefined ? '—' : percent.format(remaining) + '%'}</strong></span>
-      <span>Used <strong>{used === undefined ? '—' : percent.format(100 - remaining!) + '%'}</strong></span>
+      <span>{availableLabel} <strong>{remaining === undefined ? '—' : percent.format(remaining) + '%'}</strong></span>
+      <span>Used <strong>{used === undefined ? '—' : percent.format(used) + '%'}</strong></span>
     </div>
   </div>
+{/snippet}
+
+{#if balance}
+  <section class="allowance stack" aria-label="API token balance">
+    {#if balance.paymentDate}
+      <div class="small muted">Since top-up on <time datetime={balance.paymentDate}>{date.format(new Date(`${balance.paymentDate}T00:00:00Z`))}</time></div>
+    {:else}
+      <div class="small muted">Top-up history unavailable</div>
+    {/if}
+    {@render progress('Available API balance since top-up', 'Available')}
+    <dl class="metrics">
+      <dt>Output tokens used</dt><dd title={balance.estimateBasis}>{amount(balance.usedTokens)}</dd>
+      <dt>Output tokens available</dt>
+      <dd><Tooltip text={balance.estimateBasis}>
+        <button class="time-remaining" aria-label={'Output tokens available: ' + amount(balance.availableTokens) + '. ' + balance.estimateBasis}>
+          {amount(balance.availableTokens)}
+        </button>
+      </Tooltip></dd>
+    </dl>
+  </section>
+{:else if window}
+<section class="allowance stack" aria-label={window.label} data-window-type={allowanceWindowType(window)}>
+  <h3 class="window-divider" title={window.label}>
+    <span>{allowanceWindowLabel(window)}</span>
+  </h3>
+  {@render progress(window.label + ' remaining allowance', 'Remaining')}
   {#if window.next === 'projected'}<p class="small muted">Estimated next allowance</p>{/if}
   <div class="time-row">
     <span class="time-label">Time remaining</span>
@@ -83,6 +110,7 @@
     </dl>
   {/if}
 </section>
+{/if}
 
 <style>
   .allowance { gap: 10px; }

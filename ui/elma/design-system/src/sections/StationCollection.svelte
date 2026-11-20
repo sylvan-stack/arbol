@@ -5,7 +5,7 @@
 </script>
 
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import StationSummary from './StationSummary.svelte';
   import TextField from '../components/TextField.svelte';
   import Tabs from '../components/Tabs.svelte';
@@ -21,6 +21,11 @@
   } = $props();
   let query = $state('');
   let density = $state(untrack(() => (compact ? 'Compact' : 'Full')));
+  let now = $state(Date.now());
+  onMount(() => {
+    const timer = window.setInterval(() => (now = Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  });
   const visibleDensity = $derived(showControls ? density : 'Full');
 
   const groups = ['Drafted', 'Running', 'Unread', 'Other on-going', 'Other chats'] as const;
@@ -64,7 +69,7 @@
         <h2 class="eyebrow">{category}{agentic ? ' · Agent-origin' : ''}</h2>
         <div class="cards" class:full={visibleDensity === 'Full'} class:condensed>
           {#each entries as station (station.id)}
-            <StationSummary {...station} density={visibleDensity.toLowerCase()} {condensed} {readOnly} />
+            <StationSummary {...station} density={visibleDensity.toLowerCase()} {condensed} {readOnly} {now} />
           {/each}
         </div>
       </section>

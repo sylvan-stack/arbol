@@ -19,12 +19,17 @@
     onOpenUsage?: OpenSubscriptionUsage;
     onRenameSubscription?: RenameSubscription;
   } = $props();
+  const order = new Map([
+    'claude/anthropic', 'codex/chatgpt', 'pi/chatgpt', 'pi/kimi-coding',
+    'pi/zai', 'mimo/xiaomi', 'pi/deepseek', 'pi/minimax',
+  ].map((key, index) => [key, index]));
   const failures = $derived(view.listing?.drivers.filter(entry => entry.error) ?? []);
   const rows = $derived((view.listing?.drivers ?? []).flatMap(({ driver, subscriptions }) =>
     (subscriptions ?? []).map(subscription => ({
       driver, subscription, vendor: subscriptionVendor(driver, subscription.family),
+      rank: order.get(subscriptionKey(driver, subscription.family)) ?? order.size,
     })),
-  ).sort((a, b) => a.vendor.localeCompare(b.vendor) || a.subscription.label.localeCompare(b.subscription.label)
+  ).sort((a, b) => a.rank - b.rank || a.vendor.localeCompare(b.vendor) || a.subscription.label.localeCompare(b.subscription.label)
     || a.driver.localeCompare(b.driver) || a.subscription.id.localeCompare(b.subscription.id)));
   const count = $derived(view.listing && (!failures.length || rows.length) ? rows.length : undefined);
 </script>

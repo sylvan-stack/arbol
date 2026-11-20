@@ -60,6 +60,7 @@ export interface UsageEvidence {
     fiveHour?: QuotaReading;
     weekly?: QuotaReading;
   };
+  piChatGPTCalibration?: UsageEvidence['piChatGPT'];
   mimo?: ManualReading & {
     resetsAt: string;
     plan?: 'lite' | 'standard' | 'pro' | 'max';
@@ -87,19 +88,23 @@ type Credits = NonNullable<Quota['credits']>;
 type Result = VigorRollup['subscriptions'][number]['result'];
 type DriverReport = NonNullable<SubscriptionRecord['lastUsage']>;
 type DriverWindow = DriverReport['windows'][number];
-interface MiniMaxUsage {
-  activePlan: boolean;
-  creditBalance: string;
-  period: 'Today' | 'Last 7 days' | 'Last 30 days';
-  llmTokens: string;
-  cacheHitPercent?: number;
+interface ApiBalanceReading {
+  balance: string;
+  observedAt: string;
+  paymentAt?: string;
+  startingBalance?: string;
+  includesCarry?: boolean;
 }
+type BrowserWindow = DriverWindow & { creditsTotal?: number };
 interface BrowserReport {
   driver: string;
   subscription: string;
   createdAt: string;
   checkedAt?: string | null;
-  report: DriverReport & { extra?: { minimax?: MiniMaxUsage } };
+  report: Omit<DriverReport, 'windows' | 'extra'> & {
+    windows: BrowserWindow[];
+    extra?: NonNullable<DriverReport['extra']> & { apiBalance?: ApiBalanceReading };
+  };
   approximateWindows: string[];
 }
 const browserSource = 'Arbol Browser dashboard';
@@ -125,6 +130,7 @@ export function mergeUsageEvidence(stored?: UsageEvidence, browser?: UsageEviden
     browserReports: browser.browserReports,
     claudeDashboard: newerReading(stored?.claudeDashboard, browser.claudeDashboard),
     piChatGPT: newerReading(stored?.piChatGPT, browser.piChatGPT),
+    piChatGPTCalibration: stored?.piChatGPT,
     mimo: newerReading(stored?.mimo, browser.mimo),
   } : stored;
 }
@@ -402,6 +408,21 @@ const references = {
   zaiCredits: { driver: 'pi', family: 'zai', model: 'GLM-5.3' },
 } satisfies Record<EstimateBasis, { driver: string; family: string; model: string }>;
 
+function piPlusReference(sample: WindowEstimate, account: SubscriptionRecord, evidence: UsageEvidence | undefined, now: number) {
+  const historical = evidence?.piChatGPTCalibration;
+  const current = evidence?.piChatGPT;
+  return sample.basis === 'piChatGPT' && historical?.subscription === account.id && historical.plan === 'plus'
+    && current?.plan === 'plus' && matches(current, account, now)
+    && Math.abs(Date.parse(historical.updatedAt) - Date.parse(sample.checkedAt)) <= 1_000
+    && Date.parse(sample.observedAt) <= Date.parse(historical.observedAt) && recentObservation(sample.observedAt, now);
+}
+
+function zaiCapacity(credits: number, source: string): Capacity {
+  // https://docs.z.ai/devpack/overview.md#usage-instruction
+  const calculation = `${integer.format(credits)} credits × 10,000 ÷ 24 at the published Standard output rate.`;
+  return { model: 'GLM-5.3', total: credits * 10_000 / 24, source: `${source} ${calculation}`, calculation };
+}
+
 function windowCapacity(
   driver: string, account: SubscriptionRecord, label: string, evidence: UsageEvidence | undefined, now: number,
   resource?: string,
@@ -425,7 +446,7 @@ function windowCapacity(
       ? sample.basis === 'claudeLocal' && sameCreation(sample.createdAt, account.createdAt)
         && sample.plan !== undefined && sample.plan === publicAccountPlan(account)
         && recentObservation(sample.observedAt, now)
-      : checkedAt === Date.parse(sample.checkedAt);
+      : checkedAt === Date.parse(sample.checkedAt) || piPlusReference(sample, account, evidence, now);
     return reference && reference.driver === driver && reference.family === account.family && sample.subscription === account.id
       && bindingMatches && sample.window === label && Date.parse(sample.observedAt) <= now
       && (sample.basis !== 'zaiCredits' || resource === 'credits');
@@ -434,28 +455,22 @@ function windowCapacity(
   const [{ basis, amount, scale, observedAt, calibration, reference, plan }] = samples;
   const model = references[basis].model;
   const number = (value: number) => integer.format(Math.round(value));
-  let total: number;
-  let calculation: string;
-  let source: string;
   if (basis === 'zaiCredits') {
-    // Z.AI's Coding Plan formula uses a GLM-5.3 Standard output multiplier of 24.
-    // https://docs.z.ai/devpack/overview.md#usage-instruction
-    total = amount * 10_000 / 24;
-    calculation = `${number(amount)} credits × 10,000 ÷ 24.`;
-    source = 'Verified Coding Plan credit cap at the published GLM-5.3 Standard output rate.';
-  } else {
-    if (!scale) return undefined;
-      total = amount / (scale / 100);
-      calculation = `${number(amount)} observed output equivalents ÷ ${scale}% of the window.`;
-      source = basis === 'kimiLocal' && calibration
-        ? 'Local K3.1 Pro output between ' + formatSubscriptionCardTime(calibration.startedAt)
-          + ' and ' + formatSubscriptionCardTime(calibration.endedAt) + '. Usage moved from '
-          + calibration.startUsedPercent + '% to ' + calibration.endUsedPercent
-          + '% before the same reset at ' + formatSubscriptionCardTime(calibration.endResetsAt)
-          + '. Other shared-account activity can affect this reference estimate.'
-        : basis === 'piChatGPT'
-        ? 'Local Codex usage matched to the ChatGPT Plus window, using published Standard credit weights.'
-        : 'Local output from the observed workload, scaled by the provider’s reported used share. Other account usage can affect the estimate.';
+    return zaiCapacity(amount, `Verified Coding Plan credit cap. Sampled ${formatSubscriptionCardTime(observedAt)}.`);
+  }
+  if (!scale) return undefined;
+  const total = amount / (scale / 100);
+  const calculation = `${number(amount)} observed output equivalents ÷ ${scale}% of the window.`;
+  let source = 'Local output from the observed workload, scaled by the provider’s reported used share. Other account usage can affect the estimate.';
+  if (basis === 'kimiLocal' && calibration) {
+    source = 'Local K3.1 Pro output between ' + formatSubscriptionCardTime(calibration.startedAt)
+      + ' and ' + formatSubscriptionCardTime(calibration.endedAt) + '. Usage moved from '
+      + calibration.startUsedPercent + '% to ' + calibration.endUsedPercent
+      + '% before the same reset at ' + formatSubscriptionCardTime(calibration.endResetsAt)
+      + '. Other shared-account activity can affect this reference estimate.';
+  } else if (basis === 'piChatGPT') {
+    source = 'Local Codex usage matched to the ChatGPT Plus window, using published Standard credit weights.';
+    if (piPlusReference(samples[0], account, evidence, now)) source = `Plan reference (ChatGPT Plus). ${source}`;
   }
   if (reference === 'plan') {
     source = `Plan reference (Claude ${plan}). ${source} Capacity assumes a similar workload on the same reported plan.`;
@@ -483,22 +498,36 @@ function matchingBrowserReport(
     && Date.parse(entry.report.fetchedAt) <= now);
 }
 
-function miniMaxDashboard(
-  report: BrowserReport['report'] | undefined, now: number,
-): SubscriptionMetrics['dashboard'] {
-  const reading = report?.extra?.minimax;
-  if (!report || !reading) return undefined;
-  const period = reading.period === 'Today' && new Date(report.fetchedAt).toDateString() !== new Date(now).toDateString()
-    ? 'Day of reading' : reading.period;
-  const rows = [
-    { label: 'Plan', value: reading.activePlan ? 'Active plan' : 'No active M Plan' },
-    { label: 'Credit balance', value: `${reading.creditBalance} credits` },
-    { label: `LLM tokens · ${period}`, value: reading.llmTokens },
-  ];
-  if (reading.cacheHitPercent !== undefined) {
-    rows.push({ label: `Cache hit rate · ${period}`, value: `${reading.cacheHitPercent}%` });
+function apiBalance(account: SubscriptionRecord, report: BrowserReport['report'] | undefined, now: number): SubscriptionMetrics['balance'] {
+  if (account.state !== 'signed_in') return undefined;
+  const reading = report?.extra?.apiBalance;
+  const cash = Number(reading?.balance);
+  const observed = Date.parse(reading?.observedAt ?? '');
+  const deepseek = account.family === 'deepseek';
+  const fallback = deepseek ? deepSeekBalance(report?.extra?.balances?.length ? { ...account, lastUsage: report } : account) : undefined;
+  if (!reading || !Number.isFinite(cash) || cash < 0 || !(observed <= now)) {
+    return fallback && {
+      availableTokens: fallback.tokens,
+      estimateBasis: `DeepSeek Flash at ${fallback.rate} ${fallback.currency} per million output tokens. Based on the current reported balance.`,
+    };
   }
-  return { observedAt: report.fetchedAt, rows };
+  const model = deepseek ? 'DeepSeek Flash peak rate' : 'MiniMax-M3 Standard, up to 512k input';
+  // https://api-docs.deepseek.com/quick_start/pricing/
+  // https://platform.minimax.io/docs/pricing/overview?tab=api-enterprise
+  const rate = 1.2;
+  const equivalents = (dollars: number) => dollars / rate * 1_000_000;
+  const paymentDate = reading.paymentAt?.match(/^20\d{2}-\d{2}-\d{2}(?= )/)?.[0];
+  const starting = Number(reading.startingBalance);
+  const used = paymentDate && Number.isFinite(starting) && starting > 0 && cash <= starting ? starting - cash : undefined;
+  const basis = used === undefined ? 'The starting balance could not be established.'
+    : reading.includesCarry ? `The ${starting} USD starting balance includes the payment and the previous cash reading.`
+    : `The ${starting} USD starting balance is estimated from the last payment.`;
+  return {
+    paymentDate, availableTokens: equivalents(cash),
+    usedTokens: used === undefined ? undefined : equivalents(used),
+    usedPercent: used === undefined ? undefined : 100 * used / starting,
+    estimateBasis: `${model} at ${rate} USD per million output tokens. ${basis} Cash balance read ${formatSubscriptionCardTime(reading.observedAt)}.`,
+  };
 }
 
 function subscriptionMetrics(
@@ -508,6 +537,9 @@ function subscriptionMetrics(
   const driverWindows = report?.windows ?? [];
   const browser = matchingBrowserReport(driver, account, evidence, now);
   const browserReport = browser?.report;
+  if (driver === 'pi' && (account.family === 'deepseek' || account.family === 'minimax')) {
+    return { windows: [], balance: apiBalance(account, browserReport, now) };
+  }
   const rawWindows = new Map(driverWindows.map((window) => [window.label, { window, report, browser: false, approximate: false }]));
   if (browserReport) {
     for (const window of browserReport.windows) {
@@ -557,8 +589,13 @@ function subscriptionMetrics(
     );
     const pendingStart = rolloverFor(driver, account.family, window.windowMinutes) === 'startsOnUse'
       && used === 0 && !window.resetsAt;
+    const observedCap = driver === 'pi' && account.family === 'zai' && browserReport
+      && recentObservation(browserReport.fetchedAt, now) ? browserReport.windows.find(row => row.resource === 'credits'
+        && row.windowMinutes === window.windowMinutes)?.creditsTotal : undefined;
     const capacity = driver === 'codex' && account.family === 'chatgpt' && window.windowMinutes === 10_080 ? view?.capacity
-      : windowCapacity(driver, account, window.label, evidence, now, window.resource);
+      : typeof observedCap === 'number' && Number.isSafeInteger(observedCap) && observedCap > 0
+        ? zaiCapacity(observedCap, 'Coding Plan credit cap from the confirmed z.ai dashboard.')
+        : windowCapacity(driver, account, window.label, evidence, now, window.resource);
     return project({
       label: window.label, resetsAt: window.resetsAt, windowMinutes: window.windowMinutes,
       expiresAt: terminal ? window.resetsAt : undefined, terminal, pendingStart,
@@ -595,23 +632,13 @@ function subscriptionMetrics(
     }
   }
 
-  const useBrowserBalance = !!browserReport?.extra?.balances?.length
-    && (!report?.extra?.balances?.length || Date.parse(browserReport.fetchedAt) > Date.parse(report.fetchedAt));
-  const balanceReport = useBrowserBalance ? browserReport : report;
-  const balance = deepSeekBalance(useBrowserBalance ? { ...account, lastUsage: browserReport } : account);
-  if (balance && balanceReport) {
-    windows.push(asWindow({
-      label: 'API balance', resetsAt: null, observedAt: balanceReport.fetchedAt,
-      source: useBrowserBalance ? browserSource : undefined,
-      outputTokensRemaining: balance.tokens, model: 'DeepSeek Flash',
-      estimateBasis: `${balance.amount} ${balance.currency} at ${balance.rate} ${balance.currency} per million output tokens.`,
-    }, now));
-  }
   windows.sort((left, right) => (endTime(left) - endTime(right)) || 0);
   const issues = windows.length === 0 ? view?.issues ?? [] : [];
-  if (account.state === 'signed_in' && account.family !== 'deepseek') {
+  if (account.state === 'signed_in') {
     for (const window of windows) {
-      if (window.next !== 'awaitingRenewal' && window.outputTokensRemaining === undefined) issues.push(`${window.label} needs a matching token estimate.`);
+      if (window.next !== 'awaitingRenewal' && window.remainingPercent !== undefined && window.outputTokensRemaining === undefined) {
+        issues.push(`No matching token calibration for ${window.label.toLowerCase()}.`);
+      }
     }
   }
   const piReading = evidence?.piChatGPT;
@@ -630,10 +657,7 @@ function subscriptionMetrics(
       .map((expiresAt) => ({ label: 'Full reset', expiresAt }));
     limitResets = { count: entries.length, entries, observedAt: dashboard.observedAt };
   }
-  return {
-    windows, issues, passedBoundaries: [...passedBoundaries], limitResets,
-    dashboard: driver === 'pi' && account.family === 'minimax' ? miniMaxDashboard(browserReport, now) : undefined,
-  };
+  return { windows, issues, passedBoundaries: [...passedBoundaries], limitResets };
 }
 
 function endTime(window: SubscriptionWindow) {

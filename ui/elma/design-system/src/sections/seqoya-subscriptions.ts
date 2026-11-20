@@ -70,16 +70,21 @@ export interface SubscriptionWindow {
 export interface SubscriptionMetrics {
   issues?: string[];
   windows: SubscriptionWindow[];
-  dashboard?: {
-    observedAt: string;
-    rows: { label: string; value: string }[];
-  };
+  balance?: SubscriptionBalance;
   passedBoundaries?: number[];
   limitResets?: {
     count?: number;
     observedAt?: string;
     entries: { label: string; expiresAt?: string | 0; expired?: boolean }[];
   };
+}
+
+export interface SubscriptionBalance {
+  availableTokens: number;
+  usedTokens?: number;
+  usedPercent?: number;
+  paymentDate?: string;
+  estimateBasis: string;
 }
 
 export type RenameSubscription = (

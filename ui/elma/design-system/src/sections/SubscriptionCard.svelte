@@ -24,6 +24,7 @@
   const metrics = $derived(subscription.metrics);
   const resets = $derived(metrics?.limitResets);
   const deepseek = $derived(subscription.family === 'deepseek');
+  const payAsYouGo = $derived(driver === 'pi' && (deepseek || subscription.family === 'minimax'));
   const mimo = $derived(subscription.family === 'xiaomi' && driver === 'mimo');
   const destination = $derived(mimo ? 'mimo' : subscription.family === 'chatgpt' && ['pi', 'codex'].includes(driver) ? 'chatgpt' : undefined);
   const refreshable = $derived(canRefreshSubscriptionUsage(driver, subscription) && onRefreshUsage);
@@ -67,21 +68,19 @@
   {#if view.nameNotices?.[key]}<p class="small warning" role="status">{view.nameNotices[key]}</p>{/if}
   {#if subscription.problem}<p class="small warning">{subscription.problem.message}</p>{/if}
 
-  {#if metrics?.dashboard}
-    <dl class="metrics">
-      {#each metrics.dashboard.rows as row (row.label)}
-        <dt>{row.label}</dt><dd>{row.value}</dd>
-      {/each}
-      <dt>Dashboard updated</dt>
-      <dd><time datetime={metrics.dashboard.observedAt}>{formatSubscriptionCardTime(metrics.dashboard.observedAt)}</time></dd>
-    </dl>
-  {/if}
-
-  {#each sortAllowanceWindows(metrics?.windows ?? []) as window}
-    <SubscriptionAllowance {window} apiAccess={deepseek} />
+  {#if payAsYouGo}
+    {#if metrics?.balance}
+      <SubscriptionAllowance balance={metrics.balance} />
+    {:else}
+      <p class="small muted">No saved API balance.</p>
+    {/if}
   {:else}
-    {#if !metrics?.dashboard}<p class="small muted">No saved allowance windows.</p>{/if}
-  {/each}
+    {#each sortAllowanceWindows(metrics?.windows ?? []) as window}
+      <SubscriptionAllowance {window} />
+    {:else}
+      <p class="small muted">No saved allowance windows.</p>
+    {/each}
+  {/if}
 
   {#each metrics?.issues ?? [] as issue}<p class="small warning">{issue}</p>{/each}
   {#if deepseek && subscription.lastUsage?.extra?.apiAvailable === false}
