@@ -1,7 +1,7 @@
 <script module lang="ts">
   import type { StationData } from './StationSummary.svelte';
 
-  export type StationEntry = StationData & { id: string; drafted?: boolean };
+  export type StationEntry = StationData & { id: string };
 </script>
 
 <script lang="ts">
@@ -55,11 +55,14 @@
   {#each groups as category (category)}
     {@const entries = visible.get(category)}
     {#if entries}
-      <section class="stack" aria-label={category} style="gap:8px">
+      {@const condensed = density === 'Full' && category === 'Other chats'}
+      <section class="group" aria-label={category}>
         <h2 class="eyebrow">{category}{agentic ? ' · Agent-origin' : ''}</h2>
-        {#each entries as station (station.id)}
-          <StationSummary {...station} density={density.toLowerCase()} {readOnly} />
-        {/each}
+        <div class="cards" class:full={density === 'Full'} class:condensed>
+          {#each entries as station (station.id)}
+            <StationSummary {...station} density={density.toLowerCase()} {condensed} {readOnly} />
+          {/each}
+        </div>
       </section>
     {/if}
   {/each}
@@ -67,3 +70,28 @@
     <p class="muted" role="status">No matching Chat Sessions.</p>
   {/if}
 </div>
+
+<style>
+  .group {
+    display: grid;
+    gap: 8px;
+    min-width: 0;
+  }
+  .group + .group {
+    border-top: 1px solid var(--border);
+    padding-top: 16px;
+  }
+  .cards {
+    display: grid;
+    gap: 8px;
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .cards.full {
+    gap: 16px;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
+  }
+  .cards.condensed {
+    gap: 12px;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 210px), 1fr));
+  }
+</style>
