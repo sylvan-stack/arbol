@@ -98,6 +98,7 @@
  max-width: none;
  padding-inline: 0;
  padding-block-start: 0;
+ background: var(--canvas);
 }
 .phase-backgrounds > :global(*) { grid-column: reading-start / reading-end; }
 .phase-backgrounds > .phase-band {

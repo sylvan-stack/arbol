@@ -19,9 +19,11 @@
   if (!oninspect || !event.metaKey || event.defaultPrevented || ('key' in event && event.key !== 'Enter')) return;
   const target = event.target instanceof Element ? event.target : null;
   if (target?.closest('a,button,input,select,textarea,summary,[contenteditable]')) return;
-  const name = target?.closest('[data-exchange-phase]')?.getAttribute('data-exchange-phase');
+  const band = target?.closest('.phase-band[data-exchange-phase]');
+  const phase = phaseOrder.find(value => value === band?.getAttribute('data-exchange-phase'));
+  if (!phase && !('key' in event)) return;
   event.preventDefault();
-  oninspect(phaseOrder.find(phase => phase === name));
+  oninspect(phase);
  }
  function keys(event:KeyboardEvent){if(!area||event.defaultPrevented||document.querySelector('dialog[open]')||!event.metaKey||!event.shiftKey||!event.altKey||!['Digit7','Digit8'].includes(event.code))return;event.preventDefault();release();const stops=[0,answerTop(),bottom()].filter((v):v is number=>v!==null).sort((a,b)=>a-b).filter((v,i,values)=>i===0||v-values[i-1]>1);const current=area.scrollTop;move(event.code==='Digit7'?(stops.find(v=>v>current+2)??bottom()):([...stops].reverse().find(v=>v<current-2)??0));measure();}
  $effect.pre(()=>{identity;snapshot;if(area&&active)save();});
@@ -39,6 +41,6 @@
  <div bind:this={content}>{#key snapshot}<Response {...response} phaseBackgrounds={!!oninspect} showBeacon={beacon} onbeacon={jumpAnswer}/>{/key}</div>
 </div>
 <style>
- .response-scroll{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;overflow-anchor:none;position:relative}
+ .response-scroll{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;overflow-anchor:none;position:relative;background:var(--canvas)}
  .response-scroll:focus-visible { outline: none; }
 </style>
