@@ -21,7 +21,6 @@
   if (target?.closest('a,button,input,select,textarea,summary,[contenteditable]')) return;
   const name = target?.closest('[data-exchange-phase]')?.getAttribute('data-exchange-phase');
   event.preventDefault();
-  area?.focus({preventScroll:true});
   oninspect(phaseOrder.find(phase => phase === name));
  }
  function keys(event:KeyboardEvent){if(!area||event.defaultPrevented||document.querySelector('dialog[open]')||!event.metaKey||!event.shiftKey||!event.altKey||!['Digit7','Digit8'].includes(event.code))return;event.preventDefault();release();const stops=[0,answerTop(),bottom()].filter((v):v is number=>v!==null).sort((a,b)=>a-b).filter((v,i,values)=>i===0||v-values[i-1]>1);const current=area.scrollTop;move(event.code==='Digit7'?(stops.find(v=>v>current+2)??bottom()):([...stops].reverse().find(v=>v<current-2)??0));measure();}
@@ -41,5 +40,17 @@
 </div>
 <style>
  .response-scroll{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;overflow-anchor:none;position:relative}
- .response-scroll:focus-visible{outline:2px solid var(--focus);outline-offset:-2px}
+ .response-scroll:focus-visible { outline: none; }
+ .response-scroll:focus-visible::before {
+  content: '';
+  display: block;
+  position: sticky;
+  z-index: 1;
+  top: 2px;
+  width: 24px;
+  height: 2px;
+  margin: 0 auto -2px;
+  background: var(--focus);
+  pointer-events: none;
+ }
 </style>

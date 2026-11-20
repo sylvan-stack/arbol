@@ -5,12 +5,16 @@
  import SafeMarkdown from '../components/SafeMarkdown.svelte';
  import ToolCall from './ToolCall.svelte';
  import AskUserQuestion from './AskUserQuestion.svelte';
- import { clock,failureCause,limitReset,type ExchangeError,type IntakeFindings,type Answer,type QuestionView,type ResponseBlock,type ToolView,type ToolDetails } from './elma-response';
- let {blocks=[] as ResponseBlock[],streaming=false,statusLabel,acceptedAt,startedAt,endedAt,inferenceEndedAt,intakeFindings,phaseBackgrounds=false,now=Date.now(),error,questions=[],notes=[],showBeacon=false,onbeacon,onopenLink,onloadTool,oncopyAnswer,openTools,onToolOpen,onanswer,onretry,oncontinue,failureBusy=false,signIn}: {blocks?:ResponseBlock[];streaming?:boolean;statusLabel?:string;acceptedAt?:string;startedAt?:string;endedAt?:string;inferenceEndedAt?:string;intakeFindings?:IntakeFindings;phaseBackgrounds?:boolean;now?:number;questions?:QuestionView[];error?:ExchangeError;notes?:string[];showBeacon?:boolean;onbeacon?:()=>void;onopenLink?:(url:string)=>Promise<unknown>;onloadTool?:(tool:ToolView)=>Promise<ToolDetails>;oncopyAnswer?:(text:string)=>Promise<void>;openTools?:Record<string,boolean>;onToolOpen?:(id:string,open:boolean)=>void;onanswer?:(question:QuestionView,answer:Answer)=>void;onretry?:()=>void;oncontinue?:()=>void;failureBusy?:boolean;signIn?:string}=$props();
+ import { clock,failureCause,foresterHookLabels,limitReset,type ExchangeError,type ForesterHookCounts,type IntakeFindings,type Answer,type QuestionView,type ResponseBlock,type ToolView,type ToolDetails } from './elma-response';
+ let {blocks=[] as ResponseBlock[],streaming=false,statusLabel,startedAt,endedAt,inferenceEndedAt,intakeFindings,foresterHooks,phaseBackgrounds=false,now=Date.now(),error,questions=[],notes=[],showBeacon=false,onbeacon,onopenLink,onloadTool,oncopyAnswer,openTools,onToolOpen,onanswer,onretry,oncontinue,failureBusy=false,signIn}: {blocks?:ResponseBlock[];streaming?:boolean;statusLabel?:string;startedAt?:string;endedAt?:string;inferenceEndedAt?:string;intakeFindings?:IntakeFindings;foresterHooks?:ForesterHookCounts;phaseBackgrounds?:boolean;now?:number;questions?:QuestionView[];error?:ExchangeError;notes?:string[];showBeacon?:boolean;onbeacon?:()=>void;onopenLink?:(url:string)=>Promise<unknown>;onloadTool?:(tool:ToolView)=>Promise<ToolDetails>;oncopyAnswer?:(text:string)=>Promise<void>;openTools?:Record<string,boolean>;onToolOpen?:(id:string,open:boolean)=>void;onanswer?:(question:QuestionView,answer:Answer)=>void;onretry?:()=>void;oncontinue?:()=>void;failureBusy?:boolean;signIn?:string}=$props();
  const reset=$derived(error?limitReset(error,endedAt):undefined);
  const recorded=(value?:string):value is string=>!!value&&Number.isFinite(Date.parse(value));
  const answer=$derived(blocks.filter(block=>block.kind==='text').map(block=>block.kind==='text'?block.text:'').join('\n\n'));
  const work=$derived(blocks.filter(block=>block.kind!=='text'));
+ const hookSummary = $derived(Object.entries(foresterHookLabels).flatMap(([event, label]) => {
+  const count = foresterHooks?.[event as keyof ForesterHookCounts];
+  return count ? [count > 1 ? `${label} ×${count}` : label] : [];
+ }).join(', '));
  let copied=$state(''),threshold=$state<HTMLDivElement>();
  async function copy(){try{await(oncopyAnswer?.(answer)??navigator.clipboard.writeText(answer));copied='Answer copied';}catch{copied='The answer could not be copied.';}}
  function beacon(){if(onbeacon)onbeacon();else threshold?.scrollIntoView({block:'start'});}
@@ -48,14 +52,16 @@
  {#if recorded(startedAt)}
   <p class="exchange-update" data-reading-stop>Inference started at <time datetime={startedAt}>{clock(startedAt,true)}</time></p>
  {/if}
+ {#if hookSummary}
+  <p class="exchange-update" data-reading-stop>Forester hooks called: {hookSummary}</p>
+ {/if}
  {#if streaming}{@render render(blocks)}{:else}{@render render(work)}<div class="threshold" data-answer-threshold data-reading-stop bind:this={threshold}><span>Answer</span></div><section class="answer" aria-label="Answer"><SafeMarkdown text={answer} {onopenLink}/></section>{/if}
 {/snippet}
 <article class="response" class:phase-backgrounds={phaseBackgrounds} aria-label="Assistant response">
- {#if recorded(acceptedAt)}<p class="lifecycle">Message sent <time datetime={acceptedAt}>{clock(acceptedAt)}</time></p>{/if}
  {#if intakeFindings?.glossaryTerms || intakeFindings?.operationalArtifacts?.length}
   {@render phaseBand('intake', intakeRows)}
  {/if}
- {@render phaseBand(recorded(startedAt) || blocks.length ? 'execution' : undefined, executionRows)}
+ {@render phaseBand(recorded(startedAt) || hookSummary || blocks.length ? 'execution' : undefined, executionRows)}
  {#if recorded(inferenceEndedAt)}
   {@const ended = inferenceEndedAt}
   {#snippet finalizationRows()}
@@ -71,7 +77,7 @@
  {#if showBeacon&&!streaming}<button class="beacon" onclick={beacon}>↓ Answer</button>{/if}
 </article>
 <style>
-.response{--response-inset:24px;position:relative;width:100%;max-width:var(--elma-reading-width,720px);margin:0 auto;padding:20px var(--response-inset) 32px;min-width:0;font:calc(13.5px * var(--elma-content-scale,var(--font-scale)))/1.6 var(--font-ui);overflow-wrap:anywhere}.lifecycle{color:var(--muted);font:calc(11.5px * var(--font-scale))/1.5 var(--font-mono);margin-bottom:16px}.exchange-update{color:var(--muted);font-size:.85em;margin:6px 0;overflow-wrap:anywhere}.thinking{padding:10px 12px;margin:12px 0;color:var(--muted);background:var(--panel);border-left:2px solid var(--border)}.thinking h3{font:600 calc(11.5px * var(--font-scale))/1.5 var(--font-ui);margin:0 0 6px}.prose{margin:12px 0}.notice{color:var(--muted);font-size:.85em;margin:10px 0}.threshold{display:flex;align-items:center;gap:12px;color:var(--muted);font:calc(11.5px * var(--font-scale))/1.5 var(--font-ui);margin:24px 0 20px}.threshold:before,.threshold:after{content:'';height:1px;background:var(--border);flex:1}.status-row{display:flex;align-items:center;gap:12px;justify-content:flex-end;margin-top:16px}.exchange-status,.copy{font:calc(11.5px * var(--font-scale))/1.5 var(--font-ui);color:var(--muted)}.copy,.beacon{border:1px solid var(--border);background:var(--panel);border-radius:5px;padding:4px 8px;color:var(--link)}.beacon{position:sticky;bottom:12px;display:block;margin-left:auto;font:calc(11.5px * var(--font-scale))/1.5 var(--font-ui)}.failure-actions{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}.failure-actions button{border:1px solid var(--border);background:var(--panel);color:var(--link);border-radius:5px;padding:6px 10px;font:inherit}.failure-actions button:disabled{opacity:.6}.failure{color:var(--failure);font-size:.9em}.children{border-left:2px solid var(--border);padding-left:12px;margin-top:12px}
+.response{--response-inset:24px;position:relative;width:100%;max-width:var(--elma-reading-width,720px);margin:0 auto;padding:20px var(--response-inset) 32px;min-width:0;font:calc(13.5px * var(--elma-content-scale,var(--font-scale)))/1.6 var(--font-ui);overflow-wrap:anywhere}.exchange-update{color:var(--muted);font-size:.85em;margin:6px 0;overflow-wrap:anywhere}.thinking{padding:10px 12px;margin:12px 0;color:var(--muted);background:var(--panel);border-left:2px solid var(--border)}.thinking h3{font:600 calc(11.5px * var(--font-scale))/1.5 var(--font-ui);margin:0 0 6px}.prose{margin:12px 0}.notice{color:var(--muted);font-size:.85em;margin:10px 0}.threshold{display:flex;align-items:center;gap:12px;color:var(--muted);font:calc(11.5px * var(--font-scale))/1.5 var(--font-ui);margin:24px 0 20px}.threshold:before,.threshold:after{content:'';height:1px;background:var(--border);flex:1}.status-row{display:flex;align-items:center;gap:12px;justify-content:flex-end;margin-top:16px}.exchange-status,.copy{font:calc(11.5px * var(--font-scale))/1.5 var(--font-ui);color:var(--muted)}.copy,.beacon{border:1px solid var(--border);background:var(--panel);border-radius:5px;padding:4px 8px;color:var(--link)}.beacon{position:sticky;bottom:12px;display:block;margin-left:auto;font:calc(11.5px * var(--font-scale))/1.5 var(--font-ui)}.failure-actions{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}.failure-actions button{border:1px solid var(--border);background:var(--panel);color:var(--link);border-radius:5px;padding:6px 10px;font:inherit}.failure-actions button:disabled{opacity:.6}.failure{color:var(--failure);font-size:.9em}.children{border-left:2px solid var(--border);padding-left:12px;margin-top:12px}
 .phase-backgrounds {
  --response-columns: [full-start] minmax(var(--response-inset), 1fr)
   [reading-start] minmax(0, calc(var(--elma-reading-width, 720px) - 2 * var(--response-inset)))

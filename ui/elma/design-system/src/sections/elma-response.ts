@@ -21,5 +21,19 @@ export function clock(value?:string, seconds=false):string {if(!value||!Number.i
 export function duration(start?:string,end?:string,now=Date.now()):string {if(!start||!Number.isFinite(Date.parse(start)))return 'Not recorded';const last=end?Date.parse(end):now;if(!Number.isFinite(last)||last<Date.parse(start))return 'Not recorded';const seconds=Math.floor((last-Date.parse(start))/1000),hours=Math.floor(seconds/3600),minutes=Math.floor(seconds%3600/60);return hours?`${hours} h ${minutes} min`:minutes?`${minutes} min ${seconds%60} s`:`${seconds} s`;}
 export type IntakeFindings = { glossaryTerms?: string[]; operationalArtifacts?: string[] };
 
+export const foresterHookLabels = {
+ 'session-start': 'Session start',
+ 'user-prompt-submit': 'Prompt submit',
+ 'pre-tool-use': 'Before tool use',
+ 'post-tool-use': 'After tool use',
+ 'post-compact': 'Compaction',
+ 'stop': 'Stop',
+ 'session-end': 'Session end',
+ 'other': 'Other',
+} as const;
+
+export type ForesterHookCounts = Partial<Record<keyof typeof foresterHookLabels, number>>;
+
+
 export function askQuestions(ask:unknown):{id:string;question:string;options:{label:string;description?:string}[]}[]{if(!ask||typeof ask!=='object'||!Array.isArray((ask as {questions?:unknown}).questions))return[];return (ask as {questions:unknown[]}).questions.flatMap((q,i)=>{if(!q||typeof q!=='object'||typeof(q as {question?:unknown}).question!=='string')return[];const value=q as {id?:unknown;question:string;options?:unknown};return[{id:typeof value.id==='string'?value.id:String(i),question:value.question,options:Array.isArray(value.options)?value.options.flatMap(o=>o&&typeof o==='object'&&typeof(o as {label?:unknown}).label==='string'?[o as {label:string;description?:string}]:[]):[]}];});}
 export function answerLabels(answer:unknown):string {if(!answer||typeof answer!=='object')return pretty(answer);const value=answer as {type?:unknown;answers?:unknown};if(value.type==='decline')return 'Declined';if(value.answers&&typeof value.answers==='object')return Object.values(value.answers).flatMap(v=>Array.isArray(v)?v.filter(v=>typeof v==='string'):[]).join(', ')||'Continued';return pretty(answer);}

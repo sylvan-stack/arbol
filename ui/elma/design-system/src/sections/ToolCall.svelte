@@ -8,13 +8,48 @@
  const mark=$derived(status==='Running'?'…':status==='Failed'?'!':status==='Interrupted'?'interrupted':status==='Complete'?'✓':status);
 </script>
 <details class="tool" open={expanded} ontoggle={toggle}>
- <summary><span class="name" title={name}>{name}</span><span class="summary">{toolSummary(full?full.input:input)}</span>{#if status==='Running'&&startedAt&&now-Date.parse(startedAt)>=60000}<span class="time">{duration(startedAt,undefined,now)}</span>{/if}{#if parallel&&parallel.running>1}<span class="parallel">waiting on this call · {parallel.running} of {parallel.total} running</span>{/if}<span class="mark" class:failure={status==='Failed'}>{mark}</span></summary>
+ <summary>
+  <span class="disclosure" aria-hidden="true">▸</span>
+  <span class="name" title={name}>{name}</span>
+  <span class="mark" title={status} class:failure={status==='Failed'}>
+   <span aria-hidden="true">{mark}</span><span class="sr-only">{status}</span>
+  </span>
+  {#if status==='Running'&&startedAt&&now-Date.parse(startedAt)>=60000}<span class="time">{duration(startedAt,undefined,now)}</span>{/if}{#if parallel&&parallel.running>1}<span class="parallel">waiting on this call · {parallel.running} of {parallel.total} running</span>{/if}
+  <span class="summary">{toolSummary(full?full.input:input)}</span>
+ </summary>
  {#if expanded}<div class="detail"><dl><div><dt>Started</dt><dd>{clock(startedAt)}</dd></div><div><dt>Ended</dt><dd>{clock(endedAt)}</dd></div><div><dt>Duration</dt><dd>{status==='Running'?duration(startedAt,undefined,now):endedAt?duration(startedAt,endedAt,now):'Not recorded'}</dd></div></dl>
  <h4>Input</h4><!-- svelte-ignore a11y_no_noninteractive_tabindex (Scrollable tool data stays keyboard reachable.) --><pre tabindex="0" role="region" aria-label={name+' input'}>{pretty(full?full.input:input)}</pre><h4>Output</h4><!-- svelte-ignore a11y_no_noninteractive_tabindex (Scrollable tool data stays keyboard reachable.) --><pre tabindex="0" role="region" aria-label={name+' output'}>{pretty(full?full.result:(outputDelta||result))}</pre>
  {#if full?.error??error}<p class="failure">{full?.error??error}</p>{/if}{#if truncated}<p class="note">The Driver cut this output.</p>{/if}{#if cut&&!full}<p class="note">{loading?'Loading full details…':'Preview; full details load when opened.'}</p>{/if}{#if problem}<p role="alert" class="failure">{problem}</p><button onclick={()=>void details()}>Try again</button>{/if}
  {#if children}{@render children()}{/if}</div>{/if}
 </details>
 <style>
-.tool{min-width:0;border-top:1px solid var(--border);border-bottom:1px solid var(--border);font-size:.9em}summary{display:flex;gap:8px;align-items:center;cursor:pointer;padding:7px 0;list-style-position:inside}.name{max-width:35%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono);font-weight:600;flex-shrink:0}.name:before{content:'▸ ';color:var(--muted)}details[open] .name:before{content:'▾ '}.summary{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0;color:var(--muted);font-family:var(--font-mono)}.mark{margin-left:auto;flex-shrink:0}.time,.parallel,.note{font-size:.85em;color:var(--muted)}.detail{padding:8px 0 16px;min-width:0}dl{display:flex;flex-wrap:wrap;gap:8px 24px;font-size:.85em;color:var(--muted)}dl div{display:flex;gap:8px}dt{font-weight:600}dd{margin:0}pre{max-width:100%;max-height:50vh;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;padding:12px;background:var(--inset);border:1px solid var(--border);border-radius:5px;font:calc(12px * var(--font-scale))/1.5 var(--font-mono)}h4{font:600 .9em var(--font-ui);margin:10px 0 4px}.failure{color:var(--failure)}button{border:1px solid var(--border);background:var(--inset);color:var(--text);padding:5px 10px;border-radius:5px}
+.tool { min-width: 0; margin-block: 2px; font-size: .81em; color: var(--muted); }
+summary {
+ display: flex;
+ align-items: baseline;
+ gap: .5em;
+ max-width: 100%;
+ width: fit-content;
+ padding: 2px 4px;
+ cursor: pointer;
+ list-style: none;
+ border-radius: var(--radius-sm);
+ font-family: var(--font-mono);
+}
+summary::-webkit-details-marker { display: none; }
+summary:hover { background: var(--selected); }
+.disclosure { display: inline-block; flex: none; transition: transform var(--motion-fast); }
+details[open] .disclosure { transform: rotate(90deg); }
+.name { max-width: 35%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; text-decoration: underline; text-underline-offset: 2px; }
+.summary { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mark { flex: none; }
+.time,.parallel,.note{font-size:.85em;color:var(--muted)}.detail {
+ margin: 4px 0 8px 1.4em;
+ padding: 8px 12px;
+ min-width: 0;
+ background: var(--panel);
+ border-left: 2px solid var(--border);
+ border-radius: var(--radius-sm);
+}dl{display:flex;flex-wrap:wrap;gap:8px 24px;font-size:.85em;color:var(--muted)}dl div{display:flex;gap:8px}dt{font-weight:600}dd{margin:0}pre{max-width:100%;max-height:50vh;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;padding:12px;background:var(--inset);border:1px solid var(--border);border-radius:5px;font:calc(12px * var(--font-scale))/1.5 var(--font-mono)}h4{font:600 .9em var(--font-ui);margin:10px 0 4px}.failure{color:var(--failure)}button{border:1px solid var(--border);background:var(--inset);color:var(--text);padding:5px 10px;border-radius:5px}
 .parallel{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:40%;flex-shrink:1}
 </style>
