@@ -1,6 +1,7 @@
 """The command line of arbol-builds (BLD-0, "Building, withdrawing, pruning" and the Interface)."""
 
 import os
+import pwd
 import re
 import resource
 import signal
@@ -147,6 +148,13 @@ def main(args: list[str]) -> int:
             output(prune_builds(paths.registry, component, int(keep), bin_dir=paths.bin))
         else:
             home = Path.home()
+            owner = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+            builds = owner / "Builds"
+            destinations = {Path(path).resolve() for path in (paths.registry, paths.bin)}
+            if (contains_path(builds / "registries", destinations)
+                    or any(path.is_relative_to(owner) and
+                           (path == builds or not path.is_relative_to(builds)) for path in destinations)):
+                raise ValueError("Use --registry-dir and --bin-dir inside a fresh temporary run under ~/Builds.")
             archive = None
             run = None
             run_info = None

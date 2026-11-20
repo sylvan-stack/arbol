@@ -74,7 +74,8 @@ def contains_path(directory: Path, paths: set[Path]) -> bool:
 @contextmanager
 def open_run(root: Path, run: Path) -> Iterator[tuple[int, int, int]]:
     parts = run.relative_to(root).parts
-    if (len(parts) not in (2, 3) or (parts[0].casefold() == "sylvan-stack" and len(parts) != 3)
+    if (len(parts) not in (2, 3) or parts[0].casefold() == "registries"
+            or (parts[0].casefold() == "sylvan-stack" and len(parts) != 3)
             or any(part.startswith(".") for part in parts)):
         raise ValueError("Expected one run under ~/Builds/<repository> or ~/Builds/<org>/<repository>.")
     with ExitStack() as stack:
