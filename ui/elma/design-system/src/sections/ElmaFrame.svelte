@@ -2,7 +2,7 @@
   import {tick,type Snippet} from 'svelte';
   import WorkspaceGlyph from '../components/WorkspaceGlyph.svelte';
   import WorkspaceShell from '../patterns/WorkspaceShell.svelte';
-  import type { ElmaRoute } from './elma-types';
+  import { importToolLabel, type ElmaImport, type ElmaRoute } from './elma-types';
   import {signInCommand} from './elma-response';
   import InlineRename from '../patterns/InlineRename.svelte';
   import type { WorkspaceTrunkSelector } from '../types';
@@ -12,12 +12,12 @@
     repository='sylvan-stack', route={} as ElmaRoute, repositories=[] as {name:string;folder:string}[],
     routes=[] as {driver:string;subscription:string;unavailable?:string}[], accountProblems=[] as string[], accountBusy=false,onrefreshAccounts,onrefreshAccount, fitted=false,routeBusy=false,routeSaving=false,routeProblem='',onretryRoute,
     readingWidth=$bindable(720), uiScale=$bindable(0), contentScale=$bindable(0), theme=$bindable(''),
-    onpreferences=()=>{}, onolder, onnewer, onhistory, onrepository, onroute, onmodel, oneffort, onother, onquick, onongoing, onrename, rename, onRenameInput, onRenameSave, onRenameCancel, metadataBusy=false, children,
+    onpreferences=()=>{}, onarchived, imported, onolder, onnewer, onhistory, onrepository, onroute, onmodel, oneffort, onother, onquick, onongoing, onrename, rename, onRenameInput, onRenameSave, onRenameCancel, metadataBusy=false, children,
   }: {
     trunk?:string;trunkSelector?:WorkspaceTrunkSelector;headerWindowControls?:Snippet;title?:string;titleIdentity?:string;placeholder?:boolean;turn?:number;total?:number;hasChat?:boolean;working?:boolean;ongoing?:boolean;
     inputTokens?:number;outputTokens?:number;repository?:string;route?:ElmaRoute;repositories?:{name:string;folder:string}[];routes?:{driver:string;subscription:string;unavailable?:string}[];
     accountProblems?:string[];accountBusy?:boolean;onrefreshAccounts?:()=>void;onrefreshAccount?:(driver:string,subscription:string)=>void;fitted?:boolean;routeBusy?:boolean;routeSaving?:boolean;routeProblem?:string;onretryRoute?:()=>void;readingWidth?:number;uiScale?:number;contentScale?:number;theme?:string;onpreferences?:()=>void;
-    onolder?:()=>void;onnewer?:()=>void;onhistory?:()=>void;onrepository?:(folder:string)=>void;onroute?:(driver:string,subscription:string)=>void;onmodel?:()=>void;oneffort?:()=>void;onother?:()=>void;onquick?:()=>void;onongoing?:()=>void;onrename?:()=>void;rename?:{value:string;busy:boolean;problem:string}|null;onRenameInput?:(value:string)=>void;onRenameSave?:()=>void;onRenameCancel?:()=>void;metadataBusy?:boolean;children?:Snippet;
+    onarchived?:()=>void;imported?:ElmaImport;onolder?:()=>void;onnewer?:()=>void;onhistory?:()=>void;onrepository?:(folder:string)=>void;onroute?:(driver:string,subscription:string)=>void;onmodel?:()=>void;oneffort?:()=>void;onother?:()=>void;onquick?:()=>void;onongoing?:()=>void;onrename?:()=>void;rename?:{value:string;busy:boolean;problem:string}|null;onRenameInput?:(value:string)=>void;onRenameSave?:()=>void;onRenameCancel?:()=>void;metadataBusy?:boolean;children?:Snippet;
   }=$props();
   let titleButton=$state<HTMLButtonElement>();let wasRenaming=false,editIdentity='';
   $effect(()=>{const active=!!rename,key=titleIdentity;if(active&&!wasRenaming)editIdentity=key;if(wasRenaming&&!active&&editIdentity===key)void tick().then(()=>titleButton?.focus());wasRenaming=active;});
@@ -53,6 +53,7 @@
       <div class="insignia-content">
         <div class="insignia-title" class:placeholder>{title}</div>
         {#if total}<p class="turn-count">Turn {turn} of {total}</p>{/if}
+        {#if imported}<p class="turn-count">Imported from {importToolLabel(imported.tool)}</p>{/if}
       </div>
     </div>
     {#if hasChat}<div class="cockpit"><button disabled={!onongoing||metadataBusy} onclick={onongoing}>{ongoing?'○ Ongoing':'○ Not ongoing'}</button><span>∑ {(inputTokens+outputTokens).toLocaleString()} ↑{inputTokens.toLocaleString()} ↓{outputTokens.toLocaleString()}</span></div>{/if}
@@ -60,6 +61,7 @@
     {#if repoOpen}{#each repositories.slice(0,9) as repo,i}<button class="nav-row" disabled={!onrepository} onclick={()=>onrepository?.(repo.folder)}><span>{repo.name}</span><kbd>⌘{i+1}</kbd></button>{/each}<button class="nav-row" disabled={!onother} onclick={onother}><span>Other…</span><kbd>⌘0</kbd></button>{/if}
     <div class="history-heading">History{total?' · '+total+' turns':''}</div>
     {#if total>1}<button class="nav-row" disabled={!onolder||turn<=1} onclick={onolder}><span>Older turn</span><kbd>⌘[</kbd></button><button class="nav-row" disabled={!onnewer||turn>=total} onclick={onnewer}><span>Newer turn</span><kbd>⌘]</kbd></button><button class="nav-row" disabled={!onhistory} onclick={onhistory}><span>Jump to turn…</span><kbd>⌘P</kbd></button>{/if}
+    {#if onarchived}<button class="nav-row" onclick={onarchived}>Archived chats</button>{/if}
     {#if hasChat}<button class="nav-row" disabled={!onquick} onclick={onquick}><span>Quick actions…</span><kbd>⇧⏎</kbd></button>{/if}
     <button class="group" aria-expanded={intelligenceOpen} onclick={()=>intelligenceOpen=!intelligenceOpen}><span>Intelligence</span><span aria-hidden="true">{intelligenceOpen?'−':'+'}</span></button>
     {#if intelligenceOpen}{#if accountBusy}<p class="account-problem" role="status">Refreshing accounts…</p>{/if}<button class="nav-row" disabled={!onrefreshAccounts||accountBusy} onclick={onrefreshAccounts}>Refresh accounts</button>{#each accountProblems as problem}<p class="account-problem">{problem}</p>{/each}{#if routeBusy||routeSaving}<p class="account-problem" role="status">{routeBusy?'Loading models…':'Saving route…'}</p>{/if}{#if routeProblem}<p class="account-problem" role="status">{routeProblem}</p>{#if onretryRoute}<button class="nav-row" onclick={onretryRoute}>Retry models</button>{/if}{/if}<button class="nav-row" disabled={!onmodel||routeBusy} onclick={onmodel}><span>Model: {route.model||'—'}</span><kbd>⌃M</kbd></button><button class="nav-row" disabled={!oneffort||routeBusy} onclick={oneffort}><span>Thinking: {route.effort||'—'}</span><kbd>⌃⇥</kbd></button>{#each routes as row,i}<button class="nav-row" disabled={!!row.unavailable||!onroute} onclick={()=>onroute?.(row.driver,row.subscription)} title={row.unavailable}><span>{row.driver} · {row.subscription}{row.unavailable?' · '+row.unavailable:''}</span>{#if i<9}<kbd>⌃{i+1}</kbd>{/if}</button>{#if row.unavailable&&signInCommand(row.driver,row.subscription)}<p class="account-problem">Sign in with: <code>{signInCommand(row.driver,row.subscription)}</code></p>{/if}{#if row.unavailable}<button class="nav-row" disabled={!onrefreshAccount||accountBusy} onclick={()=>onrefreshAccount?.(row.driver,row.subscription)}>Refresh {row.driver} · {row.subscription}</button>{/if}{/each}{/if}

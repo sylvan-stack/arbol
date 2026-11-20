@@ -3,3 +3,20 @@ export interface ElmaRoute {driver?:string;subscription?:string;model?:string;ef
 export interface ElmaMessage {position:number;kind:'message';role:'user'|'assistant';text:string}
 export interface ElmaTool {position:number;kind:'tool';name:string;label?:string;input:unknown;ok:boolean;result?:unknown;error?:string;truncated:boolean;interrupted:boolean;cut?:boolean;ask?:unknown;answer?:unknown}
 export interface ElmaExchange {exchange:string;number:number;state:string;route:ElmaRoute;workingFolder:string;acceptedAt:string;endedAt?:string;items:(ElmaMessage|ElmaTool)[];runs:{kind:string;outcome:string;usage:Record<string,unknown>;started?:Record<string,unknown>;endedAt?:string}[];error?:{code:string;message:string;retryAfterSeconds?:number};note?:{kind:string;at:string}}
+
+export interface ElmaImport {
+  tool: string;
+  kind: string;
+}
+
+const importTools = new Map([
+  ['claude-code', 'Claude Code'],
+  ['codex', 'Codex'],
+  ['kimi-code', 'Kimi Code'],
+  ['pi', 'Pi'],
+  ['mimo', 'Mimo'],
+]);
+
+export function importToolLabel(tool: string): string {
+  return importTools.get(tool) ?? tool;
+}

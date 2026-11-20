@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/sylvan-stack/arbol-design-system",
-  "commit": "d855cd7fa7dbe23e74f737b5a8b3586168192d38",
+  "commit": "eac796ccbcc9f46f3eb11cac276d11ee32003d76",
   "files": {
     "docs/licenses/Hanken-Grotesk-OFL.txt": "f45f60ca871850c58d8dc9c973bd6fcad40c137e9d037172b961e8ca68c87ef7",
     "docs/licenses/Spline-Sans-Mono-OFL.txt": "3127290ccd196ec0c4ffa60296845224a034b92c81de8231b0916278ed7607e1",
@@ -38,7 +38,7 @@
     "src/sections/AnswerThreshold.svelte": "0057af31a89378c5cc42a7bb2a040248431dbfb6c651b1e4e985c8b03374a3ff",
     "src/sections/AskUserQuestion.svelte": "40aac40331bb5d7087dc7c0a263564a2bf859669b0ea62335dbae710a96c2d78",
     "src/sections/Composer.svelte": "d9ae9912d8a371093de9e3908b76e87bff2dbb58c84c467a7c9b61a1e37d8d06",
-    "src/sections/ElmaFrame.svelte": "a050c635683cbc8fc4aa9273099f4d38a9cd2907e4b7c265847886d9d03e21b4",
+    "src/sections/ElmaFrame.svelte": "0944661f8f48997832e8aba6e8eaaec03527db5d7dbaa09e9e674cb4233b39b6",
     "src/sections/ExchangeDetails.svelte": "b7f8e92f5c9b743a1c26dac6331803140b67a3e874339394756a96e9cc0bb8ef",
     "src/sections/HistoryTree.svelte": "9059b7038f614595403d6449e413b303aeb3ed928954d706e6ae423d7bb4fc8f",
     "src/sections/PinnedMessage.svelte": "06bd36f23fcb76b80aa3947a368cf6d9f63ecfa44a2ea315eb7c80da55223caf",
@@ -53,7 +53,7 @@
     "src/sections/TurnNavigator.svelte": "c77f9e07ce9703e32540126c077e2ae5f80092909651d28452d9ef50b8999407",
     "src/sections/VigorPanel.svelte": "3d7d47149b33c8a0e3e9b49f83457f004bce3eaecbe77ed12d62c58c52978da0",
     "src/sections/elma-response.ts": "6b5a532d3c5bf991d03e410ef38e1d588876df7d9545683bfd426eb5fa41c440",
-    "src/sections/elma-types.ts": "241bcb92ac14bd1099ecf4b8ad8062aad52a4bc17507c49a8491fdd595ba4876",
+    "src/sections/elma-types.ts": "11c713c3dd5404e205da5cabb3a904af8b14b83d3443d51d4e33495a5350444e",
     "src/sections/seqoya-subscriptions.ts": "12b317041706219af3344702207976a692cf118b8fba27252d16b4d0a0750588",
     "src/sections/seqoya-vigor.ts": "54a72ccc553477fc5e36ecce3df3c4b9ad8dd98415621cddbc9f717e00b19cf8",
     "src/styles/elma-phase-backgrounds.css": "5ae74fd46c7f40616e51a4f1791f604565e89a5de1ad8c5ac4f531ae2037c46e",
