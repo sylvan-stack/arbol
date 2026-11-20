@@ -12,12 +12,14 @@
 
   let {
     stations, agentic = false, compact = false, readOnly = false, showControls = true,
+    groupBy = 'status',
   }: {
     stations: StationEntry[];
     agentic?: boolean;
     compact?: boolean;
     readOnly?: boolean;
     showControls?: boolean;
+    groupBy?: 'status' | 'recent' | 'harness';
   } = $props();
   let query = $state('');
   let density = $state(untrack(() => (compact ? 'Compact' : 'Full')));
@@ -39,18 +41,21 @@
   }
 
   const visible = $derived.by(() => {
-    const result = new Map<Group, StationEntry[]>();
+    const result = new Map<string, StationEntry[]>();
     const term = showControls ? query.trim().toLowerCase() : '';
     for (const station of stations) {
       if (agentic && station.status === 'Draft') continue;
       if (term && !station.title.toLowerCase().includes(term)) continue;
-      const category = group(station);
+      const category = groupBy === 'status' ? group(station)
+        : groupBy === 'harness' ? station.harness || 'Unknown harness' : '';
       const entries = result.get(category);
       if (entries) entries.push(station);
       else result.set(category, [station]);
     }
     return result;
   });
+  const categories = $derived(groupBy === 'status' ? groups
+    : [...visible.keys()].sort((a, b) => a.localeCompare(b)));
 </script>
 
 <div class="stack">
@@ -61,12 +66,16 @@
       <Tabs label="Station density" items={['Full', 'Compact', 'Minimal']} bind:value={density} />
     </div>
   {/if}
-  {#each groups as category (category)}
+  {#each categories as category (category)}
     {@const entries = visible.get(category)}
     {#if entries}
       {@const condensed = visibleDensity === 'Full' && category === 'Other chats'}
-      <section class="group" aria-label={category}>
-        <h2 class="eyebrow">{category}{agentic ? ' · Agent-origin' : ''}</h2>
+      <section class="group" aria-label={category || 'Imported Chat Sessions'}>
+        {#if category}
+          <h2 class="eyebrow">{category}{agentic ? ' · Agent-origin' : ''}</h2>
+        {:else}
+          <h2 class="sr-only">Imported Chat Sessions</h2>
+        {/if}
         <div class="cards" class:full={visibleDensity === 'Full'} class:condensed>
           {#each entries as station (station.id)}
             <StationSummary {...station} density={visibleDensity.toLowerCase()} {condensed} {readOnly} {now} />

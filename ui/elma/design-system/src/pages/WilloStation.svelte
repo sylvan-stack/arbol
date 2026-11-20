@@ -2,6 +2,16 @@
   import type { StationEntry } from '../sections/StationCollection.svelte';
 
   export type ChatSessionRow = StationEntry & { activityAt: string };
+  export type WilloTab = 'Live Stations' | 'Imported Chat Sessions';
+  type StationView = {
+    rows?: ChatSessionRow[];
+    loading?: boolean;
+    more?: boolean;
+    problem?: string;
+    onRetry?: () => void;
+    onLoadOlder?: () => void;
+  };
+  const destinations: WilloTab[] = ['Live Stations', 'Imported Chat Sessions'];
   export const willoDestinations = [
     'Stations', 'Agentic Stations', 'Action Items', 'Spotlight', 'Comunicados',
     'Slack', 'Telegram', 'Emails', 'Blueprint Runs', 'Run Details', 'Email Signal Rules',
@@ -13,7 +23,7 @@
   import type { Snippet } from 'svelte';
   import Button from '../components/Button.svelte';
   import Notice from '../patterns/Notice.svelte';
-  import PageHeader from '../patterns/PageHeader.svelte';
+  import Tabs from '../components/Tabs.svelte';
   import WorkspaceShell from '../patterns/WorkspaceShell.svelte';
   import StationCollection from '../sections/StationCollection.svelte';
 
@@ -24,29 +34,35 @@
     problem = '',
     onRetry,
     onLoadOlder,
+    tab = $bindable('Live Stations'),
+    importedView = {},
+    onTabChange,
     headerWindowControls,
-  }: {
-    rows?: ChatSessionRow[];
-    loading?: boolean;
-    more?: boolean;
-    problem?: string;
-    onRetry?: () => void;
-    onLoadOlder?: () => void;
+  }: StationView & {
+    tab?: WilloTab;
+    importedView?: StationView;
+    onTabChange?: (tab: WilloTab) => void;
     headerWindowControls?: Snippet;
   } = $props();
 
-  const deferredDestinations = new Set(['Action Items', 'Spotlight', 'Compact Stations']);
-  const destinations = willoDestinations.filter((destination) => !deferredDestinations.has(destination));
-  const inactiveDestinations = destinations.slice(1);
+  let order = $state('Most recent');
+  const imported = $derived(tab === 'Imported Chat Sessions');
+  const view = $derived(imported ? importedView : { rows, loading, more, problem, onRetry, onLoadOlder });
+
+  function select(destination: string) {
+    if (destination === tab || (destination !== 'Live Stations' && destination !== 'Imported Chat Sessions')) return;
+    tab = destination;
+    onTabChange?.(destination);
+  }
 </script>
 
 <div class="willo">
   <WorkspaceShell
     workspace="Willo"
     headerTitle="Willo Station"
-    current="Stations"
+    current={tab}
     {destinations}
-    disabledDestinations={inactiveDestinations}
+    onnavigate={select}
     insignia={{ label: 'Station', hue: 104 }}
     {headerWindowControls}
     navigationFooter={false}
@@ -54,23 +70,28 @@
     fitted
   >
     <div class="page-content">
-      <PageHeader title="Stations" description="Recent Chat Sessions in this installation." />
-      <StationCollection stations={rows} readOnly showControls={false} />
+      {#if imported}
+        <Tabs label="Imported Chat Session order" items={['Most recent', 'By harness']} bind:value={order} />
+      {/if}
+      <StationCollection stations={view.rows ?? []} readOnly showControls={false}
+        groupBy={imported ? (order === 'By harness' ? 'harness' : 'recent') : 'status'} />
 
-      {#if problem}
-        <Notice message={problem} tone="warning" role="alert">
-          {#if onRetry}<Button label="Retry" onclick={onRetry} />{/if}
+      {#if view.problem}
+        <Notice message={view.problem} tone="warning" role="alert">
+          {#if view.onRetry}<Button label="Retry" onclick={view.onRetry} />{/if}
         </Notice>
-      {:else if loading}
+      {:else if view.loading}
         <p class="muted" role="status">
-          {rows.length ? 'Loading Chat Sessions…' : 'Loading recent Chat Sessions…'}
+          {imported ? 'Loading imported Chat Sessions…' : 'Loading Chat Sessions…'}
         </p>
-      {:else if !rows.length}
-        <p class="muted" role="status">No recent Chat Sessions.</p>
+      {:else if !view.rows?.length}
+        <p class="muted" role="status">
+          {imported ? 'No imported Chat Sessions.' : 'No live Chat Sessions.'}
+        </p>
       {/if}
 
-      {#if more && onLoadOlder && !problem}
-        <div><Button label="Load older" tone="ghost" disabled={loading} onclick={onLoadOlder} /></div>
+      {#if view.more && view.onLoadOlder && !view.problem}
+        <div><Button label="Load older" tone="ghost" disabled={view.loading} onclick={view.onLoadOlder} /></div>
       {/if}
     </div>
   </WorkspaceShell>

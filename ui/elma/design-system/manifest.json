@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/sylvan-stack/arbol-design-system",
-  "commit": "ecda5baf39b106862a9f3b1a98edb157720aa9c6",
+  "commit": "1ef68f3cc94697a13db092a0dfe587cce54a0b3d",
   "files": {
     "docs/licenses/Hanken-Grotesk-OFL.txt": "f45f60ca871850c58d8dc9c973bd6fcad40c137e9d037172b961e8ca68c87ef7",
     "docs/licenses/Spline-Sans-Mono-OFL.txt": "3127290ccd196ec0c4ffa60296845224a034b92c81de8231b0916278ed7607e1",
@@ -22,7 +22,7 @@
     "src/markdown.ts": "3879de5cdf3bb5c48a2f29639e3237a41d700d487f88571181a908b27c2d1e0e",
     "src/pages/IntelligenceProviders.svelte": "e2204c1be3793f9408dc29af254a8a22a5c1367f3a85a906af7dad51301e0f46",
     "src/pages/SeqoyaLab.svelte": "2efdf798f390e771146699251338a302ecf0eb73c93339c56566c84a41d8b2ab",
-    "src/pages/WilloStation.svelte": "3dd360157d857ffbbdcb5687358683c4fc26cf76074bb0bdea02c26243798b9c",
+    "src/pages/WilloStation.svelte": "a49c7b39a74b35f26e21e5afe947db18a22aaa91fa2bca5817654a83b8627c37",
     "src/patterns/CommandPalette.svelte": "a48722ad4b2fb3ac7e96773ffe99a5899e6f37688ac4d7f9fee33f7c9356e149",
     "src/patterns/ConfirmAction.svelte": "105af94d18ae735133ce670385c390eb235f57c7822f1927b60823cb344f380b",
     "src/patterns/EntityPicker.svelte": "7a95b85208eba0ae70e531ac6091895c8e751654c35d943096541f4ef6023389",
@@ -44,7 +44,7 @@
     "src/sections/PinnedMessage.svelte": "06bd36f23fcb76b80aa3947a368cf6d9f63ecfa44a2ea315eb7c80da55223caf",
     "src/sections/Response.svelte": "ce4422f7417ca81d415ad6a473722f11a4e9b7f6cb71c14ef975c609a9edef18",
     "src/sections/ResponseReader.svelte": "3c57abf4847728f2db6e71a8a8d30672b7c86fd15f0ebe2e8cd4ded2f399b48e",
-    "src/sections/StationCollection.svelte": "8dac86e8cbdb348698132506d6b3777ff0aabffa1e74700451b101ed12675be1",
+    "src/sections/StationCollection.svelte": "badf11b80dbb25fd9d85fb1fc3c2e9efd1193a091e7b260ba537939006a0213c",
     "src/sections/StationSummary.svelte": "3f0f28724eb510daa1096df253d6c02cdaa1d23c9b23a13e9e701a79d572112c",
     "src/sections/SubscriptionAllowance.svelte": "dc5c866cb17ed87effa3686515cf29a1e3ead4b40a2bf6ad611eda8cb2e684b4",
     "src/sections/SubscriptionCard.svelte": "930301be578eb8d6a4afe0d1c8de4ca2205662a5edb948c5a91de45e208b24d5",
