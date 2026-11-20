@@ -1,6 +1,7 @@
 """Building, listing, withdrawing and pruning Builds, and writing the launchers (BLD-0)."""
 
 import ast
+import fcntl
 import json
 import os
 import shlex
@@ -652,6 +653,7 @@ def remove_build_payload(registry: str, record: Record, eligible: Callable[[], b
         return "inUse"
     except OSError:
         return "unverifiable"
+    runtime_descriptor = None
     try:
         if eligible is not None and not eligible():
             return "recent"
@@ -665,6 +667,17 @@ def remove_build_payload(registry: str, record: Record, eligible: Callable[[], b
         external = payload != Path(folder)
         if external and os.path.lexists(payload) and payload.resolve() != payload:
             return "unverifiable"
+        if external and payload.is_dir():
+            try:
+                runtime_descriptor = os.open(payload / "use.lock", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                info = os.fstat(runtime_descriptor)
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+                    return "unverifiable"
+                fcntl.flock(runtime_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return "inUse"
+            except OSError:
+                return "unverifiable"
         record["prunedAt"] = now()
         save_unlocked(folder, record)
         if external and os.path.lexists(payload):
@@ -683,6 +696,8 @@ def remove_build_payload(registry: str, record: Record, eligible: Callable[[], b
                     pass
         return "pruned"
     finally:
+        if runtime_descriptor is not None:
+            os.close(runtime_descriptor)
         os.close(descriptor)
 
 

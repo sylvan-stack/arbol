@@ -3,8 +3,10 @@
 The generated arbol-trunk launcher embeds this module after the registry and schema readers.
 """
 
+import json
 import os
 import signal
+from pathlib import Path
 
 from arbol_installation.paths import INSTALLATION_LAYOUT
 
@@ -25,6 +27,7 @@ from .launcher import (
     readable,
     record_start,
     registered_entry,
+    schema_compatibility,
     standard_descriptors,
     warning,
     write_all,
@@ -147,10 +150,76 @@ def trunk_list(registry: str, schema: SchemaState, codes: list[str]) -> dict[str
              "fits": fits(record, schema.pair), "runnable": named_runnable(registry, record),
              "chosen": record is selected}
             for record in records]})
-    schema_view: dict[str, object] = {"status": schema.status}
+    return {"schema": schema_view(schema), "installationLayout": INSTALLATION_LAYOUT, "trunks": trunks}
+
+
+def schema_view(schema: SchemaState) -> dict[str, object]:
+    view: dict[str, object] = {"status": schema.status}
     if schema.pair is not None:
-        schema_view.update(revision=schema.pair.revision, compatibilityVersion=schema.pair.compatibility_version)
-    return {"schema": schema_view, "installationLayout": INSTALLATION_LAYOUT, "trunks": trunks}
+        view.update(revision=schema.pair.revision, compatibilityVersion=schema.pair.compatibility_version)
+    return view
+
+
+def installed_trunks() -> dict[str, tuple[Path, Record]]:
+    directory = Path.home() / "Applications/Arbol/bin"
+    prefix = "arbol-trunk-"
+    marker = b"# arbol-installed-trunk "
+    result = {}
+    for entry in sorted(directory.glob(prefix + "*")):
+        code = entry.name.removeprefix(prefix)
+        if not code_name(code) or entry.is_symlink() or not entry.is_file() or not os.access(entry, os.X_OK):
+            continue
+        with entry.open("rb") as stream:
+            stream.readline(512)
+            line = stream.readline(4096)
+        if not line.startswith(marker) or not line.endswith(b"\n"):
+            raise ValueError(f"The installed launcher for {code} has no Trunk identity.")
+        record = json.loads(line[len(marker):])
+        if (not isinstance(record, dict) or record.get("component") != f"{TRUNKS}/{code}"
+                or not isinstance(record.get("build"), str) or not BUILD_PATTERN.fullmatch(record["build"])
+                or not schema_compatibility(record.get("schemaCompatibility"))):
+            raise ValueError(f"The installed launcher for {code} has an invalid Trunk identity.")
+        result[code] = (entry, record)
+    return result
+
+
+def launch_installed_trunk(args: list[str]) -> int:
+    """Use only the Trunk entry points installed alongside the stable app."""
+    standard_descriptors()
+    try:
+        call = read_call(args)
+        installed = installed_trunks()
+        code = call.trunk or DEFAULT_TRUNK
+        if (call.trunk is not None or call.command[0] != LIST) and code not in installed:
+            raise Refused("unknown_trunk", f"No Build of {TRUNKS}/{code} is installed.")
+        schema = read_schema()
+        if call.command[0] == LIST:
+            trunks = []
+            for name in [code] if call.trunk else installed:
+                _, record = installed[name]
+                compatible = fits(record, schema.pair)
+                trunks.append({"trunk": name, "default": name == DEFAULT_TRUNK, "builds": [{
+                    "build": record["build"], "status": "working", "installationLayout": installation_layout(record),
+                    "schemaCompatibility": record["schemaCompatibility"], "fits": compatible,
+                    "runnable": True, "chosen": compatible,
+                }]})
+            write_all(1, json_line({"schema": schema_view(schema), "installationLayout": INSTALLATION_LAYOUT,
+                                    "trunks": trunks}))
+            return 0
+        if schema.pair is None:
+            raise Refused(*SCHEMA_ERRORS[schema.status])
+        entry, record = installed[code]
+        compatible = fits(record, schema.pair)
+        if not compatible or call.build not in (None, record["build"]):
+            raise Refused("no_fit", f"{TRUNKS}/{code} has no matching installed Build.",
+                          [record["build"]] if compatible else [])
+        os.execv(entry, [str(entry), *call.command])
+    except Refused as error:
+        write_all(1, json_line({"error": {"code": error.code, "message": str(error)}, "available": error.available}))
+        return 1
+    except (OSError, ValueError) as error:
+        write_all(1, json_line({"error": {"code": "launch_failed", "message": str(error)}, "available": []}))
+        return 1
 
 
 def launch_trunk(registry: str, args: list[str]) -> int:
