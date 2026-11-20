@@ -10,6 +10,7 @@ and the tool judge a record in the same way.
 import fcntl
 import json
 import os
+import plistlib
 import re
 import select
 import signal
@@ -19,7 +20,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from arbol_installation.paths import INSTALLATION_LAYOUT
+from arbol_installation.paths import INSTALLATION_LAYOUT, installation_root
 
 type Record = dict[str, Any]
 
@@ -262,10 +263,31 @@ def executable_entry(folder: str, entry: object) -> str | None:
     return path
 
 
+def registered_entry(registry: str, record: Record) -> str | None:
+    folder = os.path.join(registry, record["component"], record["build"])
+    entry = record.get("entry")
+    if (record["component"] != "arbol-app" or record["status"] != "working"
+            or entry != "Seqoya Lab.app/Contents/MacOS/Seqoya Lab"
+            or os.path.realpath(registry) != os.path.realpath(installation_root() / "builds")):
+        return executable_entry(folder, entry)
+    applications = os.path.expanduser("~/Applications/Arbol")
+    bundle = os.path.join(applications, "Seqoya Lab.app")
+    if os.path.realpath(bundle) == bundle:
+        try:
+            with open(os.path.join(bundle, "Contents/Info.plist"), "rb") as stream:
+                info = plistlib.load(stream)
+            if (info.get("CFBundleIdentifier") == "com.sylvan-stack.arbol"
+                    and info.get("CFBundleExecutable") == "Seqoya Lab"
+                    and info.get("CFBundleVersion") == str(int(record["build"], 16))):
+                return executable_entry(bundle, "Contents/MacOS/Seqoya Lab")
+        except (OSError, ValueError, AttributeError, plistlib.InvalidFileException):
+            pass
+    return executable_entry(folder, entry)
+
+
 def runnable(registry: str, record: Record) -> bool:
     return (not record.get("prunedAt") and record["status"] in ("working", "withdrawn")
-            and executable_entry(os.path.join(registry, record["component"], record["build"]),
-                                 record.get("entry")) is not None)
+            and registered_entry(registry, record) is not None)
 
 
 def named_runnable(registry: str, record: Record) -> bool:
@@ -460,7 +482,7 @@ def launch(registry: str, component: str, args: list[str], *, schema: tuple[int,
                 write_all(2, readable(line))
             except OSError:
                 pass  # the warning is a courtesy; the Build starts without it
-        entry = executable_entry(os.path.join(registry, component, selected["build"]), selected.get("entry"))
+        entry = registered_entry(registry, selected)
         if entry is None:
             raise OSError(f"The program of {component}@{selected['build']} is no longer there.")
         use_descriptor = hold_build_use(registry, component, selected["build"])
