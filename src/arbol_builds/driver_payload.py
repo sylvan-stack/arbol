@@ -16,7 +16,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from arbol_installation.paths import installation_root
+from arbol_installation.paths import build_payload_directory, build_registry
 
 from .driver_admission import (
     COMPONENTS,
@@ -357,10 +357,11 @@ def _registered_payload(registry: Path, component: str, build: str) -> tuple[Obj
     private_directory(registry)
     folder = private_directory(registry / component / build)
     record = decode(read_bytes(folder / "build.json"), exact=False)
+    payload_folder = build_payload_directory(registry, component, build)
     if (not valid_record(record, component, build) or record.get("prunedAt")
-            or executable_entry(str(folder), record.get("entry")) is None):
+            or executable_entry(str(payload_folder), record.get("entry")) is None):
         refuse()
-    payload = load(folder / SUBTREE, component, build)
+    payload = load(payload_folder / SUBTREE, component, build)
     source = record.get("source")
     if (not isinstance(source, dict) or source.get("commit") != payload.descriptor["source"]["commit"]
             or source.get("uncommittedChanges") is not False):
@@ -394,7 +395,7 @@ def resolve_provider(registry: Path, digest: str) -> Payload:
         if BUILD.fullmatch(item.name) is None:
             continue
         try:
-            raw = read_bytes(item / SUBTREE / DESCRIPTOR)
+            raw = read_bytes(build_payload_directory(registry, "arbol", item.name) / SUBTREE / DESCRIPTOR)
         except (OSError, Refusal):
             continue  # An unrelated incomplete Build cannot select the gate's provider.
         if sha256(raw) == digest:
@@ -467,7 +468,7 @@ def _candidate_acceptance(registry: Path, component: str) -> tuple[str, Object]:
     if (uname.sysname != "Darwin" or value["platform"] != {
             "system": "Darwin", "release": uname.release, "machine": uname.machine}):
         refuse()
-    installed = installation_root(Path(pwd.getpwuid(os.getuid()).pw_dir)) / "builds"
+    installed = build_registry(Path(pwd.getpwuid(os.getuid()).pw_dir))
     if registry == installed.resolve():
         refuse()
     return digest, value
@@ -573,7 +574,7 @@ def verify_acceptance(authority: Authority, payload: Payload, *, digest: str | N
     """Check owner-trust metadata; never issue it or infer qualification from D."""
     import pwd
 
-    if payload.root != authority.registry / authority.component / payload.build / SUBTREE:
+    if payload.root != build_payload_directory(authority.registry, authority.component, payload.build) / SUBTREE:
         refuse()
     if candidate is not None:
         current = candidate.registered(authority.registry, authority.component, payload.build)
@@ -602,7 +603,7 @@ def verify_acceptance(authority: Authority, payload: Payload, *, digest: str | N
     if (uname.sysname != "Darwin" or value["platform"] != {
             "system": "Darwin", "release": uname.release, "machine": uname.machine}):
         refuse()
-    installed = installation_root(Path(pwd.getpwuid(os.getuid()).pw_dir)) / "builds"
+    installed = build_registry(Path(pwd.getpwuid(os.getuid()).pw_dir))
     if value["status"] == "candidate" and authority.registry == installed.resolve():
         refuse()
     gate = verify_gate(authority.registry)
@@ -842,7 +843,7 @@ def _retention_builds(registry: Path, component: str, digests: set[str]) -> froz
             refuse()
         if not BUILD.fullmatch(folder.name):
             continue
-        raw = optional_descriptor(folder)
+        raw = optional_descriptor(build_payload_directory(registry, component, folder.name))
         if raw is None:
             continue
         digest = sha256(raw)

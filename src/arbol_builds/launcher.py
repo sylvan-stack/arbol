@@ -20,7 +20,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from arbol_installation.paths import INSTALLATION_LAYOUT, installation_root
+from arbol_installation.paths import INSTALLATION_LAYOUT, build_payload_directory, build_registry
 
 type Record = dict[str, Any]
 
@@ -264,10 +264,10 @@ def executable_entry(folder: str, entry: object) -> str | None:
 
 
 def registered_entry(registry: str, record: Record) -> str | None:
-    folder = os.path.join(registry, record["component"], record["build"])
+    folder = str(build_payload_directory(registry, record["component"], record["build"]))
     entry = record.get("entry")
     if (record["component"] != "arbol-app"
-            or os.path.realpath(registry) != os.path.realpath(installation_root() / "builds")):
+            or os.path.realpath(registry) != os.path.realpath(build_registry())):
         return executable_entry(folder, entry)
     applications = os.path.expanduser("~/Applications/Arbol")
     bundle = os.path.join(applications, "Seqoya Lab.app")

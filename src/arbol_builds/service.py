@@ -14,10 +14,12 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Event
 from typing import TYPE_CHECKING, Any
 
 from arbol_installation.admission import Admission, AdmissionRefusal, runtime_folder
-from arbol_installation.paths import installation_root, prepare_installation
+from arbol_installation.build_output import unseal_directories
+from arbol_installation.paths import build_payload_directory, build_registry, prepare_installation
 
 from .config import Locations, default_repository, description, load_json
 from .launcher import (
@@ -113,7 +115,7 @@ def save_record(folder: str, record: Record) -> None:
 
 def reserve(registry: str, component: str) -> tuple[str, str]:
     """The folder and the number of a new Build: one more than the highest numbered folder."""
-    if Path(registry).resolve() == (installation_root() / "builds").resolve():
+    if Path(registry).resolve() == build_registry().resolve():
         prepare_installation()
     root = os.path.join(registry, component)
     make_dirs(root, 0o700)
@@ -659,8 +661,15 @@ def remove_build_payload(registry: str, record: Record, eligible: Callable[[], b
         if retained is not None:
             return retained
         folder = os.path.join(registry, record["component"], record["build"])
+        payload = build_payload_directory(registry, record["component"], record["build"])
+        external = payload != Path(folder)
+        if external and os.path.lexists(payload) and payload.resolve() != payload:
+            return "unverifiable"
         record["prunedAt"] = now()
         save_unlocked(folder, record)
+        if external and os.path.lexists(payload):
+            unseal_directories(payload, payload.lstat(), Event())
+            shutil.rmtree(payload, onexc=missing_only)
         for item in os.listdir(folder):
             if item in ("build.json", "build.log", "last-start"):
                 continue

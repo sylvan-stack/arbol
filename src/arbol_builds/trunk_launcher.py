@@ -16,7 +16,6 @@ from .launcher import (
     close_build_use,
     code_name,
     default_record,
-    executable_entry,
     hold_build_use,
     installation_layout,
     json_line,
@@ -25,6 +24,7 @@ from .launcher import (
     read_records,
     readable,
     record_start,
+    registered_entry,
     standard_descriptors,
     warning,
     write_all,
@@ -181,7 +181,7 @@ def launch_trunk(registry: str, args: list[str]) -> int:
                 pass
         use_descriptor = hold_build_use(registry, component, selected["build"])
         folder = os.path.join(registry, component, selected["build"])
-        entry = executable_entry(folder, selected.get("entry"))
+        entry = registered_entry(registry, selected)
         if entry is None:
             raise OSError(f"The program of {component}@{selected['build']} is no longer there.")
         record_start(folder)

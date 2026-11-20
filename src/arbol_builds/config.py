@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from arbol_installation.paths import installation_root
+from arbol_installation.paths import build_registry
 
 from .launcher import (
     COMPONENT_PATTERN,
@@ -37,7 +37,7 @@ class Locations:
 
 def locations() -> Locations:
     home = Path.home()
-    return Locations(str(installation_root(home) / "builds"), str(home / ".local/bin"))
+    return Locations(str(build_registry(home)), str(home / ".local/bin"))
 
 
 def component_name(name: str) -> str:

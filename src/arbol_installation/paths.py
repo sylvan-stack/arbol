@@ -11,6 +11,17 @@ def installation_root(home: Path | None = None) -> Path:
     return (Path.home() if home is None else home) / ".arbol"
 
 
+def build_registry(home: Path | None = None) -> Path:
+    return (Path.home() if home is None else home) / "Builds/registries/arbol"
+
+
+def build_payload_directory(registry: str | Path, component: str, build: str) -> Path:
+    root = Path(registry)
+    if root.resolve() == build_registry().resolve():
+        root = Path.home() / ".local/lib/sylvan-stack/arbol/stable"
+    return root / component / build
+
+
 def postgres_folder(home: Path | None = None) -> Path:
     return installation_root(home) / "postgres"
 

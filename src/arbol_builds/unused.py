@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from arbol_installation.admission import Admission, AdmissionRefusal, runtime_folder
-from arbol_installation.paths import installation_root
+from arbol_installation.paths import build_payload_directory, installation_root
 
 from .config import Locations
 from .driver_payload import retention_status
@@ -198,8 +198,8 @@ def usage_snapshot(paths: Locations, schema: SchemaState) -> Usage:
     backend = default_record(paths.registry, [record for record in records if backend_fits(record, schema.pair)])
     if backend is None:
         return Usage({}, unavailable=True)
-    folder = os.path.join(paths.registry, "arbol", backend["build"])
-    executable = executable_entry(folder, "bin/arbol-exchanges")
+    folder = build_payload_directory(paths.registry, "arbol", backend["build"])
+    executable = executable_entry(str(folder), "bin/arbol-exchanges")
     if executable is None:
         return Usage({}, unavailable=True)
     try:
