@@ -266,23 +266,26 @@ def executable_entry(folder: str, entry: object) -> str | None:
 def registered_entry(registry: str, record: Record) -> str | None:
     folder = os.path.join(registry, record["component"], record["build"])
     entry = record.get("entry")
-    if (record["component"] != "arbol-app" or record["status"] != "working"
-            or entry != "Seqoya Lab.app/Contents/MacOS/Seqoya Lab"
+    if (record["component"] != "arbol-app"
             or os.path.realpath(registry) != os.path.realpath(installation_root() / "builds")):
         return executable_entry(folder, entry)
     applications = os.path.expanduser("~/Applications/Arbol")
     bundle = os.path.join(applications, "Seqoya Lab.app")
-    if os.path.realpath(bundle) == bundle:
-        try:
-            with open(os.path.join(bundle, "Contents/Info.plist"), "rb") as stream:
-                info = plistlib.load(stream)
-            if (info.get("CFBundleIdentifier") == "com.sylvan-stack.arbol"
-                    and info.get("CFBundleExecutable") == "Seqoya Lab"
-                    and info.get("CFBundleVersion") == str(int(record["build"], 16))):
-                return executable_entry(bundle, "Contents/MacOS/Seqoya Lab")
-        except (OSError, ValueError, AttributeError, plistlib.InvalidFileException):
-            pass
-    return executable_entry(folder, entry)
+    if not os.path.lexists(bundle):
+        return executable_entry(folder, entry)
+    if (record["status"] != "working" or entry != "Seqoya Lab.app/Contents/MacOS/Seqoya Lab"
+            or os.path.realpath(bundle) != bundle):
+        return None
+    try:
+        with open(os.path.join(bundle, "Contents/Info.plist"), "rb") as stream:
+            info = plistlib.load(stream)
+        if (info.get("CFBundleIdentifier") == "com.sylvan-stack.arbol"
+                and info.get("CFBundleExecutable") == "Seqoya Lab"
+                and info.get("CFBundleVersion") == str(int(record["build"], 16))):
+            return executable_entry(bundle, "Contents/MacOS/Seqoya Lab")
+    except (OSError, ValueError, AttributeError, plistlib.InvalidFileException):
+        pass
+    return None
 
 
 def runnable(registry: str, record: Record) -> bool:
@@ -294,8 +297,7 @@ def named_runnable(registry: str, record: Record) -> bool:
     """A Build named with -v: also a failed one whose program is there (BLD-D13). Never one still building."""
     return runnable(registry, record) or (
         not record.get("prunedAt") and record["status"] == "failed"
-        and executable_entry(os.path.join(registry, record["component"], record["build"]),
-                             record.get("entry")) is not None)
+        and registered_entry(registry, record) is not None)
 
 
 def default_record(registry: str, records: list[Record]) -> Record | None:
