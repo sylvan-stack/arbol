@@ -15,7 +15,6 @@
   import Notice from '../patterns/Notice.svelte';
   import PageHeader from '../patterns/PageHeader.svelte';
   import WorkspaceShell from '../patterns/WorkspaceShell.svelte';
-  import AttentionColumn from '../sections/AttentionColumn.svelte';
   import StationCollection from '../sections/StationCollection.svelte';
 
   let {
@@ -36,7 +35,9 @@
     headerWindowControls?: Snippet;
   } = $props();
 
-  const inactiveDestinations = willoDestinations.slice(1);
+  const deferredDestinations = new Set(['Action Items', 'Spotlight', 'Compact Stations']);
+  const destinations = willoDestinations.filter((destination) => !deferredDestinations.has(destination));
+  const inactiveDestinations = destinations.slice(1);
 </script>
 
 <div class="willo">
@@ -44,8 +45,9 @@
     workspace="Willo"
     headerTitle="Willo Station"
     current="Stations"
-    destinations={willoDestinations}
+    {destinations}
     disabledDestinations={inactiveDestinations}
+    insignia={{ label: 'Station', hue: 104 }}
     {headerWindowControls}
     navigationFooter={false}
     status={null}
@@ -53,28 +55,23 @@
   >
     <div class="page-content">
       <PageHeader title="Stations" description="Recent Chat Sessions in this installation." />
-      <div class="split">
-        <div class="stack">
-          <StationCollection stations={rows} readOnly />
+      <StationCollection stations={rows} readOnly showControls={false} />
 
-          {#if problem}
-            <Notice message={problem} tone="warning" role="alert">
-              {#if onRetry}<Button label="Retry" onclick={onRetry} />{/if}
-            </Notice>
-          {:else if loading}
-            <p class="muted" role="status">
-              {rows.length ? 'Loading Chat Sessions…' : 'Loading recent Chat Sessions…'}
-            </p>
-          {:else if !rows.length}
-            <p class="muted" role="status">No recent Chat Sessions.</p>
-          {/if}
+      {#if problem}
+        <Notice message={problem} tone="warning" role="alert">
+          {#if onRetry}<Button label="Retry" onclick={onRetry} />{/if}
+        </Notice>
+      {:else if loading}
+        <p class="muted" role="status">
+          {rows.length ? 'Loading Chat Sessions…' : 'Loading recent Chat Sessions…'}
+        </p>
+      {:else if !rows.length}
+        <p class="muted" role="status">No recent Chat Sessions.</p>
+      {/if}
 
-          {#if more && onLoadOlder && !problem}
-            <div><Button label="Load older" tone="ghost" disabled={loading} onclick={onLoadOlder} /></div>
-          {/if}
-        </div>
-        <AttentionColumn unavailable />
-      </div>
+      {#if more && onLoadOlder && !problem}
+        <div><Button label="Load older" tone="ghost" disabled={loading} onclick={onLoadOlder} /></div>
+      {/if}
     </div>
   </WorkspaceShell>
 </div>

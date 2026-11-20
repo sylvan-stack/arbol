@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import WorkspaceGlyph from '../components/WorkspaceGlyph.svelte';
   import WorkspaceHeader from './WorkspaceHeader.svelte';
   import type { WorkspaceTrunkSelector } from '../types';
   let {
@@ -21,7 +22,7 @@
     disabledDestinations = [],
     headerTitle, headerTitleDetail, headerTitleEditor, headerBusy,
     headerContent, headerLead, headerExtras, headerWindowControls, trunk, trunkSelector, navigation, status,
-    headerAppearance, onAppearanceChange,
+    headerAppearance, onAppearanceChange, insignia,
     theme = $bindable(''), uiScale = $bindable(0), contentScale = $bindable<number>(),
     navigationFooter = true, showNavigation = true, fitted = false, elma = false,
     onnavigate = () => {},
@@ -40,6 +41,7 @@
     headerExtras?: Snippet;
     headerWindowControls?: Snippet;
     headerAppearance?: 'enabled' | 'disabled';
+    insignia?: { label: string; hue?: number };
     theme?: string;
     uiScale?: number;
     contentScale?: number;
@@ -61,7 +63,20 @@
   <div class="layout" class:expanded>
     {#if showNavigation}<nav aria-label={workspace + ' navigation'}>
       {#if navigation}{@render navigation()}{:else}
-      <p class="eyebrow">Workspace</p>
+      {#if insignia}
+        <div class="insignia" style:--insignia-hue={(insignia.hue ?? 0) + 'deg'}>
+          <span class="insignia-watermark" aria-hidden="true">
+            <WorkspaceGlyph {workspace} size={132} />
+          </span>
+          <span class="insignia-workspace">
+            <span aria-hidden="true"><WorkspaceGlyph {workspace} size={16} /></span>
+            {workspace}
+          </span>
+          <span class="insignia-title">{insignia.label}</span>
+        </div>
+      {:else}
+        <p class="eyebrow">Workspace</p>
+      {/if}
       {#each destinations as destination}<button
           aria-current={current === destination ? 'page' : undefined}
           disabled={disabledDestinations.includes(destination)}
@@ -122,6 +137,54 @@
   }
   nav p {
     padding: 0 12px 12px;
+  }
+  .insignia {
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    gap: 4px;
+    flex-shrink: 0;
+    min-height: 104px;
+    margin-bottom: 12px;
+    padding: var(--space-4);
+    border-radius: var(--radius-lg);
+    color: var(--arbol-brief-pane-fg);
+    box-shadow: var(--arbol-shadow-1);
+  }
+  .insignia::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -2;
+    background: var(--arbol-brief-pane-bg-silver);
+    filter: hue-rotate(var(--insignia-hue));
+  }
+  .insignia-watermark {
+    position: absolute;
+    z-index: -1;
+    top: -22px;
+    right: -20px;
+    opacity: 0.46;
+    color: var(--arbol-brief-ring);
+    pointer-events: none;
+  }
+  .insignia-workspace {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font: 600 calc(12px * var(--font-scale))/1 var(--font-mono);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  .insignia-workspace > span { display: flex; }
+  .insignia-title {
+    font-size: calc(22px * var(--font-scale));
+    font-weight: 700;
+    line-height: 1.15;
+    overflow-wrap: anywhere;
   }
   nav button {
     color: var(--muted);

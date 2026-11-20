@@ -11,15 +11,17 @@
   import Tabs from '../components/Tabs.svelte';
 
   let {
-    stations, agentic = false, compact = false, readOnly = false,
+    stations, agentic = false, compact = false, readOnly = false, showControls = true,
   }: {
     stations: StationEntry[];
     agentic?: boolean;
     compact?: boolean;
     readOnly?: boolean;
+    showControls?: boolean;
   } = $props();
   let query = $state('');
   let density = $state(untrack(() => (compact ? 'Compact' : 'Full')));
+  const visibleDensity = $derived(showControls ? density : 'Full');
 
   const groups = ['Drafted', 'Running', 'Unread', 'Other on-going', 'Other chats'] as const;
   type Group = (typeof groups)[number];
@@ -33,7 +35,7 @@
 
   const visible = $derived.by(() => {
     const result = new Map<Group, StationEntry[]>();
-    const term = query.trim().toLowerCase();
+    const term = showControls ? query.trim().toLowerCase() : '';
     for (const station of stations) {
       if (agentic && station.status === 'Draft') continue;
       if (term && !station.title.toLowerCase().includes(term)) continue;
@@ -47,26 +49,28 @@
 </script>
 
 <div class="stack">
-  <div class="row spread">
-    <TextField label={readOnly ? 'Search loaded Chat Sessions' : 'Search this sample page'}
-      bind:value={query} type="search" />
-    <Tabs label="Station density" items={['Full', 'Compact', 'Minimal']} bind:value={density} />
-  </div>
+  {#if showControls}
+    <div class="row spread">
+      <TextField label={readOnly ? 'Search loaded Chat Sessions' : 'Search this sample page'}
+        bind:value={query} type="search" />
+      <Tabs label="Station density" items={['Full', 'Compact', 'Minimal']} bind:value={density} />
+    </div>
+  {/if}
   {#each groups as category (category)}
     {@const entries = visible.get(category)}
     {#if entries}
-      {@const condensed = density === 'Full' && category === 'Other chats'}
+      {@const condensed = visibleDensity === 'Full' && category === 'Other chats'}
       <section class="group" aria-label={category}>
         <h2 class="eyebrow">{category}{agentic ? ' · Agent-origin' : ''}</h2>
-        <div class="cards" class:full={density === 'Full'} class:condensed>
+        <div class="cards" class:full={visibleDensity === 'Full'} class:condensed>
           {#each entries as station (station.id)}
-            <StationSummary {...station} density={density.toLowerCase()} {condensed} {readOnly} />
+            <StationSummary {...station} density={visibleDensity.toLowerCase()} {condensed} {readOnly} />
           {/each}
         </div>
       </section>
     {/if}
   {/each}
-  {#if !visible.size && query.trim() && stations.length}
+  {#if showControls && !visible.size && query.trim() && stations.length}
     <p class="muted" role="status">No matching Chat Sessions.</p>
   {/if}
 </div>
