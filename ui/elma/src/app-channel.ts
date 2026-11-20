@@ -57,7 +57,7 @@ export class AppChannel {
   }
   const native=window.webkit?.messageHandlers?.arbolApp;
   if(native){const id='a'+(++this.next);return new Promise((resolve,reject)=>{
-   const timeout=method==='app.refreshSubscriptionDashboards'?120000:30000;
+   const timeout=method==='app.refreshSubscriptionDashboards'?(params.savedOnly===true?15000:120000):30000;
    const timer=setTimeout(()=>{this.waiting.delete(id);reject(new Refusal({code:'no_answer',message:'The app did not answer in time.'}));},timeout);
    this.waiting.set(id,{resolve,reject,timer});try{native.postMessage(JSON.stringify({type:'call',id,method,params}));}catch{clearTimeout(timer);this.waiting.delete(id);reject(new Refusal({code:'disconnected',message:'The app is disconnected.'}));}
   });}

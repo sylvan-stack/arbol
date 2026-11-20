@@ -23,10 +23,18 @@
   let browserEvidence = $state<UsageEvidence>();
   let browserIssues = $state<Record<string, string>>({});
   let browserError = $state<string>();
+  let initialBrowserRead = $state(true);
   const combinedEvidence = $derived(mergeUsageEvidence(evidence, browserEvidence));
+  const waitingForPi = $derived(initialBrowserRead && subscriptions.connected && subscriptions.listing?.drivers.some(
+    ({ driver, subscriptions: accounts }) => driver === 'pi' && accounts?.some(
+      account => account.family === 'chatgpt' && account.state === 'signed_in',
+    ),
+  ));
   let now = $state(Date.now());
   const subscriptionView = $derived<SubscriptionView>({
-    ...subscriptions, listing: withAllowances(subscriptions.listing, vigor.rollup, combinedEvidence, now, browserIssues),
+    ...subscriptions,
+    loading: subscriptions.loading || waitingForPi,
+    listing: waitingForPi ? undefined : withAllowances(subscriptions.listing, vigor.rollup, combinedEvidence, now, browserIssues),
     evidenceError: browserError ?? evidenceError ?? vigor.error,
   });
   const vigorView = $derived<VigorView>({
@@ -180,26 +188,45 @@
     }
     readSubscriptions = reloadList;
 
+    async function dashboardRead(savedOnly: boolean) {
+      const reply = await app.call('app.refreshSubscriptionDashboards', savedOnly ? { savedOnly: true } : {});
+      if (!reply.evidence || typeof reply.evidence !== 'object' || Array.isArray(reply.evidence)
+        || !reply.issues || typeof reply.issues !== 'object' || Array.isArray(reply.issues)
+        || Object.values(reply.issues).some((issue) => typeof issue !== 'string')) {
+        throw new Error('Invalid Arbol Browser usage reply.');
+      }
+      return { evidence: reply.evidence as UsageEvidence, issues: reply.issues as Record<string, string> };
+    }
+
     readBrowserUsage = async () => {
       if (!active || !subscriptions.connected || browserRequest === connection) return;
       const requestedOn = connection;
       browserRequest = requestedOn;
       try {
-        const reply = await app.call('app.refreshSubscriptionDashboards');
-        if (!isCurrent(requestedOn)) return;
-        if (!reply.evidence || typeof reply.evidence !== 'object' || Array.isArray(reply.evidence)
-          || !reply.issues || typeof reply.issues !== 'object' || Array.isArray(reply.issues)
-          || Object.values(reply.issues).some((issue) => typeof issue !== 'string')) {
-          throw new Error('Invalid Arbol Browser usage reply.');
+        if (initialBrowserRead) {
+          try {
+            const saved = await dashboardRead(true);
+            if (!isCurrent(requestedOn)) return;
+            if (Array.isArray(saved.evidence.browserReports)) browserEvidence = saved.evidence;
+            if (saved.evidence.piChatGPT) initialBrowserRead = false;
+            now = Date.now();
+          } catch {
+            // A saved read may be unavailable during a native host handoff. Try the live read.
+          }
         }
-        browserEvidence = reply.evidence as UsageEvidence;
-        browserIssues = reply.issues as Record<string, string>;
+        if (!isCurrent(requestedOn)) return;
+        const reply = await dashboardRead(false);
+        if (!isCurrent(requestedOn)) return;
+        // A verified empty catalogue can replace saved evidence. A failed read cannot.
+        if (Array.isArray(reply.evidence.browserReports)) browserEvidence = reply.evidence;
+        browserIssues = reply.issues;
         browserError = undefined;
         now = Date.now();
       } catch (error) {
         if (isCurrent(requestedOn)) browserError = error instanceof Refusal ? error.message
           : 'The App did not return readable Arbol Browser usage.';
       } finally {
+        if (isCurrent(requestedOn)) initialBrowserRead = false;
         if (browserRequest === requestedOn) browserRequest = undefined;
       }
     };
