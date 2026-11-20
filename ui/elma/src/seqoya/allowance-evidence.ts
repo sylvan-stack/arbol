@@ -208,7 +208,7 @@ function mimoQuota(account: SubscriptionRecord, saved: Result | undefined, readi
       note: saved?.stale ? 'The saved Vigor report is stale.' : undefined,
     };
   }
-  if (!quota) return { issues: ['No MiMo quota reading. Refresh usage or open the Xiaomi console.'] };
+  if (!quota) return { issues: ['No MiMo quota reading. Refresh Subscriptions or open MiMo.'] };
   if (!quota.credits) return { quota, issues: ['Absolute MiMo capacity unavailable. The saved window has a usage percentage and needs a total credit count.'] };
   const { total, remaining } = quota.credits;
   const divisor = integer.format(mimoCreditsPerOutputToken);
@@ -226,7 +226,7 @@ function mimoQuota(account: SubscriptionRecord, saved: Result | undefined, readi
 
 function chatGPTQuota(account: SubscriptionRecord, reading: UsageEvidence['piChatGPT'], now: number): AllowanceView {
   if (!matches(reading, account, now)) {
-    return { issues: ['Pi quota has no saved dashboard reading. Open ChatGPT Usage and check Connected App Limits for this sign-in.'] };
+    return { issues: ['Pi quota has no saved dashboard reading. Open in ChatGPT and check Connected App Limits for this sign-in.'] };
   }
   const report = account.lastUsage;
   const windows: Quota['windows'] = [];
@@ -306,7 +306,7 @@ function allowance(
   } else if (driver === 'pi' && account.family === 'zai') {
     issues.push('Absolute z.ai capacity unavailable. The Coding Plan reports quota shares without a token conversion.');
   } else if (driver === 'pi' && account.family === 'deepseek') {
-    if (!account.lastUsage?.extra?.balances?.length) issues.push('No DeepSeek balance reading. Refresh usage to check the API key.');
+    if (!account.lastUsage?.extra?.balances?.length) issues.push('No DeepSeek balance reading. Refresh Subscriptions to check the API key.');
     return issues.length ? { issues } : undefined;
   } else return undefined;
   if (!windows.some((window) => window.usedPercent != null)) issues.unshift('No quota percentage is available.');

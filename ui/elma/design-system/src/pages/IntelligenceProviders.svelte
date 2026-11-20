@@ -16,7 +16,7 @@
 
   let {
     tab = $bindable('Subscriptions'), subscriptions, vigor, onRefreshSubscriptions, onRefreshVigor,
-    onTabChange, onRefreshUsage, onOpenUsage, onRenameSubscription,
+    onTabChange, onOpenUsage, onRenameSubscription,
   }: {
     tab?: string;
     subscriptions?: SubscriptionView;
@@ -24,7 +24,6 @@
     onRefreshSubscriptions?: () => void;
     onRefreshVigor?: () => void;
     onTabChange?: (tab: string) => void;
-    onRefreshUsage?: (driver: string, subscription: string) => void;
     onOpenUsage?: OpenSubscriptionUsage;
     onRenameSubscription?: RenameSubscription;
   } = $props();
@@ -35,7 +34,7 @@
     {#snippet panel(tab)}
       {#if tab === 'Subscriptions'}
         <SubscriptionList embedded view={subscriptions} onRefresh={onRefreshSubscriptions}
-          {onRefreshUsage} {onOpenUsage} {onRenameSubscription} />
+          {onOpenUsage} {onRenameSubscription} />
       {:else if tab === 'Vigor'}
         <VigorPanel view={vigor} onRefresh={onRefreshVigor} />
       {:else}

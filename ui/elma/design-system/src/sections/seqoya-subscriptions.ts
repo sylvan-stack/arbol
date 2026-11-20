@@ -121,8 +121,7 @@ export function subscriptionName(driver: string, account: SubscriptionRecord): s
     ? subscriptionVendor(driver, account.family) : account.label;
 }
 
-export type UsageDestination = 'chatgpt' | 'mimo';
-export type OpenSubscriptionUsage = (destination: UsageDestination, driver: string, subscription: string) => void;
+export type OpenSubscriptionUsage = (driver: string, subscription: string) => void;
 
 export function canRefreshSubscriptionUsage(driver: string, account: SubscriptionRecord): boolean {
   return account.state === 'signed_in' && (
@@ -172,6 +171,7 @@ export interface SubscriptionView {
   listing?: SubscriptionListing;
   error?: string;
   usageRequests?: Record<string, { pending?: boolean; error?: string }>;
+  usageOpening?: string;
   usageLinkErrors?: Record<string, string | undefined>;
   evidenceError?: string;
   nameNotices?: Record<string, string | undefined>;
@@ -181,6 +181,13 @@ export function subscriptionKey(driver: string, subscription: string): string {
   return JSON.stringify([driver, subscription]);
 }
 
+export const subscriptionProviderOrder = new Map([
+  subscriptionKey('claude', 'anthropic'), subscriptionKey('codex', 'chatgpt'),
+  subscriptionKey('pi', 'chatgpt'), subscriptionKey('pi', 'kimi-coding'),
+  subscriptionKey('pi', 'zai'), subscriptionKey('mimo', 'xiaomi'),
+  subscriptionKey('pi', 'deepseek'), subscriptionKey('pi', 'minimax'),
+].map((key, index) => [key, index]));
+
 const vendors = new Map([
   ['anthropic', 'Claude Code'],
   ['chatgpt', 'ChatGPT'],
@@ -188,6 +195,7 @@ const vendors = new Map([
   ['zai', 'z.ai'],
   ['deepseek', 'DeepSeek'],
   ['xiaomi', 'MiMo'],
+  ['minimax', 'MiniMax'],
 ]);
 
 export function subscriptionVendor(driver: string, family: string): string {
