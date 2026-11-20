@@ -100,9 +100,9 @@ export class ElmaWindow {
  openLatest(){this.latestProblem='';this.latestOpen=true;}
  async chooseLatest(chat:string){if(this.latestBusy||!this.chats.rows.some(row=>row.chat===chat&&!row.archived))return;const contextId=this.contextId,generation=this.generation;this.latestBusy=true;this.latestProblem='';try{await this.drafts.settleCurrent(undefined,this.readOnly);if(this.closed||contextId!==this.contextId||generation!==this.generation)return;if(!await this.openChat(chat))throw new Error('This chat is not available.');this.latestOpen=false;this.problem='';}catch(error){if(contextId===this.contextId&&this.latestOpen)this.latestProblem=error instanceof Refusal?describe(error.detail):error instanceof Error?error.message:'The chat could not be opened.';}finally{this.latestBusy=false;}}
  openQuick(){if(!this.info){this.actionNotice='Start a chat before using chat actions';return;}this.quickOpen=true;}
- quickAction(id:string){this.quickOpen=false;if(id==='rename')this.startRename();else if(id==='archive')this.startArchive();else if(id==='copy')void this.copySession();}
+ quickAction(id:string){this.quickOpen=false;if(id==='rename')this.startRename();else if(id==='archive')this.startArchive();else if(id==='unarchive')void this.unarchive();else if(id==='copy')void this.copySession();}
  async copySession(){const chat=this.info?.chat,contextId=this.contextId,generation=this.generation;if(!chat){this.actionNotice='Start a chat before copying its session ID';return;}try{await navigator.clipboard.writeText(chat);if(contextId===this.contextId&&generation===this.generation)this.actionNotice='Session ID copied';}catch{if(contextId===this.contextId&&generation===this.generation)this.actionProblem='The session ID could not be copied.';}}
- startArchive(){if(!this.info){this.actionNotice='Start a chat before archiving';return;}if(this.archive||this.metadataBusy)return;this.actionNotice='';this.actionProblem='';this.archive={contextId:this.contextId,chat:this.info.chat,generation:this.generation,folder:this.settings.workingFolder??this.exchange?.workingFolder??this.folder,phase:'confirm'};}
+ startArchive(){if(!this.info){this.actionNotice='Start a chat before archiving';return;}if(this.archived||this.archive||this.metadataBusy)return;this.actionNotice='';this.actionProblem='';this.archive={contextId:this.contextId,chat:this.info.chat,generation:this.generation,folder:this.settings.workingFolder??this.exchange?.workingFolder??this.folder,phase:'confirm'};}
  cancelArchive(){if(this.archive?.phase==='marking')return;this.archive=null;this.notifyState();}
  private setArchived(archived:boolean){
   if(this.archived===archived)return;
@@ -115,18 +115,43 @@ export class ElmaWindow {
   const intent=this.archive;if(!intent||intent.phase!=='confirm'||!this.archiveCurrent(intent))return;intent.phase='preparing';
   let finish!:()=>void;const done=new Promise<void>(resolve=>finish=resolve);this.drafts.holdSend(done);
   try{
-   await this.drafts.settleCurrent(done);if(!this.archiveCurrent(intent))return;
-   const editor=this.drafts.current;if(!editor?.ready||editor.dirty||editor.conflict||editor.recovery!==null)throw new Error('Save or resolve the Draft before archiving.');
-   const running=[...this.exchanges].reverse().find(row=>!['completed','failed','cancelled','interrupted'].includes(row.state));
-   if(running){intent.phase='stopping';await this.stopExchange(running.exchange);if(!this.archiveCurrent(intent))return;if(!this.stopping.includes(running.exchange)&&!['completed','failed','cancelled','interrupted'].includes(this.exchanges.find(row=>row.exchange===running.exchange)?.state??''))throw new Error(this.problem||'The response could not be stopped.');if(!await this.savedEnd(intent,running.exchange))return;}
-   if(!this.archiveCurrent(intent))return;if(this.working)throw new Error('Another response started. Confirm Archive again after it finishes.');
-   await editor.flush();if(!this.archiveCurrent(intent))return;if(editor.dirty||editor.conflict||editor.recovery!==null)throw new Error('Save or resolve the Draft before archiving.');
+   await this.drafts.settleCurrent(done,this.readOnly);if(!this.archiveCurrent(intent))return;
+   if(!this.readOnly){
+    const editor=this.drafts.current;
+    if(!editor?.ready||editor.dirty||editor.conflict||editor.recovery!==null)throw new Error('Save or resolve the Draft before archiving.');
+    const running=[...this.exchanges].reverse().find(row=>!['completed','failed','cancelled','interrupted'].includes(row.state));
+    if(running){intent.phase='stopping';await this.stopExchange(running.exchange);if(!this.archiveCurrent(intent))return;if(!this.stopping.includes(running.exchange)&&!['completed','failed','cancelled','interrupted'].includes(this.exchanges.find(row=>row.exchange===running.exchange)?.state??''))throw new Error(this.problem||'The response could not be stopped.');if(!await this.savedEnd(intent,running.exchange))return;}
+    if(!this.archiveCurrent(intent))return;if(this.working)throw new Error('Another response started. Confirm Archive again after it finishes.');
+    await editor.flush();if(!this.archiveCurrent(intent))return;if(editor.dirty||editor.conflict||editor.recovery!==null)throw new Error('Save or resolve the Draft before archiving.');
+   }
+   const observed=this.marksObservation;
    intent.phase='marking';await this.mutations.start('chat.mark',{chat:intent.chat,archived:true}).result;
-   if(intent.contextId!==this.contextId)return;
+   if(this.closed||intent.contextId!==this.contextId)return;
+   this.observeArchiveReceipt(intent.chat,intent.generation,observed,true);
    this.forgetChat(intent.chat);
    if(this.archiveCurrent(intent)){this.archive=null;this.newChat(intent.folder);this.actionNotice='Chat archived';}
   }catch(error){if(this.archiveCurrent(intent))this.actionProblem=error instanceof Refusal?describe(error.detail):error instanceof Error?error.message:'The chat could not be archived.';}
   finally{if(this.archive===intent)this.archive=null;finish();this.notifyState();}
+ }
+ private observeArchiveReceipt(chat:string,generation:number,observed:number,archived:boolean){
+  if(this.info?.chat===chat&&this.generation===generation){
+   if(observed===this.marksObservation)this.setArchived(archived);
+  }else this.chats.invalidateArchive();
+ }
+ async unarchive(){
+  const chat=this.info?.chat,generation=this.generation,observed=this.marksObservation;
+  if(!chat||!this.archived||this.metadataBusy||this.archive)return;
+  this.actionNotice='';this.actionProblem='';
+  const current=()=>!this.closed&&this.info?.chat===chat&&this.generation===generation;
+  try{
+   const result=await this.mutations.start('chat.mark',{chat,archived:false}).result;
+   if(result.archivedAt!==undefined)throw new Error('The backend did not acknowledge the unarchived mark.');
+   if(this.closed)return;
+   this.observeArchiveReceipt(chat,generation,observed,false);
+   if(current()){this.rememberChat();this.actionNotice='Chat unarchived';}
+  }catch(error){
+   if(current())this.actionProblem=error instanceof Refusal?describe(error.detail):error instanceof Error?error.message:'The chat could not be unarchived.';
+  }
  }
  startRename(){
   if(!this.info?.exchangeCount||!this.info.createdAt){this.actionNotice='Start a chat before renaming';return;}
