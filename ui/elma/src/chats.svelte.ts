@@ -24,9 +24,12 @@ export class Chats {
   if(!['snapshot','changed'].includes(String(event.kind))||!Array.isArray(event.chats)){this.problem='The backend sent an invalid chat list.';return;}
   const rows=event.chats as ChatSummary[];
   if(rows.some(row=>!row||typeof row.chat!=='string'||!chatId.test(row.chat)||row.title!==null&&typeof row.title!=='string')){this.problem='The backend sent an invalid chat summary.';return;}
-  const map=new Map((event.kind==='snapshot'?[]:this.rows).map(row=>[row.chat,row]));for(const row of rows)if(row.archived)map.delete(row.chat);else map.set(row.chat,row);
+  const map=new Map((event.kind==='snapshot'?[]:this.rows).map(row=>[row.chat,row]));
+  // A newly visible active row may have been unarchived before the first archive page returned.
+  const membershipChanged=this.archiveOpen&&(event.kind==='snapshot'||rows.some(row=>row.archived||!map.has(row.chat)));
+  for(const row of rows)if(row.archived)map.delete(row.chat);else map.set(row.chat,row);
   this.rows=[...map.values()].sort(newest).slice(0,100);this.ready=true;this.problem='';
-  if(this.archiveOpen&&(event.kind==='snapshot'||rows.some(row=>row.archived||this.archiveRows.some(saved=>saved.chat===row.chat))))this.invalidateArchive();
+  if(membershipChanged)this.invalidateArchive();
   // A fresh bounded snapshot backfills an archived row without racing an old page reply.
   if(event.kind==='changed'&&rows.some(row=>row.archived)&&!this.refreshing){this.refreshing=true;void Promise.resolve().then(()=>{this.refreshing=false;if(!this.closed)this.sub.retry();});}
  }
