@@ -7,6 +7,7 @@ import fcntl
 import logging
 import os
 import plistlib
+import pwd
 import re
 import shutil
 import stat
@@ -144,6 +145,7 @@ def release_run(home: Path, run: Path, evidence: Path, *, expected: os.stat_resu
             if not os.path.samestat(current, run_info):
                 raise ValueError("The run directory changed while preparing its release.")
             name = uuid4().hex
+            os.utime(run_fd)
             os.rename(run.name, name, src_dir_fd=parent_fd, dst_dir_fd=queue_fd)
     return root / QUEUE / name
 
@@ -220,6 +222,8 @@ async def remove_run(path: Path, expected: os.stat_result | None = None) -> None
 
 
 async def sweep(home: Path) -> None:
+    if home.resolve() == Path(pwd.getpwuid(os.getuid()).pw_dir).resolve():
+        return  # Forester owns the installed queue and applies the shared space policy.
     queue = home.resolve() / "Builds" / QUEUE
     with ExitStack() as stack:
         try:
