@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import SeqoyaLab from '../../design-system/src/pages/SeqoyaLab.svelte';
   import {
-    canRefreshSubscriptionUsage, subscriptionKey, type RenameSubscription, type SubscriptionActivity, type SubscriptionListing, type SubscriptionRecord, type SubscriptionView, type UsageDestination,
+    canRefreshSubscriptionUsage, subscriptionKey, type RenameSubscription, type SubscriptionActivity, type SubscriptionListing, type SubscriptionRecord, type SubscriptionView,
   } from '../../design-system/src/sections/seqoya-subscriptions';
   import type { VigorRollup, VigorView } from '../../design-system/src/sections/seqoya-vigor';
   import { AppChannel } from '../app-channel';
@@ -53,8 +53,8 @@
   let readVigor: (() => Promise<void>) | undefined;
   let readBrowserUsage: (() => Promise<void>) | undefined;
   let readUsage: ((driver: string, subscription: string, startWindow?: boolean) => Promise<void>) | undefined;
-  let retryWindowStarts: ((key?: string) => void) | undefined;
-  let openUsagePage: ((destination: UsageDestination, driver: string, subscription: string) => Promise<void>) | undefined;
+  let retryWindowStarts: (() => void) | undefined;
+  let openUsagePage: ((driver: string, subscription: string) => Promise<void>) | undefined;
 
   function refreshSubscriptions(retryStarts = false) {
     if (retryStarts) retryWindowStarts?.();
@@ -63,13 +63,8 @@
     if (activeTab === 'Subscriptions') void readBrowserUsage?.();
   }
 
-  function refreshUsage(driver: string, subscription: string) {
-    retryWindowStarts?.(subscriptionKey(driver, subscription));
-    void readUsage?.(driver, subscription);
-  }
-
-  function openUsage(destination: UsageDestination, driver: string, subscription: string) {
-    void openUsagePage?.(destination, driver, subscription);
+  function openUsage(driver: string, subscription: string) {
+    void openUsagePage?.(driver, subscription);
   }
 
   const renameName: RenameSubscription = async (driver, account, name) => {
@@ -86,7 +81,7 @@
     const app = new AppChannel();
     const attemptedBoundaries = new Map<string, Set<number>>();
     const attemptedStarts = new Map<string, string>();
-    retryWindowStarts = (key) => { if (key) attemptedStarts.delete(key); else attemptedStarts.clear(); };
+    retryWindowStarts = () => attemptedStarts.clear();
     const expiryClock = setInterval(() => { now = Date.now(); refreshWindows(); }, 30_000);
     let active = true;
     let connection = 0;
@@ -400,18 +395,17 @@
       if (isCurrent(requestedOn)) await reloadList();
     };
 
-    openUsagePage = async (destination, driver, subscription) => {
+    openUsagePage = async (driver, subscription) => {
       const key = subscriptionKey(driver, subscription);
       const requestedOn = connection;
       const account = subscriptions.listing?.drivers.find((entry) => entry.driver === driver)
         ?.subscriptions?.find((row) => row.id === subscription);
-      if (!account) return;
+      if (!active || !subscriptions.connected || !account || subscriptions.usageOpening) return;
       subscriptions = {
-        ...subscriptions, usageLinkErrors: { ...subscriptions.usageLinkErrors, [key]: undefined },
+        ...subscriptions, usageOpening: key, usageLinkErrors: { ...subscriptions.usageLinkErrors, [key]: undefined },
       };
       try {
-        if (destination === 'chatgpt') await app.call('app.openSubscriptionUsage', { driver, subscription });
-        else await app.call('app.openLink', { url: 'https://platform.xiaomimimo.com/console/balance' });
+        await app.call('app.openSubscriptionUsage', { driver, subscription });
       } catch (error) {
         const current = subscriptions.listing?.drivers.find((entry) => entry.driver === driver)
           ?.subscriptions?.find((row) => row.id === subscription);
@@ -422,6 +416,10 @@
             [key]: error instanceof Refusal ? error.message : 'Could not open vendor usage.',
           },
         };
+      } finally {
+        if (isCurrent(requestedOn) && subscriptions.usageOpening === key) {
+          subscriptions = { ...subscriptions, usageOpening: undefined };
+        }
       }
     };
 
@@ -444,6 +442,6 @@
 <SeqoyaLab fitted {connectionStatus}
   subscriptions={subscriptionView} vigor={vigorView} onTabChange={changeTab}
   onRefreshSubscriptions={() => refreshSubscriptions(true)} onRefreshVigor={() => refreshSubscriptions(true)}
-  onRefreshUsage={refreshUsage} onOpenUsage={openUsage} onRenameSubscription={renameName}
+  onOpenUsage={openUsage} onRenameSubscription={renameName}
   appearanceReady={ready} bind:theme={appearance.theme} bind:uiScale={appearance.uiScale}
   onAppearanceChange={() => { if (ready) saveSeqoyaAppearance('installation', appearance); }} />

@@ -10,7 +10,7 @@
     trunk, trunkSelector, headerWindowControls, connectionStatus = '', fitted = false,
     theme = $bindable(''), uiScale = $bindable(0), appearanceReady = true, onAppearanceChange,
     subscriptions, vigor, onRefreshSubscriptions, onRefreshVigor, onTabChange,
-    onRefreshUsage, onOpenUsage, onRenameSubscription,
+    onOpenUsage, onRenameSubscription,
   }: {
     trunk?: string;
     trunkSelector?: WorkspaceTrunkSelector;
@@ -26,7 +26,6 @@
     onRefreshSubscriptions?: () => void;
     onRefreshVigor?: () => void;
     onTabChange?: (tab: string) => void;
-    onRefreshUsage?: (driver: string, subscription: string) => void;
     onOpenUsage?: OpenSubscriptionUsage;
     onRenameSubscription?: RenameSubscription;
   } = $props();
@@ -43,7 +42,7 @@
   status={connectionStatus ? connection : null} navigationFooter={false} {fitted}>
   <div class="page-content seqoya-page">
     <IntelligenceProviders bind:tab {subscriptions} {vigor} {onRefreshSubscriptions} {onRefreshVigor}
-      {onTabChange} {onRefreshUsage} {onOpenUsage} {onRenameSubscription} />
+      {onTabChange} {onOpenUsage} {onRenameSubscription} />
   </div>
 </WorkspaceShell>
 

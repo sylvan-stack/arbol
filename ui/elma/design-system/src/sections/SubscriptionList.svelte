@@ -4,36 +4,25 @@
   import Notice from '../patterns/Notice.svelte';
   import PageHeader from '../patterns/PageHeader.svelte';
   import SubscriptionCard from './SubscriptionCard.svelte';
-  import { subscriptionKey, subscriptionVendor,
+  import { subscriptionKey, subscriptionProviderOrder, subscriptionVendor,
     type OpenSubscriptionUsage, type RenameSubscription, type SubscriptionView,
   } from './seqoya-subscriptions';
 
   let {
     view = { connected: false }, embedded = false,
-    onRefresh, onRefreshUsage, onOpenUsage, onRenameSubscription,
+    onRefresh, onOpenUsage, onRenameSubscription,
   }: {
     view?: SubscriptionView;
     embedded?: boolean;
     onRefresh?: () => void;
-    onRefreshUsage?: (driver: string, subscription: string) => void;
     onOpenUsage?: OpenSubscriptionUsage;
     onRenameSubscription?: RenameSubscription;
   } = $props();
-  const order = new Map([
-    subscriptionKey('claude', 'anthropic'),
-    subscriptionKey('codex', 'chatgpt'),
-    subscriptionKey('pi', 'chatgpt'),
-    subscriptionKey('pi', 'kimi-coding'),
-    subscriptionKey('pi', 'zai'),
-    subscriptionKey('mimo', 'xiaomi'),
-    subscriptionKey('pi', 'deepseek'),
-    subscriptionKey('pi', 'minimax'),
-  ].map((key, index) => [key, index]));
   const failures = $derived(view.listing?.drivers.filter(entry => entry.error) ?? []);
   const rows = $derived((view.listing?.drivers ?? []).flatMap(({ driver, subscriptions }) =>
     (subscriptions ?? []).map(subscription => ({
       driver, subscription, vendor: subscriptionVendor(driver, subscription.family),
-      rank: order.get(subscriptionKey(driver, subscription.family)) ?? order.size,
+      rank: subscriptionProviderOrder.get(subscriptionKey(driver, subscription.family)) ?? subscriptionProviderOrder.size,
     })),
   ).sort((a, b) => a.rank - b.rank || a.vendor.localeCompare(b.vendor) || a.subscription.label.localeCompare(b.subscription.label)
     || a.driver.localeCompare(b.driver) || a.subscription.id.localeCompare(b.subscription.id)));
@@ -66,7 +55,7 @@
   {#if rows.length}
     <ul class="accounts" aria-label="Subscription accounts">
       {#each rows as { driver, subscription } (subscriptionKey(driver, subscription.id))}
-        <SubscriptionCard {driver} {subscription} {view} {onRefreshUsage} {onOpenUsage} onRename={onRenameSubscription} />
+        <SubscriptionCard {driver} {subscription} {view} {onOpenUsage} onRename={onRenameSubscription} />
       {/each}
     </ul>
   {:else if view.listing && !failures.length}

@@ -3,15 +3,14 @@
   import InlineRename from '../patterns/InlineRename.svelte';
   import SubscriptionAllowance from './SubscriptionAllowance.svelte';
   import {
-    canRefreshSubscriptionUsage, formatSubscriptionCardTime, sortAllowanceWindows, subscriptionKey, subscriptionName,
+    formatSubscriptionCardTime, sortAllowanceWindows, subscriptionKey, subscriptionName, subscriptionProviderOrder, subscriptionVendor,
     type OpenSubscriptionUsage, type RenameSubscription, type SubscriptionRecord, type SubscriptionView,
   } from './seqoya-subscriptions';
 
-  let { driver, subscription, view, onRefreshUsage, onOpenUsage, onRename }: {
+  let { driver, subscription, view, onOpenUsage, onRename }: {
     driver: string;
     subscription: SubscriptionRecord;
     view: SubscriptionView;
-    onRefreshUsage?: (driver: string, subscription: string) => void;
     onOpenUsage?: OpenSubscriptionUsage;
     onRename?: RenameSubscription;
   } = $props();
@@ -25,9 +24,8 @@
   const resets = $derived(metrics?.limitResets);
   const deepseek = $derived(subscription.family === 'deepseek');
   const payAsYouGo = $derived(driver === 'pi' && (deepseek || subscription.family === 'minimax'));
-  const mimo = $derived(subscription.family === 'xiaomi' && driver === 'mimo');
-  const destination = $derived(mimo ? 'mimo' : subscription.family === 'chatgpt' && ['pi', 'codex'].includes(driver) ? 'chatgpt' : undefined);
-  const refreshable = $derived(canRefreshSubscriptionUsage(driver, subscription) && onRefreshUsage);
+  const provider = $derived(subscription.id === subscription.family && subscriptionProviderOrder.has(key)
+    ? subscriptionVendor(driver, subscription.family) : undefined);
   const request = $derived(view.usageRequests?.[key]);
 
   function startEdit() {
@@ -86,17 +84,11 @@
   {#if deepseek && subscription.lastUsage?.extra?.apiAvailable === false}
     <p class="small warning">The balance is insufficient for API calls.</p>
   {/if}
-  {#if refreshable || destination && onOpenUsage}
+  {#if provider && onOpenUsage}
     <div class="row usage-actions">
-      {#if refreshable}
-        <Button label="Refresh usage" onclick={() => onRefreshUsage?.(driver, subscription.id)}
-          busy={request?.pending} disabled={!view.connected} />
-      {/if}
-      {#if destination && onOpenUsage}
-        <Button label={mimo ? 'Open MiMo console' : 'Open ChatGPT Usage'} tone="ghost"
-          disabled={destination === 'chatgpt' && !view.connected}
-          onclick={() => onOpenUsage?.(destination, driver, subscription.id)} />
-      {/if}
+      <Button label={'Open in ' + provider} tone="ghost" busy={view.usageOpening === key}
+        disabled={!view.connected || (!!view.usageOpening && view.usageOpening !== key)}
+        onclick={() => onOpenUsage?.(driver, subscription.id)} />
     </div>
   {/if}
   {#if request?.error}<p class="small warning" role="status">{request.error}</p>{/if}
