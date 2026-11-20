@@ -269,10 +269,8 @@ def registered_entry(registry: str, record: Record) -> str | None:
     if (record["component"] != "arbol-app"
             or os.path.realpath(registry) != os.path.realpath(build_registry())):
         return executable_entry(folder, entry)
-    applications = os.path.expanduser("~/Applications/Arbol")
+    applications = os.path.expanduser("~/Applications/Seqoya Lab")
     bundle = os.path.join(applications, "Seqoya Lab.app")
-    if not os.path.lexists(bundle):
-        return executable_entry(folder, entry)
     if (record["status"] != "working" or entry != "Seqoya Lab.app/Contents/MacOS/Seqoya Lab"
             or os.path.realpath(bundle) != bundle):
         return None
