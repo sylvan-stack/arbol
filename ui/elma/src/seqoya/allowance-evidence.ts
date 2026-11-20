@@ -87,12 +87,19 @@ type Credits = NonNullable<Quota['credits']>;
 type Result = VigorRollup['subscriptions'][number]['result'];
 type DriverReport = NonNullable<SubscriptionRecord['lastUsage']>;
 type DriverWindow = DriverReport['windows'][number];
+interface MiniMaxUsage {
+  activePlan: boolean;
+  creditBalance: string;
+  period: 'Today' | 'Last 7 days' | 'Last 30 days';
+  llmTokens: string;
+  cacheHitPercent?: number;
+}
 interface BrowserReport {
   driver: string;
   subscription: string;
   createdAt: string;
   checkedAt?: string | null;
-  report: DriverReport;
+  report: DriverReport & { extra?: { minimax?: MiniMaxUsage } };
   approximateWindows: string[];
 }
 const browserSource = 'Arbol Browser dashboard';
@@ -476,6 +483,24 @@ function matchingBrowserReport(
     && Date.parse(entry.report.fetchedAt) <= now);
 }
 
+function miniMaxDashboard(
+  report: BrowserReport['report'] | undefined, now: number,
+): SubscriptionMetrics['dashboard'] {
+  const reading = report?.extra?.minimax;
+  if (!report || !reading) return undefined;
+  const period = reading.period === 'Today' && new Date(report.fetchedAt).toDateString() !== new Date(now).toDateString()
+    ? 'Day of reading' : reading.period;
+  const rows = [
+    { label: 'Plan', value: reading.activePlan ? 'Active plan' : 'No active M Plan' },
+    { label: 'Credit balance', value: `${reading.creditBalance} credits` },
+    { label: `LLM tokens · ${period}`, value: reading.llmTokens },
+  ];
+  if (reading.cacheHitPercent !== undefined) {
+    rows.push({ label: `Cache hit rate · ${period}`, value: `${reading.cacheHitPercent}%` });
+  }
+  return { observedAt: report.fetchedAt, rows };
+}
+
 function subscriptionMetrics(
   driver: string, account: SubscriptionRecord, view: AllowanceView | undefined, evidence: UsageEvidence | undefined, now: number,
 ): SubscriptionMetrics {
@@ -605,7 +630,10 @@ function subscriptionMetrics(
       .map((expiresAt) => ({ label: 'Full reset', expiresAt }));
     limitResets = { count: entries.length, entries, observedAt: dashboard.observedAt };
   }
-  return { windows, issues, passedBoundaries: [...passedBoundaries], limitResets };
+  return {
+    windows, issues, passedBoundaries: [...passedBoundaries], limitResets,
+    dashboard: driver === 'pi' && account.family === 'minimax' ? miniMaxDashboard(browserReport, now) : undefined,
+  };
 }
 
 function endTime(window: SubscriptionWindow) {

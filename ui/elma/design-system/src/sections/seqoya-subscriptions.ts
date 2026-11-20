@@ -70,6 +70,10 @@ export interface SubscriptionWindow {
 export interface SubscriptionMetrics {
   issues?: string[];
   windows: SubscriptionWindow[];
+  dashboard?: {
+    observedAt: string;
+    rows: { label: string; value: string }[];
+  };
   passedBoundaries?: number[];
   limitResets?: {
     count?: number;

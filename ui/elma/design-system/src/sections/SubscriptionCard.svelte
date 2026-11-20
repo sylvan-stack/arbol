@@ -67,10 +67,20 @@
   {#if view.nameNotices?.[key]}<p class="small warning" role="status">{view.nameNotices[key]}</p>{/if}
   {#if subscription.problem}<p class="small warning">{subscription.problem.message}</p>{/if}
 
+  {#if metrics?.dashboard}
+    <dl class="metrics">
+      {#each metrics.dashboard.rows as row (row.label)}
+        <dt>{row.label}</dt><dd>{row.value}</dd>
+      {/each}
+      <dt>Dashboard updated</dt>
+      <dd><time datetime={metrics.dashboard.observedAt}>{formatSubscriptionCardTime(metrics.dashboard.observedAt)}</time></dd>
+    </dl>
+  {/if}
+
   {#each sortAllowanceWindows(metrics?.windows ?? []) as window}
     <SubscriptionAllowance {window} apiAccess={deepseek} />
   {:else}
-    <p class="small muted">No saved allowance windows.</p>
+    {#if !metrics?.dashboard}<p class="small muted">No saved allowance windows.</p>{/if}
   {/each}
 
   {#each metrics?.issues ?? [] as issue}<p class="small warning">{issue}</p>{/each}
