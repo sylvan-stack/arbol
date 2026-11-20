@@ -14,7 +14,11 @@ export default defineConfig({
     target: 'es2022',
     ...(shared && {
       rolldownOptions: {
-        input: { elma: resolve('index.html'), seqoya: resolve('seqoya.html') },
+        input: {
+          elma: resolve('index.html'),
+          seqoya: resolve('seqoya.html'),
+          willo: resolve('willo.html'),
+        },
       },
     }),
   },

@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Any
 
 ELMA_ENTRIES = ["index.html"]
-SHARED_ENTRIES = ["index.html", "seqoya.html"]
+PREVIOUS_SHARED_ENTRIES = ["index.html", "seqoya.html"]
+SHARED_ENTRIES = [*PREVIOUS_SHARED_ENTRIES, "willo.html"]
 CSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'"
 
 
@@ -59,7 +60,8 @@ def verify(folder: Path, build: str) -> dict[str, Any]:
             or not re.fullmatch(r"[0-9a-f]{40}", data.get("designSystem", {}).get("commit", ""))):
         raise ValueError("The renderer must match its Build, design provenance and every asset hash.")
     entries = data.get("entries", ELMA_ENTRIES)
-    if entries not in (ELMA_ENTRIES, SHARED_ENTRIES) or (entries == SHARED_ENTRIES and not data.get("sourceCommit")):
+    if (entries not in (ELMA_ENTRIES, PREVIOUS_SHARED_ENTRIES, SHARED_ENTRIES)
+            or (entries != ELMA_ENTRIES and not data.get("sourceCommit"))):
         raise ValueError("The renderer manifest has invalid entry points.")
     for entry in entries:
         index = Index()
