@@ -1,5 +1,6 @@
 <script lang="ts">
   import {tick,type Snippet} from 'svelte';
+  import WorkspaceGlyph from '../components/WorkspaceGlyph.svelte';
   import WorkspaceShell from '../patterns/WorkspaceShell.svelte';
   import type { ElmaRoute } from './elma-types';
   import {signInCommand} from './elma-response';
@@ -42,8 +43,18 @@
     <select class="reading-width" aria-label="Reading width" bind:value={readingWidth} onchange={onpreferences}>{#each Array.from({length:10},(_,i)=>600+i*120) as width}<option value={width}>{width} px</option>{/each}</select>
   {/snippet}
   {#snippet navigation()}
-    <div class="nav-title" class:placeholder>{title}</div>
-    {#if total}<p class="turn-count">Turn {turn} of {total}</p>{/if}
+    <div class="insignia">
+      <div class="insignia-watermark" aria-hidden="true">
+        <WorkspaceGlyph workspace="Elma" size={156} />
+      </div>
+      <span class="insignia-mark" aria-hidden="true">
+        <WorkspaceGlyph workspace="Elma" size={20} />
+      </span>
+      <div class="insignia-content">
+        <div class="insignia-title" class:placeholder>{title}</div>
+        {#if total}<p class="turn-count">Turn {turn} of {total}</p>{/if}
+      </div>
+    </div>
     {#if hasChat}<div class="cockpit"><button disabled={!onongoing||metadataBusy} onclick={onongoing}>{ongoing?'○ Ongoing':'○ Not ongoing'}</button><span>∑ {(inputTokens+outputTokens).toLocaleString()} ↑{inputTokens.toLocaleString()} ↓{outputTokens.toLocaleString()}</span></div>{/if}
     <button class="group" aria-expanded={repoOpen} onclick={()=>repoOpen=!repoOpen}><span>Repositories</span><span aria-hidden="true">{repoOpen?'−':'+'}</span></button>
     {#if repoOpen}{#each repositories.slice(0,9) as repo,i}<button class="nav-row" disabled={!onrepository} onclick={()=>onrepository?.(repo.folder)}><span>{repo.name}</span><kbd>⌘{i+1}</kbd></button>{/each}<button class="nav-row" disabled={!onother} onclick={onother}><span>Other…</span><kbd>⌘0</kbd></button>{/if}
@@ -62,8 +73,68 @@
 .title-action{font:inherit;color:inherit;background:transparent;border:0;padding:0;text-align:left;overflow-wrap:anywhere}
 
 .elma-frame{min-width:0}
-.placeholder{font-weight:400;color:var(--muted)}
+.title-action.placeholder{font-weight:400;color:var(--muted)}
+.insignia {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  flex-shrink: 0;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: start;
+  align-content: center;
+  gap: var(--space-3);
+  min-height: 88px;
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--arbol-brief-pane-fg);
+  box-shadow: 0 2px 6px -4px var(--arbol-color-shadow);
+}
+.insignia::before {
+  /* The Insignia field has the opposite brightness to its surrounding theme. */
+  --field-tint: light-dark(rgb(0 0 0 / 36%), rgb(255 255 255 / 15%));
+  content: '';
+  position: absolute;
+  z-index: -2;
+  inset: 0;
+  background: linear-gradient(var(--field-tint), var(--field-tint)), var(--arbol-brief-pane-bg-silver);
+  filter: hue-rotate(24deg);
+}
+.insignia-watermark {
+  position: absolute;
+  z-index: -1;
+  top: 50%;
+  right: -28px;
+  transform: translateY(-50%);
+  color: var(--arbol-brief-ring);
+  opacity: 0.3;
+  mask-image: linear-gradient(to right, transparent, #000 55%);
+  pointer-events: none;
+}
+.insignia-mark {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
+.insignia-content { padding-top: 2px; }
+.insignia-title {
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
+}
+.insignia-title.placeholder { font-weight: 400; }
+.turn-count {
+  margin: 6px 0 0;
+  font-size: calc(11.5px * var(--font-scale));
+  font-variant-numeric: tabular-nums;
+}
 .reading-width{font-size:calc(11.5px * var(--font-scale));min-height:28px;background:var(--inset);color:var(--text);border:1px solid var(--border);border-radius:5px;padding:2px 5px}
-.account-problem{color:var(--warning);font-size:calc(11.5px * var(--font-scale));overflow-wrap:anywhere}.nav-title{font-weight:600;overflow-wrap:anywhere}.turn-count,.cockpit,.history-heading{color:var(--muted);font-size:calc(11.5px * var(--font-scale))}.cockpit{display:flex;flex-direction:column;gap:4px;margin:12px 0}.cockpit button{border:1px solid var(--border);border-radius:20px;background:var(--inset);color:var(--text);padding:4px 8px;align-self:start}.group,.nav-row{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;text-align:left;min-height:30px;background:transparent;border:0;color:var(--text);padding:4px 0}.group{font-size:calc(11.5px * var(--font-scale));color:var(--muted);font-weight:700;margin-top:12px;text-transform:uppercase}.nav-row span{overflow-wrap:anywhere;min-width:0}.nav-row kbd{white-space:nowrap;flex-shrink:0;color:var(--muted)}.history-heading{border-top:1px solid var(--border);padding-top:12px;margin-top:12px;text-transform:uppercase}.status-text{overflow-wrap:anywhere;white-space:normal}.empty{margin:auto;padding:32px;color:var(--muted)}
+.account-problem{color:var(--warning);font-size:calc(11.5px * var(--font-scale));overflow-wrap:anywhere}.cockpit,.history-heading{color:var(--muted);font-size:calc(11.5px * var(--font-scale))}.cockpit{display:flex;flex-direction:column;gap:4px;margin:12px 0}.cockpit button{border:1px solid var(--border);border-radius:20px;background:var(--inset);color:var(--text);padding:4px 8px;align-self:start}.group,.nav-row{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;text-align:left;min-height:30px;background:transparent;border:0;color:var(--text);padding:4px 0}.group{font-size:calc(11.5px * var(--font-scale));color:var(--muted);font-weight:700;margin-top:12px;text-transform:uppercase}.nav-row span{overflow-wrap:anywhere;min-width:0}.nav-row kbd{white-space:nowrap;flex-shrink:0;color:var(--muted)}.history-heading{border-top:1px solid var(--border);padding-top:12px;margin-top:12px;text-transform:uppercase}.status-text{overflow-wrap:anywhere;white-space:normal}.empty{margin:auto;padding:32px;color:var(--muted)}
 @media(max-width:800px){.reading-width{display:none}}
 </style>
