@@ -286,10 +286,12 @@ class Reader:
                 "FROM exchange_phase_details d JOIN exchanges e ON e.id=d.exchange_id "
                 "WHERE d.exchange_id=%s AND d.position>%s AND e.trunk='steady' AND e.replaced_by IS NULL "
                 # The journal encoder writes these three leading keys in this order.
-                "AND (NOT %s OR starts_with(d.entry, %s || d.position::text || %s)) "
+                "AND (NOT %s OR starts_with(d.entry, %s || d.position::text || %s) "
+                "OR starts_with(d.entry, %s || d.position::text || %s)) "
                 "ORDER BY d.position LIMIT %s",
                 [offset + 1, PHASE_DETAIL_PAGE, params["exchange"], params["after"],
-                 updates_only, '{"n":', ',"phase":"intake","exchangeUpdates":{', 1 if offset else 32],
+                 updates_only, '{"n":', ',"phase":"intake","exchangeUpdates":{',
+                 '{"n":', ',"phase":"execution","exchangeUpdates":{', 1 if offset else 32],
             )
         remaining = PHASE_DETAIL_PAGE
         entries: list[Params] = []
