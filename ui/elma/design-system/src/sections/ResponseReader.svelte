@@ -41,16 +41,4 @@
 <style>
  .response-scroll{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;overflow-anchor:none;position:relative}
  .response-scroll:focus-visible { outline: none; }
- .response-scroll:focus-visible::before {
-  content: '';
-  display: block;
-  position: sticky;
-  z-index: 1;
-  top: 2px;
-  width: 24px;
-  height: 2px;
-  margin: 0 auto -2px;
-  background: var(--focus);
-  pointer-events: none;
- }
 </style>
