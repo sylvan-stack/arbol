@@ -11,6 +11,7 @@ from typing import Any
 from .bridge import Error, Params
 from .database import Database, Session
 from .metadata import Attention, Layout, inspect, iso
+from .narrator_bash import MAX_COMMAND_CHARS, SHELL_NAMES, shell_tool_label
 
 TOOL_BYTES = 8192
 PHASE_DETAIL_PAGE = 128 * 1024
@@ -151,10 +152,12 @@ class Reader:
             "CASE WHEN octet_length(t.input::text)>8192 THEN to_jsonb(left(t.input::text,8192)) ELSE t.input END,"
             "t.ok,CASE WHEN octet_length(t.result::text)>8192 THEN to_jsonb(left(t.result::text,8192)) ELSE t.result END,"
             "t.error,t.truncated,t.interrupted,t.ask,t.answer,"
-            "octet_length(t.input::text)>8192,coalesce(octet_length(t.result::text)>8192,false) "
+            "octet_length(t.input::text)>8192,coalesce(octet_length(t.result::text)>8192,false),"
+            "CASE WHEN lower(t.name)=ANY(%s::text[]) THEN left(CASE jsonb_typeof(t.input) "
+            "WHEN 'object' THEN t.input->>'command' WHEN 'string' THEN t.input#>>'{}' END,%s) END "
             "FROM tool_calls t JOIN exchanges e ON e.id=t.exchange_id "
             "WHERE t.exchange_id=ANY(%s::uuid[]) AND t.parent_call_id IS NULL AND e.state<>'open' ORDER BY t.position",
-            [ids],
+            [sorted(SHELL_NAMES), MAX_COMMAND_CHARS + 1, ids],
         )
         runs = await session.execute(
             "SELECT exchange_id,kind,outcome,usage,started,ended_at FROM runs WHERE exchange_id=ANY(%s::uuid[]) "
@@ -177,10 +180,13 @@ class Reader:
             result.append(exchange)
         for id, position, role, text in messages:
             by_id[str(id)]["items"].append({"position": position, "kind": "message", "role": role, "text": text})
-        for id, position, name, input, ok, output, error, truncated, interrupted, ask, answer, sql_input_cut, sql_output_cut in tools:
+        for (id, position, name, input, ok, output, error, truncated, interrupted, ask, answer,
+             sql_input_cut, sql_output_cut, shell_command) in tools:
             cut_input, input_cut = preview(input)
             tool: Params = {"position": position, "kind": "tool", "name": name, "input": cut_input,
                             "ok": ok, "truncated": truncated, "interrupted": interrupted}
+            if label := shell_tool_label(name, shell_command):
+                tool["label"] = label
             output_cut = False
             if output is not None:
                 tool["result"], output_cut = preview(output)
