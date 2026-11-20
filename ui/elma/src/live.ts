@@ -9,7 +9,7 @@ export function savedUsage(row:ElmaExchange){return row.runs.reduce((sum,run)=>{
 export function savedBlocks(row:ElmaExchange):ResponseBlock[]{return row.items.flatMap((item):ResponseBlock[]=>item.kind==='message'?(item.role==='assistant'?[{id:'message:'+item.position,kind:'text',text:item.text}]:[]):[{id:'tool:'+item.position,kind:'tool',tool:{id:row.exchange+':'+item.position,name:item.name,input:item.input,result:item.result,error:item.error,state:item.interrupted?'Interrupted':item.ok?'Complete':'Failed',truncated:item.truncated,cut:item.cut,position:item.position}}]);}
 export class LiveExchange {
  blocks:ResponseBlock[]=[];questions:QuestionView[]=[];seen=new Set<number>();
- state='accepting';waitingFor='';since?:string;startedAt?:string;activity='';end?:{state:string;at?:string;error?:{code:string;message:string;retryAfterSeconds?:number}};saved=false;
+ state='accepting';waitingFor='';since?:string;startedAt?:string;inferenceEndedAt?:string;activity='';end?:{state:string;at?:string;error?:{code:string;message:string;retryAfterSeconds?:number}};saved=false;
  private pending=new Map<string,ResponseBlock>();private tools=new Map<string,ToolView>();private usage=new Map<string,ReturnType<typeof tokens>>();private totalOverride?:ReturnType<typeof tokens>;
  readonly baseline:ReturnType<typeof tokens>;
  constructor(row:ElmaExchange){this.state=row.state;this.saved=['completed','failed','cancelled','interrupted'].includes(row.state);this.baseline=savedUsage(row);}
@@ -21,7 +21,7 @@ export class LiveExchange {
   if(line.end){this.setEnd(object(line.end));continue;}
   if(line.answer){const answer=object(line.answer);const q=this.questions.find(q=>q.open&&q.askId===answer.askId);if(q){q.answer=answer.answer;q.answerPosition=Number(n);q.problem=undefined;}continue;}
   const e=object(line.event??line.smallRun),run=text(e.runId),parent=text(e.parentCallId),kind=text(e.type);if(!run)continue;
-  if((kind==='usage'||kind==='finished')&&!parent){if(e.usage!==undefined)this.usage.set(run,tokens(e.usage));if(line.smallRun)continue;}
+  if((kind==='usage'||kind==='finished')&&!parent){if(e.usage!==undefined)this.usage.set(run,tokens(e.usage));if(line.smallRun)continue;if(kind==='finished')this.inferenceEndedAt??=text(e.at)||undefined;}
   const target=this.target(run,parent),actor=run+'\0'+parent,id=String(n);
   if(kind==='started'&&!parent){this.startedAt??=text(e.at)||undefined;this.activity='';}
   else if(['text_delta','text','thinking_delta','thinking'].includes(kind)&&typeof e.text==='string'){

@@ -11,6 +11,7 @@
  import ResponseReader from '../design-system/src/sections/ResponseReader.svelte';
  import ExchangeDetails, { type PhaseName } from '../design-system/src/sections/ExchangeDetails.svelte';
  import { Refusal, describe } from './bridge';
+ import type { IntakeFindings } from '../design-system/src/sections/elma-response';
  import { isSteadyExchange, PhaseDetailsReader } from './phase-details';
  import Composer from '../design-system/src/sections/Composer.svelte';
  import { ElmaWindow } from './window.svelte';
@@ -19,6 +20,7 @@
  type Inspection = { reader: PhaseDetailsReader; phase?: PhaseName; busy: boolean; problem: string };
  let inspection = $state.raw<Inspection>();
  let detailsTimer: ReturnType<typeof setTimeout> | undefined;
+ let intake = $state.raw<{ exchange: string; findings: IntakeFindings }>();
 
  onMount(() => {
   const model = new ElmaWindow();
@@ -64,6 +66,38 @@
  $effect(() => {
   if (inspection && view?.exchange?.exchange !== inspection.reader.exchange) closePhaseDetails();
  });
+
+ const selectedExchange = $derived(view?.exchange?.exchange);
+ const selectedSteady = $derived(isSteadyExchange(view?.exchange));
+ const selectedComplete = $derived(view?.complete ?? false);
+ $effect(() => {
+  const exchange = selectedExchange;
+  const bridge = view?.bridge;
+  const complete = selectedComplete;
+  if (!bridge || !exchange || !selectedSteady) {
+   intake = undefined;
+   return;
+  }
+  if (view?.connection !== 'Connected') return;
+  let current = true;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const source = new PhaseDetailsReader(bridge, exchange, true);
+  const isCurrent = () => current && selectedExchange === exchange;
+  async function refresh() {
+   try {
+    if (!await source.read(isCurrent) || !isCurrent()) return;
+    if (source.intakeFindings) {
+     intake = { exchange: source.exchange, findings: source.intakeFindings };
+     return;
+    }
+   } catch {
+    // Supplemental transcript data can arrive after a reconnect or a queued write.
+   }
+   if (!complete && isCurrent()) timer = setTimeout(() => void refresh(), 750);
+  }
+  void refresh();
+  return () => { current = false; clearTimeout(timer); };
+ });
  function keys(event:KeyboardEvent){if(!view||event.defaultPrevented||document.querySelector('dialog[open]'))return;if(event.ctrlKey&&event.shiftKey&&event.metaKey&&!event.altKey&&event.key.toLowerCase()==='c'){event.preventDefault();view.openLatest();return;}if(view.rename&&!view.rename.busy)return;if(event.key==='Enter'&&event.shiftKey&&!event.metaKey&&!event.ctrlKey&&!event.altKey){event.preventDefault();view.openQuick();return;}if(event.key==='Backspace'&&event.metaKey&&!event.ctrlKey&&!event.altKey&&!event.shiftKey){event.preventDefault();view.startArchive();return;}if(event.altKey&&!event.ctrlKey&&!event.metaKey&&!event.shiftKey&&(event.key==='0'||event.code==='Digit0')){event.preventDefault();void view.toggleOngoing();return;}if(event.ctrlKey&&!event.metaKey&&!event.altKey&&!event.shiftKey){if(view.composerBusy){event.preventDefault();return;}if(/^[1-9]$/.test(event.key)){const row=view.routes[Number(event.key)-1];if(row){event.preventDefault();void view.routing.choose(row.driver,row.subscription);}}else if(event.key.toLowerCase()==='m'){event.preventDefault();view.routing.nextModel();}else if(event.key==='Tab'){event.preventDefault();view.routing.nextEffort();}return;}if(!event.metaKey||event.altKey)return;if(!event.ctrlKey&&!event.shiftKey&&event.key==='Escape'){event.preventDefault();view.stopCurrent();return;}if(!event.ctrlKey&&!event.shiftKey&&/^[0-9]$/.test(event.key)){event.preventDefault();if(event.key==='0')void view.pickOther(true);else{const repo=view.repositories[Number(event.key)-1];if(repo)view.newChat(repo.folder);}return;}if(event.key.toLowerCase()==='p'){event.preventDefault();if(view.info)view.historyOpen=!view.historyOpen;}else if(!view.historyOpen&&(event.key==='['||event.code==='BracketLeft')){event.preventDefault();void view.older();}else if(!view.historyOpen&&(event.key===']'||event.code==='BracketRight')){event.preventDefault();view.newer();}}
 
 </script>
@@ -82,7 +116,7 @@
   {#if view.actionNotice}<p class="connection" role="status">{view.actionNotice}</p>{/if}
   {#if view.actionProblem}<p class="problem" role="alert">{view.actionProblem}</p>{/if}
   <section class="chat" aria-label="Chat">
-   {#if view.exchange}<PinnedMessage text={view.prompt} index={view.turn} total={view.info?.exchangeCount??0} busy={view.pageBusy} onolder={()=>void view?.older()} onnewer={()=>view?.newer()} onhistory={()=>{if(view)view.historyOpen=true;}}/><ResponseReader bind:this={reader} oninspect={isSteadyExchange(view.exchange) ? openPhaseDetails : undefined} identity={(view.info?.chat??'')+':'+view.exchange.exchange} snapshot={view.snapshotRevision} positions={view.readingPositions} response={{blocks:view.response,streaming:!view.complete,statusLabel:view.statusLabel,acceptedAt:view.exchange.acceptedAt,startedAt:view.startedAt,endedAt:view.endedAt,now:view.now,error:view.error,signIn:view.signIn,onretry:view.failureActions?()=>void view?.recoverFailure():undefined,oncontinue:view.failureActions?()=>void view?.recoverFailure(true):undefined,failureBusy:view.failureBusy,questions:view.questions,onanswer:(question,answer)=>void view?.answer(question,answer),notes:view.responseNotes,openTools:view.openTools,onToolOpen:(id,open)=>{if(view)view.openTools[id]=open;},onloadTool:tool=>view!.loadTool(tool),onopenLink:url=>view!.openLink(url)}}/>
+   {#if view.exchange}<PinnedMessage text={view.prompt} index={view.turn} total={view.info?.exchangeCount??0} busy={view.pageBusy} onolder={()=>void view?.older()} onnewer={()=>view?.newer()} onhistory={()=>{if(view)view.historyOpen=true;}}/><ResponseReader bind:this={reader} oninspect={isSteadyExchange(view.exchange) ? openPhaseDetails : undefined} identity={(view.info?.chat??'')+':'+view.exchange.exchange} snapshot={view.snapshotRevision} positions={view.readingPositions} response={{blocks:view.response,streaming:!view.complete,statusLabel:view.statusLabel,acceptedAt:view.exchange.acceptedAt,startedAt:view.startedAt,endedAt:view.endedAt,inferenceEndedAt:view.inferenceEndedAt,intakeFindings:intake?.exchange===view.exchange.exchange?intake?.findings:undefined,now:view.now,error:view.error,signIn:view.signIn,onretry:view.failureActions?()=>void view?.recoverFailure():undefined,oncontinue:view.failureActions?()=>void view?.recoverFailure(true):undefined,failureBusy:view.failureBusy,questions:view.questions,onanswer:(question,answer)=>void view?.answer(question,answer),notes:view.responseNotes,openTools:view.openTools,onToolOpen:(id,open)=>{if(view)view.openTools[id]=open;},onloadTool:tool=>view!.loadTool(tool),onopenLink:url=>view!.openLink(url)}}/>
    {:else if view.restoring}<p class="empty" role="status">Restoring selected turn…</p>{/if}
    {#if view.drafts.current}{@const draft=view.drafts.current}<Composer firstSapling empty={!view.info} repository={view.repository} route={view.route} context={view.info?.chat??view.folder} value={draft.text} bind:expanded={view.composerOpen} readOnly={!draft.ready||draft.recovery!==null} busy={view.composerBusy} onsend={()=>view?.requestSend()} status={view.composerStatus} problem={[draft.sendProblem,draft.pastes.problem,draft.problem,draft.storageProblem].filter(Boolean).join(" · ")} conflict={draft.conflict} recovery={draft.recovery} onRestore={()=>draft.restore()} onDiscardRecovery={()=>draft.discardRecovery()} oninput={(text,edit)=>draft.input(text,edit)} onpaste={(event,selection)=>{const text=event.clipboardData?.getData("text/plain")??"";if(draft.ready&&!view!.composerBusy&&draft.recovery===null&&draft.pastes.paste(text,selection))event.preventDefault();}} onblur={()=>void draft.flush()} onKeepMine={()=>draft.keepMine()} onTakeTheirs={()=>draft.takeTheirs()} onTop={()=>reader?.scrollToEdge('top')} onBottom={()=>reader?.scrollToEdge('bottom')}/>{/if}
   </section>

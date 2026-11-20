@@ -188,7 +188,12 @@ export class ElmaWindow {
  get questions(){const row=this.exchange;if(!row)return[];const saved:QuestionView[]=row.items.flatMap(item=>item.kind==='tool'&&item.ask!==undefined?[{id:'saved:'+item.position,ask:item.ask,answer:item.answer,open:false,recorded:true}]:[]);return(!this.complete&&this.currentLive?.questions.length?this.currentLive.questions:saved).map(q=>{const state=this.answerStates[this.answerKey(row.exchange,q.id)];return{...q,pending:state?.pending??false,problem:q.problem||state?.problem};});}
  get usage(){this.revision;const total={inputTokens:this.info?.usage.inputTokens??0,outputTokens:this.info?.usage.outputTokens??0};for(const live of this.live.values()){const delta=live.usageDelta;total.inputTokens+=delta.inputTokens;total.outputTokens+=delta.outputTokens;}return{inputTokens:Math.max(0,total.inputTokens),outputTokens:Math.max(0,total.outputTokens)};}
  get complete(){return !!this.exchange&&['completed','failed','cancelled','interrupted'].includes(this.exchange.state);}
- get startedAt(){return this.currentLive?.startedAt??this.exchange?.runs.map(run=>run.started?.at).filter((value):value is string=>typeof value==='string'&&Number.isFinite(Date.parse(value))).sort((a,b)=>Date.parse(a)-Date.parse(b))[0];}
+ private get inferenceRuns(){return this.exchange?.runs.filter(run=>run.kind==='agent'&&run.started&&!run.started.parentCallId)??[];}
+ get startedAt(){return this.currentLive?.startedAt??this.inferenceRuns.map(run=>run.started?.at).filter((value):value is string=>typeof value==='string'&&Number.isFinite(Date.parse(value))).sort((a,b)=>Date.parse(a)-Date.parse(b))[0];}
+ get inferenceEndedAt(){
+  if(!this.startedAt)return undefined;
+  return this.currentLive?.inferenceEndedAt??this.inferenceRuns.filter(run=>run.outcome!=='interrupted'&&run.endedAt).at(-1)?.endedAt;
+ }
  get statusLabel(){if(this.exchange&&this.stopping.includes(this.exchange.exchange)&&!this.complete)return 'Stopping…';return this.exchange?(this.currentLive??new LiveExchange(this.exchange)).label(this.exchange,this.now):'';}
  get endedAt(){return this.exchange?.endedAt??this.currentLive?.end?.at;}
  get failureActions(){return this.exchange?.state==='failed'&&this.exchange.exchange===this.exchanges.at(-1)?.exchange&&!this.moreAfterSelected;}
