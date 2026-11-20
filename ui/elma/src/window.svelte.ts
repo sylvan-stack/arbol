@@ -3,7 +3,7 @@ import { AppChannel } from './app-channel';
 import { Drafts,type DraftEditor } from './drafts.svelte';
 import { Sending,type SendIntent,type SendOperation,type Accepted } from './sending.svelte';
 import {Mutations} from './mutations.svelte';
-import {Chats,chatTitle,chatDetail} from './chats.svelte';
+import {Chats,chatTitle,chatDetail,importSource} from './chats.svelte';
 import {Opening} from './opening.svelte';
 import {Attention} from './attention.svelte';
 import type { Revision } from './wire-json';
@@ -34,10 +34,11 @@ export class ElmaWindow {
  rename=$state<RenameEditor|null>(null);actionNotice=$state('');actionProblem=$state('');mutations:Mutations;private titleObservation=0;private marksObservation=0;
  quickOpen=$state(false);archive=$state<ArchiveIntent|null>(null);private stateWaiters=new Set<()=>void>();
  latestOpen=$state(false);latestProblem=$state('');latestBusy=$state(false);chats:Chats;opening:Opening;attention:Attention;private chatProblem='';
+ archiveSelectionBusy=$state(false);archiveSelectionProblem=$state('');
  composerOpen=$state(false);sendWait=$state('');stopping=$state<string[]>([]);sending:Sending;stopConfirmation=$state<PendingMessage|null>(null);private stopQueue?:PendingMessage&{finish:()=>void};private previousSelection=new Map<string,string|null>();private replacements=new Map<string,ElmaExchange>();private stopCalls=new Map<string,Promise<void>>();private answerSerial=0;private answerStates=$state<Record<string,{token:number;pending:boolean;problem:string;after:number}>>({});
  repositoryNotice=$state('');repositoryChange=$state<{contextId:string;chat:string;folder:string;generation:number}|null>(null);
  private pageTicket=0;private generation=0;private settingsObservation=0;private chatSub?:{close:()=>void;retry:()=>void};private bootstrapGeneration=0;private closed=false;private cancelOpening?:()=>void;
- constructor(){this.bridge=new Bridge({build:__ARBOL_BUILD__,onstate:s=>{this.connection=s;if(s==='Reconnecting…'||s==='Connecting…'||s.includes('Bridge version')){this.sending?.offline();this.mutations?.offline();}},beforeReload:async()=>{await this.drafts.beforeReload();this.opening.beforeReload();},onhello:(installation)=>{
+ constructor(){this.bridge=new Bridge({build:__ARBOL_BUILD__,onstate:s=>{this.connection=s;if(s==='Reconnecting…'||s==='Connecting…'||s.includes('Bridge version')){this.sending?.offline();this.mutations?.offline();this.chats?.invalidateArchive(false);}},beforeReload:async()=>{await this.drafts.beforeReload();this.opening.beforeReload();},onhello:(installation)=>{
    this.installation=installation;
    this.drafts?.contextChanged(this.contextId);
    void this.readTrunk(this.contextId);
@@ -49,7 +50,7 @@ export class ElmaWindow {
   this.mutations=new Mutations(this.bridge,done=>this.drafts.holdSend(done));
   this.chats=new Chats(this.bridge);this.attention=new Attention(this.bridge);
   this.drafts=new Drafts(this.bridge,(contextId,editor)=>this.sending?.marked(contextId,editor,this.drafts.current===editor));this.sending=new Sending(this.bridge,(contextId,scope)=>this.drafts.owner(contextId,scope),done=>this.drafts.holdSend(done),{provisional:op=>this.provisional(op),accepted:(op,result)=>this.accepted(op,result),refused:(op,error)=>this.refused(op,error)});this.routing=new Routing(this.bridge,(chat,route)=>this.saveSettings(chat,{route}));
-  this.opening=new Opening(this.app,async done=>{const contextId=this.contextId,editor=this.drafts.current;if(!editor)throw new Error('Wait for the workspace and Draft to be read.');await editor.waitReady();await this.drafts.settleCurrent(done);if(contextId!==this.contextId)throw new Error('The window context changed before opening the request.');},async target=>{if(target.chat){const opened=await this.openChat(target.chat);if(opened){this.latestOpen=false;this.historyOpen=false;this.quickOpen=false;}return opened;}this.newChat(target.folder!);return true;},done=>this.drafts.holdSend(done));
+  this.opening=new Opening(this.app,async done=>{const contextId=this.contextId,editor=this.drafts.current;if(!editor)throw new Error('Wait for the workspace and Draft to be read.');await editor.waitReady();await this.drafts.settleCurrent(done);if(contextId!==this.contextId)throw new Error('The window context changed before opening the request.');},async target=>{if(target.chat){const opened=await this.openChat(target.chat);if(opened){this.latestOpen=false;this.closeArchived();this.historyOpen=false;this.quickOpen=false;}return opened;}this.newChat(target.folder!);return true;},done=>this.drafts.holdSend(done));
   document.addEventListener('visibilitychange',this.accountsVisible);window.addEventListener('focus',this.accountsVisible);
   this.bridge.subscribe('installation',{},event=>{this.installation=event.installation as unknown as InstallationInfo;if(this.installation.database==='ready'&&this.installation.maintenance==='normal')void this.bootstrap();},e=>this.failure(e));
  }
@@ -67,7 +68,27 @@ export class ElmaWindow {
  private rememberChat(){if(!this.info?.createdAt)return;if(this.archived){this.forgetChat(this.info.chat);return;}const chat=this.info.chat,repo=this.repositories.find(repo=>repo.folder===this.folder);this.preferences.lastChat=chat;if(repo)this.preferences.repositoryChats[repo.name]=chat;this.preferences.recentChats=[chat,...this.preferences.recentChats.filter(id=>id!==chat)].slice(0,100);this.savePreferences();}
  private failure(error?:BridgeError){if(error)this.problem=describe(error);}
  get metadataBusy(){return !!this.info&&this.mutations.forChat(this.info.chat).length>0;}
- get latestRows(){return this.chats.ordered(this.info?.chat,this.preferences.recentChats).map(row=>({id:row.chat,label:chatTitle(row),detail:chatDetail(row,this.repositories,this.now)}));}
+ get latestRows(){return this.chats.ordered(this.info?.chat,this.preferences.recentChats).map(row=>({id:row.chat,label:chatTitle(row),detail:this.listDetail(row)}));}
+ private listDetail(row:Parameters<typeof chatDetail>[0]){
+  return [importSource(row.imported),chatDetail(row,this.repositories,this.now)].filter(Boolean).join(' · ');
+ }
+ get archivedRows(){return this.chats.archiveRows.map(row=>({id:row.chat,label:chatTitle(row),detail:this.listDetail(row)}));}
+ openArchived(){this.archiveSelectionProblem='';this.chats.openArchive();}
+ closeArchived(){this.chats.closeArchive();}
+ async chooseArchived(chat:string){
+  if(this.archiveSelectionBusy||!this.chats.archiveRows.some(row=>row.chat===chat))return;
+  if(chat===this.info?.chat){this.closeArchived();return;}
+  const generation=this.generation;
+  this.archiveSelectionBusy=true;this.archiveSelectionProblem='';
+  try{
+   await this.drafts.settleCurrent();
+   if(this.closed||generation!==this.generation||!this.chats.archiveOpen)return;
+   if(!await this.openChat(chat))throw new Error('This chat is not available.');
+   this.closeArchived();this.problem='';
+  }catch(error){
+   if(this.chats.archiveOpen)this.archiveSelectionProblem=error instanceof Refusal?describe(error.detail):error instanceof Error?error.message:'The chat could not be opened.';
+  }finally{this.archiveSelectionBusy=false;}
+ }
  openLatest(){this.latestProblem='';this.latestOpen=true;}
  async chooseLatest(chat:string){if(this.latestBusy||!this.chats.rows.some(row=>row.chat===chat&&!row.archived))return;const contextId=this.contextId,generation=this.generation;this.latestBusy=true;this.latestProblem='';try{await this.drafts.settleCurrent();if(this.closed||contextId!==this.contextId||generation!==this.generation)return;if(!await this.openChat(chat))throw new Error('This chat is not available.');this.latestOpen=false;this.problem='';}catch(error){if(contextId===this.contextId&&this.latestOpen)this.latestProblem=error instanceof Refusal?describe(error.detail):error instanceof Error?error.message:'The chat could not be opened.';}finally{this.latestBusy=false;}}
  openQuick(){if(!this.info){this.actionNotice='Start a chat before using chat actions';return;}this.quickOpen=true;}
@@ -75,6 +96,10 @@ export class ElmaWindow {
  async copySession(){const chat=this.info?.chat,contextId=this.contextId,generation=this.generation;if(!chat){this.actionNotice='Start a chat before copying its session ID';return;}try{await navigator.clipboard.writeText(chat);if(contextId===this.contextId&&generation===this.generation)this.actionNotice='Session ID copied';}catch{if(contextId===this.contextId&&generation===this.generation)this.actionProblem='The session ID could not be copied.';}}
  startArchive(){if(!this.info){this.actionNotice='Start a chat before archiving';return;}if(this.archive||this.metadataBusy)return;this.actionNotice='';this.actionProblem='';this.archive={contextId:this.contextId,chat:this.info.chat,generation:this.generation,folder:this.settings.workingFolder??this.exchange?.workingFolder??this.folder,phase:'confirm'};}
  cancelArchive(){if(this.archive?.phase==='marking')return;this.archive=null;this.notifyState();}
+ private setArchived(archived:boolean){
+  if(this.archived===archived)return;
+  this.archived=archived;this.chats.invalidateArchive();
+ }
  private notifyState(){for(const check of [...this.stateWaiters])check();}
  private archiveCurrent(intent:ArchiveIntent){return !this.closed&&this.archive===intent&&intent.contextId===this.contextId&&intent.chat===this.info?.chat&&intent.generation===this.generation;}
  private savedEnd(intent:ArchiveIntent,exchange:string){return new Promise<boolean>(resolve=>{const check=()=>{const row=this.exchanges.find(row=>row.exchange===exchange);if(!this.archiveCurrent(intent)||row&&['completed','failed','cancelled','interrupted'].includes(row.state)){this.stateWaiters.delete(check);resolve(this.archiveCurrent(intent));}};this.stateWaiters.add(check);check();});}
@@ -166,7 +191,8 @@ export class ElmaWindow {
      if(this.problem===this.chatProblem)this.problem='';this.chatProblem='';if(!settled&&!same)previous?.close();this.pageTicket++;this.pageBusy=false;this.pageProblem='';
      const desired=this.info?.chat===snapshot.chat.chat?this.selected:null;for(const [exchange,live]of this.live)for(const block of live.blocks)if(block.kind==='tool'&&block.tool.position!==undefined&&this.openTools[block.tool.id])this.openTools[exchange+':'+block.tool.position]=true;
      this.restoring=false;this.live.clear();this.revision++;this.snapshotRevision++;
-     this.titleObservation++;this.marksObservation++;this.info=snapshot.chat;this.exchanges=snapshot.exchanges;this.more=snapshot.more;this.settings=snapshot.settings;this.settingsObservation++;this.ongoing=snapshot.marks.ongoing;this.archived=typeof snapshot.marks.archivedAt==='string';this.selected=this.exchanges.some(e=>e.exchange===this.selected)?this.selected:this.exchanges.at(-1)?.exchange??null;
+     const sameChat=this.info?.chat===snapshot.chat.chat;
+     this.titleObservation++;this.marksObservation++;this.info=snapshot.chat;this.exchanges=snapshot.exchanges;this.more=snapshot.more;this.settings=snapshot.settings;this.settingsObservation++;this.ongoing=snapshot.marks.ongoing;if(sameChat)this.setArchived(typeof snapshot.marks.archivedAt==='string');else this.archived=typeof snapshot.marks.archivedAt==='string';this.selected=this.exchanges.some(e=>e.exchange===this.selected)?this.selected:this.exchanges.at(-1)?.exchange??null;
      this.folder=this.settings.workingFolder??this.exchange?.workingFolder??this.folder;this.selectDraft(canonicalDraft);this.selectRoute();this.afterChatState();
      this.rememberChat();
      if(desired&&!this.exchanges.some(e=>e.exchange===desired)&&this.more){this.restoring=true;void this.restoreSelection(desired,generation,this.snapshotRevision);}
@@ -177,7 +203,7 @@ export class ElmaWindow {
     else if(event.kind==='note'){const note=event.note as Fields;const row=this.exchanges.find(e=>e.exchange===note.exchange);if(row){row.note=note as unknown as ElmaExchange['note'];this.revision++;}}
     else if(event.kind==='title'&&this.info){this.info.title=event.title as string|null;this.titleObservation++;}
     else if(event.kind==='settings'){this.settings=event.settings as ChatSnapshot['settings'];this.settingsObservation++;this.selectRoute();}
-    else if(event.kind==='marks'){const marks=event.marks as ChatSnapshot['marks'];this.ongoing=!!marks.ongoing;this.archived=typeof marks.archivedAt==='string';this.marksObservation++;if(this.info)this.rememberChat();}
+    else if(event.kind==='marks'){const marks=event.marks as ChatSnapshot['marks'];this.ongoing=!!marks.ongoing;this.setArchived(typeof marks.archivedAt==='string');this.marksObservation++;if(this.info)this.rememberChat();}
    },error=>{if(generation!==this.generation)return;this.chatProblem=error?describe(error):'The chat subscription ended.';this.problem=this.chatProblem;fail(error??{code:'ended',message:'The chat subscription ended.'});});
    this.chatSub=candidate;
   });
@@ -330,7 +356,7 @@ export class ElmaWindow {
   }catch(e){if(ticket===this.pageTicket&&e instanceof Refusal)this.pageProblem=describe(e.detail);}
   finally{if(ticket===this.pageTicket)this.pageBusy=false;}
  }
- private clear(){this.latestProblem='';this.latestOpen=false;this.quickOpen=false;this.archive=null;this.notifyState();this.rename=null;this.actionNotice='';this.actionProblem='';this.answerStates={};this.cancelQueued();this.repositoryChange=null;this.repositoryNotice='';this.restoring=false;this.live.clear();this.revision++;this.pageTicket++;this.pageBusy=false;this.pageProblem='';this.historyOpen=false;this.cancelOpening?.();this.chatSub?.close();this.chatSub=undefined;this.generation++;this.info=null;this.exchanges=[];this.selected=null;this.settings={};this.ongoing=false;this.archived=false;}
+ private clear(){this.closeArchived();this.latestProblem='';this.latestOpen=false;this.quickOpen=false;this.archive=null;this.notifyState();this.rename=null;this.actionNotice='';this.actionProblem='';this.answerStates={};this.cancelQueued();this.repositoryChange=null;this.repositoryNotice='';this.restoring=false;this.live.clear();this.revision++;this.pageTicket++;this.pageBusy=false;this.pageProblem='';this.historyOpen=false;this.cancelOpening?.();this.chatSub?.close();this.chatSub=undefined;this.generation++;this.info=null;this.exchanges=[];this.selected=null;this.settings={};this.ongoing=false;this.archived=false;}
  private selectDraft(canonical=false){if(this.contextId&&(this.info||this.folder)){const pending=this.info?this.sending.forChat(this.info.chat):undefined;this.drafts.select(this.contextId,pending&&!canonical?pending.intent.scope:this.info?{chat:this.info.chat}:{folder:this.folder});this.sending.select(this.contextId,this.drafts.current);}}
 
  close(){document.removeEventListener('visibilitychange',this.accountsVisible);window.removeEventListener('focus',this.accountsVisible);clearInterval(this.clock);this.cancelOpening?.();this.closed=true;this.notifyState();this.bootstrapGeneration++;this.chatSub?.close();this.cancelQueued();this.sending.close();this.opening.close();this.attention.close();this.mutations.close();this.chats.close();this.drafts.close();this.routing.close();this.bridge.close();this.app.close();}

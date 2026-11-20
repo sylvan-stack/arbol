@@ -1,26 +1,78 @@
 /** Bounded canonical summaries. Local preferences contain UUID ordering only. */
-import {describe,type Bridge,type Fields} from './bridge';
-import type {ElmaRoute} from '../design-system/src/sections/elma-types';
-export interface ChatSummary {chat:string;title:string|null;firstMessage?:string;activityAt?:string;last?:{exchange:string;number:number;state:string};hasDraft:boolean;workingFolder?:string;route?:ElmaRoute;ongoing:boolean;archived?:true}
+import {Refusal,describe,type Bridge,type Fields} from './bridge';
+import {importToolLabel,type ElmaImport,type ElmaRoute} from '../design-system/src/sections/elma-types';
+export interface ChatSummary {chat:string;title:string|null;firstMessage?:string;activityAt?:string;last?:{exchange:string;number:number;state:string};hasDraft:boolean;workingFolder?:string;route?:ElmaRoute;ongoing:boolean;archived?:true;imported?:ElmaImport}
 export const chatTitle=(row:Pick<ChatSummary,'title'|'firstMessage'>)=>row.title||Array.from((row.firstMessage??'').split('\n')[0]).slice(0,80).join('')||'Untitled chat';
 const activity=(row:ChatSummary)=>Number.isFinite(Date.parse(row.activityAt??''))?Date.parse(row.activityAt!):0;
 const newest=(a:ChatSummary,b:ChatSummary)=>activity(b)-activity(a)||b.chat.localeCompare(a.chat);
+const chatId=/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
+const pageSize=40;
+type ArchiveCursor={activityAt:string;chat:string};
+type ArchivedSummary=ChatSummary&ArchiveCursor&{archived:true};
+const archivedBefore=(row:ArchiveCursor,cursor:ArchiveCursor)=>row.activityAt<cursor.activityAt||
+ (row.activityAt===cursor.activityAt&&row.chat<cursor.chat);
+export const importSource=(imported:ElmaImport|undefined)=>imported?'Imported from '+importToolLabel(imported.tool):'';
+
 export class Chats {
  rows=$state<ChatSummary[]>([]);ready=$state(false);problem=$state('');private contextId='';private closed=false;private refreshing=false;private sub:{close:()=>void;retry:()=>void};
- constructor(bridge:Bridge){this.sub=bridge.subscribe('chats',{},event=>this.receive(event),error=>{this.ready=false;this.problem=error?describe(error):'The latest chats could not be read.';});}
- hello(contextId:string){if(this.contextId!==contextId){this.rows=[];this.ready=false;this.problem='';}this.contextId=contextId;}
+ archiveOpen=$state(false);archiveRows=$state<ArchivedSummary[]>([]);archiveBusy=$state(false);
+ archiveMore=$state(false);archiveProblem=$state('');
+ private archiveGeneration=0;private archiveCursor?:ArchiveCursor;private archiveOlder=false;
+ constructor(private bridge:Bridge){this.sub=bridge.subscribe('chats',{},event=>this.receive(event),error=>{this.ready=false;this.problem=error?describe(error):'The latest chats could not be read.';});}
+ hello(contextId:string){if(this.contextId!==contextId){this.rows=[];this.ready=false;this.problem='';}this.contextId=contextId;this.invalidateArchive();}
  private receive(event:Fields){
   if(!['snapshot','changed'].includes(String(event.kind))||!Array.isArray(event.chats)){this.problem='The backend sent an invalid chat list.';return;}
   const rows=event.chats as ChatSummary[];
-  if(rows.some(row=>!row||typeof row.chat!=='string'||!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(row.chat)||row.title!==null&&typeof row.title!=='string')){this.problem='The backend sent an invalid chat summary.';return;}
+  if(rows.some(row=>!row||typeof row.chat!=='string'||!chatId.test(row.chat)||row.title!==null&&typeof row.title!=='string')){this.problem='The backend sent an invalid chat summary.';return;}
   const map=new Map((event.kind==='snapshot'?[]:this.rows).map(row=>[row.chat,row]));for(const row of rows)if(row.archived)map.delete(row.chat);else map.set(row.chat,row);
   this.rows=[...map.values()].sort(newest).slice(0,100);this.ready=true;this.problem='';
+  if(this.archiveOpen&&(event.kind==='snapshot'||rows.some(row=>row.archived||this.archiveRows.some(saved=>saved.chat===row.chat))))this.invalidateArchive();
   // A fresh bounded snapshot backfills an archived row without racing an old page reply.
   if(event.kind==='changed'&&rows.some(row=>row.archived)&&!this.refreshing){this.refreshing=true;void Promise.resolve().then(()=>{this.refreshing=false;if(!this.closed)this.sub.retry();});}
  }
  ordered(current:string|undefined,recent:string[]){const ranks=new Map(recent.map((chat,i)=>[chat,i]));return this.rows.filter(row=>row.chat!==current&&!row.archived).sort((a,b)=>(ranks.get(a.chat)??Infinity)-(ranks.get(b.chat)??Infinity)||newest(a,b));}
  retry(){this.problem='';this.sub.retry();}
- close(){this.closed=true;this.sub.close();}
+ openArchive(){if(!this.archiveOpen){this.archiveOpen=true;this.invalidateArchive();}}
+ closeArchive(){this.archiveOpen=false;this.invalidateArchive();}
+ invalidateArchive(reload=true){
+  this.archiveGeneration++;
+  this.archiveRows=[];this.archiveCursor=undefined;this.archiveMore=false;
+  this.archiveBusy=false;this.archiveProblem='';this.archiveOlder=false;
+  if(reload&&this.archiveOpen)void this.loadArchive();
+ }
+ retryArchive(){return this.loadArchive(this.archiveOlder);}
+ async loadArchive(older=false){
+  if(this.closed||!this.archiveOpen||this.archiveBusy||older&&!this.archiveMore)return;
+  const generation=this.archiveGeneration,before=older?this.archiveCursor:undefined;
+  this.archiveBusy=true;this.archiveProblem='';this.archiveOlder=older;
+  try{
+   const result=await this.bridge.call<{chats:ArchivedSummary[]}>('chats.page',{archived:true,limit:pageSize,...(before&&{before})});
+   if(generation!==this.archiveGeneration)return;
+   const rows=result?.chats;
+   let previous=before;
+   if(!Array.isArray(rows)||rows.length>pageSize||rows.some(row=>{
+    if(!row||typeof row.chat!=='string'||!chatId.test(row.chat)||row.archived!==true||
+     (row.title!==null&&typeof row.title!=='string')||(row.firstMessage!==undefined&&typeof row.firstMessage!=='string')||
+     typeof row.activityAt!=='string'||!Number.isFinite(Date.parse(row.activityAt))||
+     new Date(row.activityAt).toISOString()!==row.activityAt||
+     (row.imported!==undefined&&(typeof row.imported?.tool!=='string'||!row.imported.tool||typeof row.imported.kind!=='string'||!row.imported.kind))||
+     (previous&&!archivedBefore(row,previous)))return true;
+    previous=row;
+    return false;
+   }))throw new Error('The backend sent an invalid archived chat page.');
+   const merged=new Map((older?this.archiveRows:[]).map(row=>[row.chat,row]));
+   for(const row of rows)if(!merged.has(row.chat))merged.set(row.chat,row);
+   const last=rows.at(-1);
+   if(last)this.archiveCursor={activityAt:last.activityAt,chat:last.chat};
+   this.archiveRows=[...merged.values()];
+   this.archiveMore=rows.length===pageSize;
+  }catch(error){
+   if(generation===this.archiveGeneration)this.archiveProblem=error instanceof Refusal?describe(error.detail):error instanceof Error?error.message:'Archived chats could not be read.';
+  }finally{
+   if(generation===this.archiveGeneration)this.archiveBusy=false;
+  }
+ }
+ close(){this.closed=true;this.closeArchive();this.sub.close();}
 }
 export function chatDetail(row:ChatSummary,repositories:{name:string;folder:string}[],now:number){
  const folder=row.workingFolder,repo=repositories.find(repo=>repo.folder===folder)?.name??folder?.split('/').filter(Boolean).at(-1)??'Repository unrecorded';
