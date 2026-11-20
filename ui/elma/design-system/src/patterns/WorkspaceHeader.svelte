@@ -22,7 +22,7 @@
     windowControls?: Snippet;
     trunk?: string;
     trunkSelector?: WorkspaceTrunkSelector;
-    onToggleNavigation: () => void;
+    onToggleNavigation?: () => void;
     appearance?: 'enabled' | 'disabled';
     theme?: string;
     uiScale?: number;
@@ -195,7 +195,7 @@
     <span class="small muted">Arbol / Design system</span>
     <div class="grow"></div>
   {/if}
-  <IconButton label="Toggle navigation" icon="☰" onclick={onToggleNavigation} />
+  {#if onToggleNavigation}<IconButton label="Toggle navigation" icon="☰" onclick={onToggleNavigation} />{/if}
   {#if !content && !surfaceHeader}<span class="pill">Sample workspace</span>{/if}
 </header>
 

@@ -22,7 +22,7 @@
     headerContent, headerLead, headerExtras, headerWindowControls, trunk, trunkSelector, navigation, status,
     headerAppearance, onAppearanceChange,
     theme = $bindable(''), uiScale = $bindable(0), contentScale = $bindable<number>(),
-    navigationFooter = true, fitted = false, elma = false,
+    navigationFooter = true, showNavigation = true, fitted = false, elma = false,
     onnavigate = () => {},
   }: {
     workspace?: string;
@@ -44,20 +44,20 @@
     onAppearanceChange?: () => void;
     trunk?: string;
     trunkSelector?: WorkspaceTrunkSelector;
-    navigation?: Snippet; status?: Snippet | null; navigationFooter?: boolean; fitted?: boolean; elma?: boolean;
+    navigation?: Snippet; status?: Snippet | null; navigationFooter?: boolean; showNavigation?: boolean; fitted?: boolean; elma?: boolean;
     onnavigate?: (page: string) => void;
   } = $props();
   let expanded = $state(false);
 </script>
 
-<div class="workspace" class:fitted class:elma class:appearance={!!headerAppearance}
+<div class="workspace" class:fitted class:elma class:single-pane={!showNavigation} class:appearance={!!headerAppearance}
   data-theme={theme || undefined} style:--font-scale={uiScale || undefined}>
   <WorkspaceHeader {workspace} title={headerTitle} titleDetail={headerTitleDetail} titleEditor={headerTitleEditor}
     busy={headerBusy} content={headerContent} lead={headerLead} extras={headerExtras}
-    windowControls={headerWindowControls} {trunk} {trunkSelector} onToggleNavigation={() => (expanded = !expanded)}
+    windowControls={headerWindowControls} {trunk} {trunkSelector} onToggleNavigation={showNavigation ? () => (expanded = !expanded) : undefined}
     appearance={headerAppearance} bind:theme bind:uiScale bind:contentScale {onAppearanceChange} />
   <div class="layout" class:expanded>
-    <nav aria-label={workspace + ' navigation'}>
+    {#if showNavigation}<nav aria-label={workspace + ' navigation'}>
       {#if navigation}{@render navigation()}{:else}
       <p class="eyebrow">Workspace</p>
       {#each destinations as destination}<button
@@ -71,7 +71,7 @@
         <span class="small muted">Connected knowledge.<br />Thoughtful work.</span>
       </div>{/if}
       {/if}
-    </nav>
+    </nav>{/if}
     <main>
       {#if children}{@render children()}{:else}<div class="page-content">
           <h1>{current}</h1>
@@ -107,6 +107,8 @@
     grid-template-columns: 248px minmax(0, 1fr);
     min-height: 624px;
   }
+  .single-pane.fitted { min-height: 0; }
+  .single-pane .layout { grid-template-columns: minmax(0, 1fr); }
   nav {
     padding: 24px 12px;
     display: flex;
