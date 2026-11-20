@@ -18,6 +18,7 @@ from .event_file import Line, Scanner, completed, superseded
 from .exchange_files import Folder, Folders, Record, timestamp
 from .listings import Listings
 from .model import Identity, Refused
+from .narrator_bash import shell_tool_label
 
 POLL = 0.1
 BATCH = 0.05
@@ -100,6 +101,13 @@ class Lines:
             length = len(encoded(value))
         except (ValueError, UnicodeError, RecursionError):
             return
+        event = value.get("event")
+        if line.meta.kind == "tool_started" and isinstance(event, dict):
+            if label := shell_tool_label(event.get("name"), event.get("input")):
+                labeled = {**value, "event": {**event, "label": label}}
+                labeled_length = len(encoded(labeled))
+                if self.base + labeled_length <= MAX_LINE:
+                    value, length = labeled, labeled_length
         if self.base + length > MAX_LINE:
             value = {"n": line.meta.n, "tooLarge": True, "bytes": line.size}
             length = len(encoded(value))
