@@ -115,15 +115,23 @@ export class DraftEditor {
 
 export class Drafts {
  private editors=new Map<string,DraftEditor>();private contextId='';private sends=new Set<Promise<unknown>>();current=$state<DraftEditor>();
- constructor(private bridge:Bridge,private onCanonical?:(contextId:string,editor:DraftEditor)=>void){}
+ constructor(private bridge:Bridge,private onCanonical:(contextId:string,editor:DraftEditor)=>void,private isReadOnly:(chat:string)=>boolean){}
  contextChanged(contextId:string){if(this.contextId&&contextId!==this.contextId){for(const editor of this.editors.values())editor.close();this.editors.clear();this.sends.clear();this.current=undefined;}this.contextId=contextId;}
- owner(contextId:string,scope:DraftScope){if(contextId!==this.contextId)throw new Error('The Draft belongs to a different installation.');const key=contextId+':'+JSON.stringify(scope);const editor=this.editors.get(key)??new DraftEditor(this.bridge,scope,'elma.unsaved.v1:'+key,value=>this.onCanonical?.(contextId,value));this.editors.set(key,editor);return editor;}
+ owner(contextId:string,scope:DraftScope){
+  if(scope.chat&&this.isReadOnly(scope.chat))throw new Refusal({code:'imported_chat',message:'Imported chats are read-only.'});
+  if(contextId!==this.contextId)throw new Error('The Draft belongs to a different installation.');const key=contextId+':'+JSON.stringify(scope);const editor=this.editors.get(key)??new DraftEditor(this.bridge,scope,'elma.unsaved.v1:'+key,value=>this.onCanonical?.(contextId,value));this.editors.set(key,editor);return editor;}
  select(contextId:string,scope:DraftScope){
   this.contextChanged(contextId);
   const next=this.owner(contextId,scope);
   const previous=this.current;this.current=next;
   if(next!==previous)void previous?.flush().then(()=>this.prune());this.prune();
   return next;
+ }
+ blockChat(chat:string){
+  const key=this.contextId+':'+JSON.stringify({chat}),editor=this.editors.get(key);
+  if(!editor)return;
+  if(this.current===editor)this.current=undefined;
+  editor.close();this.editors.delete(key);
  }
  suspend(){
   const previous=this.current;this.current=undefined;

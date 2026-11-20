@@ -27,13 +27,17 @@ export class SendOperation {
 interface Callbacks {provisional:(operation:SendOperation)=>void;accepted:(operation:SendOperation,result:Accepted)=>Promise<void>;refused:(operation:SendOperation,error:BridgeError)=>Promise<void>}
 export class Sending {
  private operations=new Map<string,SendOperation>();private finished=new Set<string>();private revision=$state(0);private contextId='';private online=false;private closed=false;
- constructor(private bridge:Bridge,private owner:(contextId:string,scope:DraftScope)=>DraftEditor,private hold:(done:Promise<void>)=>void,private callbacks:Callbacks){}
+ constructor(private bridge:Bridge,private owner:(contextId:string,scope:DraftScope)=>DraftEditor,private hold:(done:Promise<void>)=>void,private callbacks:Callbacks,private isReadOnly:(chat:string)=>boolean){}
  private storage(intent:SendIntent){return 'elma.send.v1:'+scopeKey(intent.contextId,intent.scope);}
  private pointer(contextId=this.contextId){return 'elma.activeSend.v1:'+contextId;}
  forEditor(contextId:string,editor:DraftEditor|undefined){this.revision;return editor?[...this.operations.values()].find(op=>op.pending&&scopeKey(op.intent.contextId,op.intent.scope)===scopeKey(contextId,editor.scope)):undefined;}
  forChat(chat:string){this.revision;return [...this.operations.values()].find(op=>op.pending&&op.intent.contextId===this.contextId&&op.intent.chat===chat);}
  select(contextId:string,editor:DraftEditor|undefined){const op=this.forEditor(contextId,editor);try{if(op)sessionStorage.setItem(this.pointer(contextId),op.intent.exchange);else sessionStorage.removeItem(this.pointer(contextId));}catch{/* Dispatch still requires its full recovery record. */}}
  start(intent:SendIntent,visible=true,recovery=false){
+  if(this.isReadOnly(intent.chat)){
+   if(recovery){this.forget(intent);return;}
+   throw new Refusal({code:'imported_chat',message:'Imported chats are read-only.'});
+  }
   if(!valid(intent,intent.contextId))throw new Error('The message could not be prepared safely.');
   const existing=this.operations.get(intent.contextId+':'+intent.exchange);if(existing)return existing;
   try{sessionStorage.setItem(this.storage(intent),stringifyWire(intent));}catch{if(!recovery)throw new Error('Not sent: this window could not keep the pending message for recovery.');}
@@ -54,9 +58,13 @@ export class Sending {
   if(this.forEditor(contextId,editor)||this.finished.has(contextId+':'+draft.sentAs))return;
   const scope=editor.scope;this.start({version:1,contextId,scope,chat:request.chat,exchange:draft.sentAs,method:'chat.send',params:{chat:request.chat,exchange:draft.sentAs,message:draft.text,route:request.route,workingFolder:request.workingFolder,...(typeof request.trunk==='string'?{trunk:request.trunk}:{}),draft:{revision:draft.revision,...('folder' in scope?{folder:scope.folder}:{})}},number:1,existing:'chat' in scope},visible,true);
  }
+ blockChat(chat:string){
+  for(const op of this.operations.values())if(op.intent.chat===chat&&op.outcome==='pending')this.complete(op);
+ }
  offline(){this.online=false;}
  private async run(op:SendOperation){
   if(this.closed||!this.online||op.running||!op.pending||op.intent.contextId!==this.contextId)return;
+  if(this.isReadOnly(op.intent.chat)){this.complete(op);return;}
   clearTimeout(op.timer);
   if(typeof op.intent.params.trunk==='string'&&op.intent.params.trunk!=='trivial'&&!this.bridge.supportsTrunkSelection){
    op.status='Waiting for a backend that supports the selected Trunk…';return;
@@ -64,6 +72,7 @@ export class Sending {
   op.running=true;op.status=op.attempts?'Waiting for send receipt…':'Sending…';op.attempts++;
   try{
    const value=await this.bridge.call<Accepted>(op.intent.method,op.intent.params);
+   if(!op.pending||this.closed)return;
    if(value?.accepted!==true||typeof value.duplicate!=='boolean'||value.chat!==op.intent.chat||value.exchange!==op.intent.exchange||!Number.isSafeInteger(value.number)||value.number<1||!isTrunkCode(value.trunk)||typeof value.build!=='string'||!(/^(?:0|[1-9a-f][0-9a-f]*)$/).test(value.build)||!value.duplicate&&value.trunk!==(op.intent.params.trunk??'trivial'))throw new Refusal({code:'no_answer',message:'The backend did not return a valid send receipt.'});
    op.outcome='accepted';op.status='Sent; restoring chat…';if(op.intent.method==='chat.send'&&op.intent.purpose!=='continue')op.editor.rereadAfterSend();try{await this.callbacks.accepted(op,value);}finally{this.complete(op);}
   }catch(e){
@@ -75,7 +84,10 @@ export class Sending {
  }
  private complete(op:SendOperation){
   clearTimeout(op.timer);op.pending=false;op.editor.pendingSend=false;this.finished.add(op.intent.contextId+':'+op.intent.exchange);if(this.finished.size>1000)this.finished.delete(this.finished.values().next().value!);this.operations.delete(op.intent.contextId+':'+op.intent.exchange);this.revision++;
-  try{sessionStorage.removeItem(this.storage(op.intent));if(sessionStorage.getItem(this.pointer(op.intent.contextId))===op.intent.exchange)sessionStorage.removeItem(this.pointer(op.intent.contextId));}catch{/* A known receipt remains known in memory. */}op.finish();
+  this.forget(op.intent);op.finish();
+ }
+ private forget(intent:SendIntent){
+  try{sessionStorage.removeItem(this.storage(intent));if(sessionStorage.getItem(this.pointer(intent.contextId))===intent.exchange)sessionStorage.removeItem(this.pointer(intent.contextId));}catch{/* A settled intent is not reused in this window. */}
  }
  close(){this.closed=true;for(const op of this.operations.values())clearTimeout(op.timer);}
 }
