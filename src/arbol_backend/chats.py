@@ -53,9 +53,13 @@ async def tool_params(params: Params) -> Params:
 
 
 async def phase_detail_params(params: Params) -> Params:
+    updates_only = params.get("updatesOnly", False)
+    if type(updates_only) is not bool:
+        raise Error("invalid_input")
     return {"exchange": uuid_id(params.get("exchange")),
             "after": integer(params.get("after", 0), 0, 2147483647),
-            "offset": integer(params.get("offset", 0), 0, 2147483646)}
+            "offset": integer(params.get("offset", 0), 0, 2147483646),
+            **({"updatesOnly": True} if updates_only else {})}
 
 
 async def rename_params(params: Params) -> Params:

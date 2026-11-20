@@ -157,7 +157,7 @@ class Reader:
             [ids],
         )
         runs = await session.execute(
-            "SELECT exchange_id,kind,outcome,usage,started FROM runs WHERE exchange_id=ANY(%s::uuid[]) "
+            "SELECT exchange_id,kind,outcome,usage,started,ended_at FROM runs WHERE exchange_id=ANY(%s::uuid[]) "
             "ORDER BY ended_at,run_id", [ids],
         )
         notes = await session.execute(
@@ -190,8 +190,8 @@ class Reader:
             if input_cut or output_cut or sql_input_cut or sql_output_cut:
                 tool["cut"] = True
             by_id[str(id)]["items"].append(tool)
-        for id, kind, outcome, usage, started in runs:
-            run = {"kind": kind, "outcome": outcome, "usage": metadata(usage)}
+        for id, kind, outcome, usage, started, ended_at in runs:
+            run = {"kind": kind, "outcome": outcome, "usage": metadata(usage), "endedAt": iso(ended_at)}
             if started is not None:
                 run["started"] = metadata(started)
             by_id[str(id)]["runs"].append(run)
@@ -276,15 +276,20 @@ class Reader:
     async def phase_details(self, params: Params) -> Params:
         """Read immutable record text, paging within a record when it exceeds one reply."""
         offset = params["offset"]
+        updates_only = params.get("updatesOnly", False)
+        selection: Params = {"updatesOnly": True} if updates_only else {}
         async with self.database.session(snapshot=True) as session:
             if (self.database.schema.revision or 0) < 4:
-                return {"entries": []}
+                return {**selection, "entries": []}
             rows = await session.execute(
                 "SELECT d.position, substr(d.entry,%s,%s), char_length(d.entry) "
                 "FROM exchange_phase_details d JOIN exchanges e ON e.id=d.exchange_id "
                 "WHERE d.exchange_id=%s AND d.position>%s AND e.trunk='steady' AND e.replaced_by IS NULL "
+                # The journal encoder writes these three leading keys in this order.
+                "AND (NOT %s OR starts_with(d.entry, %s || d.position::text || %s)) "
                 "ORDER BY d.position LIMIT %s",
-                [offset + 1, PHASE_DETAIL_PAGE, params["exchange"], params["after"], 1 if offset else 32],
+                [offset + 1, PHASE_DETAIL_PAGE, params["exchange"], params["after"],
+                 updates_only, '{"n":', ',"phase":"intake","exchangeUpdates":{', 1 if offset else 32],
             )
         remaining = PHASE_DETAIL_PAGE
         entries: list[Params] = []
@@ -301,4 +306,4 @@ class Reader:
             remaining -= len(text)
             if not remaining:
                 break
-        return {"entries": entries}
+        return {**selection, "entries": entries}
