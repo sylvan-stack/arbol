@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/sylvan-stack/arbol-design-system",
-  "commit": "0fdfc4cafeaa422fd076a97dfbbb9cb09757585e",
+  "commit": "d855cd7fa7dbe23e74f737b5a8b3586168192d38",
   "files": {
     "docs/licenses/Hanken-Grotesk-OFL.txt": "f45f60ca871850c58d8dc9c973bd6fcad40c137e9d037172b961e8ca68c87ef7",
     "docs/licenses/Spline-Sans-Mono-OFL.txt": "3127290ccd196ec0c4ffa60296845224a034b92c81de8231b0916278ed7607e1",
@@ -48,7 +48,7 @@
     "src/sections/StationSummary.svelte": "3f0f28724eb510daa1096df253d6c02cdaa1d23c9b23a13e9e701a79d572112c",
     "src/sections/SubscriptionAllowance.svelte": "dc5c866cb17ed87effa3686515cf29a1e3ead4b40a2bf6ad611eda8cb2e684b4",
     "src/sections/SubscriptionCard.svelte": "930301be578eb8d6a4afe0d1c8de4ca2205662a5edb948c5a91de45e208b24d5",
-    "src/sections/SubscriptionList.svelte": "fe3530e00f4a63ef070fddaa3dc64ed12f6f7074a4a463c7d7d17bc08210254c",
+    "src/sections/SubscriptionList.svelte": "044c1ec71a0f5f1dcb311c1bd39a22779ec98bc558cbba5e3d97f609349682ac",
     "src/sections/ToolCall.svelte": "dd254e5aa709f5cca1b07c09f9bfc48668934789f66cfde450e819d80a1d6b00",
     "src/sections/TurnNavigator.svelte": "c77f9e07ce9703e32540126c077e2ae5f80092909651d28452d9ef50b8999407",
     "src/sections/VigorPanel.svelte": "3d7d47149b33c8a0e3e9b49f83457f004bce3eaecbe77ed12d62c58c52978da0",

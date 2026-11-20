@@ -20,8 +20,14 @@
     onRenameSubscription?: RenameSubscription;
   } = $props();
   const order = new Map([
-    'claude/anthropic', 'codex/chatgpt', 'pi/chatgpt', 'pi/kimi-coding',
-    'pi/zai', 'mimo/xiaomi', 'pi/deepseek', 'pi/minimax',
+    subscriptionKey('claude', 'anthropic'),
+    subscriptionKey('codex', 'chatgpt'),
+    subscriptionKey('pi', 'chatgpt'),
+    subscriptionKey('pi', 'kimi-coding'),
+    subscriptionKey('pi', 'zai'),
+    subscriptionKey('mimo', 'xiaomi'),
+    subscriptionKey('pi', 'deepseek'),
+    subscriptionKey('pi', 'minimax'),
   ].map((key, index) => [key, index]));
   const failures = $derived(view.listing?.drivers.filter(entry => entry.error) ?? []);
   const rows = $derived((view.listing?.drivers ?? []).flatMap(({ driver, subscriptions }) =>
