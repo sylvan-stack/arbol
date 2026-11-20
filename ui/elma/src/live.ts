@@ -6,7 +6,7 @@ const object=(v:unknown):ObjectValue=>v!==null&&typeof v==='object'&&!Array.isAr
 const text=(v:unknown)=>typeof v==='string'?v:'';
 const tokens=(v:unknown)=>{const u=object(v);return{inputTokens:typeof u.inputTokens==='number'&&u.inputTokens>=0?u.inputTokens:0,outputTokens:typeof u.outputTokens==='number'&&u.outputTokens>=0?u.outputTokens:0};};
 export function savedUsage(row:ElmaExchange){return row.runs.reduce((sum,run)=>{const u=tokens(run.usage);return{inputTokens:sum.inputTokens+u.inputTokens,outputTokens:sum.outputTokens+u.outputTokens};},{inputTokens:0,outputTokens:0});}
-export function savedBlocks(row:ElmaExchange):ResponseBlock[]{return row.items.flatMap((item):ResponseBlock[]=>item.kind==='message'?(item.role==='assistant'?[{id:'message:'+item.position,kind:'text',text:item.text}]:[]):[{id:'tool:'+item.position,kind:'tool',tool:{id:row.exchange+':'+item.position,name:item.name,input:item.input,result:item.result,error:item.error,state:item.interrupted?'Interrupted':item.ok?'Complete':'Failed',truncated:item.truncated,cut:item.cut,position:item.position}}]);}
+export function savedBlocks(row:ElmaExchange):ResponseBlock[]{return row.items.flatMap((item):ResponseBlock[]=>item.kind==='message'?(item.role==='assistant'?[{id:'message:'+item.position,kind:'text',text:item.text}]:[]):[{id:'tool:'+item.position,kind:'tool',tool:{id:row.exchange+':'+item.position,name:item.name,label:item.label,input:item.input,result:item.result,error:item.error,state:item.interrupted?'Interrupted':item.ok?'Complete':'Failed',truncated:item.truncated,cut:item.cut,position:item.position}}]);}
 export class LiveExchange {
  blocks:ResponseBlock[]=[];questions:QuestionView[]=[];seen=new Set<number>();
  state='accepting';waitingFor='';since?:string;startedAt?:string;inferenceEndedAt?:string;activity='';end?:{state:string;at?:string;error?:{code:string;message:string;retryAfterSeconds?:number}};saved=false;
@@ -30,7 +30,7 @@ export class LiveExchange {
    if(block.kind!=='tool')block.text=kind.endsWith('_delta')?block.text+e.text:e.text;
    if(!kind.endsWith('_delta'))this.pending.delete(key);if(!parent)this.activity=blockKind;
   }else if(kind==='tool_started'&&typeof e.callId==='string'){
-   const tool:ToolView={id:run+':'+e.callId,name:text(e.name)||'Tool',input:e.input,state:'Running',startedAt:text(e.at)||undefined};
+   const tool:ToolView={id:run+':'+e.callId,name:text(e.name)||'Tool',label:text(e.label)||undefined,input:e.input,state:'Running',startedAt:text(e.at)||undefined};
    const siblings=[...this.tools.values()].filter(t=>t.state==='Running'&&target.some(b=>b.kind==='tool'&&b.tool===t));
    const total=siblings.length+1;if(total>1){for(const t of siblings)t.parallel={running:total,total};tool.parallel={running:total,total};}
    this.tools.set(run+'\0'+e.callId,tool);target.push({id:'live:'+id,kind:'tool',tool});if(!parent)this.activity='';
@@ -44,7 +44,7 @@ export class LiveExchange {
   else if(kind==='notice'&&typeof e.message==='string')target.push({id:'live:'+id,kind:'notice',text:e.message});
   else if(kind==='control_refused'){const error=object(e.error),message='The answer was not taken: '+(text(error.message)||text(e.message)||'The Driver refused it.');const q=this.questions.find(q=>q.id===run+':'+e.askId);if(q){q.problem=message;q.refusalPosition=Number(n);}else target.push({id:'live:'+id,kind:'notice',text:message});}
  }}
- reconcile(row:ElmaExchange){const retained=this.blocks.filter(b=>b.kind==='thinking'||b.kind==='notice');const tools=[...this.tools.values()];this.blocks=[...retained,...savedBlocks(row).map(b=>{if(b.kind!=='tool')return b;const observed=tools.find(t=>t.position===b.tool.position);return{...b,tool:{...b.tool,id:observed?.id??b.tool.id,startedAt:observed?.startedAt,endedAt:observed?.endedAt}};})];this.state=row.state;this.saved=true;this.questions=[];this.totalOverride=savedUsage(row);}
+ reconcile(row:ElmaExchange){const retained=this.blocks.filter(b=>b.kind==='thinking'||b.kind==='notice');const tools=[...this.tools.values()];this.blocks=[...retained,...savedBlocks(row).map(b=>{if(b.kind!=='tool')return b;const observed=tools.find(t=>t.position===b.tool.position);return{...b,tool:{...b.tool,id:observed?.id??b.tool.id,label:b.tool.label??observed?.label,startedAt:observed?.startedAt,endedAt:observed?.endedAt}};})];this.state=row.state;this.saved=true;this.questions=[];this.totalOverride=savedUsage(row);}
  get totals(){if(this.totalOverride)return this.totalOverride;if(!this.usage.size)return this.baseline;return[...this.usage.values()].reduce((sum,u)=>({inputTokens:sum.inputTokens+u.inputTokens,outputTokens:sum.outputTokens+u.outputTokens}),{inputTokens:0,outputTokens:0});}
  get usageDelta(){const total=this.totals;return{inputTokens:total.inputTokens-this.baseline.inputTokens,outputTokens:total.outputTokens-this.baseline.outputTokens};}
  label(row:ElmaExchange,now:number){
