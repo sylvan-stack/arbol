@@ -1,4 +1,4 @@
-"""Publish a verified copy of the retired files covered by ARC-5."""
+"""Publish and retire the legacy files covered by ARC-5."""
 
 from __future__ import annotations
 
@@ -150,8 +150,12 @@ def ensure_unused(sources: dict[str, Path]) -> None:
     run = subprocess.run(["/usr/sbin/lsof", "-nP", "-Fn", "-u", str(os.getuid())], capture_output=True, timeout=45)
     if run.returncode not in (0, 1) or run.stderr:
         raise RecoveryError("Could not verify the owner process file inventory.")
+    this_process = f"p{os.getpid()}".encode()
+    own = False
     for raw in run.stdout.splitlines():
-        if raw.startswith(b"n/"):
+        if raw.startswith(b"p"):
+            own = raw == this_process
+        elif raw.startswith(b"n/") and not own:
             path = Path(os.fsdecode(raw[1:]).removesuffix(" (deleted)"))
             if any(path.is_relative_to(source) for source in sources.values()):
                 raise RecoveryError("A running process still uses an archive source.")
@@ -203,10 +207,64 @@ def keep_manifest(private: Path, kind: str, value: dict[str, Any]) -> None:
             os.fsync(parent)
 
 
+def remove_entry(parent: int, name: str, key: str, expected: dict[str, Any]) -> None:
+    saved = expected.get(key)
+    if saved is None or describe(parent, name) != saved:
+        raise RecoveryError("An unrecorded or changed original appeared during retirement.")
+    if saved["type"] != "directory":
+        os.unlink(name, dir_fd=parent)
+        return
+    with opened(name, DIR, parent) as folder:
+        if list(identity(os.fstat(folder))) != saved["identity"]:
+            raise RecoveryError("An original directory was replaced.")
+        for child in sorted(os.listdir(folder)):
+            remove_entry(folder, child, f"{key}/{child}", expected)
+        os.fsync(folder)
+    if describe(parent, name) != saved:
+        raise RecoveryError("An original directory was replaced.")
+    os.rmdir(name, dir_fd=parent)
+
+
+def retire(archive: Archive, destination: Path, kind: str, sources: dict[str, Path], private: Path) -> int:
+    value = check_archive(archive, destination, kind, sources)
+    keep_manifest(private, kind, value)
+    ensure_unused(sources)
+    expected = value["entries"]
+    remaining = inventory(sources)
+    # Interrupted removals leave a subset with its original file identities.
+    if any(expected.get(key) != entry for key, entry in remaining.items()):
+        raise RecoveryError("An original entry differs from the verified archive.")
+    for key, path in sources.items():
+        if key in remaining:
+            manifest = archive.path(destination / MANIFEST)
+            if manifest.read_bytes() != canonical(value):
+                raise RecoveryError("The published archive manifest changed during retirement.")
+            with opened(path.parent, DIR) as parent:
+                remove_entry(parent, path.name, key, expected)
+                os.fsync(parent)
+    return len(remaining)
+
+
+def remove_empty_old_root(home: Path) -> bool:
+    old = home / "Library/Application Support/Arbol"
+    if not os.path.lexists(old):
+        return True
+    with opened(old.parent, DIR) as parent, opened(old.name, DIR, parent) as folder:
+        if os.listdir(folder):
+            return False
+        ensure_unused({"old installation": old})
+        current = os.stat(old.name, dir_fd=parent, follow_symlinks=False)
+        if identity(current) != identity(os.fstat(folder)):
+            raise RecoveryError("The old installation directory was replaced.")
+        os.rmdir(old.name, dir_fd=parent)
+        os.fsync(parent)
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("kind", choices=("legacy", "backups"))
-    parser.add_argument("action", choices=("publish", "verify"))
+    parser.add_argument("action", choices=("publish", "verify", "remove"))
     args = parser.parse_args()
     try:
         archive = require_archive()
@@ -228,13 +286,16 @@ def main() -> int:
                 raise RecoveryError("Retirement evidence needs a private internal directory.")
             with opened("archive.lock", os.O_CREAT | os.O_NOFOLLOW | os.O_RDWR, folder) as fd:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                if args.action == "publish":
-                    value = publish(archive, destination, args.kind, sources)
+                result: dict[str, Any] = {"status": "ready", "action": args.action, "archive": str(destination)}
+                if args.action == "remove":
+                    result["entries"] = retire(archive, destination, args.kind, sources, private)
+                    result["oldRootAbsent"] = remove_empty_old_root(home)
                 else:
-                    value = check_archive(archive, destination, args.kind, sources)
-                keep_manifest(private, args.kind, value)
-        print(json.dumps({"status": "ready", "action": args.action, "archive": str(destination),
-                          "entries": len(value["entries"])}))
+                    value = (publish(archive, destination, args.kind, sources) if args.action == "publish"
+                             else check_archive(archive, destination, args.kind, sources))
+                    keep_manifest(private, args.kind, value)
+                    result["entries"] = len(value["entries"])
+        print(json.dumps(result))
         return 0
     except (ArchiveUnavailable, RecoveryError, OSError, ValueError, subprocess.SubprocessError) as error:
         code = error.code if isinstance(error, ArchiveUnavailable) else "archive_refused"
