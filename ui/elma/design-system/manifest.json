@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/sylvan-stack/arbol-design-system",
-  "commit": "0723ba2e2dff687df0f8f0c7e344185c9f4edb7d",
+  "commit": "739826d3d1ae07987f81d1a74540a98d704625e1",
   "files": {
     "docs/licenses/Hanken-Grotesk-OFL.txt": "f45f60ca871850c58d8dc9c973bd6fcad40c137e9d037172b961e8ca68c87ef7",
     "docs/licenses/Spline-Sans-Mono-OFL.txt": "3127290ccd196ec0c4ffa60296845224a034b92c81de8231b0916278ed7607e1",
@@ -57,7 +57,7 @@
     "src/sections/elma-types.ts": "3d03f9b12ef9c37942c3026cd6907fd4844670f1f3524c43df5de5e4b51062b0",
     "src/sections/seqoya-subscriptions.ts": "3fc22dbdced4299c2dca1c1f7c8309aeea11c25f78f30b5cb93e7739d06c9377",
     "src/sections/seqoya-vigor.ts": "54a72ccc553477fc5e36ecce3df3c4b9ad8dd98415621cddbc9f717e00b19cf8",
-    "src/styles/elma-phase-backgrounds.css": "9bb7722daef2264ea91714d8d2aa2881b43d2342f9a2d113ccfa0c1ba8902ccb",
+    "src/styles/elma-phase-backgrounds.css": "73fb92afc5ace311b5b1b127cdcf72fa5fc44838982868cc620a2e97389e3865",
     "src/styles/legacy-tokens.css": "54bac8ebf24bf5092b04bfa79832b0391895db0f44518a8f1e87566d8b499705",
     "src/styles/system.css": "2ad2d5c3ad36925863f2037ef450c07b5d547cb4ff492e07a8a7a032cb1e0d15",
     "src/styles/tokens.css": "99f1089102c8180f3ec57cb0d5b0ca41ba4635879f23c060a0a35b683ce5f0a3",

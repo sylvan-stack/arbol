@@ -6,15 +6,17 @@
   --ripples-finalization: #82be9c;
   --ripples-tint: 6%;
   --ripples-strength: 22%;
+  --ripples-execution-strength: var(--ripples-strength);
 }
 
 [data-theme='birch'] {
   --ripples-intake: #956432;
   --ripples-planning: #806087;
-  --ripples-execution: #eef7ff;
+  --ripples-execution: #ffebb0;
   --ripples-finalization: #58775f;
   --ripples-tint: 11%;
   --ripples-strength: 15%;
+  --ripples-execution-strength: 52%;
 }
 
 [data-exchange-phase='intake'] {
@@ -31,6 +33,7 @@
 
 [data-exchange-phase='execution'] {
   --ripple-color: var(--ripples-execution);
+  --ripple-strength: var(--ripples-execution-strength);
   --ripple-size: 32.4px;
   --ripple-offset: 6px;
 }
@@ -42,7 +45,9 @@
 }
 
 [data-exchange-phase] {
-  --ripple-ink: color-mix(in srgb, var(--ripple-color) var(--ripples-strength), transparent);
+  --ripple-ink: color-mix(
+    in srgb, var(--ripple-color) var(--ripple-strength, var(--ripples-strength)), transparent
+  );
   --ripple-soft-ink: color-mix(in srgb, var(--ripple-ink) 54%, transparent);
   background-color: color-mix(in srgb, var(--ripple-color) var(--ripples-tint), var(--canvas));
   background-image: radial-gradient(
