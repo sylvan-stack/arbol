@@ -4,7 +4,7 @@
   import type { SubscriptionView, OpenSubscriptionUsage, RenameSubscription } from '../sections/seqoya-subscriptions';
   import type { VigorView } from '../sections/seqoya-vigor';
   import type { WorkspaceTrunkSelector } from '../types';
-  import IntelligenceProviders from './IntelligenceProviders.svelte';
+  import IntelligenceProviders, { providerTabInsignia } from './IntelligenceProviders.svelte';
 
   let {
     trunk, trunkSelector, headerWindowControls, connectionStatus = '', fitted = false,
@@ -30,17 +30,19 @@
     onOpenUsage?: OpenSubscriptionUsage;
     onRenameSubscription?: RenameSubscription;
   } = $props();
+
+  let tab = $state('Subscriptions');
 </script>
 
 {#snippet connection()}<span role="status">{connectionStatus}</span>{/snippet}
 
 <WorkspaceShell workspace="Seqoya" headerTitle="Seqoya Lab" current="Intelligence Providers"
   destinations={['Intelligence Providers']} {trunk} {trunkSelector} {headerWindowControls}
-  insignia={{ label: 'Lab' }}
+  insignia={{ label: providerTabInsignia[tab] }}
   headerAppearance={appearanceReady ? 'enabled' : 'disabled'} bind:theme bind:uiScale {onAppearanceChange}
   status={connectionStatus ? connection : null} navigationFooter={false} {fitted}>
   <div class="page-content seqoya-page">
-    <IntelligenceProviders {subscriptions} {vigor} {onRefreshSubscriptions} {onRefreshVigor}
+    <IntelligenceProviders bind:tab {subscriptions} {vigor} {onRefreshSubscriptions} {onRefreshVigor}
       {onTabChange} {onRefreshUsage} {onOpenUsage} {onRenameSubscription} />
   </div>
 </WorkspaceShell>

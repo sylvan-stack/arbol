@@ -1,14 +1,24 @@
+<script module lang="ts">
+  export const providerTabInsignia: Record<string, string> = {
+    Subscriptions: 'Providers Subscriptions Metrics',
+    Vigor: 'Subscriptions Vigor Pressure',
+    Routing: 'Subscription and Model routing',
+  };
+  const providerTabs = Object.keys(providerTabInsignia);
+</script>
+
 <script lang="ts">
   import Tabs from '../components/Tabs.svelte';
-  import PageHeader from '../patterns/PageHeader.svelte';
   import SubscriptionList from '../sections/SubscriptionList.svelte';
   import VigorPanel from '../sections/VigorPanel.svelte';
   import type { SubscriptionView, OpenSubscriptionUsage, RenameSubscription } from '../sections/seqoya-subscriptions';
   import type { VigorView } from '../sections/seqoya-vigor';
 
   let {
-    subscriptions, vigor, onRefreshSubscriptions, onRefreshVigor, onTabChange, onRefreshUsage, onOpenUsage, onRenameSubscription,
+    tab = $bindable('Subscriptions'), subscriptions, vigor, onRefreshSubscriptions, onRefreshVigor,
+    onTabChange, onRefreshUsage, onOpenUsage, onRenameSubscription,
   }: {
+    tab?: string;
     subscriptions?: SubscriptionView;
     vigor?: VigorView;
     onRefreshSubscriptions?: () => void;
@@ -21,9 +31,7 @@
 </script>
 
 <div class="stack">
-  <PageHeader title="Intelligence Providers" description="" />
-  <Tabs label="Intelligence Providers" items={['Subscriptions', 'Vigor', 'Routing']}
-    value="Subscriptions" onChange={onTabChange}>
+  <Tabs label="Intelligence Providers" items={providerTabs} bind:value={tab} onChange={onTabChange}>
     {#snippet panel(tab)}
       {#if tab === 'Subscriptions'}
         <SubscriptionList embedded view={subscriptions} onRefresh={onRefreshSubscriptions}
