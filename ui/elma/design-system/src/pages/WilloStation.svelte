@@ -1,16 +1,22 @@
 <script module lang="ts">
-  export interface ChatSessionRow {
-    id: string;
-    title: string;
-    activityAt: string;
-  }
+  import type { StationEntry } from '../sections/StationCollection.svelte';
+
+  export type ChatSessionRow = StationEntry & { activityAt: string };
+  export const willoDestinations = [
+    'Stations', 'Agentic Stations', 'Action Items', 'Spotlight', 'Comunicados',
+    'Slack', 'Telegram', 'Emails', 'Blueprint Runs', 'Run Details', 'Email Signal Rules',
+    'Compact Stations',
+  ];
 </script>
 
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import Button from '../components/Button.svelte';
   import Notice from '../patterns/Notice.svelte';
+  import PageHeader from '../patterns/PageHeader.svelte';
   import WorkspaceShell from '../patterns/WorkspaceShell.svelte';
+  import AttentionColumn from '../sections/AttentionColumn.svelte';
+  import StationCollection from '../sections/StationCollection.svelte';
 
   let {
     rows = [],
@@ -30,95 +36,58 @@
     headerWindowControls?: Snippet;
   } = $props();
 
-  const localTime = new Intl.DateTimeFormat(undefined, {
-    dateStyle: 'medium',
-    timeStyle: 'short',
-  });
+  const inactiveDestinations = willoDestinations.slice(1);
 </script>
 
-<WorkspaceShell
-  workspace="Willo"
-  headerTitle="Willo Station"
-  {headerWindowControls}
-  showNavigation={false}
-  status={null}
-  fitted
->
-  <div class="page">
-    <section class="collection" aria-labelledby="recent-chat-sessions">
-      <h2 id="recent-chat-sessions">Recent Chat Sessions</h2>
+<div class="willo">
+  <WorkspaceShell
+    workspace="Willo"
+    headerTitle="Willo Station"
+    current="Stations"
+    destinations={willoDestinations}
+    disabledDestinations={inactiveDestinations}
+    {headerWindowControls}
+    navigationFooter={false}
+    status={null}
+    fitted
+  >
+    <div class="page-content">
+      <PageHeader title="Stations" description="Recent Chat Sessions in this installation." />
+      <div class="split">
+        <div class="stack">
+          <StationCollection stations={rows} readOnly />
 
-      {#if rows.length}
-        <ol class="rows" role="list">
-          {#each rows as row (row.id)}
-            <li>
-              <span class="title">{row.title}</span>
-              <time datetime={row.activityAt}>{localTime.format(new Date(row.activityAt))}</time>
-            </li>
-          {/each}
-        </ol>
-      {/if}
+          {#if problem}
+            <Notice message={problem} tone="warning" role="alert">
+              {#if onRetry}<Button label="Retry" onclick={onRetry} />{/if}
+            </Notice>
+          {:else if loading}
+            <p class="muted" role="status">
+              {rows.length ? 'Loading Chat Sessions…' : 'Loading recent Chat Sessions…'}
+            </p>
+          {:else if !rows.length}
+            <p class="muted" role="status">No recent Chat Sessions.</p>
+          {/if}
 
-      {#if problem}
-        <Notice message={problem} tone="warning" role="alert">
-          {#if onRetry}<Button label="Retry" onclick={onRetry} />{/if}
-        </Notice>
-      {:else if loading}
-        <p class="muted" role="status">
-          {rows.length ? 'Loading Chat Sessions…' : 'Loading recent Chat Sessions…'}
-        </p>
-      {:else if !rows.length}
-        <p class="muted" role="status">No recent Chat Sessions.</p>
-      {/if}
-
-      {#if more && onLoadOlder && !problem}
-        <div><Button label="Load older" tone="ghost" disabled={loading} onclick={onLoadOlder} /></div>
-      {/if}
-    </section>
-  </div>
-</WorkspaceShell>
+          {#if more && onLoadOlder && !problem}
+            <div><Button label="Load older" tone="ghost" disabled={loading} onclick={onLoadOlder} /></div>
+          {/if}
+        </div>
+        <AttentionColumn unavailable />
+      </div>
+    </div>
+  </WorkspaceShell>
+</div>
 
 <style>
-  .page {
-    flex: 1;
-    min-block-size: 0;
+  .willo {
+    height: 100dvh;
+  }
+  .willo :global(.workspace.fitted) {
+    height: 100%;
+    min-height: 0;
+  }
+  .page-content {
     overflow: auto;
-    padding: clamp(var(--space-4), 4vw, var(--space-6));
-  }
-  .collection {
-    display: grid;
-    gap: var(--space-4);
-    max-inline-size: 58rem;
-    margin-inline: auto;
-  }
-  .collection h2 {
-    font-size: 1.25em;
-    font-weight: 600;
-  }
-  .rows {
-    padding: 0;
-    margin: 0;
-    list-style: none;
-    border-block-start: 1px solid var(--border);
-  }
-  .rows li {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    flex-wrap: wrap;
-    column-gap: var(--space-5);
-    row-gap: var(--space-1);
-    padding: var(--space-3) 0;
-    border-block-end: 1px solid var(--border);
-  }
-  .title {
-    flex: 1 1 16rem;
-    font-weight: 600;
-    overflow-wrap: anywhere;
-  }
-  time {
-    color: var(--muted);
-    font-size: .9em;
-    font-variant-numeric: tabular-nums;
   }
 </style>

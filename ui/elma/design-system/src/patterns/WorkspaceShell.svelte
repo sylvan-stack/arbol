@@ -18,6 +18,7 @@
       'Monitoring',
     ],
     children,
+    disabledDestinations = [],
     headerTitle, headerTitleDetail, headerTitleEditor, headerBusy,
     headerContent, headerLead, headerExtras, headerWindowControls, trunk, trunkSelector, navigation, status,
     headerAppearance, onAppearanceChange,
@@ -28,6 +29,7 @@
     workspace?: string;
     current?: string;
     destinations?: string[];
+    disabledDestinations?: string[];
     children?: Snippet;
     headerTitle?: string;
     headerTitleDetail?: Snippet;
@@ -62,6 +64,7 @@
       <p class="eyebrow">Workspace</p>
       {#each destinations as destination}<button
           aria-current={current === destination ? 'page' : undefined}
+          disabled={disabledDestinations.includes(destination)}
           onclick={() => {
             onnavigate(destination);
             expanded = false;
@@ -128,6 +131,9 @@
     text-align: left;
     padding: 8px 12px;
     min-height: 36px;
+  }
+  nav button:disabled {
+    color: var(--disabled);
   }
   nav button[aria-current='page'] {
     background: var(--selected);

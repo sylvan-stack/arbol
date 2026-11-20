@@ -8,7 +8,17 @@
     title: string | null;
     firstMessage?: string;
     activityAt: string;
+    ongoing?: boolean;
+    hasDraft?: boolean;
+    last?: { state?: string; error?: { message?: string } };
+    workingFolder?: string;
+    route?: { driver?: string; model?: string };
   }
+
+  const stationStatuses = new Map([
+    ['accepting', 'Running'], ['running', 'Running'], ['stopping', 'Running'], ['ending', 'Running'],
+    ['completed', 'Complete'], ['failed', 'Failed'], ['cancelled', 'Cancelled'], ['interrupted', 'Interrupted'],
+  ]);
 
   const pageSize = 50;
   let rows = $state<ChatSessionRow[]>([]);
@@ -19,11 +29,24 @@
   let retryOlder = false;
 
   function toRow(summary: Summary): ChatSessionRow {
-    const firstLine = summary.firstMessage?.split('\n', 1)[0].trim() ?? '';
+    const message = summary.firstMessage?.trim() ?? '';
+    const firstLine = message.split('\n', 1)[0].trim();
+    const title = summary.title?.trim() || Array.from(firstLine).slice(0, 80).join('') || 'Untitled Chat Session';
+    const status = stationStatuses.get(summary.last?.state ?? '');
+    const folder = typeof summary.workingFolder === 'string' ? summary.workingFolder.split('/').pop() : undefined;
+    const detail = [folder, summary.route?.driver, summary.route?.model]
+      .filter(value => typeof value === 'string' && value).join(' · ');
+    const error = summary.last?.error?.message;
     return {
       id: summary.chat,
-      title: summary.title?.trim() || Array.from(firstLine).slice(0, 80).join('') || 'Untitled Chat Session',
+      title,
       activityAt: summary.activityAt,
+      status: status ?? (summary.hasDraft === true && !summary.last ? 'Draft' : undefined),
+      ongoing: summary.ongoing === true,
+      drafted: summary.hasDraft === true,
+      preview: message && message !== title ? message : undefined,
+      failure: status === 'Failed' && typeof error === 'string' ? error : undefined,
+      detail,
     };
   }
 
