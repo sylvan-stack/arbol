@@ -1,6 +1,6 @@
 import { parse } from 'lossless-json';
 import { phaseLabel, phaseOrder, type PhaseName } from '../design-system/src/sections/ExchangeDetails.svelte';
-import type { IntakeFindings } from '../design-system/src/sections/elma-response';
+import { foresterHookLabels, type ForesterHookCounts, type IntakeFindings } from '../design-system/src/sections/elma-response';
 import type { Bridge } from './bridge';
 
 type Fields = Record<string, unknown>;
@@ -25,6 +25,7 @@ export class PhaseDetailsReader {
   private privateData = new Map<PhaseName, Phase>();
   currentPhase: PhaseName | null = null;
   intakeFindings?: IntakeFindings;
+  foresterHooks?: ForesterHookCounts;
 
   constructor(private readonly bridge: Bridge, readonly exchange: string, private readonly updatesOnly = false) {}
 
@@ -80,7 +81,7 @@ export class PhaseDetailsReader {
     const detail = object(parse(this.offset ? this.chunks.join('') + text : text));
     const phase = phaseOrder.find(name => name === detail?.phase);
     if (!detail || !phase) throw new Error('Invalid phase detail entry.');
-    if (this.updatesOnly) this.readFindings(detail);
+    if (this.updatesOnly) this.readUpdates(phase, detail);
     else this.project(phase, detail);
     this.after = position;
     this.offset = 0;
@@ -88,9 +89,23 @@ export class PhaseDetailsReader {
     this.chunks = [];
   }
 
-  private readFindings(detail: Fields) {
+  private readUpdates(phase: PhaseName, detail: Fields) {
     const value = object(detail.exchangeUpdates);
     if (!value) return;
+    if (phase === 'execution') {
+      const hooks = object(value.foresterHooks);
+      if (!hooks) return;
+      const counts: ForesterHookCounts = {};
+      for (const [event, count] of Object.entries(hooks)) {
+        if (Object.hasOwn(foresterHookLabels, event) && typeof count === 'number'
+          && Number.isSafeInteger(count) && count > 0) {
+          counts[event as keyof ForesterHookCounts] = count;
+        }
+      }
+      if (Object.keys(counts).length) this.foresterHooks = counts;
+      return;
+    }
+    if (phase !== 'intake') return;
     const titles = (entry: unknown): string[] | undefined =>
       Array.isArray(entry) && entry.every(name => typeof name === 'string') ? entry : undefined;
     const glossaryTerms = titles(value.glossaryTerms);
