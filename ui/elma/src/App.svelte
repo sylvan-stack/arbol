@@ -34,11 +34,11 @@
   inspection = undefined;
  }
 
- function openPhaseDetails() {
+ function openPhaseDetails(phase?: PhaseName) {
   const exchange = view?.exchange;
   if (!view || !exchange || !isSteadyExchange(exchange) || inspection) return;
   const source = new PhaseDetailsReader(view.bridge, exchange.exchange);
-  inspection = { reader: source, busy: false, problem: '' };
+  inspection = { reader: source, phase, busy: false, problem: '' };
   void readPhaseDetails(source);
  }
 
@@ -55,8 +55,10 @@
   }
   if (!inspection || !isCurrent()) return;
   const phases = source.phases;
-  const phase = inspection.phase ?? (phases.includes('execution') && view?.response.length
-   ? 'execution' : source.currentPhase ?? phases.at(-1));
+  const preferred = inspection.phase;
+  const defaultPhase = phases.includes('execution') && view?.response.length
+   ? 'execution' : source.currentPhase ?? phases.at(-1);
+  const phase = preferred && (!terminal || phases.includes(preferred)) ? preferred : defaultPhase;
   inspection = { ...inspection, phase, busy: false, problem };
   if (!terminal && !problem) {
    detailsTimer = setTimeout(() => void readPhaseDetails(source), 750);

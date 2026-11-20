@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/sylvan-stack/arbol-design-system",
-  "commit": "ad138735c97bdc576497166b842b8dd76ac18cb1",
+  "commit": "55bb64a456d3e0783fb6285969e1500afe8fc3a1",
   "files": {
     "docs/licenses/Hanken-Grotesk-OFL.txt": "f45f60ca871850c58d8dc9c973bd6fcad40c137e9d037172b961e8ca68c87ef7",
     "docs/licenses/Spline-Sans-Mono-OFL.txt": "3127290ccd196ec0c4ffa60296845224a034b92c81de8231b0916278ed7607e1",
@@ -43,8 +43,8 @@
     "src/sections/ExchangeDetails.svelte": "b7f8e92f5c9b743a1c26dac6331803140b67a3e874339394756a96e9cc0bb8ef",
     "src/sections/HistoryTree.svelte": "9059b7038f614595403d6449e413b303aeb3ed928954d706e6ae423d7bb4fc8f",
     "src/sections/PinnedMessage.svelte": "06bd36f23fcb76b80aa3947a368cf6d9f63ecfa44a2ea315eb7c80da55223caf",
-    "src/sections/Response.svelte": "beeff9f66e6a489b2d7ba1866cc59d1a1fc738ac3040a98fd829b7a89b3ad5a6",
-    "src/sections/ResponseReader.svelte": "6ad2c34b6c459368a65ea52c0185559714d60b6e184e0fb6ce72f58eec5b9fa7",
+    "src/sections/Response.svelte": "84874ed79bc133feecdc379e82fff3fcef6b35c2feea5a82216cb5946527118c",
+    "src/sections/ResponseReader.svelte": "9864e075f5c5277944faa1e11616453eb88e338a763d3ca2d8fe37b69b110653",
     "src/sections/StationCollection.svelte": "6acc2fb8037403333409069fefc64383ab6dfc57797ae0ff33fd83eb4206e6fb",
     "src/sections/StationSummary.svelte": "83eee0b63389bc0b9070e849b995580fdaca8b1b7fa87b2d752c10ab70a5ff6f",
     "src/sections/SubscriptionAllowance.svelte": "0ebadf6ff25a7c3032f2f974a6ead3938dfb781b8c02ebb552879bb96f0fa21f",
@@ -57,6 +57,7 @@
     "src/sections/elma-types.ts": "3d03f9b12ef9c37942c3026cd6907fd4844670f1f3524c43df5de5e4b51062b0",
     "src/sections/seqoya-subscriptions.ts": "3fc22dbdced4299c2dca1c1f7c8309aeea11c25f78f30b5cb93e7739d06c9377",
     "src/sections/seqoya-vigor.ts": "54a72ccc553477fc5e36ecce3df3c4b9ad8dd98415621cddbc9f717e00b19cf8",
+    "src/styles/elma-phase-backgrounds.css": "d59fa139b629e555bddd75743a33762d227cf299dfd731dfd7b93a31c898c725",
     "src/styles/legacy-tokens.css": "54bac8ebf24bf5092b04bfa79832b0391895db0f44518a8f1e87566d8b499705",
     "src/styles/system.css": "2ad2d5c3ad36925863f2037ef450c07b5d547cb4ff492e07a8a7a032cb1e0d15",
     "src/styles/tokens.css": "99f1089102c8180f3ec57cb0d5b0ca41ba4635879f23c060a0a35b683ce5f0a3",

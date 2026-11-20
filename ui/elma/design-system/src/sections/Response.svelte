@@ -1,9 +1,12 @@
 <script lang="ts">
+ import type { Snippet } from 'svelte';
+ import type { PhaseName } from './ExchangeDetails.svelte';
+ import '../styles/elma-phase-backgrounds.css';
  import SafeMarkdown from '../components/SafeMarkdown.svelte';
  import ToolCall from './ToolCall.svelte';
  import AskUserQuestion from './AskUserQuestion.svelte';
  import { clock,failureCause,limitReset,type ExchangeError,type IntakeFindings,type Answer,type QuestionView,type ResponseBlock,type ToolView,type ToolDetails } from './elma-response';
- let {blocks=[] as ResponseBlock[],streaming=false,statusLabel,acceptedAt,startedAt,endedAt,inferenceEndedAt,intakeFindings,now=Date.now(),error,questions=[],notes=[],showBeacon=false,onbeacon,onopenLink,onloadTool,oncopyAnswer,openTools,onToolOpen,onanswer,onretry,oncontinue,failureBusy=false,signIn}: {blocks?:ResponseBlock[];streaming?:boolean;statusLabel?:string;acceptedAt?:string;startedAt?:string;endedAt?:string;inferenceEndedAt?:string;intakeFindings?:IntakeFindings;now?:number;questions?:QuestionView[];error?:ExchangeError;notes?:string[];showBeacon?:boolean;onbeacon?:()=>void;onopenLink?:(url:string)=>Promise<unknown>;onloadTool?:(tool:ToolView)=>Promise<ToolDetails>;oncopyAnswer?:(text:string)=>Promise<void>;openTools?:Record<string,boolean>;onToolOpen?:(id:string,open:boolean)=>void;onanswer?:(question:QuestionView,answer:Answer)=>void;onretry?:()=>void;oncontinue?:()=>void;failureBusy?:boolean;signIn?:string}=$props();
+ let {blocks=[] as ResponseBlock[],streaming=false,statusLabel,acceptedAt,startedAt,endedAt,inferenceEndedAt,intakeFindings,phaseBackgrounds=false,now=Date.now(),error,questions=[],notes=[],showBeacon=false,onbeacon,onopenLink,onloadTool,oncopyAnswer,openTools,onToolOpen,onanswer,onretry,oncontinue,failureBusy=false,signIn}: {blocks?:ResponseBlock[];streaming?:boolean;statusLabel?:string;acceptedAt?:string;startedAt?:string;endedAt?:string;inferenceEndedAt?:string;intakeFindings?:IntakeFindings;phaseBackgrounds?:boolean;now?:number;questions?:QuestionView[];error?:ExchangeError;notes?:string[];showBeacon?:boolean;onbeacon?:()=>void;onopenLink?:(url:string)=>Promise<unknown>;onloadTool?:(tool:ToolView)=>Promise<ToolDetails>;oncopyAnswer?:(text:string)=>Promise<void>;openTools?:Record<string,boolean>;onToolOpen?:(id:string,open:boolean)=>void;onanswer?:(question:QuestionView,answer:Answer)=>void;onretry?:()=>void;oncontinue?:()=>void;failureBusy?:boolean;signIn?:string}=$props();
  const reset=$derived(error?limitReset(error,endedAt):undefined);
  const recorded=(value?:string):value is string=>!!value&&Number.isFinite(Date.parse(value));
  const answer=$derived(blocks.filter(block=>block.kind==='text').map(block=>block.kind==='text'?block.text:'').join('\n\n'));
@@ -22,8 +25,16 @@
   </ToolCall></section>{/if}
  {/each}
 {/snippet}
-<article class="response" aria-label="Assistant response">
- {#if recorded(acceptedAt)}<p class="lifecycle">Message sent <time datetime={acceptedAt}>{clock(acceptedAt)}</time></p>{/if}
+{#snippet phaseBand(phase: PhaseName | undefined, rows: Snippet)}
+ {#if phaseBackgrounds && phase}
+  <div class="phase-band" data-exchange-phase={phase}>
+   <div class="phase-content">{@render rows()}</div>
+  </div>
+ {:else}
+  {@render rows()}
+ {/if}
+{/snippet}
+{#snippet intakeRows()}
  {#if intakeFindings?.glossaryTerms}
   <p class="exchange-update" data-reading-stop>
    {intakeFindings.glossaryTerms.length ? 'Glossary terms found: '+intakeFindings.glossaryTerms.join(', ') : 'No Glossary terms found'}
@@ -32,12 +43,25 @@
  {#if intakeFindings?.operationalArtifacts?.length}
   <p class="exchange-update" data-reading-stop>Operational artifacts included: {intakeFindings.operationalArtifacts.join(', ')}</p>
  {/if}
+{/snippet}
+{#snippet executionRows()}
  {#if recorded(startedAt)}
   <p class="exchange-update" data-reading-stop>Inference started at <time datetime={startedAt}>{clock(startedAt,true)}</time></p>
  {/if}
  {#if streaming}{@render render(blocks)}{:else}{@render render(work)}<div class="threshold" data-answer-threshold data-reading-stop bind:this={threshold}><span>Answer</span></div><section class="answer" aria-label="Answer"><SafeMarkdown text={answer} {onopenLink}/></section>{/if}
+{/snippet}
+<article class="response" class:phase-backgrounds={phaseBackgrounds} aria-label="Assistant response">
+ {#if recorded(acceptedAt)}<p class="lifecycle">Message sent <time datetime={acceptedAt}>{clock(acceptedAt)}</time></p>{/if}
+ {#if intakeFindings?.glossaryTerms || intakeFindings?.operationalArtifacts?.length}
+  {@render phaseBand('intake', intakeRows)}
+ {/if}
+ {@render phaseBand(recorded(startedAt) || blocks.length ? 'execution' : undefined, executionRows)}
  {#if recorded(inferenceEndedAt)}
-  <p class="exchange-update" data-reading-stop>Inference ended at <time datetime={inferenceEndedAt}>{clock(inferenceEndedAt,true)}</time></p>
+  {@const ended = inferenceEndedAt}
+  {#snippet finalizationRows()}
+   <p class="exchange-update" data-reading-stop>Inference ended at <time datetime={ended}>{clock(ended,true)}</time></p>
+  {/snippet}
+  {@render phaseBand('finalization', finalizationRows)}
  {/if}
  {#if error}<section class="failure" aria-label="Exchange failure"><p>Failed at: {clock(endedAt)}</p><p>Error: {failureCause(error)}</p><p>{error.code}: {error.message}</p>{#if reset}<p>It resets at <time datetime={reset}>{clock(reset)}</time></p>{/if}{#if ['not_signed_in','credential_rejected'].includes(error.code)&&signIn}<p>Sign in with: <code>{signIn}</code></p>{/if}<p>⚠︎ {failureCause(error)}</p>{#if onretry||oncontinue}<div class="failure-actions">{#if onretry}<button disabled={failureBusy} onclick={onretry}>Retry</button>{/if}{#if oncontinue}<button disabled={failureBusy} onclick={oncontinue}>Continue from failure point</button>{/if}</div>{/if}</section>{/if}
  {#each notes as note}<p class="notice">{note}</p>{/each}
@@ -47,6 +71,22 @@
  {#if showBeacon&&!streaming}<button class="beacon" onclick={beacon}>↓ Answer</button>{/if}
 </article>
 <style>
-.response{position:relative;width:100%;max-width:var(--elma-reading-width,720px);margin:0 auto;padding:20px 24px 32px;min-width:0;font:calc(13.5px * var(--elma-content-scale,var(--font-scale)))/1.6 var(--font-ui);overflow-wrap:anywhere}.lifecycle{color:var(--muted);font:calc(11.5px * var(--font-scale))/1.5 var(--font-mono);margin-bottom:16px}.exchange-update{color:var(--muted);font-size:.85em;margin:6px 0;overflow-wrap:anywhere}.thinking{padding:10px 12px;margin:12px 0;color:var(--muted);background:var(--panel);border-left:2px solid var(--border)}.thinking h3{font:600 calc(11.5px * var(--font-scale))/1.5 var(--font-ui);margin:0 0 6px}.prose{margin:12px 0}.notice{color:var(--muted);font-size:.85em;margin:10px 0}.threshold{display:flex;align-items:center;gap:12px;color:var(--muted);font:calc(11.5px * var(--font-scale))/1.5 var(--font-ui);margin:24px 0 20px}.threshold:before,.threshold:after{content:'';height:1px;background:var(--border);flex:1}.status-row{display:flex;align-items:center;gap:12px;justify-content:flex-end;margin-top:16px}.exchange-status,.copy{font:calc(11.5px * var(--font-scale))/1.5 var(--font-ui);color:var(--muted)}.copy,.beacon{border:1px solid var(--border);background:var(--panel);border-radius:5px;padding:4px 8px;color:var(--link)}.beacon{position:sticky;bottom:12px;display:block;margin-left:auto;font:calc(11.5px * var(--font-scale))/1.5 var(--font-ui)}.failure-actions{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}.failure-actions button{border:1px solid var(--border);background:var(--panel);color:var(--link);border-radius:5px;padding:6px 10px;font:inherit}.failure-actions button:disabled{opacity:.6}.failure{color:var(--failure);font-size:.9em}.children{border-left:2px solid var(--border);padding-left:12px;margin-top:12px}
-@media(max-width:600px){.response{padding:16px 12px}}
+.response{--response-inset:24px;position:relative;width:100%;max-width:var(--elma-reading-width,720px);margin:0 auto;padding:20px var(--response-inset) 32px;min-width:0;font:calc(13.5px * var(--elma-content-scale,var(--font-scale)))/1.6 var(--font-ui);overflow-wrap:anywhere}.lifecycle{color:var(--muted);font:calc(11.5px * var(--font-scale))/1.5 var(--font-mono);margin-bottom:16px}.exchange-update{color:var(--muted);font-size:.85em;margin:6px 0;overflow-wrap:anywhere}.thinking{padding:10px 12px;margin:12px 0;color:var(--muted);background:var(--panel);border-left:2px solid var(--border)}.thinking h3{font:600 calc(11.5px * var(--font-scale))/1.5 var(--font-ui);margin:0 0 6px}.prose{margin:12px 0}.notice{color:var(--muted);font-size:.85em;margin:10px 0}.threshold{display:flex;align-items:center;gap:12px;color:var(--muted);font:calc(11.5px * var(--font-scale))/1.5 var(--font-ui);margin:24px 0 20px}.threshold:before,.threshold:after{content:'';height:1px;background:var(--border);flex:1}.status-row{display:flex;align-items:center;gap:12px;justify-content:flex-end;margin-top:16px}.exchange-status,.copy{font:calc(11.5px * var(--font-scale))/1.5 var(--font-ui);color:var(--muted)}.copy,.beacon{border:1px solid var(--border);background:var(--panel);border-radius:5px;padding:4px 8px;color:var(--link)}.beacon{position:sticky;bottom:12px;display:block;margin-left:auto;font:calc(11.5px * var(--font-scale))/1.5 var(--font-ui)}.failure-actions{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}.failure-actions button{border:1px solid var(--border);background:var(--panel);color:var(--link);border-radius:5px;padding:6px 10px;font:inherit}.failure-actions button:disabled{opacity:.6}.failure{color:var(--failure);font-size:.9em}.children{border-left:2px solid var(--border);padding-left:12px;margin-top:12px}
+.phase-backgrounds {
+ --response-columns: [full-start] minmax(var(--response-inset), 1fr)
+  [reading-start] minmax(0, calc(var(--elma-reading-width, 720px) - 2 * var(--response-inset)))
+  [reading-end] minmax(var(--response-inset), 1fr) [full-end];
+ display: grid;
+ grid-template-columns: var(--response-columns);
+ max-width: none;
+ padding-inline: 0;
+}
+.phase-backgrounds > :global(*) { grid-column: reading-start / reading-end; }
+.phase-backgrounds > .phase-band {
+ display: grid;
+ grid-column: full-start / full-end;
+ grid-template-columns: var(--response-columns);
+}
+.phase-content { grid-column: reading-start / reading-end; display: flow-root; }
+@media(max-width:600px){.response{--response-inset:12px;padding-block:16px;}}
 </style>
