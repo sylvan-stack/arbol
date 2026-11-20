@@ -56,8 +56,7 @@
   if (!inspection || !isCurrent()) return;
   const phases = source.phases;
   const preferred = inspection.phase;
-  const defaultPhase = phases.includes('execution') && view?.response.length
-   ? 'execution' : source.currentPhase ?? phases.at(-1);
+  const defaultPhase = source.currentPhase ?? phases.at(-1);
   const phase = preferred && (!terminal || phases.includes(preferred)) ? preferred : defaultPhase;
   inspection = { ...inspection, phase, busy: false, problem };
   if (!terminal && !problem) {
@@ -141,5 +140,5 @@
 {:else}<p role="status">Connecting…</p>{/if}
 <style>
 .connection,.problem{margin:0;padding:6px 16px;background:var(--inset);color:var(--warning);border-bottom:1px solid var(--border)}
-.problem{color:var(--failure)}.chat{display:flex;flex-direction:column;min-height:0;flex:1;overflow:hidden}.empty{margin:auto;color:var(--muted)}
+.problem{color:var(--failure)}.chat{display:flex;flex-direction:column;min-height:0;flex:1;overflow:hidden;background:var(--canvas)}.empty{margin:auto;color:var(--muted)}
 </style>
