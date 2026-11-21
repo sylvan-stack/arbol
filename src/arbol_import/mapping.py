@@ -1,5 +1,8 @@
 """Project a saved harness session into the importer's database rows (IMP-0)."""
 
+import json
+import re
+import shlex
 from bisect import bisect_right
 from collections import defaultdict
 from collections.abc import Iterator, Mapping
@@ -14,6 +17,16 @@ from .readers.form import CallLink, Kind, Result, Session, State, TextBlock, Too
 type Json = None | bool | int | float | str | list[Json] | dict[str, Json]
 type JsonObject = dict[str, Json]
 type ExchangeTrigger = Trigger | Literal["steered"]
+
+_RESULT_LIMIT = 200 * 1024
+_SHELL_NAMES = {
+    "claude-code": frozenset({"Bash"}),
+    "codex": frozenset({"commandExecution", "command_execution", "exec_command"}),
+    "mimo": frozenset({"bash"}),
+    "pi": frozenset({"bash"}),
+}
+_SHELL_WRAPPER = re.compile(r"(?:.*/)?(?:sh|bash|zsh|dash|ksh|fish)")
+_SHELL_OPTIONS = re.compile(r"-[il]*c[il]*")
 
 
 @dataclass(frozen=True)
@@ -198,16 +211,88 @@ def _split_turn(turn: Turn) -> tuple[list[_Segment], int]:
     return segments, call_count
 
 
-def _call_row(call: ToolCall, position: int, identifier: str, parent: str | None) -> ToolCallRow:
-    contents: JsonObject | None = None if call.result is None else {"output": stored_text(call.result.text)}
-    argument = {"input": call.input} if isinstance(call.input, str) else call.input
+def _codex_command(words: list[str]) -> str:
+    if len(words) == 3 and _SHELL_WRAPPER.fullmatch(words[0]) and _SHELL_OPTIONS.fullmatch(words[1]):
+        return words[2]
+    return shlex.join(words)
+
+
+def _call_input(call: ToolCall, tool: Tool, working_folder: str) -> tuple[str, Json]:
+    argument = _stored_json(call.input)
+    if call.name in _SHELL_NAMES.get(tool, ()):
+        source = argument if isinstance(argument, dict) else {}
+        command = source.get("command", argument if isinstance(argument, str) else None)
+        if tool == "codex" and isinstance(command, list) and all(isinstance(word, str) for word in command):
+            command = _codex_command([word for word in command if isinstance(word, str)])
+        cwd = source.get("workdir" if tool == "mimo" else "cwd")
+        if not isinstance(cwd, str) and tool in {"pi", "mimo"}:
+            cwd = working_folder
+        shell_input: JsonObject = {"command": command if isinstance(command, str) else None}
+        if isinstance(cwd, str):
+            shell_input["cwd"] = cwd
+        return "shell", shell_input
+    name = "apply_patch" if tool == "codex" and call.name in {"fileChange", "file_change"} else call.name
+    return stored_text(name), {"input": argument} if isinstance(argument, str) else argument
+
+
+def _json_size(value: Json) -> int:
+    return len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8"))
+
+
+def _output_prefix(output: str, budget: int) -> str:
+    # The two quotes are already accounted for in the empty result's size.
+    low, high = 0, min(len(output), budget)
+    while low < high:
+        pivot = (low + high + 1) // 2
+        if _json_size(output[:pivot]) - 2 <= budget:
+            low = pivot
+        else:
+            high = pivot - 1
+    return output[:low]
+
+
+def _bounded_result(result: Result) -> tuple[JsonObject, bool]:
+    fields = _stored_object(result.fields or {})
+    fields.pop("output", None)
+    if result.images:
+        fields["images"] = [
+            {"mediaType": stored_text(image.media_type), "size": image.size} for image in result.images
+        ]
+    output = stored_text(result.text)
+    value = {**fields, "output": output}
+    if _json_size(value) <= _RESULT_LIMIT:
+        return value, False
+    value["output"] = ""
+    budget = _RESULT_LIMIT - _json_size(value)
+    if budget < 0:
+        value = {"output": ""}
+        budget = _RESULT_LIMIT - _json_size(value)
+        for key, field_value in fields.items():
+            # A singleton object's braces take the same two bytes as the new comma and space.
+            size = _json_size({key: field_value})
+            if size <= budget:
+                value[key] = field_value
+                budget -= size
+    value["output"] = _output_prefix(output, budget)
+    return value, True
+
+
+def _call_row(call: ToolCall, position: int, identifier: str, parent: str | None, *,
+              tool: Tool, working_folder: str) -> ToolCallRow:
+    name, argument = _call_input(call, tool, working_folder)
+    if call.result is None:
+        return ToolCallRow(
+            position, identifier, parent, name, argument, None, False,
+            "The session ended before the tool call finished.", call.truncated, interrupted=True,
+        )
+    contents, cut = _bounded_result(call.result)
+    error = stored_text(call.error)[:2000] if not call.ok and call.error is not None else None
     return ToolCallRow(
-        position, identifier, parent, stored_text(call.name), _stored_json(argument), contents,
-        call.ok, stored_text(call.error) if call.error is not None else None, call.truncated,
+        position, identifier, parent, name, argument, contents, call.ok, error, cut or call.truncated,
     )
 
 
-def _map_turn(turn: Turn, working_folder: str, native_id: str) -> Iterator[MappedSegment]:
+def _map_turn(turn: Turn, working_folder: str, session: Session) -> Iterator[MappedSegment]:
     segments, call_count = _split_turn(turn)
     visited = 0
     for segment in segments:
@@ -223,11 +308,13 @@ def _map_turn(turn: Turn, working_folder: str, native_id: str) -> Iterator[Mappe
                 messages.append(MessageRow(position, "assistant", stored_text(item.text)))
                 continue
             call = item.native
-            identifier = stored_text(call.call_id if parent is None else f"{call.agent or native_id}/{call.call_id}")
+            identifier = stored_text(
+                call.call_id if parent is None else f"{call.agent or session.native_id}/{call.call_id}"
+            )
             if identifier in seen_ids:
                 raise MappingError("Saved calls have duplicate IDs in an Exchange.")
             seen_ids.add(identifier)
-            calls.append(_call_row(call, position, identifier, parent))
+            calls.append(_call_row(call, position, identifier, parent, tool=session.tool, working_folder=working_folder))
             visited += 1
             fallback_count += item.fallback
             segment.usage += item.usage
@@ -248,7 +335,7 @@ def map_session(session: Session, owner_home: Path) -> MappedSession:
         origin = _stored_object(session.origin)
         segments = tuple(
             segment for turn in session.turns
-            for segment in _map_turn(turn, stored_text(turn.working_folder or fallback_folder), session.native_id)
+            for segment in _map_turn(turn, stored_text(turn.working_folder or fallback_folder), session)
         )
     except RecursionError:
         raise MappingError("A saved object is nested too deeply.") from None
