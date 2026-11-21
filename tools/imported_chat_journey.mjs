@@ -115,6 +115,14 @@ try {
   assert.equal(await message.inputValue(), draft);
   assert(draftRequests.some((params) => params.chat === ordinary));
 
+  await page.keyboard.press('Control+Shift+Meta+c');
+  const recentImport = latest.getByRole('button', words(/Fictional archive example/));
+  assert.match(await recentImport.innerText(), /Imported from Codex/);
+  await recentImport.click();
+  await latest.waitFor({ state: 'hidden' });
+  await page.getByText('Fictional saved prompt', { exact: true }).waitFor();
+  assert.equal(await composer.count(), 0);
+
   const control = once(terminal, 'line');
   raceArmed = true;
   await archive.click();
