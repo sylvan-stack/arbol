@@ -106,6 +106,14 @@ class TextBlock:
 
 
 @dataclass(frozen=True)
+class CallLink:
+    """Identity of a proven parent call. An agent of None identifies the main lane."""
+
+    agent: str | None
+    call_id: str
+
+
+@dataclass(frozen=True)
 class ToolCall:
     """A tool call: `callId`, `agent` (the sub-agent that made it, or None for the main agent), `name`, `input`,
     `result` (None when the session holds no result), `ok`, `error`, `parentCallId`, `startedAt`, and the `truncated`
@@ -121,6 +129,7 @@ class ToolCall:
     parent_call_id: str | None
     started_at: datetime
     truncated: bool = False
+    parent: CallLink | None = None
 
 
 type Item = TextBlock | ToolCall
@@ -137,6 +146,7 @@ class Subagent:
     first_record_at: datetime
     last_turn_failed: bool
     usage: Usage
+    launch: CallLink | None = None
 
 
 @dataclass(frozen=True)
