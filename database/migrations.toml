@@ -34,3 +34,11 @@ id = "exchange-phase-details"
 file = "004-exchange-phase-details.sql"
 sha256 = "94bf7eb33700279641b5cfefff7170cfc2caaa89d12a6a81aacc66a0f9580889"
 compatibility_version = 1
+
+[[migrations]]
+revision = 5
+predecessor = 4
+id = "import-files-fingerprint"
+file = "005-import-files-fingerprint.sql"
+sha256 = "f31483400a6a202c5bb15f3fd1c9583d04df612df5e58596702115ea48f7d324"
+compatibility_version = 1
