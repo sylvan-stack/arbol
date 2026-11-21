@@ -40,6 +40,7 @@ from .mutation import with_mutation_lock
 from .schema_state import SchemaState, read_schema
 from .service import (
     browser_document,
+    browser_file,
     browser_file_digest,
     browser_lock,
     browser_private_directory,
@@ -165,6 +166,12 @@ def _browser_references(home: Path) -> Iterator[set[str]]:
         for profile in sorted(profiles.iterdir()):
             if re.fullmatch(r"\.creating-[0-9a-f]{32}", profile.name):
                 continue
+            if re.fullmatch(r"\.deleting-[0-9a-f]{32}", profile.name):
+                browser_private_directory(profile)
+                if sorted(item.name for item in profile.iterdir()) != ["owner.lock"]:
+                    raise ValueError("Browser profile deletion still has private data.")
+                with browser_file(profile / "owner.lock"):
+                    continue  # The original lock-only tombstone is not a live profile.
             if not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", profile.name):
                 raise ValueError("Browser profile registry has unfinished or unknown state.")
             metadata, _ = browser_document(profile / "profile.json")
