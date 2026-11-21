@@ -11,9 +11,10 @@ import stat
 from base64 import b64decode
 from collections import defaultdict
 from collections.abc import Generator, Iterator
-from contextlib import closing
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from functools import partial
 from heapq import heappop, heappush
 from pathlib import Path
 from struct import Struct, unpack
@@ -25,6 +26,7 @@ from .form import (
     LIVE_WINDOW,
     ArchiveFile,
     CallLink,
+    CatalogueEntry,
     ExportedRows,
     Failed,
     FileObservations,
@@ -44,6 +46,7 @@ from .form import (
     Trigger,
     Turn,
     Usage,
+    read_catalogue,
     unknown_record,
 )
 from .lines import file_records, lines
@@ -1539,8 +1542,7 @@ def _read_session(home: Path, source: Source, root: Thread, inventory: Inventory
         return Failed.of(failure, native_id=root.native_id, kind=_kind(root.native_id, root.chosen, driver_ids, starts))
 
 
-def read(source: Source) -> Iterator[Session | Failed]:
-    """Yield one supported Codex session or local failure per selected root."""
+def _entries(source: Source) -> Iterator[CatalogueEntry]:
     try:
         home = source.home.resolve(strict=True)
     except (OSError, RuntimeError, ValueError):
@@ -1551,8 +1553,21 @@ def read(source: Source) -> Iterator[Session | Failed]:
     inventory = _inventory(home, catalogue)
     for root in inventory.roots:
         if source.wants(root.native_id):
-            yield _read_session(home, source, root, inventory, catalogue, titles, driver_ids)
+            kind: Kind | None = "arbol_driver" if root.native_id in driver_ids else None
+            yield CatalogueEntry(
+                root.native_id, kind, partial(_read_session, home, source, root, inventory, catalogue, titles, driver_ids),
+            )
     if source.selected is None:
         for broken in inventory.unidentified:
             if broken.failure is not None:
-                yield Failed.of(broken.failure, file=broken.relative)
+                yield CatalogueEntry.failed(Failed.of(broken.failure, file=broken.relative))
+
+
+
+@contextmanager
+def catalogue(source: Source) -> Iterator[Iterator[CatalogueEntry]]:
+    yield _entries(source)
+
+
+def read(source: Source) -> Iterator[Session | Failed]:
+    yield from read_catalogue(catalogue, source)
