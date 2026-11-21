@@ -15,7 +15,9 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from .form import (
+    LIVE_WINDOW,
     Failed,
+    FileObservations,
     HomeFile,
     Image,
     Item,
@@ -30,10 +32,9 @@ from .form import (
     ToolCall,
     Turn,
     Usage,
-    live_by_mtime,
     unknown_record,
 )
-from .lines import file_records
+from .lines import file_records, observed_input
 
 _NATIVE_ID = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
 _ENTRY_TYPES = (
@@ -120,8 +121,8 @@ def _session_path(home: Path, path: Path) -> Path:
     raise _unreadable(path.relative_to(home).as_posix())
 
 
-def _session_records(home: Path, file: str) -> Generator[tuple[int, Any]]:
-    yield from file_records(home, file)
+def _session_records(home: Path, file: str, observations: FileObservations) -> Generator[tuple[int, Any]]:
+    yield from file_records(home, file, observations)
 
 
 @dataclass(frozen=True)
@@ -345,7 +346,7 @@ def _turn_end(last: _Message, state: State) -> datetime:
     return _entry_time(entry)
 
 
-def _turn(home: Path, rows: list[_Message], cwd: str) -> Turn:
+def _turn(home: Path, rows: list[_Message], cwd: str, observations: FileObservations) -> Turn:
     start, user = rows[0]
     turn_key = start.native_id
     assert turn_key is not None  # The active path validated it.
@@ -365,7 +366,7 @@ def _turn(home: Path, rows: list[_Message], cwd: str) -> Turn:
         model=model,
         effort=effort,
         usage=tuple(_response(entry, message) for entry, message in assistants),
-        items=tuple(_items(home, rows)),
+        items=tuple(_items(home, rows, observations)),
     )
 
 
@@ -448,19 +449,26 @@ def _spill_path(home: Path, entry: _Entry, message: dict[str, Any]) -> Path | No
     return resolved
 
 
-def _full_output(home: Path, entry: _Entry, message: dict[str, Any], inline: str) -> str:
+def _full_output(
+    home: Path, entry: _Entry, message: dict[str, Any], inline: str, observations: FileObservations,
+) -> str:
     path = _spill_path(home, entry, message)
     if path is None or not path.is_relative_to(home):
         return inline
     try:
-        if stat.S_ISREG(path.stat().st_mode):
-            return path.read_bytes().decode("utf-8")
+        if stat.S_ISREG(path.stat(follow_symlinks=False).st_mode):
+            with observed_input(home, path.relative_to(home).as_posix(), observations) as stream:
+                return stream.read().decode("utf-8")
+        if path in observations.files:
+            raise _spill_failure(entry)
     except (OSError, UnicodeError):
         raise _spill_failure(entry) from None
     return inline
 
 
-def _result(home: Path, entry: _Entry, message: dict[str, Any]) -> tuple[Result, str | None, bool]:
+def _result(
+    home: Path, entry: _Entry, message: dict[str, Any], observations: FileObservations,
+) -> tuple[Result, str | None, bool]:
     content = message.get("content")
     parts = list(_parts(entry, content, ("text", "image")))
     output = "\n".join(part["text"] for part in parts if part["type"] == "text")
@@ -476,7 +484,7 @@ def _result(home: Path, entry: _Entry, message: dict[str, Any]) -> tuple[Result,
         fields = {key: value for key, value in details.items() if key not in ("truncation", "fullOutputPath")}
     else:
         fields = {"details": details} if details is not None else {}
-    full_output = _full_output(home, entry, message, output)
+    full_output = _full_output(home, entry, message, output, observations)
     return Result(full_output, _without_image_bytes(fields) or None, images), output if is_error else None, truncated
 
 
@@ -493,7 +501,7 @@ def _results(rows: list[_Message]) -> dict[str, _Message]:
     return results
 
 
-def _items(home: Path, rows: list[_Message]) -> Iterator[Item]:
+def _items(home: Path, rows: list[_Message], observations: FileObservations) -> Iterator[Item]:
     results = _results(rows)
     calls: set[str] = set()
     for entry, message in rows:
@@ -511,7 +519,7 @@ def _items(home: Path, rows: list[_Message]) -> Iterator[Item]:
                 entry.bad("tool-call")
             calls.add(call_id)
             saved = results.get(call_id)
-            result, error, truncated = _result(home, *saved) if saved is not None else (None, None, False)
+            result, error, truncated = _result(home, *saved, observations) if saved is not None else (None, None, False)
             yield ToolCall(
                 call_id=call_id,
                 agent=None,
@@ -526,7 +534,9 @@ def _items(home: Path, rows: list[_Message]) -> Iterator[Item]:
             )
 
 
-def _archive(home: Path, scan: _Scan, clock: datetime) -> tuple[tuple[HomeFile, ...], bool, int]:
+def _archive(
+    home: Path, scan: _Scan, clock: datetime, observations: FileObservations,
+) -> tuple[tuple[HomeFile, ...], bool, int]:
     session = home / scan.file
     files = {session}
     outside: set[Path] = set()
@@ -543,16 +553,19 @@ def _archive(home: Path, scan: _Scan, clock: datetime) -> tuple[tuple[HomeFile, 
             outside.add(path)
             continue
         try:
-            if stat.S_ISREG(path.stat().st_mode):
+            if stat.S_ISREG(path.stat(follow_symlinks=False).st_mode):
                 files.add(path)
+            elif path in observations.files:
+                raise _spill_failure(entry)
         except FileNotFoundError:
-            # An expired spill on an inactive branch supplies no archive file.
-            continue
+            if path in observations.files:
+                raise _spill_failure(entry) from None
         except OSError:
             raise _spill_failure(entry) from None
     ordered = (session, *sorted(files - {session}))
-    archive = tuple(HomeFile(path.relative_to(home).as_posix()) for path in ordered)
-    return archive, live_by_mtime(ordered, clock), len(outside)
+    archive = tuple(observations.nominate(home, path) for path in ordered)
+    live = any(file.observation is not None and file.observation.modified_at >= clock - LIVE_WINDOW for file in archive)
+    return archive, live, len(outside)
 
 
 def _discover(home: Path) -> Iterator[Path | Failed]:
@@ -579,16 +592,20 @@ def _discover(home: Path) -> Iterator[Path | Failed]:
 def _read_session(home: Path, path: Path, source: Source) -> Session | Failed | None:
     file = path.relative_to(home).as_posix()
     scan = _Scan(file)
+    observations = FileObservations()
     header = None
     try:
-        with closing(_session_records(home, file)) as rows:
+        with closing(_session_records(home, file, observations)) as rows:
             header = _selected_header(rows, file, source)
             if header is None:
                 return None
             for line, record in rows:
                 scan.add(line, record)
-        turns = tuple(_turn(home, messages, header.cwd) for messages in _turn_messages(_active_messages(scan.entries)))
-        archive, live, outside = _archive(home, scan, source.clock)
+        turns = tuple(
+            _turn(home, messages, header.cwd, observations)
+            for messages in _turn_messages(_active_messages(scan.entries))
+        )
+        archive, live, outside = _archive(home, scan, source.clock, observations)
         return Session(
             tool="pi",
             native_id=header.native_id,
