@@ -9,9 +9,11 @@ path as a session's identity (IMP-1.11).
 from __future__ import annotations
 
 import re
+import stat
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from os import stat_result
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Protocol
 
@@ -193,16 +195,58 @@ def _relative(path: str) -> str:
 
 
 @dataclass(frozen=True)
+class FileObservation:
+    """Identity and times of the regular file the reader actually observed."""
+
+    device: int
+    inode: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+
+    @classmethod
+    def from_stat(cls, info: stat_result) -> FileObservation:
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError("A native archive input is not a regular file.")
+        return cls(info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+    @property
+    def modified_at(self) -> datetime:
+        return datetime.fromtimestamp(self.mtime_ns / 1_000_000_000, UTC)
+
+
+@dataclass(frozen=True)
 class HomeFile:
     """A file in the tool's home with its manifest and optional verified read paths."""
 
     path: str
     read_path: str | None = None
+    observation: FileObservation | None = None
 
     def __post_init__(self) -> None:
         _relative(self.path)
         if self.read_path is not None:
             _relative(self.read_path)
+
+
+class FileObservations:
+    """Hold one stamp for each physical file across discovery, projection and archive nomination."""
+
+    def __init__(self) -> None:
+        self.files: dict[Path, FileObservation] = {}
+
+    def record(self, path: Path, info: stat_result) -> FileObservation:
+        observation = FileObservation.from_stat(info)
+        if self.files.setdefault(path, observation) != observation:
+            raise OSError("A native file changed between import reads.")
+        return observation
+
+    def nominate(self, home: Path, path: Path, *, target: Path | None = None) -> HomeFile:
+        physical = target if target is not None else path
+        relative = path.relative_to(home).as_posix()
+        read_path = physical.relative_to(home).as_posix() if physical != path else None
+        observation = self.record(physical, physical.stat(follow_symlinks=False))
+        return HomeFile(relative, read_path, observation)
 
 
 @dataclass(frozen=True)
