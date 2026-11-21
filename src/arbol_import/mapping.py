@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from math import isfinite
 from pathlib import Path
 from typing import Literal
 
@@ -53,12 +54,39 @@ class MappedSession:
     kind: Kind
     title: str | None
     created_at: datetime
-    origin: Mapping[str, object]
+    origin: JsonObject
     segments: tuple[MappedSegment, ...]
+
+
+class MappingError(ValueError):
+    """A content-free per-session mapping refusal."""
 
 
 def stored_text(value: str) -> str:
     return value.replace("\0", "\ufffd").encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
+
+
+def _stored_object[Key](value: Mapping[Key, object]) -> JsonObject:
+    result: JsonObject = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            raise MappingError("A saved object has a non-text key.")
+        result[stored_text(key)] = _stored_json(item)
+    return result
+
+
+def _stored_json(value: object) -> Json:
+    if isinstance(value, str):
+        return stored_text(value)
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, float) and isfinite(value):
+        return value
+    if isinstance(value, Mapping):
+        return _stored_object(value)
+    if isinstance(value, (list, tuple)):
+        return [_stored_json(item) for item in value]
+    raise MappingError("A saved value could not be stored as JSON.")
 
 
 def map_session(session: Session, owner_home: Path) -> MappedSession:
@@ -72,4 +100,8 @@ def map_session(session: Session, owner_home: Path) -> MappedSession:
         )
         for turn in session.turns
     )
-    return MappedSession(session.tool, session.native_id, session.kind, title, session.created_at, session.origin, segments)
+    try:
+        origin = _stored_object(session.origin)
+    except RecursionError:
+        raise MappingError("A saved object is nested too deeply.") from None
+    return MappedSession(session.tool, session.native_id, session.kind, title, session.created_at, origin, segments)
