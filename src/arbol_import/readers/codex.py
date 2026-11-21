@@ -23,6 +23,7 @@ from urllib.parse import unquote_to_bytes
 
 from .form import (
     ArchiveFile,
+    CallLink,
     ExportedRows,
     Failed,
     HomeFile,
@@ -1145,7 +1146,10 @@ def _work_call(record: Record, parent: ToolCall, start: datetime) -> ToolCall:
                                                                           "in_progress", "aborted")
     if not ok and error is None:
         error = _result_text(item.get("error")) or (result.text if result is not None else "") or None
-    return ToolCall(item["id"], parent.agent, name, arguments, result, ok, None if ok else error, parent.call_id, start)
+    return ToolCall(
+        item["id"], parent.agent, name, arguments, result, ok, None if ok else error, parent.call_id, start,
+        parent=CallLink(parent.agent, parent.call_id),
+    )
 
 
 def _completed_work(payload: Object, item: Object, kind: str) -> Object:
@@ -1347,11 +1351,13 @@ class AgentWork:
     calls: list[ToolCall] = field(default_factory=list)
     usage: Usage = field(default_factory=Usage)
 
-    def info(self, agent: str, call_id: str | None) -> Subagent:
+    def info(self, agent: str, launch: CallLink | None) -> Subagent:
         first = min(self.turns, key=lambda turn: turn.records[0].line).first_at
         native_turns = [turn for turn in self.turns if turn.start is not None]
         last = max(native_turns or self.turns, key=lambda turn: turn.records[-1].line)
-        return Subagent(agent, call_id, first, _terminal(last.end)[0] == "failed", self.usage)
+        return Subagent(
+            agent, launch.call_id if launch else None, first, _terminal(last.end)[0] == "failed", self.usage, launch,
+        )
 
 
 def _agents(root: Lane, descendants: list[tuple[Thread, Lane]], root_id: str
@@ -1377,15 +1383,18 @@ def _agents(root: Lane, descendants: list[tuple[Thread, Lane]], root_id: str
             work.turns.append(native_turn)
             for response in _responses(native_turn):
                 work.usage += response.usage
-            launch_id = launch.call_id if launch is not None and launch_turn == target else None
+            link = CallLink(launch.agent, launch.call_id) if launch is not None and launch_turn == target else None
             for item in lane.items.get(index, ()):
                 if isinstance(item, ToolCall):
                     lane.call_turns[item.call_id] = target
-                    work.calls.append(replace(item, parent_call_id=item.parent_call_id or launch_id))
+                    parent_link = item.parent or link
+                    work.calls.append(replace(
+                        item, parent_call_id=parent_link.call_id if parent_link else None, parent=parent_link,
+                    ))
         family[thread.native_id] = lane
         for target, work in per_turn.items():
-            launch_id = launch.call_id if launch is not None and launch_turn == target else None
-            assigned[target].append((work.info(thread.native_id, launch_id), work.calls))
+            link = CallLink(launch.agent, launch.call_id) if launch is not None and launch_turn == target else None
+            assigned[target].append((work.info(thread.native_id, link), work.calls))
     return assigned
 
 
