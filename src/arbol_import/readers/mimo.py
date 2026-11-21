@@ -573,7 +573,7 @@ def _usage(value: object) -> Usage:
     return Usage.native(
         uncached=_count(tokens.get("input", 0)),
         cache_read=_count(cache.get("read", 0)),
-        cache_write=_count(cache.get("write", 0)),
+        cache_write=_count(cache["write"]) if "write" in cache else None,
         output=_count(tokens.get("output", 0)),
         reasoning=None if reasoning is None else _count(reasoning),
     )
