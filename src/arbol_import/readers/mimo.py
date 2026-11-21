@@ -12,9 +12,10 @@ import sqlite3
 import stat
 from collections import defaultdict
 from collections.abc import Iterator
-from contextlib import closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import NoReturn
@@ -24,6 +25,7 @@ from .form import (
     LIVE_WINDOW,
     ArchiveFile,
     CallLink,
+    CatalogueEntry,
     ExportedRows,
     Failed,
     FileObservation,
@@ -42,6 +44,7 @@ from .form import (
     ToolCall,
     Turn,
     Usage,
+    read_catalogue,
     unknown_record,
 )
 
@@ -854,14 +857,23 @@ def _read_session(
         return Failed.of(_unreadable(record), native_id=native_id, kind=_kind(native_id, facts))
 
 
+@contextmanager
+def catalogue(source: Source) -> Iterator[Iterator[CatalogueEntry]]:
+    with ExitStack() as stack:
+        try:
+            home = source.home.resolve(strict=True)
+            database, mtime = stack.enter_context(_snapshot(source, home))
+            selected = tuple(_session_ids(database, source))
+        except SessionFailure as failure:
+            yield iter((CatalogueEntry.failed(Failed.of(failure, file=_DATABASE)),))
+        except (sqlite3.Error, OSError, RuntimeError, ValueError):
+            yield iter((CatalogueEntry.failed(Failed.of(_unreadable("database set"), file=_DATABASE)),))
+        else:
+            yield (
+                CatalogueEntry(native_id, None, partial(_read_session, database, home, source, native_id, mtime))
+                for native_id in selected
+            )
+
+
 def read(source: Source) -> Iterator[Session | Failed]:
-    """Yield selected top-level sessions while the private database set is open."""
-    try:
-        home = source.home.resolve(strict=True)
-        with _snapshot(source, home) as (database, mtime):
-            for native_id in _session_ids(database, source):
-                yield _read_session(database, home, source, native_id, mtime)
-    except SessionFailure as failure:
-        yield Failed.of(failure, file=_DATABASE)
-    except (sqlite3.Error, OSError, RuntimeError, ValueError):
-        yield Failed.of(_unreadable("database set"), file=_DATABASE)
+    yield from read_catalogue(catalogue, source)
