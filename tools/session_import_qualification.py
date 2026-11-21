@@ -575,6 +575,19 @@ def negative(q: Qualification) -> None:
     q.check(all((sha256(saved.read_bytes()).hexdigest(), saved.stat().st_mtime_ns) == stamp
                 for saved, stamp in snapshots.items()), "no import changed its native input bytes or mtimes")
 
+    ownership = q.settings / "drivers/claude/subscriptions/fictional/chats"
+    ownership.mkdir(parents=True, mode=0o700)
+    private_json(ownership / "saved-chat.json", {"conversation": CLAUDE})
+    claude_file = q.home / ".claude/projects/fictional" / f"{CLAUDE}.jsonl"
+    with claude_file.open("a", encoding="utf-8") as transcript:
+        transcript.write("{invalid saved record}\n")
+    excluded = q.execute("claude-code", "--session", CLAUDE, dry=True)
+    included = q.execute("claude-code", "--session", CLAUDE, "--include", "arbol_driver", dry=True)
+    q.check(excluded.exit_status == 0
+            and _outcome(excluded, "excluded") == {"native": CLAUDE, "kind": "arbol_driver", "outcome": "excluded"}
+            and included.exit_status == 1 and _outcome(included, "failed")["kind"] == "arbol_driver",
+            "damaged Driver history was excluded by default and failed when explicitly included")
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
