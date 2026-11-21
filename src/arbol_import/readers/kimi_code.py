@@ -19,8 +19,10 @@ from typing import Any, Never
 from urllib.parse import unquote, unquote_to_bytes
 
 from .form import (
+    LIVE_WINDOW,
     CallLink,
     Failed,
+    FileObservations,
     HomeFile,
     Image,
     Item,
@@ -38,10 +40,9 @@ from .form import (
     Trigger,
     Turn,
     Usage,
-    live_by_mtime,
     unknown_record,
 )
-from .lines import file_records
+from .lines import file_records, observed_input
 
 _SESSION = re.compile(r"session_([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})")
 
@@ -145,14 +146,14 @@ def _time(value: object) -> datetime | None:
         return None
 
 
-def _state(home: Path, path: Path) -> _State:
+def _state(home: Path, path: Path, observations: FileObservations) -> _State:
     where = path.relative_to(home)
     try:
         if not _eligible(home, path):
             if not path.exists() and not path.is_symlink():
                 return _State()
             raise ValueError
-        with path.open("rb") as stream:
+        with observed_input(home, where.as_posix(), observations) as stream:
             value = json.load(stream)
         if not isinstance(value, dict):
             raise ValueError
@@ -192,11 +193,11 @@ _CONVERSATION = frozenset({
 _VERSION = re.compile(r"[0-9]{1,4}(?:\.[0-9]{1,4}){0,3}")
 
 
-def _rows(home: Path, path: Path) -> Iterator[tuple[str, dict[str, Any]]]:
+def _rows(home: Path, path: Path, observations: FileObservations) -> Iterator[tuple[str, dict[str, Any]]]:
     file = path.relative_to(home).as_posix()
     if not _eligible(home, path):
         raise SessionFailure("unreadable_session", f"{file}: no eligible wire.")
-    for number, raw in file_records(home, file):
+    for number, raw in file_records(home, file, observations):
         where = f"{file}:{number}"
         row = _object(raw)
         if not isinstance(row.get("type"), str):
@@ -267,16 +268,19 @@ def _fork_ids(home: Path, session: _SavedSession, state: _State,
     if source is None or source == session:
         raise failure
     copied = _ForkIndex()
+    observations = FileObservations()
     try:
         for agent, path in _wires(home, source).items():
             signatures = copied.signatures.setdefault(agent, set())
-            for where, row in _rows(home, path):
+            for where, row in _rows(home, path, observations):
                 _record(where, row)
                 ids = tuple(_record_ids(row))
                 if ids:
                     copied.uuids.update(ids)
                 elif (signature := _copy_signature(row)) is not None:
                     signatures.add(signature)
+        for path in observations.files:
+            observations.record(path, path.stat(follow_symlinks=False))
     except (SessionFailure, OSError, RecursionError):
         raise failure from None
     return copied
@@ -576,7 +580,7 @@ def _content(record: _Record) -> TextBlock | None:
     return None
 
 
-def _items(turn: _NativeTurn, home: Path, session: _SavedSession, *,
+def _items(turn: _NativeTurn, home: Path, session: _SavedSession, observations: FileObservations, *,
            agent: str | None = None, parent: CallLink | None = None) -> Iterator[Item]:
     results = {record.data["parentUuid"]: record for record in turn.records if record.kind == "tool.result"}
     seen: set[str] = set()
@@ -589,7 +593,7 @@ def _items(turn: _NativeTurn, home: Path, session: _SavedSession, *,
         seen.add(data["uuid"])
         result, ok, error = None, True, None
         if linked := results.get(data["uuid"]):
-            result, ok, error = _result(home, session, linked)
+            result, ok, error = _result(home, session, linked, observations)
         yield ToolCall(
             data["toolCallId"], agent, data["name"], data.get("args"), result, ok, error,
             parent.call_id if parent else None, record.time(), parent=parent,
@@ -630,7 +634,9 @@ def _spill_path(session: _SavedSession, name: str) -> Path:
     return session.folder / "tool-results" / path
 
 
-def _result(home: Path, session: _SavedSession, record: _Record) -> tuple[Result, bool, str | None]:
+def _result(
+    home: Path, session: _SavedSession, record: _Record, observations: FileObservations,
+) -> tuple[Result, bool, str | None]:
     result = _object(record.data["result"])
     output = result["output"]
     parts = [] if isinstance(output, str) else _parts(output, record)
@@ -641,13 +647,14 @@ def _result(home: Path, session: _SavedSession, record: _Record) -> tuple[Result
         if (path.is_relative_to(directory) and _eligible(home, path)
                 and not any(_forbidden(part) for part in path.relative_to(directory).parts)):
             try:
-                text = path.read_text(encoding="utf-8", newline="")
+                with observed_input(home, path.relative_to(home).as_posix(), observations) as stream:
+                    text = stream.read().decode("utf-8")
             except (OSError, UnicodeError):
                 raise SessionFailure("unreadable_session", f"{record.where}: could not read the tool result.") from None
     ok = result.get("isError") is not True
     error = None if ok else _error(result.get("error")) or text or _string(result.get("note"))
     fields = {key: value for key, value in result.items() if key not in {"output", "isError"}}
-    images = tuple(image for part in parts if (image := _image(home, session, part)) is not None)
+    images = tuple(image for part in parts if (image := _image(home, session, part, observations)) is not None)
     return Result(text, fields or None, images), ok, error
 
 
@@ -659,16 +666,18 @@ def _file_name(url: str) -> str:
     return unquote(url.removeprefix("kimi-file://").partition("?")[0])
 
 
-def _upload(home: Path, name: str, directory: Path | None = None) -> tuple[Path | None, str | None]:
+def _upload(
+    home: Path, name: str, observations: FileObservations, directory: Path | None = None,
+) -> tuple[Path | None, str | None]:
     if not _FILE_ID.fullmatch(name):
         return None, None
     directory = directory or home / "files"
     metadata = directory / "meta" / f"{name}.json"
     if _eligible(home, metadata):
         try:
-            with metadata.open("rb") as stream:
+            with observed_input(home, metadata.relative_to(home).as_posix(), observations) as stream:
                 value = _object(json.load(stream))
-        except (OSError, ValueError, RecursionError):
+        except (ValueError, RecursionError):
             value = {}
         key = _string(value.get("key")) or ""
         if (value.get("version") == 1 and _FILE_ID.fullmatch(key)
@@ -676,6 +685,8 @@ def _upload(home: Path, name: str, directory: Path | None = None) -> tuple[Path 
             saved = directory / key
             if _eligible(home, saved):
                 return saved, _string(value.get("mediaType"))
+    elif metadata in observations.files:
+        raise OSError("Previously read upload metadata is unavailable.")
     try:
         path = next((path for path in _children(home, directory)
                      if (path.name == name or path.name.startswith(f"{name}."))
@@ -689,7 +700,9 @@ def _size(value: object) -> int | None:
     return value if type(value) is int and value >= 0 else None
 
 
-def _image(home: Path, session: _SavedSession, part: dict[str, Any]) -> Image | None:
+def _image(
+    home: Path, session: _SavedSession, part: dict[str, Any], observations: FileObservations,
+) -> Image | None:
     if part["type"] != "image_url":
         return None
     native = _object(part.get("imageUrl"))
@@ -718,9 +731,9 @@ def _image(home: Path, session: _SavedSession, part: dict[str, Any]) -> Image | 
             path = session.folder / "blobs" / hash_value
     elif url.startswith("kimi-file://"):
         name = _file_name(url)
-        path, mime = _upload(home, name)
+        path, mime = _upload(home, name, observations)
         if path is None or not _eligible(home, path):
-            path, mime = _upload(home, name, session.folder / "media")
+            path, mime = _upload(home, name, observations, session.folder / "media")
         media = media or mime
     elif not url.startswith("ms://"):
         return None
@@ -728,9 +741,11 @@ def _image(home: Path, session: _SavedSession, part: dict[str, Any]) -> Image | 
     if path is not None and _eligible(home, path):
         media = media or mimetypes.guess_file_type(path)[0]
         try:
-            size = path.stat().st_size if size is None else size
-        except OSError:
-            pass
+            info = observations.record(path, path.stat(follow_symlinks=False))
+            size = info.size if size is None else size
+        except FileNotFoundError:
+            if path in observations.files:
+                raise
     if media is not None and media.startswith("image/") and size is not None:
         return Image(media, size)
     return None
@@ -855,7 +870,9 @@ def _item_time(item: Item) -> datetime:
     return item.at if isinstance(item, TextBlock) else item.started_at
 
 
-def _project(lanes: dict[str, _Lane], home: Path, session: _SavedSession, cwd: str | None) -> Iterator[Turn]:
+def _project(
+    lanes: dict[str, _Lane], home: Path, session: _SavedSession, cwd: str | None, observations: FileObservations,
+) -> Iterator[Turn]:
     main = lanes["main"]
     launches = _launches(lanes)
     children: dict[str, dict[str, _ChildWork]] = {}
@@ -875,11 +892,11 @@ def _project(lanes: dict[str, _Lane], home: Path, session: _SavedSession, cwd: s
                 work.failed = turn.end is not None and turn.end.data["reason"] not in ("cancelled", "completed")
                 for response in _responses(turn, counted):
                     work.usage += response.usage
-                work.items.extend(_items(turn, home, session, agent=agent, parent=parent))
+                work.items.extend(_items(turn, home, session, observations, agent=agent, parent=parent))
 
     counted_main: set[str] = set()
     for turn in main.turns.values():
-        root_items = _items(turn, home, session)
+        root_items = _items(turn, home, session, observations)
         agents = children.get(turn.key, {})
         items = tuple(merge(root_items, *(work.items for work in agents.values()), key=_item_time))
         subagents = tuple(
@@ -932,6 +949,7 @@ def _forbidden(name: str) -> bool:
 class _RawFiles:
     home: Path
     session: _SavedSession
+    observations: FileObservations
     uploads: set[str] = field(default_factory=set)
     outside: set[Path] = field(default_factory=set)
 
@@ -967,7 +985,7 @@ class _RawFiles:
                 if name := _spill_name(result, _string(output) or ""):
                     self.escapes(_spill_path(self.session, name))
 
-    def archive(self) -> tuple[HomeFile, ...]:
+    def archive(self, wires: dict[str, Path]) -> tuple[HomeFile, ...]:
         result: set[Path] = set()
         pending = [self.session.folder / name for name in _ARCHIVE_TREES]
         while pending:
@@ -981,18 +999,23 @@ class _RawFiles:
 
         agents = self.session.folder / "agents"
         self.escapes(agents)
-        listed = [self.session.state, *(agent / "wire.jsonl" for agent in _children(self.home, agents)
-                                       if not _forbidden(agent.name))]
+        listed = [self.session.state, *(wire for agent, wire in wires.items() if not _forbidden(agent))]
         for path in listed:
-            if not self.escapes(path) and _eligible(self.home, path):
+            eligible = not self.escapes(path) and _eligible(self.home, path)
+            if eligible != (path in self.observations.files):
+                raise OSError("A native wire or state file changed during projection.")
+            if eligible:
                 result.add(path)
         for name in self.uploads:
             named = self.home / "files" / name
             if not self.escapes(named):
-                upload, _ = _upload(self.home, name)
+                upload, _ = _upload(self.home, name, self.observations)
                 if upload is not None and not self.escapes(upload) and _eligible(self.home, upload):
                     result.add(upload)
-        return tuple(HomeFile(path.relative_to(self.home).as_posix()) for path in sorted(result))
+        files = tuple(self.observations.nominate(self.home, path) for path in sorted(result))
+        for path in self.observations.files:
+            self.observations.record(path, path.stat(follow_symlinks=False))
+        return files
 
 
 def _claim_is_live(claim: dict[str, Any]) -> bool:
@@ -1057,15 +1080,16 @@ def read(source: Source) -> Iterator[Session | Failed]:
         if not source.wants(session.native_id):
             continue
         lanes = {"main": _Lane()}
-        files = _RawFiles(home, session)
+        observations = FileObservations()
+        files = _RawFiles(home, session, observations)
         try:
-            state = _state(home, session.state)
+            state = _state(home, session.state, observations)
             wires = _wires(home, session)
             copied = _fork_ids(home, session, state, inventory)
             main = lanes["main"]
             for agent, path in wires.items():
                 lane = lanes.setdefault(agent, _Lane())
-                for where, row in _rows(home, path):
+                for where, row in _rows(home, path, observations):
                     files.observe(row)
                     if lane.first_at is None:
                         lane.first_at = _time(row.get("created_at") if row["type"] == "metadata" else row.get("time"))
@@ -1073,11 +1097,14 @@ def read(source: Source) -> Iterator[Session | Failed]:
                         lane.append(_record(where, row))
             created = main.first_at
             if created is None:
-                created = state.created_at or datetime.fromtimestamp(session.main.stat().st_mtime, UTC)
-            files_to_archive = files.archive()
+                created = state.created_at or observations.files[session.main].modified_at
             kind = _kind(lanes)
-            turns = tuple(_project(lanes, home, session, state.cwd))
-            live = live_by_mtime(wires.values(), source.clock) or _locked(home, session)
+            turns = tuple(_project(lanes, home, session, state.cwd, observations))
+            files_to_archive = files.archive(wires)
+            live = any(
+                observations.files[path].modified_at >= source.clock - LIVE_WINDOW
+                for path in wires.values()
+            ) or _locked(home, session)
             yield Session("kimi-code", session.native_id, kind, state.title, created, main.version,
                           _origin(session, main), state.cwd, live, turns,
                           files_to_archive, len(files.outside))
