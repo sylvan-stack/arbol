@@ -172,7 +172,7 @@ def _browser_references(home: Path) -> Iterator[set[str]]:
                     raise ValueError("Browser profile deletion still has private data.")
                 with browser_file(profile / "owner.lock"):
                     continue  # The original lock-only tombstone is not a live profile.
-            if not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", profile.name):
+            if not re.fullmatch(r"[a-z](?:[a-z0-9-]{0,62}[a-z0-9])?", profile.name):
                 raise ValueError("Browser profile registry has unfinished or unknown state.")
             metadata, _ = browser_document(profile / "profile.json")
             instance = metadata.get("instance")

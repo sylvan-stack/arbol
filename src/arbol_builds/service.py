@@ -317,6 +317,8 @@ def installed_browser_selection(home: Path) -> Record | None:
         selected, _ = browser_document(support / "selected.json", 4096)
     except FileNotFoundError:
         return None
+    if selected.get("scope") == "rehearsal":
+        raise ValueError("Provisional Browser selection is reserved for its guarded rehearsal.")
     if (set(selected) != {"format", "build", "imageSha256"} or selected["format"] != 1
             or not browser_release_number(selected["build"]) or not browser_sha(selected["imageSha256"])):
         raise ValueError("Invalid installed Browser selection.")
