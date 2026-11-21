@@ -25,7 +25,7 @@ from psycopg.rows import tuple_row
 from arbol_installation.admission import AdmissionRefusal
 from arbol_installation.paths import database_settings, postgres_folder
 
-from .exchange_admission import Admission, Lease, register_database_writer
+from .exchange_admission import Admission, Lease, Source, register_database_writer
 from .model import Identity, Refused, object_file, private_directory
 
 SERVICE = "com.sylvan-stack.arbol.database"
@@ -375,7 +375,17 @@ class Database:
                 yield session
 
     @asynccontextmanager
-    async def connection(self, *, snapshot: bool = False, probe: bool = False) -> AsyncIterator[Session]:
+    async def import_read(self, *, allow_draining: bool) -> AsyncIterator[Session]:
+        if self.admission is None:
+            raise Refused("maintenance", "The installation admission state is unavailable.")
+        with self.admission.import_read(allow_draining=allow_draining) as source:
+            async with self.connection(snapshot=True, read_source=source) as session:
+                yield session
+
+    @asynccontextmanager
+    async def connection(
+        self, *, snapshot: bool = False, probe: bool = False, read_source: Source | None = None,
+    ) -> AsyncIterator[Session]:
         connection: AsyncConnection[tuple[Any, ...]] | None = None
         try:
             if self.away and not probe:
@@ -398,11 +408,13 @@ class Database:
                     self.passfile = Path(name)
                     self.parameters["passfile"] = name
             parameters = dict(self.parameters)
-            lease = current_lease(self.identity.folder) if self.application and not probe else None
-            if self.application and not probe:
-                if lease is None:
-                    raise Refused("maintenance", "An application connection requires an installation permit.")
-                source = lease.state.source
+            if read_source is not None and (not snapshot or probe):
+                raise Refused("maintenance", "An import read requires a read-only snapshot.")
+            lease = current_lease(self.identity.folder) if self.application and not probe and read_source is None else None
+            if self.application and not probe and lease is None and read_source is None:
+                raise Refused("maintenance", "An application connection requires an installation permit.")
+            source = lease.state.source if lease is not None else read_source
+            if source is not None:
                 if ((parameters["host"], int(parameters["port"]), parameters["dbname"])
                         != (source["host"], source["port"], source["database"])):
                     raise Refused("maintenance", "The database configuration does not match writer admission.")
@@ -424,6 +436,17 @@ class Database:
                 await register_database_writer(session, lease)
             if snapshot:
                 await session.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            if read_source is not None:
+                info = connection.info
+                if (info.host, info.port, info.dbname) != (
+                    read_source["host"], read_source["port"], read_source["database"],
+                ):
+                    raise Refused("maintenance", "The import snapshot does not match the admission target.")
+                rows = await session.execute(
+                    "SELECT oid FROM pg_catalog.pg_database WHERE datname = pg_catalog.current_database()",
+                )
+                if rows != [(read_source["databaseOid"],)]:
+                    raise Refused("maintenance", "PostgreSQL did not confirm the import snapshot target.")
             self.schema = await self.read_schema(session)
             if self.on_connected:
                 self.on_connected()
