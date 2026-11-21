@@ -8,10 +8,13 @@ import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from arbol_installation.admission import runtime_folder
 from arbol_installation.paths import INSTALLATION_LAYOUT, installation_root
+
+if TYPE_CHECKING:
+    from arbol_import.readers.form import Tool
 
 ROOT_ID = re.compile(r"[a-z0-9]+\Z", re.ASCII)
 BUILD_ID = re.compile(r"[1-9a-f][0-9a-f]*\Z", re.ASCII)
@@ -25,12 +28,51 @@ USAGE = (
     "Usage: arbol backend [acquire] [isolation options] | vigor [--refresh [<driver>/<subscription>]] [--text]"
     " | vigor learn|profiles|approve <version> [--text]."
 )
+IMPORT_USAGE = "Usage: arbol import <tool> [--session <native id>]... [--dry-run] [--include arbol_driver|probe]..."
+type IncludedKind = Literal["arbol_driver", "probe"]
 
 
 class Refused(Exception):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+@dataclass(frozen=True)
+class ImportOptions:
+    tool: Tool
+    sessions: tuple[str, ...] = ()
+    include: tuple[IncludedKind, ...] = ()
+    dry_run: bool = False
+
+
+def parse_import(args: list[str]) -> ImportOptions:
+    from arbol_import.readers.form import TOOLS
+
+    if not args or args[0] not in TOOLS:
+        raise Refused("invalid_input", IMPORT_USAGE)
+    tool = cast("Tool", args[0])
+    selected: list[str] = []
+    included: list[IncludedKind] = []
+    dry_run = False
+    index = 1
+    while index < len(args):
+        option = args[index]
+        index += 1
+        if option == "--dry-run" and not dry_run:
+            dry_run = True
+            continue
+        if option not in ("--session", "--include") or index >= len(args):
+            raise Refused("invalid_input", IMPORT_USAGE)
+        value = args[index]
+        index += 1
+        if option == "--session" and value and not value.startswith("-") and "\0" not in value:
+            selected.append(value)
+        elif option == "--include" and value in ("arbol_driver", "probe"):
+            included.append(cast("IncludedKind", value))
+        else:
+            raise Refused("invalid_input", IMPORT_USAGE)
+    return ImportOptions(tool, tuple(selected), tuple(included), dry_run)
 
 
 def object_file(path: Path) -> dict[str, Any]:
