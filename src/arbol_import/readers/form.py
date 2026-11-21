@@ -38,31 +38,37 @@ FAILURE_CODES: tuple[FailureCode, ...] = ("unreadable_session", "unknown_format"
 @dataclass(frozen=True)
 class Usage:
     """Token usage by the common rule (IMP-1): `inputTokens` is input + cache read + cache write, beside
-    `cachedInputTokens` (cache read) and `cacheWriteTokens`; `outputTokens`; and `reasoningTokens` only where the tool
-    records it. Build one from the tool's counts with `native()`; adding two sums them."""
+    `cachedInputTokens` (cache read) and `outputTokens`. Cache writes and reasoning are optional native counters.
+    Build one from the tool's counts with `native()`; adding two sums them."""
 
     input_tokens: int = 0
     cached_input_tokens: int = 0
-    cache_write_tokens: int = 0
+    cache_write_tokens: int | None = None
     output_tokens: int = 0
     reasoning_tokens: int | None = None
 
     @classmethod
-    def native(cls, *, uncached: int, cache_read: int = 0, cache_write: int = 0, output: int = 0,
+    def native(cls, *, uncached: int, cache_read: int = 0, cache_write: int | None = None, output: int = 0,
                reasoning: int | None = None) -> Usage:
         """From a tool's own counts, where `uncached` is the input it counts apart from cache reads and writes."""
-        return cls(uncached + cache_read + cache_write, cache_read, cache_write, output, reasoning)
+        return cls(uncached + cache_read + (cache_write or 0), cache_read, cache_write, output, reasoning)
 
     def __add__(self, other: Usage) -> Usage:
         if not isinstance(other, Usage):
             return NotImplemented
-        reasoning = (None if self.reasoning_tokens is None and other.reasoning_tokens is None
-                     else (self.reasoning_tokens or 0) + (other.reasoning_tokens or 0))
-        return Usage(self.input_tokens + other.input_tokens,
-                     self.cached_input_tokens + other.cached_input_tokens,
-                     self.cache_write_tokens + other.cache_write_tokens,
-                     self.output_tokens + other.output_tokens,
-                     reasoning)
+        return Usage(
+            self.input_tokens + other.input_tokens,
+            self.cached_input_tokens + other.cached_input_tokens,
+            _sum_counter(self.cache_write_tokens, other.cache_write_tokens),
+            self.output_tokens + other.output_tokens,
+            _sum_counter(self.reasoning_tokens, other.reasoning_tokens),
+        )
+
+
+def _sum_counter(left: int | None, right: int | None) -> int | None:
+    if left is None:
+        return right
+    return left + (right or 0)
 
 
 @dataclass(frozen=True)
