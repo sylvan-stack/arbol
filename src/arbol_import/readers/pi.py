@@ -8,14 +8,16 @@ import os
 import re
 import stat
 from collections.abc import Generator, Iterator
-from contextlib import closing
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any, NoReturn
 
 from .form import (
     LIVE_WINDOW,
+    CatalogueEntry,
     Failed,
     FileObservations,
     HomeFile,
@@ -32,6 +34,7 @@ from .form import (
     ToolCall,
     Turn,
     Usage,
+    read_catalogue,
     unknown_record,
 )
 from .lines import file_records, observed_input
@@ -589,16 +592,15 @@ def _discover(home: Path) -> Iterator[Path | Failed]:
                 yield Failed.of(failure, file=path.relative_to(home).as_posix())
 
 
-def _read_session(home: Path, path: Path, source: Source) -> Session | Failed | None:
+def _read_session(
+    home: Path, path: Path, source: Source, header: _Header, observations: FileObservations,
+) -> Session | Failed:
     file = path.relative_to(home).as_posix()
     scan = _Scan(file)
-    observations = FileObservations()
-    header = None
     try:
         with closing(_session_records(home, file, observations)) as rows:
-            header = _selected_header(rows, file, source)
-            if header is None:
-                return None
+            if _selected_header(rows, file, source) != header:
+                raise _unreadable(file)
             for line, record in rows:
                 scan.add(line, record)
         turns = tuple(
@@ -622,26 +624,48 @@ def _read_session(home: Path, path: Path, source: Source) -> Session | Failed | 
         )
     except (SessionFailure, OSError, OverflowError, RecursionError) as error:
         failure = error if isinstance(error, SessionFailure) else _unreadable(file)
+        return Failed.of(failure, native_id=header.native_id, kind=scan.kind)
+
+
+def _entry(home: Path, path: Path, source: Source) -> CatalogueEntry | None:
+    file = path.relative_to(home).as_posix()
+    observations = FileObservations()
+    header = None
+    try:
+        with closing(_session_records(home, file, observations)) as rows:
+            header = _selected_header(rows, file, source)
+    except (SessionFailure, OSError, OverflowError, RecursionError) as error:
+        failure = error if isinstance(error, SessionFailure) else _unreadable(file)
         if header is not None:
-            return Failed.of(failure, native_id=header.native_id, kind=scan.kind)
-        return Failed.of(failure, file=file) if source.selected is None else None
+            return CatalogueEntry.failed(Failed.of(failure, native_id=header.native_id, kind="owner"))
+        return CatalogueEntry.failed(Failed.of(failure, file=file)) if source.selected is None else None
+    if header is None:
+        return None
+    return CatalogueEntry(header.native_id, None, partial(_read_session, home, path, source, header, observations))
 
 
-def read(source: Source) -> Iterator[Session | Failed]:
-    """Read the selected Pi sessions, reporting each session's failures without stopping the scan."""
+def _entries(source: Source) -> Iterator[CatalogueEntry]:
     try:
         home = source.home.resolve()
     except (OSError, RuntimeError, ValueError):
         if source.selected is None:
-            yield Failed.of(_unreadable("sessions"), file="sessions")
+            yield CatalogueEntry.failed(Failed.of(_unreadable("sessions"), file="sessions"))
         return
     seen: set[Path] = set()
     for candidate in _discover(home):
         if isinstance(candidate, Failed):
             if source.selected is None:
-                yield candidate
+                yield CatalogueEntry.failed(candidate)
         elif candidate not in seen:
             seen.add(candidate)
-            session = _read_session(home, candidate, source)
-            if session is not None:
-                yield session
+            if entry := _entry(home, candidate, source):
+                yield entry
+
+
+@contextmanager
+def catalogue(source: Source) -> Iterator[Iterator[CatalogueEntry]]:
+    yield _entries(source)
+
+
+def read(source: Source) -> Iterator[Session | Failed]:
+    yield from read_catalogue(catalogue, source)
