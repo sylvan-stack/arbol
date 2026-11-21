@@ -102,11 +102,16 @@ def _excluded(kind: Kind | None, options: ImportOptions) -> bool:
 
 
 def _select(entry: CatalogueEntry, options: ImportOptions, owner_home: Path) -> _Selection | JsonObject:
+    if _excluded(entry.kind, options):
+        return {**_attribution(entry.native, entry.kind), "outcome": "excluded"}
     result = entry.load()
     if isinstance(result, Failed):
         native = result.native_id if result.native_id is not None else result.file
         assert native is not None
-        return {**_attribution(native, result.kind), "outcome": "failed", "error": _error(result.code, result.message)}
+        info = _attribution(native, result.kind)
+        if _excluded(result.kind, options):
+            return {**info, "outcome": "excluded"}
+        return {**info, "outcome": "failed", "error": _error(result.code, result.message)}
     info = _session_attribution(result)
     if _excluded(result.kind, options):
         return {**info, "outcome": "excluded"}
