@@ -8,14 +8,17 @@ import json
 import re
 import stat
 from collections.abc import Generator, Iterable, Iterator, Sequence
+from contextlib import closing
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NoReturn
 
 from .form import (
+    LIVE_WINDOW,
     CallLink,
     Failed,
+    FileObservations,
     HomeFile,
     Image,
     Item,
@@ -33,10 +36,9 @@ from .form import (
     Trigger,
     Turn,
     Usage,
-    live_by_mtime,
     unknown_record,
 )
-from .lines import file_records
+from .lines import file_records, observed_input
 
 
 @dataclass(frozen=True)
@@ -140,10 +142,6 @@ def _time(value: object) -> datetime | None:
     return None
 
 
-def _mtime(path: Path) -> datetime:
-    return datetime.fromtimestamp(path.stat().st_mtime, UTC)
-
-
 @dataclass(frozen=True)
 class OrderedFile:
     file: SessionFile
@@ -167,9 +165,16 @@ def _data_file(home: Path, path: Path) -> Path:
     raise _unreadable(home, path)
 
 
-def _read_records(home: Path, path: Path) -> Generator[tuple[int, Any]]:
+def _bind_input(home: Path, path: Path, target: Path, observations: FileObservations) -> str:
+    info = target.stat(follow_symlinks=False)
+    observations.record(path, info)
+    observations.record(target, info)
+    return target.relative_to(home).as_posix()
+
+
+def _read_records(home: Path, path: Path, observations: FileObservations) -> Generator[tuple[int, Any]]:
     resolved = _data_file(home, path)
-    yield from file_records(home, resolved.relative_to(home).as_posix())
+    yield from file_records(home, _bind_input(home, path, resolved, observations), observations)
 
 
 def _record_time(row: dict[str, Any]) -> datetime | None:
@@ -181,12 +186,14 @@ def _record_time(row: dict[str, Any]) -> datetime | None:
     return at
 
 
-def _order_file(home: Path, file: SessionFile) -> OrderedFile:
+def _order_file(home: Path, file: SessionFile, observations: FileObservations) -> OrderedFile:
     modified = None
     number = 0
     try:
-        modified = _mtime(_data_file(home, file.path))
-        stream = _read_records(home, file.path)
+        target = _data_file(home, file.path)
+        _bind_input(home, file.path, target, observations)
+        modified = observations.files[target].modified_at
+        stream = _read_records(home, file.path, observations)
         try:
             for line, row in stream:
                 number = line
@@ -224,11 +231,12 @@ class SessionRecords:
     created_at: datetime | None = None
 
 
-def _ordered_rows(home: Path, ordered: OrderedFile) -> Iterator[tuple[int, Any]]:
-    for number, raw in _read_records(home, ordered.file.path):
-        if ordered.lookahead_failure is not None and number >= ordered.failure_line:
-            raise ordered.lookahead_failure
-        yield number, raw
+def _ordered_rows(home: Path, ordered: OrderedFile, observations: FileObservations) -> Generator[tuple[int, Any]]:
+    with closing(_read_records(home, ordered.file.path, observations)) as records:
+        for number, raw in records:
+            if ordered.lookahead_failure is not None and number >= ordered.failure_line:
+                raise ordered.lookahead_failure
+            yield number, raw
     if ordered.lookahead_failure is not None:
         raise ordered.lookahead_failure
 
@@ -256,7 +264,9 @@ def _context_files(files: list[SessionFile], selected: frozenset[str] | None) ->
     return related
 
 
-def _ordered_sessions(home: Path, source: Source) -> Iterator[Failed | tuple[str, SessionRecords]]:
+def _ordered_sessions(
+    home: Path, source: Source, observations: FileObservations,
+) -> Iterator[Failed | tuple[str, SessionRecords]]:
     discovered: list[SessionFile] = []
     for file in _discover(home):
         if isinstance(file, Failed):
@@ -264,7 +274,7 @@ def _ordered_sessions(home: Path, source: Source) -> Iterator[Failed | tuple[str
         else:
             discovered.append(file)
     files = sorted(
-        (_order_file(home, file) for file in _context_files(discovered, source.selected)),
+        (_order_file(home, file, observations) for file in _context_files(discovered, source.selected)),
         key=lambda ordered: (ordered.at, ordered.file.path),
     )
 
@@ -288,10 +298,10 @@ def _ordered_sessions(home: Path, source: Source) -> Iterator[Failed | tuple[str
         seen_here: set[str] = set()
         if session.failure is None:
             try:
-                for number, raw in _ordered_rows(home, ordered):
+                for number, raw in _ordered_rows(home, ordered, observations):
                     uuid = raw.get("uuid") if isinstance(raw, dict) else None
                     duplicate = isinstance(uuid, str) and (uuid in project_uuids or uuid in session_uuids)
-                    row = _validated(home, file, (rank, number), raw, duplicate)
+                    row = _validated(home, file, (rank, number), raw, duplicate, observations)
                     if session.created_at is None and isinstance(raw, dict):
                         session.created_at = row.at if row is not None else _record_time(raw)
                     if row is None:
@@ -397,7 +407,7 @@ def _validate_message(home: Path, record: Record) -> None:
 
 def _validated(
     home: Path, file: SessionFile, position: tuple[int, int], raw: object, duplicate: bool,
-    *, stream_path: Path | None = None,
+    observations: FileObservations, *, stream_path: Path | None = None,
 ) -> Record | None:
     row = _object(raw)
     kind = row.get("type")
@@ -405,7 +415,7 @@ def _validated(
     if kind in _MESSAGE_TYPES:
         _validate_message(home, record)
         if kind == "user":
-            results = _native_results(home, record)
+            results = _native_results(home, record, observations)
             if results and not duplicate:
                 record = replace(record, results=results)
     elif kind == "attachment":
@@ -623,7 +633,9 @@ def _spill_path(record: Record, text: str) -> Path | None:
     return record.file.directory / "tool-results" / path
 
 
-def _spill_result(home: Path, record: Record, text: str) -> tuple[str, tuple[Image, ...]]:
+def _spill_result(
+    home: Path, record: Record, text: str, observations: FileObservations,
+) -> tuple[str, tuple[Image, ...]]:
     path = _spill_path(record, text)
     if path is None:
         return text, ()
@@ -635,7 +647,8 @@ def _spill_result(home: Path, record: Record, text: str) -> tuple[str, tuple[Ima
             or not _archive_name(path.relative_to(home)) or not _archive_name(resolved.relative_to(home))
         ):
             return text, ()
-        saved = _regular(home, resolved).read_bytes().decode("utf-8")
+        with observed_input(home, _bind_input(home, path, resolved, observations), observations) as stream:
+            saved = stream.read().decode("utf-8")
         content = json.loads(saved) if resolved.suffix == ".json" else None
     except (OSError, RuntimeError, ValueError, SessionFailure):
         raise SessionFailure("unreadable_session", f"{record.where(home)}: the tool result could not be read.") from None
@@ -688,7 +701,7 @@ def _result_images(home: Path, record: Record, content: object) -> tuple[Image, 
     return tuple(_result_image(home, record, part) for part in _blocks(content) if part.get("type") == "image")
 
 
-def _native_results(home: Path, record: Record) -> dict[str, NativeResult]:
+def _native_results(home: Path, record: Record, observations: FileObservations) -> dict[str, NativeResult]:
     results = {}
     native_fields = _object(record.row.get("toolUseResult"))
     for block in _result_blocks(record):
@@ -698,7 +711,7 @@ def _native_results(home: Path, record: Record) -> dict[str, NativeResult]:
             continue
         texts = []
         for part in _result_texts(content):
-            output_text, output_images = _spill_result(home, record, part)
+            output_text, output_images = _spill_result(home, record, part, observations)
             texts.append(output_text)
             images.extend(output_images)
         extras = {
@@ -788,18 +801,20 @@ def _present(home: Path, path: Path) -> bool:
     return True
 
 
-def _json_file(home: Path, path: Path) -> Any:
+def _json_file(home: Path, path: Path, observations: FileObservations) -> Any:
     try:
-        return json.loads(_data_file(home, path).read_bytes())
+        target = _data_file(home, path)
+        with observed_input(home, _bind_input(home, path, target, observations), observations) as stream:
+            return json.load(stream)
     except (OSError, ValueError, RecursionError):
         raise _unreadable(home, path) from None
 
 
-def _agent_link(home: Path, path: Path) -> str | None:
+def _agent_link(home: Path, path: Path, observations: FileObservations) -> str | None:
     meta = path.with_suffix(".meta.json")
     if not _present(home, meta):
         return None
-    value = _json_file(home, meta)
+    value = _json_file(home, meta, observations)
     if not isinstance(value, dict) or (
         value.get("toolUseId") is not None and not _string(value["toolUseId"])
     ):
@@ -831,9 +846,9 @@ class AgentLog:
         return next((row.at for row in self.rows if row.at is not None and not row.duplicate), None)
 
 
-def _agent_logs(home: Path, files: Sequence[OrderedFile]) -> dict[str, AgentLog]:
+def _agent_logs(home: Path, files: Sequence[OrderedFile], observations: FileObservations) -> dict[str, AgentLog]:
     inputs = [
-        (_order_file(home, SessionFile(path)), top.file, workflow)
+        (_order_file(home, SessionFile(path), observations), top.file, workflow)
         for top in files for path, workflow in _agent_files(home, top.file)
     ]
     inputs.sort(key=lambda entry: (entry[0].at, entry[0].file.path))
@@ -842,7 +857,7 @@ def _agent_logs(home: Path, files: Sequence[OrderedFile]) -> dict[str, AgentLog]
     for rank, (ordered, owner, workflow) in enumerate(inputs):
         path = ordered.file.path
         native_id = path.stem.removeprefix("agent-")
-        launch = _agent_link(home, path)
+        launch = _agent_link(home, path, observations)
         log = logs.setdefault(native_id, AgentLog(native_id, workflow, launch))
         if log.launch_id is None:
             log.launch_id = launch
@@ -851,9 +866,9 @@ def _agent_logs(home: Path, files: Sequence[OrderedFile]) -> dict[str, AgentLog]
         earlier = seen.setdefault(native_id, set())
         current: set[str] = set()
         try:
-            for number, raw in _ordered_rows(home, ordered):
+            for number, raw in _ordered_rows(home, ordered, observations):
                 uuid = _string(raw.get("uuid")) if isinstance(raw, dict) else None
-                row = _validated(home, owner, (rank, number), raw, uuid in earlier, stream_path=path)
+                row = _validated(home, owner, (rank, number), raw, uuid in earlier, observations, stream_path=path)
                 if row is not None:
                     log.rows.append(row)
                     if uuid is not None:
@@ -1003,7 +1018,8 @@ def _archive_name(relative: Path) -> bool:
 @dataclass
 class ArchiveFiles:
     home: Path
-    regular: dict[Path, Path] = field(default_factory=dict)
+    observations: FileObservations
+    regular: dict[Path, HomeFile] = field(default_factory=dict)
     outside: set[Path] = field(default_factory=set)
 
     def resolve(self, path: Path) -> Path | None:
@@ -1028,10 +1044,14 @@ class ArchiveFiles:
         if resolved is None or not resolved.is_relative_to(boundary):
             return
         try:
-            if stat.S_ISREG(resolved.stat().st_mode):
-                self.regular[path] = resolved
+            if stat.S_ISREG(resolved.stat(follow_symlinks=False).st_mode):
+                _bind_input(self.home, path, resolved, self.observations)
+                self.regular[path] = self.observations.nominate(self.home, path, target=resolved)
+            elif resolved in self.observations.files or path in self.observations.files:
+                raise _unreadable(self.home, path)
         except FileNotFoundError:
-            pass
+            if resolved in self.observations.files or path in self.observations.files:
+                raise _unreadable(self.home, path) from None
         except OSError:
             raise _unreadable(self.home, path) from None
 
@@ -1088,20 +1108,17 @@ def _archive_refs(archive: ArchiveFiles, rows: Iterable[Record]) -> None:
 
 
 def _archive(
-    home: Path, clock: datetime, session: SessionRecords, agents: dict[str, AgentLog],
+    home: Path, clock: datetime, session: SessionRecords, agents: dict[str, AgentLog], observations: FileObservations,
 ) -> tuple[tuple[HomeFile, ...], bool, int]:
-    archive = ArchiveFiles(home)
+    archive = ArchiveFiles(home, observations)
     for top in session.files:
         archive.include(top.file.path, top.file.path.parent)
         archive.session_tree(top.file.directory)
     _archive_refs(archive, session.rows)
     for agent in agents.values():
         _archive_refs(archive, agent.rows)
-    files = tuple(HomeFile(path.relative_to(home).as_posix()) for path in sorted(archive.regular))
-    try:
-        live = live_by_mtime(archive.regular.values(), clock)
-    except OSError:
-        raise SessionFailure("unreadable_session", "A session archive file could not be inspected.") from None
+    files = tuple(archive.regular[path] for path in sorted(archive.regular))
+    live = any(file.observation is not None and file.observation.modified_at >= clock - LIVE_WINDOW for file in files)
     return files, live, len(archive.outside)
 
 
@@ -1114,7 +1131,7 @@ def _last_title(rows: Sequence[Record], record_type: str, field_name: str) -> st
     return None
 
 
-def _title(home: Path, session: SessionRecords) -> str | None:
+def _title(home: Path, session: SessionRecords, observations: FileObservations) -> str | None:
     title = _last_title(session.rows, "custom-title", "customTitle")
     if title is not None:
         return title
@@ -1122,7 +1139,7 @@ def _title(home: Path, session: SessionRecords) -> str | None:
         path = top.file.directory / "custom-title.json"
         if not _present(home, path):
             continue
-        value = _json_file(home, path)
+        value = _json_file(home, path, observations)
         title = _string(value) if isinstance(value, str) else _string(_object(value).get("customTitle"))
         if title is None:
             unknown_record("custom-title", path.relative_to(home).as_posix(), conversation=True)
@@ -1130,11 +1147,13 @@ def _title(home: Path, session: SessionRecords) -> str | None:
     return _last_title(session.rows, "ai-title", "aiTitle")
 
 
-def _session(home: Path, source: Source, native_id: str, kind: Kind, session: SessionRecords) -> Session:
+def _session(
+    home: Path, source: Source, native_id: str, kind: Kind, session: SessionRecords, observations: FileObservations,
+) -> Session:
     rows = session.rows
-    title = _title(home, session)
-    agents = _agent_logs(home, session.files)
-    files, live, outside = _archive(home, source.clock, session, agents)
+    title = _title(home, session, observations)
+    agents = _agent_logs(home, session.files, observations)
+    files, live, outside = _archive(home, source.clock, session, agents, observations)
     first_prompt = next((row for row in rows if _user_prompt(row) is not None), None)
     created_at = session.created_at
     if created_at is None:
@@ -1170,7 +1189,8 @@ def read(source: Source) -> Iterator[Session | Failed]:
         return
 
     driver_ids = _driver_ids(source.driver_state)
-    for discovered in _ordered_sessions(home, source):
+    observations = FileObservations()
+    for discovered in _ordered_sessions(home, source, observations):
         if isinstance(discovered, Failed):
             yield discovered
             continue
@@ -1181,6 +1201,6 @@ def read(source: Source) -> Iterator[Session | Failed]:
             # failure retains the prefix already accepted from the main logs.
             if session.failure is not None:
                 raise session.failure
-            yield _session(home, source, native_id, kind, session)
+            yield _session(home, source, native_id, kind, session, observations)
         except SessionFailure as error:
             yield Failed.of(error, native_id=native_id, kind=kind)
