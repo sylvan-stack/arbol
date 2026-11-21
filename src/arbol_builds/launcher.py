@@ -11,6 +11,7 @@ import fcntl
 import json
 import os
 import plistlib
+import pwd
 import re
 import select
 import signal
@@ -18,6 +19,7 @@ import stat
 import sys  # noqa: F401  (the line arbol-builds appends calls sys.exit)
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from arbol_installation.paths import INSTALLATION_LAYOUT, build_payload_directory, build_registry
@@ -443,6 +445,13 @@ def launch(registry: str, component: str, args: list[str], *, schema: tuple[int,
         signal.signal(signal.SIGINT, signal.SIG_DFL)
     use_descriptor: int | None = None
     try:
+        if component == "arbol-browser":
+            home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+            if os.path.abspath(registry) == str(build_registry(home)):
+                stable_entry = str(home / "Applications/Arbol Browser/bin/arbol-browser")
+                signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+                signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
+                os.execv(stable_entry, [stable_entry, *args])
         registered = read_records(registry, component)
         records = [record for record in registered if layout_fits(record)]
         if component == "arbol":

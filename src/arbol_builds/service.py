@@ -2,8 +2,11 @@
 
 import ast
 import fcntl
+import hashlib
 import json
 import os
+import pwd
+import re
 import shlex
 import shutil
 import signal
@@ -12,7 +15,8 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event
@@ -168,6 +172,45 @@ def reserve(registry: str, component: str) -> tuple[str, str]:
         counter = os.path.join(root, ".production-high-water")
         return with_mutation_lock(root, lambda: reserve_numbered_folder(root, browser_production_high_water(counter), counter))
     return reserve_numbered_folder(root)
+
+
+@contextmanager
+def browser_release_allocation(paths: Locations, source: dict[str, Any],
+                               review: str) -> Iterator[tuple[str, str, dict[str, Any]]]:
+    home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    registry = Path(paths.registry)
+    run = registry.parent
+    managed = home / "Builds/sylvan-stack/arbol-browser"
+    if (not re.fullmatch(r"[0-9a-f]{40}", review) or source["uncommittedChanges"]
+            or registry.name != "registry" or Path(paths.bin) != run / "bin"
+            or not run.is_relative_to(managed) or run == managed or run.resolve() != run):
+        raise ValueError("A Browser release needs a clean reviewed commit and a private managed Browser run.")
+    info = run.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        raise ValueError("Browser release run must be a private physical directory.")
+    canonical_registry = build_registry(home)
+    if canonical_registry.resolve() != canonical_registry or (canonical_registry / "arbol-browser").is_symlink():
+        raise ValueError("Browser production allocation needs a physical canonical registry.")
+    canonical, build = reserve(str(canonical_registry), "arbol-browser")
+    proof = os.path.join(canonical, "production-reservation.json")
+    folder = str(registry / "arbol-browser" / build)
+    release = {"review": review, "reservation": uuid.uuid4().hex}
+    document = {"format": 1, "component": "arbol-browser", "build": build, "folder": folder,
+                "source": source, **release}
+    try:
+        make_dirs(os.path.dirname(folder), 0o700)
+        if Path(os.path.dirname(folder)).resolve() != Path(os.path.dirname(folder)):
+            raise ValueError("Browser release registry must be physical.")
+        os.mkdir(folder, 0o700)
+        atomic_write(proof, json_text(document) + b"\n", durable=True)
+        yield folder, build, release
+    finally:
+        # Retire the transient reservation, preserving the durable high-water cursor.
+        if os.path.lexists(proof):
+            if load_json(proof) != document:
+                raise ValueError("Browser release reservation changed during the Build.")
+            os.unlink(proof)
+        os.rmdir(canonical)
 
 
 def module_text(name: str, folder: Path = Path(PACKAGE)) -> str:
@@ -472,16 +515,51 @@ def command(text: str, repo: str, folder: str, number: str, log: int, stop: Stop
     return code == 0 and not stop.requested
 
 
-def build_component(component: str, paths: Locations, stop: Stop) -> Record:
+def build_component(component: str, paths: Locations, stop: Stop, *, browser_release_review: str | None = None) -> Record:
     if component in ("arbol-root", "arbol-roots"):
         raise ValueError("The legacy Root runtime cannot be built by this release.")
     repo = os.path.abspath(paths.repo or default_repository(component))
     config, version, source = description(repo, component)
     if component == "arbol" and not schema_compatibility(config.get("schemaCompatibility")):
         raise ValueError("Arbol must declare schemaCompatibility in arbol-build.json.")
+    if browser_release_review is not None:
+        if component != "arbol-browser":
+            raise ValueError("A Browser release requires the arbol-browser component.")
+        with browser_release_allocation(paths, source, browser_release_review) as (folder, build, release):
+            return build_allocated(component, paths, stop, repo, config, version, source, folder, build, release)
     folder, build = reserve(paths.registry, component)
+    return build_allocated(component, paths, stop, repo, config, version, source, folder, build)
+
+
+def release_artifact(folder: str, build: str, source: dict[str, Any], release: dict[str, Any]) -> dict[str, Any]:
+    out = Path(folder).parents[2] / f"release-{build}"
+    receipt = out / "signed-release.json"
+    with receipt.open("rb") as stream:
+        contents = stream.read(1048577)
+    if len(contents) > 1048576:
+        raise ValueError("Browser release receipt exceeds its bound.")
+    data = json.loads(contents)
+    image = out / "ArbolBrowser.dmg"
+    if (data.get("kind") != "signed-production-candidate" or data.get("build") != build
+            or data.get("source") != source["commit"] or data.get("review") != release["review"]
+            or data.get("image") != image.name or data.get("qualification") != "unexecuted"
+            or not isinstance(data.get("imageSha256"), str) or not isinstance(data.get("payloadDigest"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", data["payloadDigest"])):
+        raise ValueError("Browser production artifact does not match its Build allocation.")
+    with image.open("rb") as stream:
+        if hashlib.file_digest(stream, "sha256").hexdigest() != data["imageSha256"]:
+            raise ValueError("Browser production image digest differs.")
+    return {"image": str(image), "imageSha256": data["imageSha256"], "payloadDigest": data["payloadDigest"],
+            "receipt": str(receipt), "receiptSha256": hashlib.sha256(contents).hexdigest()}
+
+
+def build_allocated(component: str, paths: Locations, stop: Stop, repo: str, config: dict[str, Any],
+                    version: str, source: dict[str, Any], folder: str, build: str,
+                    release: dict[str, Any] | None = None) -> Record:
     record: Record = {"component": component, "build": build, "packageVersion": version, "status": "building",
                       "startedAt": now(), "source": source, "entry": config["entry"], "checks": []}
+    if release is not None:
+        record["productionRelease"] = release.copy()
     # Whole numbers, also when written 1.0, in the order of BuildRecord.
     if "contract" in config:
         record["contract"] = int(config["contract"])
@@ -503,6 +581,10 @@ def build_component(component: str, paths: Locations, stop: Stop) -> Record:
             if not command(text, repo, folder, build, log, stop):
                 raise RuntimeError("Build stopped by the caller." if stop.requested
                                    else "Build command failed; see build.log.")
+        if release is not None:
+            name = "production-release"
+            record["productionRelease"].update(release_artifact(folder, build, source, release))
+            save_record(folder, record)
         stage, name = "entry", config["entry"]
         if executable_entry(folder, config["entry"]) is None:
             raise RuntimeError("The entry must be an executable file within the Build folder.")
