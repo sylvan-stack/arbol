@@ -12,7 +12,7 @@
 
   let {
     stations, agentic = false, compact = false, readOnly = false, showControls = true,
-    groupBy = 'status',
+    groupBy = 'status', onOpenChat,
   }: {
     stations: StationEntry[];
     agentic?: boolean;
@@ -20,6 +20,7 @@
     readOnly?: boolean;
     showControls?: boolean;
     groupBy?: 'status' | 'recent' | 'harness';
+    onOpenChat?: (chat: string) => void;
   } = $props();
   let query = $state('');
   let density = $state(untrack(() => (compact ? 'Compact' : 'Full')));
@@ -78,7 +79,8 @@
         {/if}
         <div class="cards" class:full={visibleDensity === 'Full'} class:condensed>
           {#each entries as station (station.id)}
-            <StationSummary {...station} density={visibleDensity.toLowerCase()} {condensed} {readOnly} {now} />
+            <StationSummary {...station} density={visibleDensity.toLowerCase()} {condensed} {readOnly} {now}
+              onOpen={onOpenChat && (() => onOpenChat?.(station.id))} />
           {/each}
         </div>
       </section>

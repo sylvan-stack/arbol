@@ -37,11 +37,15 @@
     tab = $bindable('Live Stations'),
     importedView = {},
     onTabChange,
+    onOpenChat,
+    openProblem = '',
     headerWindowControls,
   }: StationView & {
     tab?: WilloTab;
     importedView?: StationView;
     onTabChange?: (tab: WilloTab) => void;
+    onOpenChat?: (chat: string) => void;
+    openProblem?: string;
     headerWindowControls?: Snippet;
   } = $props();
 
@@ -73,7 +77,10 @@
       {#if imported}
         <Tabs label="Imported Chat Session order" items={['Most recent', 'By harness']} bind:value={order} />
       {/if}
-      <StationCollection stations={view.rows ?? []} readOnly showControls={false}
+      {#if openProblem}
+        <div class="open-problem"><Notice message={openProblem} tone="warning" role="alert" /></div>
+      {/if}
+      <StationCollection stations={view.rows ?? []} readOnly showControls={false} {onOpenChat}
         groupBy={imported ? (order === 'By harness' ? 'harness' : 'recent') : 'status'} />
 
       {#if view.problem}
@@ -107,5 +114,11 @@
   }
   .page-content {
     overflow: auto;
+  }
+  .open-problem {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    margin-bottom: 8px;
   }
 </style>

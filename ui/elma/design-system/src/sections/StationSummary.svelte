@@ -37,8 +37,14 @@
   let {
     title, status, drafted = false, unread = false, ongoing = false, inElma = false,
     density = 'full', condensed = false, failure, preview, detail, harness, activityAt, usage,
-    readOnly = false, now = Date.now(),
-  }: StationData & { density?: string; condensed?: boolean; readOnly?: boolean; now?: number } = $props();
+    readOnly = false, now = Date.now(), onOpen,
+  }: StationData & {
+    density?: string;
+    condensed?: boolean;
+    readOnly?: boolean;
+    now?: number;
+    onOpen?: () => void;
+  } = $props();
   let name = $state(untrack(() => title));
   let draft = $state(untrack(() => title));
   let editing = $state(false);
@@ -115,6 +121,9 @@
     </div>
   {/if}
   {#if feedback}<small role="status">{feedback}</small>{/if}
+  {#if readOnly && onOpen}
+    <button type="button" class="open-chat" aria-label={`Open ${title} in Elma Chat`} onclick={onOpen}></button>
+  {/if}
 </article>
 
 <style>
@@ -143,6 +152,16 @@
     background: var(--state-rail);
     pointer-events: none;
   }
+  .open-chat {
+    position: absolute;
+    inset: 0;
+    cursor: pointer;
+    background: transparent;
+    border: 0;
+    border-radius: inherit;
+  }
+  .open-chat:hover { box-shadow: inset 0 0 0 1px var(--accent); }
+  .open-chat:focus-visible { outline-offset: -3px; }
   .station.has-draft { --state-rail: var(--muted); }
   .station.unread { --state-rail: var(--success); --state-color: var(--success); }
   .station.running {

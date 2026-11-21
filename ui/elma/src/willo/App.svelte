@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import WilloStation, { type ChatSessionRow, type WilloTab } from '../../design-system/src/pages/WilloStation.svelte';
+  import { AppChannel } from '../app-channel';
   import { Bridge } from '../bridge';
 
   type Cursor = { activityAt: string; chat: string };
@@ -48,6 +49,9 @@
   let generation = 0;
   let greeted = false;
   let connectionProblem = '';
+  let openProblem = $state('');
+  let openRequest = 0;
+  let openChat: ((chat: string) => Promise<void>) | undefined;
   let read: ((tab: WilloTab, older: boolean) => Promise<void>) | undefined;
 
   function cursorOf(row: Cursor): Cursor {
@@ -113,6 +117,19 @@
   }
 
   onMount(() => {
+    const app = new AppChannel();
+    openChat = async (chat) => {
+      const request = ++openRequest;
+      openProblem = '';
+      try {
+        await app.call('app.openChatInElma', { chat });
+      } catch (error) {
+        if (request === openRequest) {
+          openProblem = error instanceof Error ? error.message : 'Could not open the Elma Chat app.';
+        }
+      }
+    };
+
     const bridge = new Bridge({
       onhello: () => {
         greeted = true;
@@ -181,6 +198,9 @@
 
     return () => {
       generation++;
+      openRequest++;
+      openChat = undefined;
+      app.close();
       read = undefined;
       bridge.close();
     };
@@ -203,4 +223,6 @@
     onLoadOlder: () => void read?.(importedTab, true),
   }}
   onTabChange={select}
+  onOpenChat={chat => void openChat?.(chat)}
+  {openProblem}
 />
