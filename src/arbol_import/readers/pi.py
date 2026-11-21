@@ -395,7 +395,7 @@ def _response(entry: _Entry, message: dict[str, Any]) -> Response:
         Usage.native(
             uncached=_tokens(entry, usage, "input"),
             cache_read=_tokens(entry, usage, "cacheRead"),
-            cache_write=_tokens(entry, usage, "cacheWrite"),
+            cache_write=_tokens(entry, usage, "cacheWrite") if "cacheWrite" in usage else None,
             output=_tokens(entry, usage, "output"),
             reasoning=_tokens(entry, usage, "reasoning") if usage.get("reasoning") is not None else None,
         ),
