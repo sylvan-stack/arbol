@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/sylvan-stack/arbol-design-system",
-  "commit": "e4f2fb4e486e0387c9f095771cef045d4edfb8a6",
+  "commit": "0cc92eace5e012f32af9a352162c0db0df895f11",
   "files": {
     "docs/licenses/Hanken-Grotesk-OFL.txt": "f45f60ca871850c58d8dc9c973bd6fcad40c137e9d037172b961e8ca68c87ef7",
     "docs/licenses/Spline-Sans-Mono-OFL.txt": "3127290ccd196ec0c4ffa60296845224a034b92c81de8231b0916278ed7607e1",
@@ -21,7 +21,7 @@
     "src/json.ts": "9101532d0ae7e1c0ed89b6eaf3bbe00b7c1727b5946e7429fe5d24a34ad75396",
     "src/markdown.ts": "3879de5cdf3bb5c48a2f29639e3237a41d700d487f88571181a908b27c2d1e0e",
     "src/pages/IntelligenceProviders.svelte": "1e74ad79967695b76c7e1d038e417d4f955f82072d51378c61176f36a0a977db",
-    "src/pages/SeqoyaLab.svelte": "1371e40a66be704d6966a4b60eeeee0cb6988f19f947ca8318325286a9dee5d5",
+    "src/pages/SeqoyaLab.svelte": "be78371e552fb60a6f0a8be9bb8a5b822fc8db8d764e30ac4fad783d377ca67e",
     "src/pages/WilloStation.svelte": "a49c7b39a74b35f26e21e5afe947db18a22aaa91fa2bca5817654a83b8627c37",
     "src/patterns/CommandPalette.svelte": "a48722ad4b2fb3ac7e96773ffe99a5899e6f37688ac4d7f9fee33f7c9356e149",
     "src/patterns/ConfirmAction.svelte": "105af94d18ae735133ce670385c390eb235f57c7822f1927b60823cb344f380b",
@@ -33,7 +33,7 @@
     "src/patterns/Notice.svelte": "b2d76e8101550ea9006c791266b1b4ae45092b5dd481dd1e147883f5fc790f79",
     "src/patterns/PageHeader.svelte": "6a6514e5fddc38dbb904e86be9d9a7d007dbe43fd4aef5ac8406a2718477876a",
     "src/patterns/WorkspaceHeader.svelte": "fdb8df1caa89f99cba647a04dfdc04f4a6082d34c3f985366edbb6ebf414d141",
-    "src/patterns/WorkspaceShell.svelte": "2f12dd52df95eca2afb0c16be60f76ec6a10d3bec48ae0b4a7412695577a9d64",
+    "src/patterns/WorkspaceShell.svelte": "8f303aa4af71a34c740450191064b46c15a23ee84de2667858d9802486584ffe",
     "src/sections/AllowanceMetrics.svelte": "11c2e513b10320f29494381ddf51268a33419879e99ef46ed1321094e2f67dc2",
     "src/sections/AnswerThreshold.svelte": "0057af31a89378c5cc42a7bb2a040248431dbfb6c651b1e4e985c8b03374a3ff",
     "src/sections/AskUserQuestion.svelte": "40aac40331bb5d7087dc7c0a263564a2bf859669b0ea62335dbae710a96c2d78",

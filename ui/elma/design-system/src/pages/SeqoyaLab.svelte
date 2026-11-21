@@ -37,7 +37,7 @@
 
 <WorkspaceShell workspace="Seqoya" headerTitle="Seqoya Lab" current="Intelligence Providers"
   destinations={['Intelligence Providers']} {trunk} {trunkSelector} {headerWindowControls}
-  insignia={{ label: providerTabInsignia[tab] }}
+  insignia={{ label: providerTabInsignia[tab], compact: true }}
   headerAppearance={appearanceReady ? 'enabled' : 'disabled'} bind:theme bind:uiScale {onAppearanceChange}
   status={connectionStatus ? connection : null} navigationFooter={false} {fitted}>
   <div class="page-content seqoya-page">

@@ -41,7 +41,7 @@
     headerExtras?: Snippet;
     headerWindowControls?: Snippet;
     headerAppearance?: 'enabled' | 'disabled';
-    insignia?: { label: string; hue?: number };
+    insignia?: { label: string; hue?: number; compact?: boolean };
     theme?: string;
     uiScale?: number;
     contentScale?: number;
@@ -64,7 +64,8 @@
     {#if showNavigation}<nav aria-label={workspace + ' navigation'}>
       {#if navigation}{@render navigation()}{:else}
       {#if insignia}
-        <div class="insignia" style:--insignia-hue={(insignia.hue ?? 0) + 'deg'}>
+        <div class="insignia" class:compact-insignia={insignia.compact}
+          style:--insignia-hue={(insignia.hue ?? 0) + 'deg'}>
           <span class="insignia-watermark" aria-hidden="true">
             <WorkspaceGlyph {workspace} size={132} />
           </span>
@@ -186,6 +187,19 @@
     line-height: 1.15;
     overflow-wrap: anywhere;
   }
+  .compact-insignia { gap: 7px; }
+  .compact-insignia .insignia-title {
+    font: 600 calc(16px * var(--font-scale))/1.2 ui-serif, Georgia, serif;
+    text-wrap: balance;
+  }
+  .compact-insignia .insignia-workspace::after {
+    content: '';
+    inline-size: 22px;
+    block-size: 1px;
+    background: currentColor;
+    opacity: 0.38;
+  }
+  .compact-insignia .insignia-watermark { opacity: 0.28; }
   nav button {
     color: var(--muted);
     background: none;
