@@ -194,12 +194,15 @@ def _relative(path: str) -> str:
 
 @dataclass(frozen=True)
 class HomeFile:
-    """A file in the tool's home, by its path relative to the home."""
+    """A file in the tool's home with its manifest and optional verified read paths."""
 
     path: str
+    read_path: str | None = None
 
     def __post_init__(self) -> None:
         _relative(self.path)
+        if self.read_path is not None:
+            _relative(self.read_path)
 
 
 @dataclass(frozen=True)
