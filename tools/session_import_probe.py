@@ -227,13 +227,19 @@ class Ledger:
     @contextmanager
     def watch(self) -> Iterator[None]:
         real_stat = Path.stat
+        real_is_file = Path.is_file
 
         def observe(path: Path, *, follow_symlinks: bool = True) -> os.stat_result:
             self.capture(path.absolute())
             return real_stat(path, follow_symlinks=follow_symlinks)
 
+        def observe_is_file(path: Path, *, follow_symlinks: bool = True) -> bool:
+            # Path.is_file normally bypasses Path.stat on Python 3.14.
+            self.capture(path.absolute())
+            return real_is_file(path, follow_symlinks=follow_symlinks)
+
         sys.addaudithook(self.audit)
-        with patch.object(Path, 'stat', observe):
+        with patch.object(Path, 'stat', observe), patch.object(Path, 'is_file', observe_is_file):
             self.active = True
             try:
                 yield
