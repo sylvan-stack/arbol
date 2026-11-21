@@ -26,6 +26,7 @@ from .form import (
     CallLink,
     ExportedRows,
     Failed,
+    FileObservation,
     HomeFile,
     Image,
     Item,
@@ -801,7 +802,10 @@ def _archive(
         outside.add(str(resolved))
     # The listed diff must not alias an in-home credential or another session's file.
     if resolved == candidate and stat.S_ISREG(info.st_mode):
-        return (exported, HomeFile(relative.as_posix())), len(outside)
+        observed = FileObservation.from_stat(info)
+        if FileObservation.from_stat(candidate.lstat()) != observed:
+            raise OSError("A native session diff changed during archive nomination.")
+        return (exported, HomeFile(relative.as_posix(), observation=observed)), len(outside)
     return (exported,), len(outside)
 
 
