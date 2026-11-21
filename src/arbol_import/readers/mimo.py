@@ -23,6 +23,7 @@ from urllib.parse import unquote, urlsplit
 from .form import (
     LIVE_WINDOW,
     ArchiveFile,
+    CallLink,
     ExportedRows,
     Failed,
     HomeFile,
@@ -588,6 +589,9 @@ class _Launch:
     message: _Message
     call_id: str
 
+    def link(self) -> CallLink:
+        return CallLink(None if self.message.lane == "main" else self.message.lane, self.call_id)
+
 
 @dataclass(frozen=True)
 class _Actor:
@@ -659,6 +663,7 @@ def _items(turn: _Turn, actors: list[_Actor]) -> Iterator[Item]:
                 else:
                     yield replace(
                         part.tool, agent=message.lane, parent_call_id=launch.call_id if launch else None,
+                        parent=launch.link() if launch else None,
                     )
             elif message.lane == "main" and (text := _text_block(message, part)) is not None:
                 yield text
@@ -678,7 +683,8 @@ def _subagent(actor: _Actor) -> Subagent:
     )
     state, _, _ = _state(last_assistant)
     return Subagent(
-        actor.lane, actor.launch.call_id if actor.launch else None, actor.messages[0].created, state == "failed", usage,
+        actor.lane, actor.launch.call_id if actor.launch else None, actor.messages[0].created, state == "failed",
+        usage, actor.launch.link() if actor.launch else None,
     )
 
 
