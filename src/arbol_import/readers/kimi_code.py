@@ -9,8 +9,10 @@ import re
 import subprocess
 from base64 import b64decode
 from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from functools import partial
 from hashlib import sha256
 from heapq import merge
 from pathlib import Path
@@ -21,6 +23,7 @@ from urllib.parse import unquote, unquote_to_bytes
 from .form import (
     LIVE_WINDOW,
     CallLink,
+    CatalogueEntry,
     Failed,
     FileObservations,
     HomeFile,
@@ -40,6 +43,7 @@ from .form import (
     Trigger,
     Turn,
     Usage,
+    read_catalogue,
     unknown_record,
 )
 from .lines import file_records, observed_input
@@ -1065,51 +1069,65 @@ def _locked(home: Path, session: _SavedSession) -> bool:
     return False
 
 
-def read(source: Source) -> Iterator[Session | Failed]:
-    """Yield selected sessions or their individual failures. Open native files read-only."""
+def _read_session(
+    home: Path, source: Source, session: _SavedSession, inventory: dict[str, _SavedSession],
+) -> Session | Failed:
+    lanes = {"main": _Lane()}
+    observations = FileObservations()
+    files = _RawFiles(home, session, observations)
+    try:
+        state = _state(home, session.state, observations)
+        wires = _wires(home, session)
+        copied = _fork_ids(home, session, state, inventory)
+        main = lanes["main"]
+        for agent, path in wires.items():
+            lane = lanes.setdefault(agent, _Lane())
+            for where, row in _rows(home, path, observations):
+                files.observe(row)
+                if lane.first_at is None:
+                    lane.first_at = _time(row.get("created_at") if row["type"] == "metadata" else row.get("time"))
+                if copied is None or not copied.has(agent, row):
+                    lane.append(_record(where, row))
+        created = main.first_at
+        if created is None:
+            created = state.created_at or observations.files[session.main].modified_at
+        kind = _kind(lanes)
+        turns = tuple(_project(lanes, home, session, state.cwd, observations))
+        files_to_archive = files.archive(wires)
+        live = any(
+            observations.files[path].modified_at >= source.clock - LIVE_WINDOW
+            for path in wires.values()
+        ) or _locked(home, session)
+        return Session("kimi-code", session.native_id, kind, state.title, created, main.version,
+                      _origin(session, main), state.cwd, live, turns,
+                      files_to_archive, len(files.outside))
+    except SessionFailure as session_failure:
+        return Failed.of(session_failure, native_id=session.native_id, kind=_kind(lanes))
+    except (OSError, UnicodeError, RecursionError):
+        failure = SessionFailure("unreadable_session", f"{session.folder.relative_to(home)}: could not read session.")
+        return Failed.of(failure, native_id=session.native_id, kind=_kind(lanes))
+
+
+def _entries(source: Source) -> Iterator[CatalogueEntry]:
     try:
         home = source.home.resolve()
     except (OSError, ValueError, RuntimeError):
         failure = SessionFailure("unreadable_session", "sessions: could not resolve the tool home.")
-        yield Failed.of(failure, file="sessions")
+        yield CatalogueEntry.failed(Failed.of(failure, file="sessions"))
         return
 
     inventory: dict[str, _SavedSession] = {}
-    yield from _discover(home, inventory, report_unidentified=source.selected is None)
+    for failed in _discover(home, inventory, report_unidentified=source.selected is None):
+        yield CatalogueEntry.failed(failed)
     for session in inventory.values():
-        if not source.wants(session.native_id):
-            continue
-        lanes = {"main": _Lane()}
-        observations = FileObservations()
-        files = _RawFiles(home, session, observations)
-        try:
-            state = _state(home, session.state, observations)
-            wires = _wires(home, session)
-            copied = _fork_ids(home, session, state, inventory)
-            main = lanes["main"]
-            for agent, path in wires.items():
-                lane = lanes.setdefault(agent, _Lane())
-                for where, row in _rows(home, path, observations):
-                    files.observe(row)
-                    if lane.first_at is None:
-                        lane.first_at = _time(row.get("created_at") if row["type"] == "metadata" else row.get("time"))
-                    if copied is None or not copied.has(agent, row):
-                        lane.append(_record(where, row))
-            created = main.first_at
-            if created is None:
-                created = state.created_at or observations.files[session.main].modified_at
-            kind = _kind(lanes)
-            turns = tuple(_project(lanes, home, session, state.cwd, observations))
-            files_to_archive = files.archive(wires)
-            live = any(
-                observations.files[path].modified_at >= source.clock - LIVE_WINDOW
-                for path in wires.values()
-            ) or _locked(home, session)
-            yield Session("kimi-code", session.native_id, kind, state.title, created, main.version,
-                          _origin(session, main), state.cwd, live, turns,
-                          files_to_archive, len(files.outside))
-        except SessionFailure as session_failure:
-            yield Failed.of(session_failure, native_id=session.native_id, kind=_kind(lanes))
-        except (OSError, UnicodeError, RecursionError):
-            failure = SessionFailure("unreadable_session", f"{session.folder.relative_to(home)}: could not read session.")
-            yield Failed.of(failure, native_id=session.native_id, kind=_kind(lanes))
+        if source.wants(session.native_id):
+            yield CatalogueEntry(session.native_id, None, partial(_read_session, home, source, session, inventory))
+
+
+@contextmanager
+def catalogue(source: Source) -> Iterator[Iterator[CatalogueEntry]]:
+    yield _entries(source)
+
+
+def read(source: Source) -> Iterator[Session | Failed]:
+    yield from read_catalogue(catalogue, source)
