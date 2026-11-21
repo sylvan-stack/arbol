@@ -11,6 +11,7 @@ from datetime import datetime
 from math import isfinite
 from pathlib import Path
 from typing import Literal
+from uuid import UUID
 
 from .readers.form import CallLink, Kind, Result, Session, State, TextBlock, Tool, ToolCall, Trigger, Turn, Usage
 
@@ -27,6 +28,9 @@ _SHELL_NAMES = {
 }
 _SHELL_WRAPPER = re.compile(r"(?:.*/)?(?:sh|bash|zsh|dash|ksh|fish)")
 _SHELL_OPTIONS = re.compile(r"-[il]*c[il]*")
+_DRIVER_NAMES: dict[Tool, str] = {
+    "claude-code": "claude", "codex": "codex", "kimi-code": "kimi-code", "pi": "pi", "mimo": "mimo",
+}
 
 
 @dataclass(frozen=True)
@@ -51,6 +55,18 @@ class ToolCallRow:
 
 
 @dataclass(frozen=True)
+class RunRow:
+    exchange_id: UUID
+    run_id: str
+    outcome: State
+    usage: JsonObject
+    error: JsonObject | None
+    ended_at: datetime
+    kind: Literal["agent"] = "agent"
+    started: None = None
+
+
+@dataclass(frozen=True)
 class MappedSegment:
     turn_key: str
     trigger: ExchangeTrigger
@@ -58,10 +74,19 @@ class MappedSegment:
     ended_at: datetime
     state: State
     working_folder: str
-    usage: Usage
+    route: JsonObject
+    error: JsonObject | None
+    usage: JsonObject
     messages: tuple[MessageRow, ...]
     calls: tuple[ToolCallRow, ...]
     fallback_count: int
+    trunk: Literal["imported"] = "imported"
+    build: Literal["0"] = "0"
+    small_call_route: None = None
+
+    def run_for(self, exchange_id: UUID) -> RunRow:
+        """Give the single agent run and all of the segment's calls the same stored run ID."""
+        return RunRow(exchange_id, f"{exchange_id}.import", self.state, self.usage, self.error, self.ended_at)
 
 
 @dataclass(frozen=True)
@@ -71,6 +96,7 @@ class MappedSession:
     kind: Kind
     title: str | None
     created_at: datetime
+    tool_version: str | None
     origin: JsonObject
     segments: tuple[MappedSegment, ...]
 
@@ -292,8 +318,36 @@ def _call_row(call: ToolCall, position: int, identifier: str, parent: str | None
     )
 
 
+def _run_usage(usage: Usage, model: str | None) -> JsonObject:
+    value: JsonObject = {
+        "inputTokens": usage.input_tokens,
+        "cachedInputTokens": usage.cached_input_tokens,
+        "outputTokens": usage.output_tokens,
+    }
+    if model is not None:
+        value["model"] = stored_text(model)
+    if usage.reasoning_tokens is not None:
+        value["reasoningTokens"] = usage.reasoning_tokens
+    if usage.cache_write_tokens is not None:
+        value["cacheWriteTokens"] = usage.cache_write_tokens
+    return value
+
+
+def _failure(turn: Turn) -> JsonObject:
+    message = stored_text(turn.error or "The tool recorded the turn as failed without a message.")[:2000]
+    error: JsonObject = {"code": "imported_failure", "message": message}
+    if turn.error_kind is not None:
+        error["native"] = stored_text(turn.error_kind)
+    return error
+
+
 def _map_turn(turn: Turn, working_folder: str, session: Session) -> Iterator[MappedSegment]:
     segments, call_count = _split_turn(turn)
+    route: JsonObject = {"driver": _DRIVER_NAMES[session.tool]}
+    if turn.model is not None:
+        route["model"] = stored_text(turn.model)
+    if turn.effort is not None:
+        route["effort"] = stored_text(turn.effort)
     visited = 0
     for segment in segments:
         messages = [MessageRow(0, "user", stored_text(segment.prompt))]
@@ -321,7 +375,8 @@ def _map_turn(turn: Turn, working_folder: str, session: Session) -> Iterator[Map
             pending.extend((child, identifier) for child in reversed(sorted(item.children, key=_item_time)))
         yield MappedSegment(
             segment.turn_key, segment.trigger, segment.accepted_at, segment.ended_at,
-            segment.state, working_folder, segment.usage, tuple(messages), tuple(calls), fallback_count,
+            segment.state, working_folder, route, _failure(turn) if segment.state == "failed" else None,
+            _run_usage(segment.usage, turn.model), tuple(messages), tuple(calls), fallback_count,
         )
     if visited != call_count:
         raise MappingError("Saved tool calls have circular parent links.")
@@ -339,4 +394,5 @@ def map_session(session: Session, owner_home: Path) -> MappedSession:
         )
     except RecursionError:
         raise MappingError("A saved object is nested too deeply.") from None
-    return MappedSession(session.tool, session.native_id, session.kind, title, session.created_at, origin, segments)
+    version = stored_text(session.tool_version) if session.tool_version is not None else None
+    return MappedSession(session.tool, session.native_id, session.kind, title, session.created_at, version, origin, segments)
