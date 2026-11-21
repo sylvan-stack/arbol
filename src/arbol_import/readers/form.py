@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import re
 import stat
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from os import stat_result
@@ -382,11 +383,37 @@ class Source:
         return self.selected is None or native_id in self.selected
 
 
+@dataclass(frozen=True)
+class CatalogueEntry:
+    """Reportable identity and a projection valid during its open catalogue."""
+
+    native: str
+    kind: Kind | None
+    load: Callable[[], Session | Failed]
+
+    @classmethod
+    def failed(cls, value: Failed) -> CatalogueEntry:
+        attribution = value.native_id if value.native_id is not None else value.file
+        assert attribution is not None
+        return cls(attribution, value.kind, lambda: value)
+
+
+type Catalogue = AbstractContextManager[Iterator[CatalogueEntry]]
+
+
 class Reader(Protocol):
     """A tool's reader module, `arbol_import.readers.<tool code name with - as _>`. `read()` yields one `Session` or
     `Failed` per top-level session; a failed session never stops the others. A reader only reads."""
 
     def read(self, source: Source) -> Iterator[Session | Failed]: ...
+
+    def catalogue(self, source: Source) -> Catalogue: ...
+
+
+def read_catalogue(open_catalogue: Callable[[Source], Catalogue], source: Source) -> Iterator[Session | Failed]:
+    with open_catalogue(source) as entries:
+        for entry in entries:
+            yield entry.load()
 
 
 def reader_module(tool: Tool) -> str:
