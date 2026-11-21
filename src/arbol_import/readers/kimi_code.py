@@ -19,6 +19,7 @@ from typing import Any, Never
 from urllib.parse import unquote, unquote_to_bytes
 
 from .form import (
+    CallLink,
     Failed,
     HomeFile,
     Image,
@@ -576,7 +577,7 @@ def _content(record: _Record) -> TextBlock | None:
 
 
 def _items(turn: _NativeTurn, home: Path, session: _SavedSession, *,
-           agent: str | None = None, parent_call: str | None = None) -> Iterator[Item]:
+           agent: str | None = None, parent: CallLink | None = None) -> Iterator[Item]:
     results = {record.data["parentUuid"]: record for record in turn.records if record.kind == "tool.result"}
     seen: set[str] = set()
     for record in turn.records:
@@ -589,8 +590,10 @@ def _items(turn: _NativeTurn, home: Path, session: _SavedSession, *,
         result, ok, error = None, True, None
         if linked := results.get(data["uuid"]):
             result, ok, error = _result(home, session, linked)
-        yield ToolCall(data["toolCallId"], agent, data["name"], data.get("args"), result, ok, error,
-                       parent_call, record.time())
+        yield ToolCall(
+            data["toolCallId"], agent, data["name"], data.get("args"), result, ok, error,
+            parent.call_id if parent else None, record.time(), parent=parent,
+        )
 
 
 def _check_tool(record: _Record) -> None:
@@ -818,22 +821,22 @@ def _turn_at(lane: _Lane, at: datetime) -> _NativeTurn | None:
 
 
 def _route(agent: str, at: datetime, first_at: datetime, main: _Lane,
-           launches: dict[str, list[_Launch]]) -> tuple[_NativeTurn | None, str | None]:
+           launches: dict[str, list[_Launch]]) -> tuple[_NativeTurn | None, CallLink | None]:
     """Find the main turn and the immediate launch call, walking parent lanes."""
-    parent_call = None
+    parent = None
     visited = set()
     while agent not in visited:
         visited.add(agent)
         entries = launches.get(agent, [])
         launch = next((entry for entry in reversed(entries) if entry.at <= at), entries[0] if entries else None)
         if launch is None:
-            return _turn_at(main, first_at), parent_call
+            return _turn_at(main, first_at), parent
         if launch.parent_turn is None:
             return None, None
-        if parent_call is None:
-            parent_call = launch.call_id
+        if parent is None and launch.call_id is not None:
+            parent = CallLink(None if launch.parent_agent == "main" else launch.parent_agent, launch.call_id)
         if launch.parent_agent == "main":
-            return launch.parent_turn, parent_call
+            return launch.parent_turn, parent
         agent = launch.parent_agent
         at = first_at = launch.parent_turn.start.time()
     return _turn_at(main, first_at), None
@@ -842,7 +845,7 @@ def _route(agent: str, at: datetime, first_at: datetime, main: _Lane,
 @dataclass
 class _ChildWork:
     first_at: datetime
-    parent_call: str | None
+    parent: CallLink | None
     failed: bool = False
     usage: Usage = field(default_factory=Usage)
     items: list[Item] = field(default_factory=list)
@@ -864,23 +867,26 @@ def _project(lanes: dict[str, _Lane], home: Path, session: _SavedSession, cwd: s
         for index, turn in enumerate(native_turns):
             at = turn.start.time() if turn is not None else lane.first_at
             first_at = lane.first_at if index == 0 else at
-            root, parent_call = _route(agent, at, first_at, main, launches)
+            root, parent = _route(agent, at, first_at, main, launches)
             if root is None:
                 continue
-            work = children.setdefault(root.key, {}).setdefault(agent, _ChildWork(first_at, parent_call))
+            work = children.setdefault(root.key, {}).setdefault(agent, _ChildWork(first_at, parent))
             if turn is not None:
                 work.failed = turn.end is not None and turn.end.data["reason"] not in ("cancelled", "completed")
                 for response in _responses(turn, counted):
                     work.usage += response.usage
-                work.items.extend(_items(turn, home, session, agent=agent, parent_call=parent_call))
+                work.items.extend(_items(turn, home, session, agent=agent, parent=parent))
 
     counted_main: set[str] = set()
     for turn in main.turns.values():
         root_items = _items(turn, home, session)
         agents = children.get(turn.key, {})
         items = tuple(merge(root_items, *(work.items for work in agents.values()), key=_item_time))
-        subagents = tuple(Subagent(agent, work.parent_call, work.first_at, work.failed, work.usage)
-                         for agent, work in agents.items())
+        subagents = tuple(
+            Subagent(agent, work.parent.call_id if work.parent else None, work.first_at, work.failed,
+                     work.usage, work.parent)
+            for agent, work in agents.items()
+        )
         yield replace(turn.project(cwd, counted_main), items=items, subagents=subagents)
 
 
