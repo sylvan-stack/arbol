@@ -1242,7 +1242,7 @@ def _responses(turn: NativeTurn) -> tuple[Response, ...]:
         usage = Usage(
             input_tokens=counts["input_tokens"],
             cached_input_tokens=counts["cached_input_tokens"] or 0,
-            cache_write_tokens=counts["cache_write_input_tokens"] or 0,
+            cache_write_tokens=counts["cache_write_input_tokens"],
             output_tokens=counts["output_tokens"],
             reasoning_tokens=counts["reasoning_output_tokens"],
         )
