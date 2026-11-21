@@ -189,6 +189,11 @@ def valid_record(value: object, component: str, build: str) -> bool:
             isinstance(check, dict) and text(check.get("name")) and isinstance(check.get("passed"), bool)
             for check in checks):
         return False
+    selection = value.get("promotionUnitTests")
+    if "promotionUnitTests" in value and (
+            component.endswith("-driver") or not isinstance(selection, list)
+            or any(not text(name) for name in selection) or len(set(selection)) != len(selection)):
+        return False
     if (installation_layout(value) is None
             or any(key in value and not positive(value[key]) for key in ("contract", "dataFormat"))):
         return False
@@ -208,7 +213,8 @@ def valid_record(value: object, component: str, build: str) -> bool:
     if "entry" in value and entry_path("/build", value["entry"]) is None:
         return False
     if value["status"] in ("working", "withdrawn") and (
-            not date(value.get("finishedAt")) or not text(value.get("entry")) or not checks
+            not date(value.get("finishedAt")) or not text(value.get("entry")) or (selection is None and not checks)
+            or not set(selection or ()).issubset(check["name"] for check in checks)
             or any(check["passed"] is not True for check in checks)):
         return False
     if value["status"] == "withdrawn":

@@ -31,7 +31,7 @@ from .service import (
 from .unused import prune_browser_releases, prune_unused
 
 USAGE = ("arbol-builds build <component> [--repo <folder>] [--release-to <new-evidence-directory>] "
-         "[--browser-release <review-commit>] "
+         "[--browser-release <review-commit>] [--check <name>] "
          "| list [<component>] | show <component>[@<build>] "
          "| withdraw <component>@<build> --reason <text> "
          "| lock <component>@<build> | unlock <component>@<build> | prune <component> --keep <n> | prune --unused "
@@ -123,7 +123,7 @@ def main(args: list[str]) -> int:
             return 0
         words, values = options(
             args, ["--registry-dir", "--bin-dir", "--repo", "--reason", "--keep", "--unused", "--release-to",
-                   "--browser-release"],
+                   "--browser-release", "--check"],
             {"--unused"},
         )
         command = words[0] if words else None
@@ -134,7 +134,7 @@ def main(args: list[str]) -> int:
         if "--unused" in values and (command != "prune" or len(words) > 1 or "--keep" in values):
             raise ValueError("--unused applies only to prune without a component or --keep.")
         for key in values:
-            if ((key in ("--repo", "--release-to", "--browser-release") and command != "build")
+            if ((key in ("--repo", "--release-to", "--browser-release", "--check") and command != "build")
                     or (key == "--reason" and command != "withdraw")
                     or (key == "--keep" and command != "prune")):
                 raise ValueError(f"Option {key} does not apply to {command}.")
@@ -203,7 +203,8 @@ def main(args: list[str]) -> int:
 
             previous = {name: signal.signal(name, request) for name in (signal.SIGINT, signal.SIGTERM)}
             try:
-                record = build_component(component, paths, stop, browser_release_review=review)
+                record = build_component(component, paths, stop, browser_release_review=review,
+                                         additional_check=values.get("--check"))
             finally:
                 for name, handler in previous.items():
                     signal.signal(name, handler)

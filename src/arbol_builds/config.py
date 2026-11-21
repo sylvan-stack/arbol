@@ -76,7 +76,8 @@ def description(repo: str, component: str) -> tuple[dict[str, Any], str, dict[st
             or not isinstance(config.get("build"), list) or not config["build"]
             or any(blank(command) for command in config["build"])
             or entry_path("/build", config.get("entry")) is None
-            or not isinstance(config.get("checks"), list) or not config["checks"]):
+            or not isinstance(config.get("checks"), list)
+            or (not config["checks"] and "promotionUnitTests" not in config)):
         raise ValueError("Invalid arbol-build.json: expected this component, nonempty build commands, "
                          "a relative executable entry and named checks.")
     names: set[str] = set()
@@ -85,6 +86,13 @@ def description(repo: str, component: str) -> tuple[dict[str, Any], str, dict[st
                 or blank(check.get("command")) or ("kind" in check and check["kind"] not in KINDS)):
             raise ValueError("Invalid or duplicate check in arbol-build.json.")
         names.add(check["name"])
+    if "promotionUnitTests" in config:
+        selection = config["promotionUnitTests"]
+        unit_names = {check["name"] for check in config["checks"] if check.get("kind") == "unit"}
+        if (component.endswith("-driver") or not isinstance(selection, list)
+                or any(not isinstance(name, str) or name not in unit_names for name in selection)
+                or len(set(selection)) != len(selection)):
+            raise ValueError("promotionUnitTests must name distinct declared unit checks on a non-Driver recipe.")
     for key in ("contract", "dataFormat"):
         if key in config and not positive(config[key]):
             raise ValueError("contract and dataFormat must be positive whole numbers.")
@@ -114,3 +122,20 @@ def description(repo: str, component: str) -> tuple[dict[str, Any], str, dict[st
     source = {"repository": os.path.realpath(os.path.abspath(repo)), "branch": git("rev-parse", "--abbrev-ref", "HEAD"),
               "commit": git("rev-parse", "HEAD"), "uncommittedChanges": git("status", "--porcelain") != ""}
     return config, version, source
+
+
+def selected_checks(config: dict[str, Any], additional: str | None) -> list[dict[str, Any]]:
+    checks: list[dict[str, Any]] = config["checks"]
+    if "promotionUnitTests" not in config:
+        if additional is not None:
+            raise ValueError("--check requires a recipe with an explicit promotionUnitTests selection.")
+        return checks
+    by_name = {check["name"]: check for check in checks}
+    names = [check["name"] for check in checks if "kind" not in check]
+    names.extend(config["promotionUnitTests"])
+    if additional is not None:
+        if additional not in by_name:
+            raise ValueError("The requested --check is not declared in arbol-build.json.")
+        if additional not in names:
+            names.append(additional)
+    return [by_name[name] for name in names]

@@ -27,7 +27,7 @@ from arbol_installation.admission import Admission, AdmissionRefusal, runtime_fo
 from arbol_installation.build_output import unseal_directories
 from arbol_installation.paths import build_payload_directory, build_registry, prepare_installation
 
-from .config import Locations, default_repository, description, load_json
+from .config import Locations, default_repository, description, load_json, selected_checks
 from .launcher import (
     BUILD_PATTERN,
     DRIVER_LAUNCHER_MARK,
@@ -639,16 +639,20 @@ def command(text: str, repo: str, folder: str, number: str, log: int, stop: Stop
     return code == 0 and not stop.requested
 
 
-def build_component(component: str, paths: Locations, stop: Stop, *, browser_release_review: str | None = None) -> Record:
+def build_component(component: str, paths: Locations, stop: Stop, *, browser_release_review: str | None = None,
+                    additional_check: str | None = None) -> Record:
     if component in ("arbol-root", "arbol-roots"):
         raise ValueError("The legacy Root runtime cannot be built by this release.")
     repo = os.path.abspath(paths.repo or default_repository(component))
     config, version, source = description(repo, component)
     if component == "arbol" and not schema_compatibility(config.get("schemaCompatibility")):
         raise ValueError("Arbol must declare schemaCompatibility in arbol-build.json.")
+    config = {**config, "checks": selected_checks(config, additional_check)}
     if browser_release_review is not None:
         if component != "arbol-browser":
             raise ValueError("A Browser release requires the arbol-browser component.")
+        if "promotionUnitTests" not in config:
+            raise ValueError("A Browser release requires an explicit promotionUnitTests selection.")
         with browser_release_allocation(paths, source, browser_release_review) as (folder, build, release):
             return build_allocated(component, paths, stop, repo, config, version, source, folder, build, release)
     folder, build = reserve(paths.registry, component)
@@ -684,6 +688,8 @@ def build_allocated(component: str, paths: Locations, stop: Stop, repo: str, con
                       "startedAt": now(), "source": source, "entry": config["entry"], "checks": []}
     if release is not None:
         record["productionRelease"] = release.copy()
+    if "promotionUnitTests" in config:
+        record["promotionUnitTests"] = config["promotionUnitTests"]
     # Whole numbers, also when written 1.0, in the order of BuildRecord.
     if "contract" in config:
         record["contract"] = int(config["contract"])
@@ -713,6 +719,8 @@ def build_allocated(component: str, paths: Locations, stop: Stop, repo: str, con
         if executable_entry(folder, config["entry"]) is None:
             raise RuntimeError("The entry must be an executable file within the Build folder.")
         stage = "check"
+        if record.get("promotionUnitTests") == []:
+            os.write(log, b"\nPromotion unit test selection is empty.\n")
         for check in config["checks"]:
             name = check["name"]
             passed = command(check["command"], repo, folder, build, log, stop)
@@ -723,6 +731,8 @@ def build_allocated(component: str, paths: Locations, stop: Stop, repo: str, con
         stage, name = "entry", config["entry"]
         if executable_entry(folder, config["entry"]) is None:
             raise RuntimeError("A check removed the Build entry.")
+        if stop.requested:
+            raise RuntimeError("Build stopped by the caller.")
         record["status"] = "working"
     except Exception as error:
         record["status"] = "failed"
