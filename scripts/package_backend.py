@@ -178,6 +178,7 @@ def package(root: Path = ROOT) -> Path:
     ignore = shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store")
     shutil.copytree(root / "src/arbol_installation", folder / "src/arbol_installation", ignore=ignore)
     shutil.copytree(root / "src/arbol_backend", folder / "src/arbol_backend", ignore=ignore)
+    shutil.copytree(root / "src/arbol_import", folder / "src/arbol_import", ignore=ignore)
     shutil.copytree(root / "src/arbol_radar", folder / "src/arbol_radar", ignore=ignore)
     shutil.copytree(root / "tests/backend", folder / "tests/backend", ignore=ignore)
     shutil.copytree(root / "tests/radar", folder / "tests/radar", ignore=ignore)
