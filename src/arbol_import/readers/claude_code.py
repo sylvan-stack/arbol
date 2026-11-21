@@ -371,6 +371,7 @@ _METADATA_TYPES = (
     "summary", "system", "progress", "queue-operation", "bridge-session", "relocated", "custom-title", "ai-title",
     "file-history-snapshot", "file-history-delta",
 )
+_REQUEST_REPLAY_TYPES = ("api-request", "api-request-blob", "api-request-shape")
 
 
 def _object(value: object) -> dict[str, Any]:
@@ -446,6 +447,8 @@ def _validated(
 ) -> Record | None:
     row = _object(raw)
     kind = row.get("type")
+    if kind in _REQUEST_REPLAY_TYPES:
+        return None
     record = Record(file, position, row, _record_time(row), duplicate, stream_path)
     if kind in _MESSAGE_TYPES:
         _validate_message(home, record)
