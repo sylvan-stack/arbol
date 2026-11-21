@@ -18,6 +18,7 @@ import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from io import BufferedReader
 from pathlib import Path
 from threading import Event
 from typing import TYPE_CHECKING, Any
@@ -68,6 +69,11 @@ SIGINT_LINE = ("import _signal, sys; _signal.getsignal(_signal.SIGINT) is _signa
 SHEBANG_STOPS = " \t\n#"
 SHEBANG_LIMIT = 500
 STOP_SECONDS = 2.0
+BROWSER_BUILD = re.compile(r"[1-9a-f][0-9a-f]{0,15}\Z")
+BROWSER_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+BROWSER_LAUNCHER = 'anchor apple generic and certificate leaf[subject.OU] = "7V372XL59S" ' \
+    'and certificate leaf[field.1.2.840.113635.100.6.1.13] exists ' \
+    'and identifier "com.sylvan-stack.arbol-browser.launcher"'
 
 
 def now() -> str:
@@ -211,6 +217,122 @@ def browser_release_allocation(paths: Locations, source: dict[str, Any],
                 raise ValueError("Browser release reservation changed during the Build.")
             os.unlink(proof)
         os.rmdir(canonical)
+
+
+def browser_support(home: Path) -> Path:
+    return home / ".local/lib/sylvan-stack/arbol-browser"
+
+
+def browser_private_directory(path: Path) -> None:
+    if path.resolve(strict=True) != path:
+        raise ValueError("Browser maintenance requires physical paths.")
+    for folder in (path, *path.parents):
+        info = folder.lstat()
+        mode = stat.S_IMODE(info.st_mode)
+        system_tmp = folder == Path("/private/tmp") and info.st_uid == 0 and mode == 0o1777
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, os.getuid())
+                or (mode & 0o022 and not system_tmp)
+                or (folder == path and (info.st_uid != os.getuid() or mode != 0o700))):
+            raise ValueError("Browser maintenance directory is unsafe.")
+
+
+@contextmanager
+def browser_file(path: Path, mode: int = 0o600, *, unlink_allowed: bool = False) -> Iterator[tuple[BufferedReader, os.stat_result]]:
+    browser_private_directory(path.parent)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as stream:
+        def stamp(info: os.stat_result) -> tuple[int, ...]:
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) != mode or info.st_nlink != 1):
+                raise ValueError("Browser maintenance file is unsafe.")
+            return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+        before = os.fstat(fd)
+        expected = stamp(before)
+        if stamp(path.lstat()) != expected:
+            raise ValueError("Browser maintenance file changed.")
+        yield stream, before
+        held = os.fstat(fd)
+        try:
+            named = path.lstat()
+        except FileNotFoundError:
+            if not unlink_allowed or held.st_nlink != 0 or not os.path.samestat(before, held):
+                raise
+            return
+        if stamp(held) != expected or stamp(named) != expected:
+            raise ValueError("Browser maintenance file changed.")
+
+
+def browser_document(path: Path, maximum: int = 16384) -> tuple[Record, str]:
+    with browser_file(path) as (stream, info):
+        if not 1 <= info.st_size <= maximum:
+            raise ValueError("Invalid Browser maintenance document size.")
+        raw = stream.read(maximum + 1)
+    value = json.loads(raw.decode("utf-8", "strict"))
+    if len(raw) != info.st_size or not isinstance(value, dict):
+        raise ValueError("Invalid Browser maintenance document.")
+    return value, hashlib.sha256(raw).hexdigest()
+
+
+def browser_file_digest(path: Path, maximum: int, mode: int = 0o600) -> str:
+    with browser_file(path, mode) as (stream, info):
+        if not 1 <= info.st_size <= maximum:
+            raise ValueError("Invalid Browser release file size.")
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+@contextmanager
+def browser_lock(path: Path, *, shared: bool = False, retiring: bool = False) -> Iterator[None]:
+    with browser_file(path, unlink_allowed=retiring) as (stream, _):
+        fcntl.flock(stream.fileno(), (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
+        yield
+
+
+def browser_release_number(value: object) -> bool:
+    return isinstance(value, str) and BROWSER_BUILD.fullmatch(value) is not None
+
+
+def browser_sha(value: object) -> bool:
+    return isinstance(value, str) and BROWSER_DIGEST.fullmatch(value) is not None
+
+
+def browser_release_receipt(home: Path, build: str) -> Record:
+    if not browser_release_number(build):
+        raise ValueError("Invalid installed Browser Build number.")
+    receipt, _ = browser_document(browser_support(home) / "releases" / f"{build}.json")
+    if (set(receipt) != {"format", "build", "imageSha256", "source", "payloadDigest", "launcherSha256"}
+            or receipt["format"] != 1 or receipt["build"] != build
+            or not all(browser_sha(receipt[key]) for key in ("imageSha256", "payloadDigest", "launcherSha256"))
+            or not isinstance(receipt["source"], str) or not re.fullmatch(r"[0-9a-f]{40}", receipt["source"])):
+        raise ValueError("Invalid installed Browser release receipt.")
+    return receipt
+
+
+def installed_browser_selection(home: Path) -> Record | None:
+    """Verify the canonical selection without launching or remounting any release."""
+    support = browser_support(home)
+    if os.path.lexists(support / "install-transaction.json"):
+        raise ValueError("Browser installation transaction needs recovery.")
+    try:
+        selected, _ = browser_document(support / "selected.json", 4096)
+    except FileNotFoundError:
+        return None
+    if (set(selected) != {"format", "build", "imageSha256"} or selected["format"] != 1
+            or not browser_release_number(selected["build"]) or not browser_sha(selected["imageSha256"])):
+        raise ValueError("Invalid installed Browser selection.")
+    build = selected["build"]
+    receipt = browser_release_receipt(home, build)
+    image = support / "images" / f"{build}.dmg"
+    launcher = home / "Applications/Arbol Browser/bin/arbol-browser"
+    if (selected["imageSha256"] != receipt["imageSha256"]
+            or browser_file_digest(image, 1073741824) != receipt["imageSha256"]
+            or browser_file_digest(launcher, 67108864, 0o755) != receipt["launcherSha256"]):
+        raise ValueError("Selected Browser image or launcher differs from its release.")
+    checked = subprocess.run(["/usr/bin/codesign", "--verify", "--strict", "-R", f"={BROWSER_LAUNCHER}", str(launcher)],
+                             env={"PATH": "/usr/bin:/bin"}, capture_output=True, timeout=15, check=False)
+    if checked.returncode or browser_document(support / "selected.json", 4096)[0] != selected:
+        raise ValueError("Selected Browser release could not be verified.")
+    return selected
 
 
 def module_text(name: str, folder: Path = Path(PACKAGE)) -> str:

@@ -15,22 +15,28 @@ from .config import JS_SPACE, component_name, default_repository, locations
 from .launcher import json_line, standard_descriptors, write_all
 from .service import (
     Stop,
+    browser_lock,
+    browser_release_number,
+    browser_sha,
+    browser_support,
     build_component,
     build_details,
+    installed_browser_selection,
     list_builds,
     lock_build,
     prune_builds,
     show_build,
     withdraw_build,
 )
-from .unused import prune_unused
+from .unused import prune_browser_releases, prune_unused
 
 USAGE = ("arbol-builds build <component> [--repo <folder>] [--release-to <new-evidence-directory>] "
          "[--browser-release <review-commit>] "
          "| list [<component>] | show <component>[@<build>] "
          "| withdraw <component>@<build> --reason <text> "
          "| lock <component>@<build> | unlock <component>@<build> | prune <component> --keep <n> | prune --unused "
-         "[--registry-dir <folder>] [--bin-dir <folder>] | release-run <run-directory> --evidence <report>"
+         "[--registry-dir <folder>] [--bin-dir <folder>] | release-run <run-directory> --evidence <report> "
+         "| browser-release inspect | browser-release retire <selected-build> <selected-sha256>"
          "; a Trunk is the component arbol-trunk/<code name>")
 COMMANDS = ("build", "list", "show", "withdraw", "prune", "lock", "unlock")
 SAFE_INTEGER = 2**53 - 1
@@ -84,6 +90,23 @@ def main(args: list[str]) -> int:
         write_all(1, json_line(value))
 
     try:
+        if args[:1] == ["browser-release"]:
+            home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+            if args[1:] == ["inspect"]:
+                guard = browser_support(home) / "selection.lock"
+                if os.path.lexists(guard):
+                    with browser_lock(guard, shared=True):
+                        selection = installed_browser_selection(home)
+                else:
+                    selection = installed_browser_selection(home)
+                    if selection is not None:
+                        raise ValueError("Installed Browser selection has no guard.")
+                output({"selected": selection})
+                return 0
+            if (len(args) == 4 and args[1] == "retire" and browser_release_number(args[2]) and browser_sha(args[3])):
+                output(prune_browser_releases(home, args[2], args[3]))
+                return 0
+            raise ValueError("Usage: arbol-builds browser-release inspect | retire <selected-build> <selected-sha256>.")
         if args[:1] == ["driver-state"]:
             from .driver_state import command as driver_state_command
             return driver_state_command(args[1:], locations().registry)

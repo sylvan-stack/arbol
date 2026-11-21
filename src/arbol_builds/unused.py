@@ -1,13 +1,17 @@
 """Opt-in unused-Build pruning (BLD-0.26, BLD-D23/D24)."""
 
+import hashlib
 import json
 import math
 import os
+import plistlib
 import re
 import stat
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,6 +20,7 @@ from arbol_installation.admission import Admission, AdmissionRefusal, runtime_fo
 from arbol_installation.paths import build_payload_directory, installation_root
 
 from .config import Locations
+from .driver_admission import sync_directory
 from .driver_payload import retention_status
 from .launcher import (
     BUILD_PATTERN,
@@ -33,7 +38,21 @@ from .launcher import (
 )
 from .mutation import with_mutation_lock
 from .schema_state import SchemaState, read_schema
-from .service import build_details, components_in, prune_protections, remove_build_payload
+from .service import (
+    browser_document,
+    browser_file_digest,
+    browser_lock,
+    browser_private_directory,
+    browser_release_number,
+    browser_release_receipt,
+    browser_sha,
+    browser_support,
+    build_details,
+    components_in,
+    installed_browser_selection,
+    prune_protections,
+    remove_build_payload,
+)
 
 
 def read_days(home: Path | None = None) -> float | None:
@@ -79,6 +98,179 @@ def prune_unused(paths: Locations, *, now_ms: float | None = None) -> list[dict[
             return prune_admitted(paths, names, days, now_ms)
     except AdmissionRefusal:
         return [{"component": component, "pruned": [], "maintenance": True} for component in names]
+
+
+def _browser_document(path: Path, maximum: int = 16384) -> Record | None:
+    try:
+        return browser_document(path, maximum)[0]
+    except FileNotFoundError:
+        return None
+
+
+def _profile_claims(home: Path, profile: Path, instance: str) -> list[Record]:
+    profile_hash = hashlib.sha256(os.fsencode(profile)).hexdigest()
+    history = profile.parent.parent / "exit-evidence" / profile_hash
+    runtime = Path(f"/private/tmp/ab-{os.getuid()}") / profile_hash[:32]
+    claims: list[Record] = []
+    for path in (runtime / "claim.json", history / "previous-claim.json", history / "current-attempt.json"):
+        claim = _browser_document(path)
+        if claim is None:
+            continue
+        claims.append(claim)
+        terminal = claim.get("terminal")
+        if terminal is not None:
+            request = claim.get("request", "")
+            if (not isinstance(request, str) or not re.fullmatch(r"req_[A-Za-z0-9_-]{22}", request)
+                    or not isinstance(terminal, dict) or not browser_sha(terminal.get("digest"))
+                    or not isinstance(terminal.get("path"), str)):
+                raise ValueError("Browser Claim has uncertain terminal evidence.")
+            evidence = Path(terminal["path"])
+            if evidence.parent != history / request or evidence.name not in ("activation.json", "terminal.json", "unused.json"):
+                raise ValueError("Browser Claim has an unexpected evidence location.")
+            if evidence.name == "unused.json":
+                witness, witness_digest = browser_document(evidence, 262144)
+                prior = witness.get("priorDataClaim")
+                if terminal["digest"] != witness_digest or "priorDataClaim" not in witness or (
+                    prior is not None and (not isinstance(prior, dict) or prior.get("phase") != "closed")
+                ):
+                    raise ValueError("Browser Claim has uncertain previous data-writer evidence.")
+                if prior is not None:
+                    claims.append(prior)
+    for claim in claims:
+        if (claim.get("format") != 1 or claim.get("profile") != str(profile)
+                or claim.get("profileInstance") != instance or claim.get("profilePathHash") != profile_hash
+                or not browser_release_number(claim.get("build")) or not browser_sha(claim.get("productDigest"))):
+            raise ValueError("Browser Claim differs from its profile.")
+        build = claim["build"]
+        root = home / "Applications/Arbol Browser/.mounted/arbol-browser" / build
+        uses = browser_support(home) / "uses" / build
+        # Existing preview evidence may use an isolated Build. Only the exact
+        # installed path and corresponding original guard name an installed image.
+        if (claim.get("buildRoot") == str(root)) != (claim.get("buildGuard") == str(uses)):
+            raise ValueError("Browser Claim has an inconsistent installed Build path.")
+    return claims
+
+
+@contextmanager
+def _browser_references(home: Path) -> Iterator[set[str]]:
+    state = home / ".arbol/browser"
+    if not os.path.lexists(state):
+        yield set()
+        return
+    profiles = state / "profiles"
+    browser_private_directory(profiles)
+    with ExitStack() as locks:
+        locks.enter_context(browser_lock(state / "registry.lock"))
+        referenced: set[str] = set()
+        for profile in sorted(profiles.iterdir()):
+            if re.fullmatch(r"\.creating-[0-9a-f]{32}", profile.name):
+                continue
+            if not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", profile.name):
+                raise ValueError("Browser profile registry has unfinished or unknown state.")
+            metadata, _ = browser_document(profile / "profile.json")
+            instance = metadata.get("instance")
+            if metadata.get("id") != profile.name or not isinstance(instance, str) or not re.fullmatch(r"prf_[A-Za-z0-9_-]{22}", instance):
+                raise ValueError("Invalid Browser profile identity.")
+            locks.enter_context(browser_lock(profile / "owner.lock"))
+            claims = _profile_claims(home, profile, instance)
+            installed = [claim for claim in claims if claim.get("buildRoot") ==
+                         str(home / "Applications/Arbol Browser/.mounted/arbol-browser" / claim["build"])]
+            referenced.update(claim["build"] for claim in installed)
+            marker = _browser_document(profile / "engine.json")
+            if marker is not None:
+                reader = marker.get("requiredReader")
+                if marker.get("profileInstance") != instance or not isinstance(reader, str):
+                    raise ValueError("Invalid Browser data-writer marker.")
+                if reader.startswith("host-production:") and not any(
+                    reader == f"host-production:1:{claim['productDigest']}" for claim in installed
+                ):
+                    raise ValueError("Browser data-writer Build cannot be verified.")
+        yield referenced
+
+
+def _image_command(program: str, *arguments: str) -> bytes:
+    return subprocess.run([program, *arguments], env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+                          stdin=subprocess.DEVNULL, capture_output=True, check=True, timeout=12).stdout
+
+
+def _unmount_browser_image(image: Path, mount: Path) -> None:
+    if not os.path.lexists(mount):
+        return
+    browser_private_directory(mount)
+    info = plistlib.loads(_image_command("/usr/bin/hdiutil", "info", "-plist"))
+    matches = [(row, entity) for row in info["images"] for entity in row.get("system-entities", [])
+               if entity.get("mount-point") == str(mount)]
+    if not matches and not any(mount.iterdir()):
+        return
+    if len(matches) != 1:
+        raise ValueError("Historical Browser mount has an uncertain image mapping.")
+    row, entity = matches[0]
+    device = entity.get("dev-entry")
+    if (row.get("image-path") != str(image) or row.get("owner-uid") != os.getuid()
+            or row.get("image-type") != "UDIF read-only" or row.get("writeable") is not False
+            or not isinstance(device, str) or not re.fullmatch(r"/dev/disk[0-9]+s[0-9]+", device)):
+        raise ValueError("Historical Browser mount has the wrong backing image.")
+    volume = plistlib.loads(_image_command("/usr/sbin/diskutil", "info", "-plist", device))
+    node = Path(device).lstat()
+    if (volume.get("MountPoint") != str(mount) or volume.get("FilesystemType") != "apfs"
+            or volume.get("WritableVolume") is not False or not stat.S_ISBLK(node.st_mode)
+            or node.st_rdev != mount.lstat().st_dev):
+        raise ValueError("Historical Browser volume is not the guarded read-only mount.")
+    _image_command("/usr/bin/hdiutil", "detach", device)
+    if any(mount.iterdir()):
+        raise ValueError("Historical Browser mount is still populated.")
+
+
+def prune_browser_releases(home: Path, selected_build: str, selected_sha: str) -> dict[str, Any]:
+    """Only retire exact inactive installed images after a fresh, guarded reference census."""
+    support = browser_support(home)
+    uses, releases = support / "uses", support / "releases"
+    result: dict[str, Any] = {"pruned": [], "retained": [], "inUse": []}
+    with browser_lock(support / "selection.lock"):
+        selected = installed_browser_selection(home)
+        if selected is None or (selected["build"], selected["imageSha256"]) != (selected_build, selected_sha):
+            raise ValueError("Installed Browser selection changed before maintenance.")
+        browser_private_directory(releases)
+        for path in sorted(releases.glob("*.json")):
+            build = path.stem
+            if build == selected_build or not browser_release_number(build):
+                continue
+            guard = uses / build
+            try:
+                with browser_lock(guard, retiring=True), _browser_references(home) as references:
+                    receipt = browser_release_receipt(home, build)
+                    image = support / "images" / f"{build}.dmg"
+                    mounted = home / "Applications/Arbol Browser/.mounted/arbol-browser" / build / "app"
+                    original = os.path.lexists(image)
+                    if original and browser_file_digest(image, 1073741824) != receipt["imageSha256"]:
+                        raise ValueError("Historical Browser image differs from its verified receipt.")
+                    if build in references and not original:
+                        raise ValueError("A referenced historical Browser image is missing.")
+                    _unmount_browser_image(image, mounted)
+                    if build in references:
+                        result["retained"].append(build)
+                        continue
+                    if os.path.lexists(mounted.parent):
+                        browser_private_directory(mounted.parent)
+                        if os.path.lexists(mounted):
+                            mounted.rmdir()
+                        mounted.parent.rmdir()
+                        sync_directory(mounted.parent.parent)
+                    if original:
+                        image.unlink()
+                        sync_directory(image.parent)
+                    # Finish metadata only after all actual payloads are absent.
+                    if os.path.lexists(image) or os.path.lexists(mounted.parent):
+                        raise ValueError("Historical Browser payload retirement was incomplete.")
+                    (uses / f"{build}.mount").unlink(missing_ok=True)
+                    path.unlink()
+                    guard.unlink()  # descriptor remains held until finally
+                    sync_directory(releases)
+                    sync_directory(uses)
+                    result["pruned"].append(build)
+            except BlockingIOError:
+                result["inUse"].append(build)
+    return result
 
 
 def prune_admitted(paths: Locations, names: list[str], days: float, now_ms: float | None) -> list[dict[str, Any]]:
