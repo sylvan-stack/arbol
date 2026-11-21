@@ -10,7 +10,7 @@ from arbol_installation.paths import prepare_installation
 from arbol_radar.cli import run as vigor
 
 from .database import explicit_target
-from .model import ISOLATION, Refused, identity, parse, private_directory
+from .model import ISOLATION, Refused, identity, parse, parse_import, private_directory
 from .process import acquire_backend
 from .server import Backend
 
@@ -20,6 +20,11 @@ def main(args: list[str], package: Path) -> int:
         for key in list(os.environ):
             if key.startswith("PG"):
                 os.environ.pop(key, None)
+        if args[:1] == ["import"]:
+            from arbol_import.command import import_main
+
+            options = parse_import(args[1:])
+            return import_main(identity(package, {}), options)
         parsed = parse(args)
         selected = identity(package, parsed)
         if selected.fixture:

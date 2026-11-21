@@ -1,7 +1,9 @@
 """The read-only-source, installation-bound import command (IMP-0)."""
 
+import asyncio
 import fcntl
 import importlib
+import json
 import os
 import runpy
 import stat
@@ -230,6 +232,12 @@ async def run_import(identity: Identity, options: ImportOptions, *, archive: Arc
             return await _process(run, options, identity.home)
     except ArchiveUnavailable as error:
         raise Refused(error.code, str(error)) from None
+
+
+def import_main(identity: Identity, options: ImportOptions) -> int:
+    report = asyncio.run(run_import(identity, options))
+    print(json.dumps(report.document(), separators=(",", ":")), flush=True)
+    return report.exit_status
 
 
 @contextmanager
