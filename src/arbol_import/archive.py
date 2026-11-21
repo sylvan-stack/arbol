@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import stat
 from collections.abc import Callable, Iterable, Iterator
 from compression import zstd
@@ -15,11 +16,12 @@ from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 from uuid import uuid4
 
-from .readers.form import ArchiveFile, ExportedRows, FileObservation
+from .readers.form import ArchiveFile, ExportedRows, FileObservation, Session, Tool
 from .readers.lines import open_input
 
 _CHUNK = 1 << 20
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+_DIGEST = re.compile(r"[0-9a-f]{64}")
 
 
 class UnreadableInput(ValueError):
@@ -67,6 +69,13 @@ class Inventory:
     def fingerprint(self) -> str:
         pairs = [[entry.path, entry.sha256] for entry in self.files]
         return sha256(_canonical(pairs)).hexdigest()
+
+
+@dataclass(frozen=True)
+class PublishedArchive:
+    manifest: str
+    fingerprint: str
+    bytes_written: int
 
 
 def _canonical(value: object) -> bytes:
@@ -151,11 +160,14 @@ def _directory_at(parent: int, name: str, device: int, *, create: bool = False) 
             pass
     folder = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent)
     try:
-        if os.fstat(folder).st_dev != device:
+        bound = os.fstat(folder)
+        if bound.st_dev != device:
             raise ArchiveUnavailable()
         if create:
             os.fsync(parent)
         yield folder
+        if not os.path.samestat(bound, os.stat(name, dir_fd=parent, follow_symlinks=False)):
+            raise ArchiveUnavailable()
     finally:
         os.close(folder)
 
@@ -242,3 +254,109 @@ def _write_object(objects: int, device: int, home: Path, source: ArchiveFile, ex
             _verify_object(destination, leaf, device, expected)
             os.fsync(destination)
     return 0
+
+
+def _timestamp(value: object) -> datetime:
+    if not isinstance(value, str):
+        raise ArchiveUnavailable()
+    try:
+        stamp = datetime.fromisoformat(value)
+    except ValueError:
+        raise ArchiveUnavailable() from None
+    if stamp.utcoffset() is None:
+        raise ArchiveUnavailable()
+    return stamp
+
+
+def _manifest_inventory(data: bytes, tool: Tool, native_id: str) -> Inventory:
+    try:
+        value = json.loads(data)
+    except (UnicodeError, ValueError, RecursionError):
+        raise ArchiveUnavailable() from None
+    if (
+        not isinstance(value, dict) or set(value) != {"tool", "nativeId", "takenAt", "toolVersion", "files"}
+        or value["tool"] != tool or value["nativeId"] != native_id
+        or (value["toolVersion"] is not None and not isinstance(value["toolVersion"], str))
+        or not isinstance(value["files"], list)
+    ):
+        raise ArchiveUnavailable()
+    _timestamp(value["takenAt"])
+    files: list[FileEntry] = []
+    seen: set[str] = set()
+    for entry in value["files"]:
+        if not isinstance(entry, dict) or set(entry) != {"path", "sha256", "size", "mtime"}:
+            raise ArchiveUnavailable()
+        path, digest, size = entry["path"], entry["sha256"], entry["size"]
+        if (
+            not isinstance(path, str) or not _relative_path(path) or path in seen
+            or not isinstance(digest, str) or not _DIGEST.fullmatch(digest)
+            or type(size) is not int or size < 0
+        ):
+            raise ArchiveUnavailable()
+        seen.add(path)
+        files.append(FileEntry(path, digest, size, _timestamp(entry["mtime"])))
+    return _inventory(files)
+
+
+def read_manifest(binding: ArchiveRoot, manifest: str, tool: Tool, native_id: str) -> Inventory:
+    """Recover a prior fingerprint only from the exact, session-bound manifest."""
+    if not _DIGEST.fullmatch(manifest):
+        raise ArchiveUnavailable()
+    with (
+        _archive_directory(binding) as root,
+        _directory_at(root, "manifests", binding.device) as manifests,
+        _directory_at(manifests, manifest[:2], binding.device) as prefix,
+        _regular_at(prefix, f"{manifest[2:]}.json", binding.device) as stream,
+    ):
+        data = stream.read()
+        if sha256(data).hexdigest() != manifest:
+            raise ArchiveUnavailable()
+        return _manifest_inventory(data, tool, native_id)
+
+
+def _write_manifest(root: int, device: int, identifier: str, data: bytes) -> int:
+    with (
+        _directory_at(root, "manifests", device, create=True) as manifests,
+        _directory_at(manifests, identifier[:2], device, create=True) as prefix,
+        _staging(prefix) as (name, stream),
+    ):
+        leaf = f"{identifier[2:]}.json"
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+        if _publish(prefix, name, prefix, leaf):
+            return len(data)
+        with _regular_at(prefix, leaf, device) as existing:
+            if existing.read(len(data) + 1) != data:
+                raise ArchiveUnavailable()
+        os.fsync(prefix)
+    return 0
+
+
+def publish_session(
+    binding: ArchiveRoot, home: Path, session: Session, inventory: Inventory, taken_at: datetime,
+) -> PublishedArchive:
+    """Publish exactly the previously inspected objects and manifest before database commit."""
+    by_path = {entry.path: entry for entry in inventory.files}
+    sources = session.archive_files
+    if (
+        len(by_path) != len(inventory.files) or set(by_path) != {file.path for file in sources}
+        or any(not _DIGEST.fullmatch(entry.sha256) for entry in inventory.files)
+    ):
+        raise UnreadableInput()
+    data = _canonical({
+        "tool": session.tool,
+        "nativeId": session.native_id,
+        "takenAt": taken_at.isoformat(),
+        "toolVersion": session.tool_version,
+        "files": [
+            {"path": entry.path, "sha256": entry.sha256, "size": entry.size, "mtime": entry.mtime.isoformat()}
+            for entry in inventory.files
+        ],
+    })
+    identifier = sha256(data).hexdigest()
+    with _archive_directory(binding, create=True) as root:
+        with _directory_at(root, "objects", binding.device, create=True) as objects:
+            written = sum(_write_object(objects, binding.device, home, item, by_path[item.path]) for item in sources)
+        written += _write_manifest(root, binding.device, identifier, data)
+    return PublishedArchive(identifier, inventory.fingerprint, written)
