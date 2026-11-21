@@ -94,6 +94,7 @@ class Rollout:
     origin: Object = field(default_factory=dict)
     failure: SessionFailure | None = None
     outside: bool = False
+    read_path: str | None = None
 
 
 def _rollout_target(home: Path, relative: str) -> Path:
@@ -111,10 +112,13 @@ def _rollout_target(home: Path, relative: str) -> Path:
     raise SessionFailure("unreadable_session", f"{relative}: the rollout could not be read.")
 
 
-def _records(home: Path, relative: str) -> Generator[tuple[int, Any]]:
+def _records(home: Path, relative: str, read_path: str | None = None) -> Generator[tuple[int, Any]]:
     target = _rollout_target(home, relative)
+    actual_path = target.relative_to(home).as_posix()
+    if read_path is not None and actual_path != read_path:
+        raise SessionFailure("unreadable_session", f"{relative}: the rollout target changed.")
     try:
-        yield from file_records(home, target.relative_to(home).as_posix())
+        yield from file_records(home, actual_path)
     except RecursionError:
         raise SessionFailure("unreadable_session", f"{relative}: a line could not be decoded.") from None
 
@@ -193,8 +197,10 @@ def _discover(home: Path) -> Iterator[Rollout]:
                 continue
             if not stat.S_ISREG(target.stat().st_mode):
                 continue
-            rollout.mtime_ns = _rollout_target(home, relative).stat().st_mtime_ns
-            with closing(_records(home, relative)) as records:
+            target = _rollout_target(home, relative)
+            rollout.mtime_ns = target.stat().st_mtime_ns
+            rollout.read_path = target.relative_to(home).as_posix()
+            with closing(_records(home, relative, rollout.read_path)) as records:
                 first = next(records, None)
             if first is None:
                 continue
@@ -818,7 +824,7 @@ def _conversation(rollout: Rollout, line: int, row: Object, kind: str,
 
 def _body(home: Path, rollout: Rollout) -> Generator[Record]:
     conversation = {"response_item", "event_msg", "turn_context", "token_usage_record"}
-    with closing(_records(home, rollout.relative)) as records:
+    with closing(_records(home, rollout.relative, rollout.read_path)) as records:
         first = next(records, None)
         if first is None:
             raise SessionFailure("unreadable_session", f"{rollout.relative}: the rollout header disappeared.")
@@ -1422,8 +1428,11 @@ def _session_archive(home: Path, catalogue: Catalogue, inventory: Inventory, fam
                      clock: datetime) -> tuple[tuple[ArchiveFile, ...], int, bool]:
     native_ids = {thread.native_id for thread in family}
     root = family[0]
-    files = sorted({rollout.relative for thread in family for rollout in thread.copies})
-    archive: list[ArchiveFile] = [HomeFile(relative) for relative in files]
+    files = {rollout.relative: rollout.read_path for thread in family for rollout in thread.copies}
+    archive: list[ArchiveFile] = [
+        HomeFile(relative, target if target != relative else None)
+        for relative, target in sorted(files.items())
+    ]
     if catalogue.mtime is not None:
         threads = [
             {key: value for key, value in catalogue.threads[native_id].items() if key in _THREAD_ARCHIVE_FIELDS}
