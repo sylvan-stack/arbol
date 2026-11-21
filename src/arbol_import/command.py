@@ -1,23 +1,26 @@
 """The read-only-source, installation-bound import command (IMP-0)."""
 
 import fcntl
+import importlib
 import os
 import runpy
 import stat
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import cast
 
 from arbol_backend.database import protected_thread
 from arbol_backend.model import Identity, ImportOptions, Refused, private_directory
 from arbol_installation.paths import installation_root, prepare_installation
 
 from .archive import ArchiveRoot, ArchiveUnavailable
-from .readers.form import Source, Tool
-from .writer import ImportStore
+from .mapping import JsonObject, MappedSession, MappingError, map_session, segment_keys
+from .readers.form import CatalogueEntry, Failed, Kind, Reader, Session, Source, Tool, reader_module
+from .writer import ImportStore, rows_refused, validate_rows
 
 _HOMES: dict[Tool, str] = {
     "claude-code": ".claude",
@@ -27,6 +30,7 @@ _HOMES: dict[Tool, str] = {
     "mimo": ".local/share/mimocode",
 }
 _DRIVER_STATE: dict[Tool, str] = {"claude-code": "claude", "codex": "codex"}
+_OPTIONAL_KINDS = frozenset({"arbol_driver", "probe"})
 
 
 @dataclass(frozen=True)
@@ -34,6 +38,67 @@ class _Run:
     store: ImportStore
     source: Source
     archive: ArchiveRoot | None
+
+    def admit_next(self, *, dry_run: bool) -> None:
+        with self.store.admission.import_read(allow_draining=dry_run):
+            pass
+
+
+@dataclass(frozen=True)
+class _Selection:
+    native: Session
+    mapped: MappedSession
+    keys: tuple[str, ...]
+    withheld: tuple[str, ...]
+
+
+def _reader(tool: Tool) -> Reader:
+    return cast(Reader, importlib.import_module(reader_module(tool)))
+
+
+def _attribution(native: str, kind: Kind | None) -> JsonObject:
+    value: JsonObject = {"native": native}
+    if kind is not None:
+        value["kind"] = kind
+    return value
+
+
+def _error(code: str, message: str) -> JsonObject:
+    return {"code": code, "message": message}
+
+
+def _excluded(kind: Kind | None, options: ImportOptions) -> bool:
+    return kind in _OPTIONAL_KINDS and kind not in options.include
+
+
+def _select(entry: CatalogueEntry, options: ImportOptions, owner_home: Path) -> _Selection | JsonObject:
+    result = entry.load()
+    if isinstance(result, Failed):
+        native = result.native_id if result.native_id is not None else result.file
+        assert native is not None
+        return {**_attribution(native, result.kind), "outcome": "failed", "error": _error(result.code, result.message)}
+    info = _attribution(result.native_id, result.kind)
+    if result.files_not_archived:
+        info["filesNotArchived"] = result.files_not_archived
+    if _excluded(result.kind, options):
+        return {**info, "outcome": "excluded"}
+    if not result.turns:
+        return {**info, "outcome": "empty"}
+
+    withheld = segment_keys(result.turns[-1]) if result.live else ()
+    eligible = replace(result, turns=result.turns[:-1]) if result.live else result
+    try:
+        mapped = map_session(eligible, owner_home)
+        validate_rows(mapped)
+        keys = (*(segment.turn_key for segment in mapped.segments), *withheld)
+        if len(set(keys)) != len(keys) or any(
+            "\0" in key or not 1 <= len(key.encode("utf-8")) <= 512 for key in withheld
+        ):
+            raise rows_refused()
+    except (MappingError, UnicodeError, Refused):
+        failure = rows_refused()
+        return {**info, "outcome": "failed", "error": _error(failure.code, str(failure))}
+    return _Selection(result, mapped, keys, withheld)
 
 
 @contextmanager
