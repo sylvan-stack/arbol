@@ -8,15 +8,17 @@ import json
 import re
 import stat
 from collections.abc import Generator, Iterable, Iterator, Sequence
-from contextlib import closing
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any, NoReturn
 
 from .form import (
     LIVE_WINDOW,
     CallLink,
+    CatalogueEntry,
     Failed,
     FileObservations,
     HomeFile,
@@ -36,6 +38,7 @@ from .form import (
     Trigger,
     Turn,
     Usage,
+    read_catalogue,
     unknown_record,
 )
 from .lines import file_records, observed_input
@@ -264,64 +267,96 @@ def _context_files(files: list[SessionFile], selected: frozenset[str] | None) ->
     return related
 
 
-def _ordered_sessions(
-    home: Path, source: Source, observations: FileObservations,
-) -> Iterator[Failed | tuple[str, SessionRecords]]:
-    discovered: list[SessionFile] = []
-    for file in _discover(home):
-        if isinstance(file, Failed):
-            yield file
-        else:
-            discovered.append(file)
-    files = sorted(
-        (_order_file(home, file, observations) for file in _context_files(discovered, source.selected)),
-        key=lambda ordered: (ordered.at, ordered.file.path),
-    )
+@dataclass
+class _ScannedFile:
+    last_line: int = 0
+    duplicates: set[int] = field(default_factory=set)
 
-    remaining: dict[str, int] = {}
-    for ordered in files:
-        native_id = ordered.file.native_id
-        remaining[native_id] = remaining.get(native_id, 0) + 1
 
-    projects: dict[Path, set[str]] = {}
-    previous_copies: dict[str, set[str]] = {}
-    sessions: dict[str, SessionRecords] = {}
+class _Context:
+    """Stream preceding project and copy context, retaining UUIDs and accepted line positions only."""
 
-    # Context IDs go through the same scan even when they won't be yielded.
-    for rank, ordered in enumerate(files):
+    def __init__(self, home: Path, files: list[OrderedFile], observations: FileObservations) -> None:
+        self.home = home
+        self.files = files
+        self.observations = observations
+        self.scanned: dict[int, _ScannedFile] = {}
+        self.projects: dict[Path, set[str]] = {}
+        self.copies: dict[str, set[str]] = {}
+        self.failures: dict[str, SessionFailure] = {}
+        self.times: dict[str, datetime] = {}
+        self.predecessors: list[tuple[int, ...]] = []
+        self.sessions: dict[str, list[int]] = {}
+        last_project: dict[Path, int] = {}
+        last_copy: dict[str, int] = {}
+        for rank, ordered in enumerate(files):
+            file = ordered.file
+            prior = (last_project.get(file.path.parent), last_copy.get(file.native_id))
+            self.predecessors.append(tuple(index for index in prior if index is not None))
+            self.sessions.setdefault(file.native_id, []).append(rank)
+            last_project[file.path.parent] = last_copy[file.native_id] = rank
+
+    def _scan(self, rank: int) -> None:
+        ordered = self.files[rank]
         file = ordered.file
-        native_id = file.native_id
-        session = sessions.setdefault(native_id, SessionRecords())
-        session.files.append(ordered)
-        project_uuids = projects.setdefault(file.path.parent, set())
-        session_uuids = previous_copies.setdefault(native_id, set())
-        seen_here: set[str] = set()
-        if session.failure is None:
-            try:
-                for number, raw in _ordered_rows(home, ordered, observations):
+        scanned = self.scanned[rank] = _ScannedFile()
+        if file.native_id in self.failures:
+            return
+        project = self.projects.setdefault(file.path.parent, set())
+        copies = self.copies.setdefault(file.native_id, set())
+        accepted: set[str] = set()
+        try:
+            with closing(_ordered_rows(self.home, ordered, self.observations)) as rows:
+                for number, raw in rows:
                     uuid = raw.get("uuid") if isinstance(raw, dict) else None
-                    duplicate = isinstance(uuid, str) and (uuid in project_uuids or uuid in session_uuids)
-                    row = _validated(home, file, (rank, number), raw, duplicate, observations)
-                    if session.created_at is None and isinstance(raw, dict):
-                        session.created_at = row.at if row is not None else _record_time(raw)
-                    if row is None:
-                        continue
-                    if isinstance(uuid, str):
-                        seen_here.add(uuid)
-                    if source.wants(native_id):
-                        session.rows.append(row)
-            except SessionFailure as error:
-                session.failure = error
-            except (OSError, RecursionError):
-                session.failure = _unreadable(home, file.path)
-        project_uuids.update(seen_here)
-        session_uuids.update(seen_here)
-        remaining[native_id] -= 1
-        if remaining[native_id] == 0:
-            previous_copies.pop(native_id)
-            finished = sessions.pop(native_id)
-            if source.wants(native_id):
-                yield native_id, finished
+                    duplicate = isinstance(uuid, str) and (uuid in project or uuid in copies)
+                    row = _validated(self.home, file, (rank, number), raw, duplicate, self.observations)
+                    if isinstance(raw, dict) and (at := row.at if row is not None else _record_time(raw)) is not None:
+                        self.times.setdefault(file.native_id, at)
+                    if duplicate:
+                        scanned.duplicates.add(number)
+                    scanned.last_line = number
+                    if row is not None and isinstance(uuid, str):
+                        accepted.add(uuid)
+        except SessionFailure as error:
+            self.failures[file.native_id] = error
+        except (OSError, RecursionError):
+            self.failures[file.native_id] = _unreadable(self.home, file.path)
+        project.update(accepted)
+        copies.update(accepted)
+
+    def project(self, native_id: str, result: SessionRecords) -> None:
+        selected = self.sessions[native_id]
+        pending = list(selected)
+        required = set()
+        while pending:
+            rank = pending.pop()
+            if rank in required or rank in self.scanned:
+                continue
+            required.add(rank)
+            pending.extend(self.predecessors[rank])
+        for rank in sorted(required):
+            self._scan(rank)
+        result.created_at = self.times.get(native_id)
+        result.failure = self.failures.get(native_id)
+        for rank in selected:
+            ordered = self.files[rank]
+            result.files.append(ordered)
+            scanned = self.scanned[rank]
+            if not scanned.last_line:
+                continue
+            number = 0
+            with closing(_read_records(self.home, ordered.file.path, self.observations)) as rows:
+                for number, raw in rows:
+                    row = _validated(
+                        self.home, ordered.file, (rank, number), raw, number in scanned.duplicates, self.observations,
+                    )
+                    if row is not None:
+                        result.rows.append(row)
+                    if number == scanned.last_line:
+                        break
+            if number != scanned.last_line:
+                raise _unreadable(self.home, ordered.file.path)
 
 
 _USAGE_FIELDS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens")
@@ -1180,27 +1215,54 @@ def _session(
     )
 
 
-def read(source: Source) -> Iterator[Session | Failed]:
-    """Yield one Claude Code reader result per selected native session."""
+def _read_entry(
+    home: Path, source: Source, context: _Context, native_id: str, driver_ids: set[str],
+) -> Session | Failed:
+    session = SessionRecords()
+    try:
+        context.project(native_id, session)
+        kind = _kind(native_id, driver_ids, session.rows)
+        if session.failure is not None:
+            raise session.failure
+        return _session(home, source, native_id, kind, session, context.observations)
+    except (SessionFailure, OSError, RecursionError, OverflowError) as error:
+        failure = error if isinstance(error, SessionFailure) else SessionFailure(
+            "unreadable_session", "A Claude Code session could not be read.",
+        )
+        return Failed.of(failure, native_id=native_id, kind=_kind(native_id, driver_ids, session.rows))
+
+
+def _entries(source: Source) -> Iterator[CatalogueEntry]:
     try:
         home = source.home.resolve()
     except (OSError, RuntimeError, ValueError):
-        yield Failed.of(SessionFailure("unreadable_session", "projects: could not be read."), file="projects")
+        yield CatalogueEntry.failed(Failed.of(
+            SessionFailure("unreadable_session", "projects: could not be read."), file="projects",
+        ))
         return
-
     driver_ids = _driver_ids(source.driver_state)
+    discovered = []
+    for file in _discover(home):
+        if isinstance(file, Failed):
+            yield CatalogueEntry.failed(file)
+        else:
+            discovered.append(file)
     observations = FileObservations()
-    for discovered in _ordered_sessions(home, source, observations):
-        if isinstance(discovered, Failed):
-            yield discovered
-            continue
-        native_id, session = discovered
-        kind = _kind(native_id, driver_ids, session.rows)
-        try:
-            # The scanner stopped before the offending row. A later sidecar
-            # failure retains the prefix already accepted from the main logs.
-            if session.failure is not None:
-                raise session.failure
-            yield _session(home, source, native_id, kind, session, observations)
-        except SessionFailure as error:
-            yield Failed.of(error, native_id=native_id, kind=kind)
+    ordered = sorted(
+        (_order_file(home, file, observations) for file in _context_files(discovered, source.selected)),
+        key=lambda item: (item.at, item.file.path),
+    )
+    context = _Context(home, ordered, observations)
+    for native_id in sorted(context.sessions, key=lambda key: context.sessions[key][-1]):
+        if source.wants(native_id):
+            kind: Kind | None = "arbol_driver" if native_id in driver_ids else None
+            yield CatalogueEntry(native_id, kind, partial(_read_entry, home, source, context, native_id, driver_ids))
+
+
+@contextmanager
+def catalogue(source: Source) -> Iterator[Iterator[CatalogueEntry]]:
+    yield _entries(source)
+
+
+def read(source: Source) -> Iterator[Session | Failed]:
+    yield from read_catalogue(catalogue, source)
