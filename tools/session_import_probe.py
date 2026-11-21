@@ -89,6 +89,7 @@ class Ledger:
         self.paths: dict[Path, Path] = {}
         self.saved: dict[Path, Fingerprint] = {}
         self.issues: Counter[str] = Counter()
+        self.process_lookups = 0
         self.active = False
         self.busy = False
         self.bytes = 0
@@ -214,6 +215,9 @@ class Ledger:
                 value = unquote(urlsplit(value).path)
             database = as_path(value)
             violation = database is None or self.scratch is None or not database.resolve().is_relative_to(self.scratch)
+        elif event == 'subprocess.Popen' and self.tool == 'kimi-code' and args[0] == '/bin/ps':
+            self.process_lookups += 1
+            return
         else:
             return
         if violation:
@@ -306,6 +310,8 @@ def run(tool: Tool, home: Path, driver: Path | None, work: Path) -> dict[str, ob
         status = 'changed'
     else:
         status = 'unchanged'
+    if tool == 'kimi-code':
+        counts['process_lookups'] = ledger.process_lookups
     return {'tool': tool, 'status': status, 'counts': counts, 'kinds': kinds, 'failure_codes': failures,
             'observed_files': len(ledger.saved), 'issues': issues}
 
