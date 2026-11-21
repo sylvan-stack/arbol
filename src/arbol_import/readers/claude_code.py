@@ -761,7 +761,7 @@ def _responses(rows: Iterable[Record]) -> dict[tuple[int, int], Response]:
             Usage.native(
                 uncached=usage.get("input_tokens") or 0,
                 cache_read=usage.get("cache_read_input_tokens") or 0,
-                cache_write=usage.get("cache_creation_input_tokens") or 0,
+                cache_write=usage.get("cache_creation_input_tokens"),
                 output=usage.get("output_tokens") or 0,
             ),
         )
