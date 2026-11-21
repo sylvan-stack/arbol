@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fcntl
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tomllib
@@ -25,6 +27,7 @@ from arbol_backend.model import Identity, Refused, identity, parse_import
 from arbol_builds.service import write_launcher
 from arbol_import.archive import ArchiveRoot
 from arbol_import.command import ImportReport, run_import
+from arbol_import.writer import ImportStore
 from arbol_installation.admission import Source
 from tools.backend_journeys import Bridge
 from tools.imported_chat_journey import checked_package
@@ -37,6 +40,45 @@ EXCHANGE = "00000000-0000-4000-8000-000000000104"
 CLAUDE = "00000000-0000-4000-8000-000000000105"
 OLD = datetime(2026, 1, 1, tzinfo=UTC)
 _BUILD_CHECKS = [{"name": "unit", "passed": True}, {"name": "roots-unit", "passed": True}]
+_IMPORT_CHILD = """
+import asyncio, json, os, signal, sys
+from dataclasses import replace
+from pathlib import Path
+from unittest.mock import patch
+action, folder, home, archive, *selected = sys.argv[1:]
+package, home, archive = Path(folder), Path(home), Path(archive)
+sys.path[:0] = [str(package / part) for part in ('src', 'runtime/site-packages')]
+from arbol_backend.model import Refused, identity, parse_import
+from arbol_import import command
+from arbol_import.archive import ArchiveRoot
+from arbol_import.writer import ImportStore
+options = parse_import(['pi', *(word for native in selected for word in ('--session', native))])
+current = replace(identity(package, {}, home=home), fixture=True)
+if action == 'mercury':
+    try:
+        Path('/Volumes/Mercury').lstat()
+    except PermissionError:
+        pass
+    else:
+        raise RuntimeError('The disposable restriction did not deny Mercury.')
+    with patch.object(command, '_reader', side_effect=AssertionError('Reader opened after Mercury refusal')):
+        try:
+            asyncio.run(command.run_import(current, options))
+        except Refused as error:
+            print(json.dumps({'code': error.code, 'denied': True}))
+        else:
+            raise RuntimeError('The real archive verifier admitted the restricted child.')
+elif action == 'interrupt':
+    original = ImportStore.apply
+    async def committed(self, *args, **kwargs):
+        result = await original(self, *args, **kwargs)
+        os.kill(os.getpid(), signal.SIGTERM)
+        return result
+    with patch.object(ImportStore, 'apply', committed):
+        asyncio.run(command.run_import(current, options, archive=ArchiveRoot(archive, archive.parent.stat().st_dev)))
+else:
+    raise RuntimeError('Unknown disposable control.')
+"""
 
 
 def _ready(package: Path) -> dict[str, Any]:
@@ -246,6 +288,17 @@ class Qualification:
     def session(self, native: str, *, dry: bool = False) -> ImportReport:
         return self.execute("pi", "--session", native, dry=dry)
 
+    def sessions(self, *ids: str, dry: bool = False) -> ImportReport:
+        return self.execute("pi", *(word for native in ids for word in ("--session", native)), dry=dry)
+
+    def import_child(self, action: str, *ids: str, restrict: bool = False) -> subprocess.CompletedProcess[bytes]:
+        command = [sys.executable, "-I", "-B", "-c", _IMPORT_CHILD, action,
+                   str(self.candidate), str(self.home), str(self.archive.path), *ids]
+        if restrict:
+            profile = '(version 1)(allow default)(deny file-read* file-write* (subpath "/Volumes/Mercury"))'
+            command = ["/usr/bin/sandbox-exec", "-p", profile, *command]
+        return subprocess.run(command, env=self.env, capture_output=True, timeout=45)
+
     async def previous_playback(self) -> None:
         with (self.root / "previous-backend.log").open("wb") as log:
             command = [str(self.bin / "arbol"), "-v", self.prior.name, "backend"]
@@ -432,6 +485,97 @@ def positive(qualification: Qualification) -> None:
     ] and rows[1][7] <= 200 * 1024, "nested tool rows have dense positions and bounded results")
 
 
+def _outcomes(report: ImportReport) -> list[object]:
+    return [row.get("outcome") for row in report.sessions]
+
+
+def negative(q: Qualification) -> None:
+    draining, pending, killed, waiting, first, failure, rejected = (
+        f"00000000-0000-4000-8000-{index:012d}" for index in range(106, 113)
+    )
+    files = {native: _pi_file(q.home, native) for native in (draining, pending, killed, waiting, first, failure, rejected)}
+    for native, saved in files.items():
+        _write_pi(saved, native, 1)
+    snapshots = {saved: (sha256(saved.read_bytes()).hexdigest(), saved.stat().st_mtime_ns)
+                 for saved in files.values()}
+
+    denial = q.import_child("mercury", draining, restrict=True)
+    q.check(denial.returncode == 0 and json.loads(denial.stdout) == {"code": "archive_unavailable", "denied": True},
+            "real Mercury preflight refused before opening a reader inside verified restriction")
+    lock = q.home / ".arbol/imports/import.lock"
+    with lock.open("rb") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        q.check(_refusal(lambda: q.session(draining), "busy"), "a concurrent import was refused")
+
+    original = ImportStore.apply
+    token = None
+
+    async def after_first(store: ImportStore, *args: Any, **options: Any) -> Any:
+        nonlocal token
+        result = await original(store, *args, **options)
+        if token is None:
+            token = begin_maintenance(q.source, runtime=q.runtime)
+        return result
+
+    with patch.object(ImportStore, "apply", after_first):
+        report = q.sessions(draining, pending)
+    q.check(report.error is not None and report.error["code"] == "maintenance"
+            and _outcomes(report) == ["imported", None], "drain stopped between sessions with exact pending attribution")
+    _outcome(q.session(pending, dry=True), "imported")
+    assert token is not None
+    freeze(Context(q.select(q.candidate)), q.source, token)
+    q.check(_refusal(lambda: q.session(pending, dry=True), "maintenance"), "exclusive admission refused a dry run")
+    q.reopen("candidate", token, 5)
+    q.check(_outcomes(q.sessions(draining, pending)) == ["unchanged", "imported"], "drained import resumed safely")
+
+    interrupted = q.import_child("interrupt", killed, waiting)
+    q.check(interrupted.returncode == -signal.SIGTERM, "disposable importer was interrupted after its first commit")
+    expected = q.cluster.psql(f"SELECT native_id FROM chat_imports WHERE native_id IN ('{killed}','{waiting}')")
+    q.check(expected.strip() == killed, "interruption preserved only the committed session")
+    q.check(_outcomes(q.sessions(killed, waiting)) == ["unchanged", "imported"], "interrupted import replayed safely")
+
+    prefix = sha256(files[failure].read_bytes()).hexdigest()[:2]
+    obstruction = q.archive.path / "objects" / prefix
+    q.check(prefix != sha256(files[first].read_bytes()).hexdigest()[:2] and not obstruction.exists(),
+            "the injected archive fault addresses only a later file")
+    obstruction.touch(mode=0o600)
+    try:
+        refused = q.sessions(first, failure)
+        q.check(refused.error is not None and refused.error["code"] == "archive_unavailable"
+                and _outcomes(refused) == ["imported", None], "archive failure stopped before the later rows committed")
+        count = q.cluster.psql(f"SELECT count(*) FROM chat_imports WHERE native_id='{failure}'")
+        q.check(count.strip() == "0", "no later manifest reference was written after archive failure")
+    finally:
+        obstruction.unlink()
+    q.check(_outcomes(q.sessions(first, failure)) == ["unchanged", "imported"], "archive failure replayed safely")
+
+    q.cluster.psql(f"""
+        CREATE FUNCTION public.qualify_refused_rows() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM public.exchanges e JOIN public.chat_imports c USING(chat_id)
+                     WHERE e.id = NEW.exchange_id AND c.native_id = '{rejected}') THEN
+            RAISE EXCEPTION USING ERRCODE='23514', MESSAGE='Fictional diagnostic must be hidden';
+          END IF;
+          RETURN NEW;
+        END;
+        $$;
+        CREATE TRIGGER qualify_refused_rows BEFORE INSERT ON public.runs
+          FOR EACH ROW EXECUTE FUNCTION public.qualify_refused_rows();
+    """)
+    try:
+        refused = q.session(rejected)
+        row = _outcome(refused, "failed")
+        q.check(row["error"]["code"] == "rows_refused" and "Fictional diagnostic" not in json.dumps(row),
+                "a confirmed row refusal hid database content")
+        q.check(q.cluster.psql(f"SELECT count(*) FROM chat_imports WHERE native_id='{rejected}'").strip() == "0",
+                "row refusal rolled back the entire session")
+    finally:
+        q.cluster.psql("DROP TRIGGER qualify_refused_rows ON public.runs; DROP FUNCTION public.qualify_refused_rows()")
+    _outcome(q.session(rejected), "imported")
+    q.check(all((sha256(saved.read_bytes()).hexdigest(), saved.stat().st_mtime_ns) == stamp
+                for saved, stamp in snapshots.items()), "no import changed its native input bytes or mtimes")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
@@ -442,6 +586,7 @@ def main() -> int:
     try:
         q.prepare()
         positive(q)
+        negative(q)
     finally:
         require(q.cluster.stop(), "The disposable source cluster did not stop.")
     print(json.dumps({"build": q.build, "source": q.commit, "checks": q.checks, "release": q.releases["candidate"][1]}))
