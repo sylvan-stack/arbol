@@ -7,20 +7,21 @@ import runpy
 import stat
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
+from uuid import UUID
 
 from arbol_backend.database import protected_thread
 from arbol_backend.model import Identity, ImportOptions, Refused, private_directory
 from arbol_installation.paths import installation_root, prepare_installation
 
-from .archive import ArchiveRoot, ArchiveUnavailable
+from .archive import ArchiveRoot, ArchiveUnavailable, UnreadableInput, inspect_files, publish_session, read_manifest
 from .mapping import JsonObject, MappedSession, MappingError, map_session, segment_keys
 from .readers.form import CatalogueEntry, Failed, Kind, Reader, Session, Source, Tool, reader_module
-from .writer import ImportStore, rows_refused, validate_rows
+from .writer import ImportOutcome, ImportStore, Previous, WritePlan, rows_refused, validate_rows
 
 _HOMES: dict[Tool, str] = {
     "claude-code": ".claude",
@@ -52,6 +53,26 @@ class _Selection:
     withheld: tuple[str, ...]
 
 
+@dataclass
+class ImportReport:
+    tool: Tool
+    sessions: list[JsonObject] = field(default_factory=list)
+    archive_bytes: int = 0
+    error: JsonObject | None = None
+
+    def document(self) -> JsonObject:
+        value: JsonObject = {
+            "tool": self.tool, "sessions": list(self.sessions), "archiveBytesWritten": self.archive_bytes,
+        }
+        if self.error is not None:
+            value["error"] = self.error
+        return value
+
+    @property
+    def exit_status(self) -> int:
+        return int(self.error is not None or any(row.get("outcome") == "failed" for row in self.sessions))
+
+
 def _reader(tool: Tool) -> Reader:
     return cast(Reader, importlib.import_module(reader_module(tool)))
 
@@ -67,6 +88,13 @@ def _error(code: str, message: str) -> JsonObject:
     return {"code": code, "message": message}
 
 
+def _session_attribution(session: Session) -> JsonObject:
+    result = _attribution(session.native_id, session.kind)
+    if session.files_not_archived:
+        result["filesNotArchived"] = session.files_not_archived
+    return result
+
+
 def _excluded(kind: Kind | None, options: ImportOptions) -> bool:
     return kind in _OPTIONAL_KINDS and kind not in options.include
 
@@ -77,9 +105,7 @@ def _select(entry: CatalogueEntry, options: ImportOptions, owner_home: Path) -> 
         native = result.native_id if result.native_id is not None else result.file
         assert native is not None
         return {**_attribution(native, result.kind), "outcome": "failed", "error": _error(result.code, result.message)}
-    info = _attribution(result.native_id, result.kind)
-    if result.files_not_archived:
-        info["filesNotArchived"] = result.files_not_archived
+    info = _session_attribution(result)
     if _excluded(result.kind, options):
         return {**info, "outcome": "excluded"}
     if not result.turns:
@@ -99,6 +125,111 @@ def _select(entry: CatalogueEntry, options: ImportOptions, owner_home: Path) -> 
         failure = rows_refused()
         return {**info, "outcome": "failed", "error": _error(failure.code, str(failure))}
     return _Selection(result, mapped, keys, withheld)
+
+
+async def _plan(selection: _Selection, previous: Previous | None, run: _Run) -> WritePlan:
+    saved = previous.keys if previous is not None else frozenset()
+    additions = tuple(segment for segment in selection.mapped.segments if segment.turn_key not in saved)
+    if not additions and any(key not in saved for key in selection.withheld):
+        return WritePlan("deferred")
+    try:
+        home = run.source.home.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        raise UnreadableInput() from None
+    inventory = await protected_thread(lambda: inspect_files(home, selection.native.archive_files))
+    archive = run.archive
+    outcome: ImportOutcome
+    if additions:
+        outcome = "imported" if previous is None else "extended"
+    else:
+        if previous is None:
+            raise rows_refused()
+        fingerprint = previous.fingerprint
+        repaired = fingerprint is None
+        if fingerprint is None:
+            if archive is None:
+                raise Refused("rows_refused", "Run a real import with Mercury mounted to record the saved fingerprint.")
+            fingerprint = (await protected_thread(lambda: read_manifest(
+                archive, previous.manifest, selection.native.tool, selection.native.native_id,
+            ))).fingerprint
+        if fingerprint == inventory.fingerprint:
+            return WritePlan("unchanged", repair=fingerprint if repaired else None)
+        outcome = "rearchived"
+    if archive is None:
+        return WritePlan(outcome, additions)
+    written = await protected_thread(
+        lambda: publish_session(archive, home, selection.native, inventory, run.source.clock),
+    )
+    return WritePlan(outcome, additions, written)
+
+
+def _outcome(session: Session, chat: UUID | None, plan: WritePlan) -> JsonObject:
+    row = _session_attribution(session)
+    row["outcome"] = plan.outcome
+    if chat is not None:
+        row["chat"] = str(chat)
+    if plan.outcome in {"imported", "extended", "rearchived"}:
+        row.update({
+            "exchanges": len(plan.segments),
+            "messages": sum(len(segment.messages) for segment in plan.segments),
+            "toolCalls": sum(len(segment.calls) for segment in plan.segments),
+            "subagentFallbacks": sum(segment.fallback_count for segment in plan.segments),
+        })
+    return row
+
+
+async def _import_one(selection: _Selection, run: _Run, report: ImportReport) -> JsonObject:
+    async def decide(previous: Previous | None) -> WritePlan:
+        plan = await _plan(selection, previous, run)
+        if plan.archive is not None:
+            report.archive_bytes += plan.archive.bytes_written
+        return plan
+
+    if run.archive is None:
+        previous = await run.store.previous(selection.native.tool, selection.native.native_id, selection.keys)
+        plan = await decide(previous)
+        chat = previous.chat if previous is not None else None
+    else:
+        chat, plan = await run.store.apply(selection.mapped, selection.keys, run.source.clock, run.archive, decide)
+    return _outcome(selection.native, chat, plan)
+
+
+async def _process(run: _Run, options: ImportOptions, owner_home: Path) -> ImportReport:
+    report = ImportReport(options.tool)
+    with _reader(options.tool).catalogue(run.source) as catalogue:
+        for entry in catalogue:
+            try:
+                run.admit_next(dry_run=options.dry_run)
+                selection = _select(entry, options, owner_home)
+                if isinstance(selection, _Selection):
+                    try:
+                        row = await _import_one(selection, run, report)
+                    except UnreadableInput as error:
+                        row = {**_session_attribution(selection.native), "outcome": "failed",
+                               "error": _error(error.code, str(error))}
+                    except Refused as error:
+                        if error.code != "rows_refused":
+                            raise
+                        row = {**_session_attribution(selection.native), "outcome": "failed",
+                               "error": _error(error.code, str(error))}
+                else:
+                    row = selection
+                report.sessions.append(row)
+            except (ArchiveUnavailable, Refused) as error:
+                report.error = _error(error.code, str(error))
+                report.sessions.append(_attribution(entry.native, entry.kind))
+                report.sessions.extend(_attribution(pending.native, pending.kind) for pending in catalogue)
+                break
+    return report
+
+
+async def run_import(identity: Identity, options: ImportOptions, *, archive: ArchiveRoot | None = None) -> ImportReport:
+    """Run against the installed paths, or a verified disposable identity passed by qualification."""
+    try:
+        async with _run_scope(identity, options, archive) as run:
+            return await _process(run, options, identity.home)
+    except ArchiveUnavailable as error:
+        raise Refused(error.code, str(error)) from None
 
 
 @contextmanager
