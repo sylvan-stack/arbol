@@ -11,8 +11,6 @@
     oninput,
     onblur,
     onpaste,
-    onTop,
-    onBottom,
     value = $bindable(''),
     expanded = $bindable(false),
     repository = 'repository',
@@ -36,8 +34,6 @@
     oninput?: (text: string,edit?:{start:number;end:number}) => void;
     onblur?: () => void;
     onpaste?: (event: ClipboardEvent, selection: { start: number; end: number }) => void;
-    onTop?: () => void;
-    onBottom?: () => void;
     value?: string;
     expanded?: boolean;
     repository?: string;
@@ -61,6 +57,7 @@
     picker = $state(false),
     feedback = $state(''),
     firstInput = $state<HTMLTextAreaElement>();
+  const editorVisible = $derived(empty || (expanded && !busy));
   let priorContext: string | undefined,
     priorText = false;
   let beforeEdit:{start:number;end:number;length:number}|undefined;
@@ -141,13 +138,13 @@
 </script>
 
 <svelte:window onkeydown={firstKeys} />
-{#if firstSapling}
+{#if firstSapling && (editorVisible || status || problem || conflict || recovery != null)}
   <section class="first-composer" class:empty aria-label="Message composer">
     {#if empty}<p class="context-line">
         {repository} · {route.driver ?? '—'} · {route.subscription ?? '—'} · model: {route.model ??
           '—'} · thinking: {route.effort ?? '—'}
       </p>{/if}
-    {#if empty || expanded&&!busy}<textarea
+    {#if editorVisible}<textarea
         bind:this={firstInput}
         aria-label="Message"
         placeholder={'Message ' + repository + '…'}
@@ -173,29 +170,13 @@
           ? ' · Esc to collapse'
           : ''}</small
       >
-    {:else}<div class="closed">
-        <button class="start-message" disabled={busy} onclick={() => (expanded = true)}
-          >Press Enter to start new message ⏎</button
-        ><button
-          class="scroll"
-          aria-label="Scroll to top"
-          title="Scroll to top"
-          disabled={!onTop}
-          onclick={onTop}>↑</button
-        ><button
-          class="scroll"
-          aria-label="Scroll to bottom"
-          title="Scroll to bottom"
-          disabled={!onBottom}
-          onclick={onBottom}>↓</button
-        >
-      </div>{/if}
+    {/if}
     {#if !empty && !expanded && status}<small class="muted" role="status">{status}</small>{/if}
     {#if problem}<p class="problem" role="alert">{problem}</p>{/if}
     {#if conflict}<section class="conflict" aria-label="Changed elsewhere"><strong>Changed elsewhere</strong><div class="versions"><div><b>Your text</b><pre>{conflict.mine||'(empty)'}</pre></div><div><b>Other text</b><pre>{conflict.theirs||'(removed)'}</pre></div></div><div class="choices"><button onclick={onKeepMine} disabled={!onKeepMine}>Keep mine</button><button onclick={onTakeTheirs} disabled={!onTakeTheirs}>Take theirs</button></div></section>{/if}
     {#if recovery!==undefined&&recovery!==null}<section class="conflict" aria-label="Unsaved text from this window"><strong>Unsaved text from this window</strong><p>The Draft still has the revision this text was typed over.</p><pre>{recovery||'(empty)'}</pre><div class="choices"><button onclick={onRestore} disabled={!onRestore}>Restore text</button><button onclick={onDiscardRecovery} disabled={!onDiscardRecovery}>Discard</button></div></section>{/if}
   </section>
-{:else}
+{:else if !firstSapling}
   <section class="panel stack" aria-label="Message composer">
     <TextArea
       onkeydown={handleKeys}
@@ -275,31 +256,6 @@
   .first-composer textarea:focus-visible {
     outline: 2px solid var(--focus);
     outline-offset: 2px;
-  }
-  .closed {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-  }
-  .start-message {
-    flex: 1;
-    background: none;
-    border: 0;
-    padding: 4px;
-    color: var(--muted);
-    font: inherit;
-    text-align: left;
-    min-width: 0;
-  }
-  .scroll {
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    background: var(--panel);
-    color: var(--text);
-    font: inherit;
-    min-width: 30px;
-    min-height: 30px;
   }
   .problem {
     margin: 0;

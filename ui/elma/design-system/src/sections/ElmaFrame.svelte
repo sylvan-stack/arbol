@@ -2,6 +2,7 @@
   import {tick,type Snippet} from 'svelte';
   import WorkspaceGlyph from '../components/WorkspaceGlyph.svelte';
   import WorkspaceShell from '../patterns/WorkspaceShell.svelte';
+  import ElmaStatus, { type ElmaStatusActions } from './ElmaStatus.svelte';
   import { importToolLabel, type ElmaImport, type ElmaRoute } from './elma-types';
   import {signInCommand} from './elma-response';
   import InlineRename from '../patterns/InlineRename.svelte';
@@ -12,12 +13,13 @@
     repository='sylvan-stack', route={} as ElmaRoute, repositories=[] as {name:string;folder:string}[],
     routes=[] as {driver:string;subscription:string;unavailable?:string}[], accountProblems=[] as string[], accountBusy=false,onrefreshAccounts,onrefreshAccount, fitted=false,routeBusy=false,routeSaving=false,routeProblem='',onretryRoute,
     readingWidth=$bindable(720), uiScale=$bindable(0), contentScale=$bindable(0), theme=$bindable(''),
-    onpreferences=()=>{}, onarchived, imported, onolder, onnewer, onhistory, onrepository, onroute, onmodel, oneffort, onother, onquick, onongoing, onrename, rename, onRenameInput, onRenameSave, onRenameCancel, metadataBusy=false, children,
+    onpreferences=()=>{}, onarchived, imported, onolder, onnewer, onhistory, onrepository, onroute, onmodel, oneffort, onother, onquick, onongoing, onrename, rename, onRenameInput, onRenameSave, onRenameCancel, metadataBusy=false, statusActions, children,
   }: {
     trunk?:string;trunkSelector?:WorkspaceTrunkSelector;headerWindowControls?:Snippet;title?:string;titleIdentity?:string;placeholder?:boolean;turn?:number;total?:number;hasChat?:boolean;working?:boolean;ongoing?:boolean;
     inputTokens?:number;outputTokens?:number;repository?:string;route?:ElmaRoute;repositories?:{name:string;folder:string}[];routes?:{driver:string;subscription:string;unavailable?:string}[];
     accountProblems?:string[];accountBusy?:boolean;onrefreshAccounts?:()=>void;onrefreshAccount?:(driver:string,subscription:string)=>void;fitted?:boolean;routeBusy?:boolean;routeSaving?:boolean;routeProblem?:string;onretryRoute?:()=>void;readingWidth?:number;uiScale?:number;contentScale?:number;theme?:string;onpreferences?:()=>void;
     onarchived?:()=>void;imported?:ElmaImport;onolder?:()=>void;onnewer?:()=>void;onhistory?:()=>void;onrepository?:(folder:string)=>void;onroute?:(driver:string,subscription:string)=>void;onmodel?:()=>void;oneffort?:()=>void;onother?:()=>void;onquick?:()=>void;onongoing?:()=>void;onrename?:()=>void;rename?:{value:string;busy:boolean;problem:string}|null;onRenameInput?:(value:string)=>void;onRenameSave?:()=>void;onRenameCancel?:()=>void;metadataBusy?:boolean;children?:Snippet;
+    statusActions?: ElmaStatusActions;
   }=$props();
   let titleButton=$state<HTMLButtonElement>();let wasRenaming=false,editIdentity='';
   $effect(()=>{const active=!!rename,key=titleIdentity;if(active&&!wasRenaming)editIdentity=key;if(wasRenaming&&!active&&editIdentity===key)void tick().then(()=>titleButton?.focus());wasRenaming=active;});
@@ -66,7 +68,7 @@
     <button class="group" aria-expanded={intelligenceOpen} onclick={()=>intelligenceOpen=!intelligenceOpen}><span>Intelligence</span><span aria-hidden="true">{intelligenceOpen?'−':'+'}</span></button>
     {#if intelligenceOpen}{#if accountBusy}<p class="account-problem" role="status">Refreshing accounts…</p>{/if}<button class="nav-row" disabled={!onrefreshAccounts||accountBusy} onclick={onrefreshAccounts}>Refresh accounts</button>{#each accountProblems as problem}<p class="account-problem">{problem}</p>{/each}{#if routeBusy||routeSaving}<p class="account-problem" role="status">{routeBusy?'Loading models…':'Saving route…'}</p>{/if}{#if routeProblem}<p class="account-problem" role="status">{routeProblem}</p>{#if onretryRoute}<button class="nav-row" onclick={onretryRoute}>Retry models</button>{/if}{/if}<button class="nav-row" disabled={!onmodel||routeBusy} onclick={onmodel}><span>Model: {route.model||'—'}</span><kbd>⌃M</kbd></button><button class="nav-row" disabled={!oneffort||routeBusy} onclick={oneffort}><span>Thinking: {route.effort||'—'}</span><kbd>⌃⇥</kbd></button>{#each routes as row,i}<button class="nav-row" disabled={!!row.unavailable||!onroute} onclick={()=>onroute?.(row.driver,row.subscription)} title={row.unavailable}><span>{row.driver} · {row.subscription}{row.unavailable?' · '+row.unavailable:''}</span>{#if i<9}<kbd>⌃{i+1}</kbd>{/if}</button>{#if row.unavailable&&signInCommand(row.driver,row.subscription)}<p class="account-problem">Sign in with: <code>{signInCommand(row.driver,row.subscription)}</code></p>{/if}{#if row.unavailable}<button class="nav-row" disabled={!onrefreshAccount||accountBusy} onclick={()=>onrefreshAccount?.(row.driver,row.subscription)}>Refresh {row.driver} · {row.subscription}</button>{/if}{/each}{/if}
   {/snippet}
-  {#snippet status()}<span class="status-text">{repository} – {route.driver||'—'} · {route.subscription||'—'} – {route.model||'—'}::{route.effort||'—'}</span>{/snippet}
+  {#snippet status()}<ElmaStatus {repository} {route} actions={statusActions} />{/snippet}
   {#if children}{@render children()}{:else}<div class="empty">New Chat</div>{/if}
 </WorkspaceShell>
 </div>
@@ -137,6 +139,6 @@
   font-variant-numeric: tabular-nums;
 }
 .reading-width{font-size:calc(11.5px * var(--font-scale));min-height:28px;background:var(--inset);color:var(--text);border:1px solid var(--border);border-radius:5px;padding:2px 5px}
-.account-problem{color:var(--warning);font-size:calc(11.5px * var(--font-scale));overflow-wrap:anywhere}.cockpit,.history-heading{color:var(--muted);font-size:calc(11.5px * var(--font-scale))}.cockpit{display:flex;flex-direction:column;gap:4px;margin:12px 0}.cockpit button{border:1px solid var(--border);border-radius:20px;background:var(--inset);color:var(--text);padding:4px 8px;align-self:start}.group,.nav-row{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;text-align:left;min-height:30px;background:transparent;border:0;color:var(--text);padding:4px 0}.group{font-size:calc(11.5px * var(--font-scale));color:var(--muted);font-weight:700;margin-top:12px;text-transform:uppercase}.nav-row span{overflow-wrap:anywhere;min-width:0}.nav-row kbd{white-space:nowrap;flex-shrink:0;color:var(--muted)}.history-heading{border-top:1px solid var(--border);padding-top:12px;margin-top:12px;text-transform:uppercase}.status-text{overflow-wrap:anywhere;white-space:normal}.empty{margin:auto;padding:32px;color:var(--muted)}
+.account-problem{color:var(--warning);font-size:calc(11.5px * var(--font-scale));overflow-wrap:anywhere}.cockpit,.history-heading{color:var(--muted);font-size:calc(11.5px * var(--font-scale))}.cockpit{display:flex;flex-direction:column;gap:4px;margin:12px 0}.cockpit button{border:1px solid var(--border);border-radius:20px;background:var(--inset);color:var(--text);padding:4px 8px;align-self:start}.group,.nav-row{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;text-align:left;min-height:30px;background:transparent;border:0;color:var(--text);padding:4px 0}.group{font-size:calc(11.5px * var(--font-scale));color:var(--muted);font-weight:700;margin-top:12px;text-transform:uppercase}.nav-row span{overflow-wrap:anywhere;min-width:0}.nav-row kbd{white-space:nowrap;flex-shrink:0;color:var(--muted)}.history-heading{border-top:1px solid var(--border);padding-top:12px;margin-top:12px;text-transform:uppercase}.empty{margin:auto;padding:32px;color:var(--muted)}
 @media(max-width:800px){.reading-width{display:none}}
 </style>
