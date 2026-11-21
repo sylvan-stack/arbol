@@ -1,7 +1,8 @@
 """Inspect and retain byte-exact native session inputs (IMP-0.13)."""
 
+import json
 import os
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -29,6 +30,20 @@ class FileEntry:
     sha256: str
     size: int
     mtime: datetime
+
+
+@dataclass(frozen=True)
+class Inventory:
+    files: tuple[FileEntry, ...]
+
+    @property
+    def fingerprint(self) -> str:
+        pairs = [[entry.path, entry.sha256] for entry in self.files]
+        return sha256(_canonical(pairs)).hexdigest()
+
+
+def _canonical(value: object) -> bytes:
+    return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
 
 
 def _relative_path(value: str) -> bool:
@@ -85,3 +100,16 @@ def _measure(home: Path, source: ArchiveFile, copy: Callable[[bytes], object] | 
             if copy is not None:
                 copy(chunk)
     return FileEntry(source.path, digest.hexdigest(), size, mtime)
+
+
+def _inventory(entries: Iterable[FileEntry]) -> Inventory:
+    by_path: dict[str, FileEntry] = {}
+    for entry in entries:
+        if by_path.setdefault(entry.path, entry) != entry:
+            raise UnreadableInput()
+    return Inventory(tuple(by_path[path] for path in sorted(by_path)))
+
+
+def inspect_files(home: Path, files: Iterable[ArchiveFile]) -> Inventory:
+    """Compute the replay fingerprint without opening or writing an archive."""
+    return _inventory(_measure(home, source) for source in files)
