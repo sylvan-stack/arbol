@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import fcntl
+import os
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from typing import TYPE_CHECKING
@@ -30,6 +32,7 @@ from arbol_installation.admission import (
 from arbol_installation.admission import (
     AdmissionRefusal,
     Mode,
+    private_file,
 )
 from arbol_installation.admission import (
     Lease as Lease,
@@ -72,6 +75,22 @@ if TYPE_CHECKING:
 
 
 class Admission(InstallationAdmission):
+    @contextmanager
+    def import_read(self, *, allow_draining: bool) -> Iterator[Source]:
+        """Keep the source stable for a bounded SQL read without registering a writer."""
+        with ExitStack() as stack:
+            try:
+                folder = stack.enter_context(directory(self.runtime))
+                stack.enter_context(lock(folder, GATE, fcntl.LOCK_SH))
+                state = read_state(folder)
+                for name in (OWNER, WRITERS):
+                    private_file(os.stat(name, dir_fd=folder, follow_symlinks=False))
+            except (OSError, ValueError, RecursionError):
+                raise Refusal("maintenance", "The installation admission state is unavailable.") from None
+            if state.phase not in (("normal", "draining") if allow_draining else ("normal",)):
+                raise Refusal("maintenance", "The installation is in maintenance.")
+            yield state.source
+
     @contextmanager
     def lease(self, mode: Mode, *, generation: str | None = None) -> Iterator[Lease]:
         with ExitStack() as stack:
