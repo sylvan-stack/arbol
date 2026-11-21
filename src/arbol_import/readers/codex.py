@@ -22,11 +22,12 @@ from typing import Any, BinaryIO
 from urllib.parse import unquote_to_bytes
 
 from .form import (
+    LIVE_WINDOW,
     ArchiveFile,
     CallLink,
     ExportedRows,
     Failed,
-    HomeFile,
+    FileObservations,
     Image,
     Item,
     Kind,
@@ -43,7 +44,6 @@ from .form import (
     Trigger,
     Turn,
     Usage,
-    live_by_mtime,
     unknown_record,
 )
 from .lines import file_records, lines
@@ -95,6 +95,7 @@ class Rollout:
     failure: SessionFailure | None = None
     outside: bool = False
     read_path: str | None = None
+    observations: FileObservations = field(default_factory=FileObservations)
 
 
 def _rollout_target(home: Path, relative: str) -> Path:
@@ -112,15 +113,20 @@ def _rollout_target(home: Path, relative: str) -> Path:
     raise SessionFailure("unreadable_session", f"{relative}: the rollout could not be read.")
 
 
-def _records(home: Path, relative: str, read_path: str | None = None) -> Generator[tuple[int, Any]]:
-    target = _rollout_target(home, relative)
+def _observed_target(home: Path, rollout: Rollout) -> Path:
+    target = _rollout_target(home, rollout.relative)
     actual_path = target.relative_to(home).as_posix()
-    if read_path is not None and actual_path != read_path:
-        raise SessionFailure("unreadable_session", f"{relative}: the rollout target changed.")
+    if rollout.read_path is not None and actual_path != rollout.read_path:
+        raise SessionFailure("unreadable_session", f"{rollout.relative}: the rollout target changed.")
+    return target
+
+
+def _records(home: Path, rollout: Rollout) -> Generator[tuple[int, Any]]:
+    target = _observed_target(home, rollout)
     try:
-        yield from file_records(home, actual_path)
+        yield from file_records(home, target.relative_to(home).as_posix(), rollout.observations)
     except RecursionError:
-        raise SessionFailure("unreadable_session", f"{relative}: a line could not be decoded.") from None
+        raise SessionFailure("unreadable_session", f"{rollout.relative}: a line could not be decoded.") from None
 
 
 def _header(rollout: Rollout, row: object, line: int) -> None:
@@ -198,9 +204,10 @@ def _discover(home: Path) -> Iterator[Rollout]:
             if not stat.S_ISREG(target.stat().st_mode):
                 continue
             target = _rollout_target(home, relative)
-            rollout.mtime_ns = target.stat().st_mtime_ns
+            observation = rollout.observations.record(target, target.stat(follow_symlinks=False))
+            rollout.mtime_ns = observation.mtime_ns
             rollout.read_path = target.relative_to(home).as_posix()
-            with closing(_records(home, relative, rollout.read_path)) as records:
+            with closing(_records(home, rollout)) as records:
                 first = next(records, None)
             if first is None:
                 continue
@@ -824,7 +831,7 @@ def _conversation(rollout: Rollout, line: int, row: Object, kind: str,
 
 def _body(home: Path, rollout: Rollout) -> Generator[Record]:
     conversation = {"response_item", "event_msg", "turn_context", "token_usage_record"}
-    with closing(_records(home, rollout.relative, rollout.read_path)) as records:
+    with closing(_records(home, rollout)) as records:
         first = next(records, None)
         if first is None:
             raise SessionFailure("unreadable_session", f"{rollout.relative}: the rollout header disappeared.")
@@ -1428,11 +1435,16 @@ def _session_archive(home: Path, catalogue: Catalogue, inventory: Inventory, fam
                      clock: datetime) -> tuple[tuple[ArchiveFile, ...], int, bool]:
     native_ids = {thread.native_id for thread in family}
     root = family[0]
-    files = {rollout.relative: rollout.read_path for thread in family for rollout in thread.copies}
-    archive: list[ArchiveFile] = [
-        HomeFile(relative, target if target != relative else None)
-        for relative, target in sorted(files.items())
-    ]
+    rollouts = {rollout.relative: rollout for thread in family for rollout in thread.copies}
+    try:
+        files = [
+            rollout.observations.nominate(home, home / relative, target=_observed_target(home, rollout))
+            for relative, rollout in sorted(rollouts.items())
+        ]
+        live = any(file.observation is not None and file.observation.modified_at >= clock - LIVE_WINDOW for file in files)
+    except (OSError, OverflowError):
+        raise SessionFailure("unreadable_session", f"{root.chosen.relative}: rollout times could not be read.") from None
+    archive: list[ArchiveFile] = list(files)
     if catalogue.mtime is not None:
         threads = [
             {key: value for key, value in catalogue.threads[native_id].items() if key in _THREAD_ARCHIVE_FIELDS}
@@ -1449,10 +1461,6 @@ def _session_archive(home: Path, catalogue: Catalogue, inventory: Inventory, fam
                               sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
             archive.append(ExportedRows(f"{_DB}#{root.native_id}.json", rows, catalogue.mtime))
     outside = {path for native_id in native_ids for path in inventory.outside.get(native_id, ())}
-    try:
-        live = live_by_mtime((home / relative for relative in files), clock)
-    except OSError:
-        raise SessionFailure("unreadable_session", f"{root.chosen.relative}: rollout times could not be read.") from None
     return tuple(archive), len(outside), live
 
 
