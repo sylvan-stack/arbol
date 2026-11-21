@@ -80,13 +80,22 @@ def json_text(value: object, indent: int | None = None) -> bytes:
     return dumped.encode("utf-8", "backslashreplace")
 
 
-def atomic_write(path: str, contents: bytes, mode: int = 0o600) -> None:
+def atomic_write(path: str, contents: bytes, mode: int = 0o600, *, durable: bool = False) -> None:
     temporary = f"{path}.{os.getpid()}.{uuid.uuid4()}.tmp"
     try:
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
         with os.fdopen(fd, "wb") as stream:
             stream.write(contents)
+            if durable:
+                stream.flush()
+                os.fsync(stream.fileno())
         os.replace(temporary, path)
+        if durable:
+            parent = os.open(os.path.dirname(path), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(parent)
+            finally:
+                os.close(parent)
     finally:
         try:
             os.unlink(temporary)
@@ -114,21 +123,51 @@ def save_record(folder: str, record: Record) -> None:
     with_mutation_lock(os.path.dirname(folder), change)
 
 
-def reserve(registry: str, component: str) -> tuple[str, str]:
-    """The folder and the number of a new Build: one more than the highest numbered folder."""
-    if Path(registry).resolve() == build_registry().resolve():
-        prepare_installation()
-    root = os.path.join(registry, component)
-    make_dirs(root, 0o700)
-    number = max((int(name, 16) for name in numbered_folders(root)), default=0) + 1
+def browser_production_high_water(path: str) -> int:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return 0
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600):
+            raise ValueError("Unsafe Browser production Build counter.")
+        raw = stream.read(18)
+    build = raw.decode("ascii").removesuffix("\n")
+    if raw != (build + "\n").encode("ascii") or len(build) > 16 or not BUILD_PATTERN.fullmatch(build):
+        raise ValueError("Damaged Browser production Build counter.")
+    return int(build, 16)
+
+
+def reserve_numbered_folder(root: str, high_water: int = 0, counter: str | None = None) -> tuple[str, str]:
+    number = max(high_water, max((int(name, 16) for name in numbered_folders(root)), default=0)) + 1
     while True:
         build = format(number, "x")
+        if counter is not None and len(build) > 16:
+            raise ValueError("Browser production Build numbering is exhausted.")
         folder = os.path.join(root, build)
         try:
             os.mkdir(folder, 0o700)
-            return folder, build
         except FileExistsError:
             number += 1
+            continue
+        if counter is not None:
+            atomic_write(counter, (build + "\n").encode("ascii"), durable=True)
+        return folder, build
+
+
+def reserve(registry: str, component: str) -> tuple[str, str]:
+    """Allocate in the requested registry, keeping canonical Browser numbers across pruning."""
+    canonical = Path(registry).resolve() == build_registry().resolve()
+    if canonical:
+        prepare_installation()
+    root = os.path.join(registry, component)
+    make_dirs(root, 0o700)
+    if canonical and component == "arbol-browser":
+        counter = os.path.join(root, ".production-high-water")
+        return with_mutation_lock(root, lambda: reserve_numbered_folder(root, browser_production_high_water(counter), counter))
+    return reserve_numbered_folder(root)
 
 
 def module_text(name: str, folder: Path = Path(PACKAGE)) -> str:
