@@ -745,7 +745,10 @@ def _usage(record: _Record) -> Usage | None:
     counts = [value.get(field, 0) for field in _USAGE_FIELDS]
     if any(type(count) is not int or count < 0 for count in counts):
         record.invalid("step.end")
-    return Usage.native(uncached=counts[0], cache_read=counts[1], cache_write=counts[2], output=counts[3])
+    return Usage.native(
+        uncached=counts[0], cache_read=counts[1],
+        cache_write=counts[2] if "inputCacheCreation" in value else None, output=counts[3],
+    )
 
 
 def _request_turn(record: _Record) -> str | None:
