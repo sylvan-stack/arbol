@@ -666,6 +666,36 @@ def copy_configuration(files: dict[str, str], destination: Path) -> list[str]:
     return sorted(files)
 
 
+def exchange_capabilities(value: object, builds: object) -> dict[str, Any]:
+    """Validate the successor policy against the exact captured release payloads."""
+    if (not isinstance(value, dict) or set(value) != {"readExchange", "trunks", "backend"}
+            or value["readExchange"] != [1, 2]
+            or any(type(version) is not int for version in value["readExchange"])
+            or not isinstance(value["trunks"], dict) or set(value["trunks"]) != {"steady", "trivial"}
+            or not isinstance(value["backend"], dict) or not isinstance(builds, list)):
+        raise RecoveryError("Invalid Exchange release capabilities.")
+    backend = value["backend"]
+    if (set(backend) != {"build", "readNotes", "writeNote"} or backend["readNotes"] != [1, 2]
+            or any(type(version) is not int for version in backend["readNotes"])
+            or type(backend["writeNote"]) is not int or backend["writeNote"] != 2):
+        raise RecoveryError("Invalid Backend note capabilities.")
+    selected = [("arbol", backend.get("build"))]
+    for name, declaration in value["trunks"].items():
+        if (not isinstance(declaration, dict) or set(declaration) != {"build", "start"}
+                or type(declaration["start"]) is not int or declaration["start"] != 2):
+            raise RecoveryError("Invalid Trunk Exchange capabilities.")
+        selected.append((f"arbol-trunk/{name}", declaration.get("build")))
+    for component, number in selected:
+        matches = [item for item in builds if isinstance(item, dict) and item.get("component") == component
+                   and item.get("build") == number]
+        if (not isinstance(number, str) or re.fullmatch(r"[1-9a-z][0-9a-z]*", number) is None
+                or len(matches) != 1 or not isinstance(matches[0].get("evidence"), dict)
+                or not isinstance(matches[0]["evidence"].get("installedFilesSha256"), str)
+                or DIGEST.fullmatch(matches[0]["evidence"]["installedFilesSha256"]) is None):
+            raise RecoveryError("Exchange capabilities do not identify one verified payload for each selected Build.")
+    return value
+
+
 def record_release(inventory_path: Path, destination: Path) -> str:
     archive = require_archive()
     private_dir(inventory_path.parent)
@@ -703,6 +733,10 @@ def record_release(inventory_path: Path, destination: Path) -> str:
         inputs = copy_configuration(inventory.get("inputs", {}), output / "inputs")
         payload = {"format": 1, "kind": kind, "builds": builds, "configuration": labels, "inputs": inputs,
                    "files": tree(output)}
+        if "exchangeCapabilities" in inventory:
+            if kind != "current":
+                raise RecoveryError("Exchange capabilities require a current release.")
+            payload["exchangeCapabilities"] = exchange_capabilities(inventory["exchangeCapabilities"], builds)
         receipt = output / "release.json"
         write_private(receipt, payload)
         return digest(receipt)
@@ -723,6 +757,10 @@ def verify_release(folder: Path, expected: str | None = None, *,
             or not value.get("builds") or not value.get("configuration")
             or value.get("files") != tree(folder, exclude=frozenset({"release.json"}))):
         raise RecoveryError("Required release payloads or recovery configuration differ from the release record.")
+    if "exchangeCapabilities" in value:
+        if value["kind"] != "current":
+            raise RecoveryError("Exchange capabilities require a current release.")
+        exchange_capabilities(value["exchangeCapabilities"], value["builds"])
     return value, actual
 
 
