@@ -361,7 +361,9 @@ def listed_exchanges(value: object) -> list[Record]:
     result: list[Record] = []
     seen: set[str] = set()
     for item in value["exchanges"]:
-        if (not isinstance(item, dict) or type(item.get("exchangeFormat")) is not int or item["exchangeFormat"] != 1
+        if (not isinstance(item, dict) or "root" in item or "rootContract" in item
+                or type(item.get("exchangeFormat")) is not int
+                or item["exchangeFormat"] not in (1, 2)
                 or not isinstance(item.get("exchange"), str) or not UUID.fullmatch(item["exchange"])
                 or not isinstance(item.get("chat"), str) or not UUID.fullmatch(item["chat"])
                 or not isinstance(item.get("trunk"), str) or not listed_trunk(item)

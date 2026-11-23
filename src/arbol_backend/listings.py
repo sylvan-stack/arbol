@@ -51,8 +51,9 @@ class Listings:
         result: list[Params] = []
         seen = set(unreadable)
         for row in rows:
-            if (not isinstance(row, dict) or "root" in row or type(row.get("exchangeFormat")) is not int
-                    or row["exchangeFormat"] != 1 or not isinstance(row.get("process"), dict)
+            if (not isinstance(row, dict) or "root" in row or "rootContract" in row
+                    or type(row.get("exchangeFormat")) is not int
+                    or row["exchangeFormat"] not in (1, 2) or not isinstance(row.get("process"), dict)
                     or not isinstance(row.get("signsOfLife"), dict)):
                 raise Error("no_answer", source="runtime")
             exchange, chat = uuid_id(row.get("exchange")), uuid_id(row.get("chat"))
@@ -70,7 +71,7 @@ class Listings:
             timestamp(life.get("since"))
             heartbeat = integer(life.get("heartbeat"), 0, 9223372036854775807)
             projected: Params = {"exchange": exchange, "chat": chat, "trunk": trunk, "build": build,
-                                 "state": state, "exchangeFormat": 1,
+                                 "state": state, "exchangeFormat": row["exchangeFormat"],
                                  "process": {"pid": pid, "startedAt": process["startedAt"], "alive": process["alive"]},
                                  "signsOfLife": {"heartbeat": heartbeat, "waitingFor": text(life.get("waitingFor")),
                                                  "since": life["since"]}}
