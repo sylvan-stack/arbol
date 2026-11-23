@@ -15,8 +15,7 @@ from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from .paths import INSTALLATION_LAYOUT, installation_root, prepare_installation
