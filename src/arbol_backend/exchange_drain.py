@@ -30,6 +30,8 @@ from .exchange_admission import (
 )
 from .exchange_context import Context, Refusal
 from .exchange_listing import drained_inventory
+from .model import Refused
+from .note_files import NoteFiles
 
 
 @contextmanager
@@ -151,6 +153,10 @@ def freeze(context: Context, source: Source, session: str) -> str:
         bound(state, checked_source(source), session)
         if state.phase == "draining":
             drained_inventory(context)
+            try:
+                NoteFiles(context.identity).require_empty()
+            except (OSError, ValueError, Refused):
+                raise Refusal("maintenance_busy", "Recovery note custody is not empty or cannot be verified.") from None
             asyncio.run(inspect_database(context, source, idle=True))
             write_state(folder, State("exclusive", uuid4().hex, state.source, session, state.release,
                                       state.exchange_authorization))
@@ -196,6 +202,10 @@ def reopen(context: Context, source: Source, session: str, *, release: str, sche
         with gate(folder, idle=idle):
             if idle:
                 drained_inventory(context)
+                try:
+                    NoteFiles(context.identity).require_empty()
+                except (OSError, ValueError, Refused):
+                    raise Refusal("maintenance_busy", "Recovery note custody is not empty or cannot be verified.") from None
             if asyncio.run(inspect_database(context, source, idle=idle)) != schema:
                 raise Refusal("schema_incompatible", "The installed schema does not match the verified release.")
             write_state(folder, State("normal", uuid4().hex, state.source, None, release,

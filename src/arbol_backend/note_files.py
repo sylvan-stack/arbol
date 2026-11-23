@@ -177,6 +177,18 @@ class NoteFiles:
         finally:
             os.close(parent)
 
+    def require_empty(self) -> None:
+        """Refuse closure if any note namespace entry remains, without reading its content."""
+        try:
+            parent = self.directory()
+        except FileNotFoundError:
+            return
+        try:
+            if os.listdir(parent):
+                raise Error("no_answer")
+        finally:
+            os.close(parent)
+
     def remove(self, note: Note) -> None:
         parent = self.directory()
         try:
