@@ -558,9 +558,10 @@ def capture_build(
             not isinstance(check, dict) or set(check) != {"name", "passed"} or not isinstance(check["name"], str)
             or not check["name"] or type(check["passed"]) is not bool for check in recorded_checks)):
         raise RecoveryError("The installed Build's historical checks are unreadable.")
-    if transition is not None and transition["role"] == "successor" and (
-            not expected_checks or recorded_checks != expected_checks):
-        raise RecoveryError("The successor Build lacks its exact successful Build checks.")
+    if transition is not None and transition["role"] == "successor":
+        packaging = [{"name": check["name"], "passed": True} for check in build_config["checks"] if "kind" not in check]
+        if recorded_checks != packaging:
+            raise RecoveryError("The successor Build does not record its exact packaging checks.")
 
     evidence: dict[str, Any] = {}
     if transition is not None:
@@ -750,6 +751,63 @@ def selected_entry(path: Path) -> tuple[bytes, int]:
         os.close(fd)
 
 
+def required_unit_checks(folder: Path, builds: list[dict[str, Any]]) -> set[tuple[str, str, str]]:
+    """Read the exact committed recipes retained with this release, not promotion results."""
+    required: set[tuple[str, str, str]] = set()
+    for index, build in enumerate(builds):
+        if build.get("savedAt") != f"builds/{index}":
+            raise RecoveryError("The captured Build source location is invalid.")
+        source = build["evidence"]["gitSource"]
+        if source.get("repository") != "source.git":
+            raise RecoveryError("The captured Build source is unavailable.")
+        repository = folder / "builds" / str(index) / "source.git"
+        if repository.is_symlink() or not repository.is_dir():
+            raise RecoveryError("The captured Build source is unavailable.")
+        commit = commit_id(build["sourceCommit"])
+        if git(repository, "rev-parse", f"{commit}^{{tree}}").decode().strip() != source.get("tree"):
+            raise RecoveryError("The captured source tree differs from the selected Build.")
+        component_path = build["componentPath"]
+        prefix = relative(component_path).as_posix() + "/" if component_path else ""
+        raw = source_file(repository, commit, prefix, "arbol-build.json")
+        if sha(raw) != build["buildConfigurationSha256"]:
+            raise RecoveryError("The captured Build recipe differs from its source.")
+        recipe = json.loads(raw)
+        if recipe.get("component") != build["component"] or not isinstance(recipe.get("checks"), list):
+            raise RecoveryError("The captured Build recipe has invalid checks.")
+        checks = recipe["checks"]
+        packaging = [{"name": row["name"], "passed": True} for row in checks if "kind" not in row]
+        if build["evidence"].get("recordedChecks") != packaging:
+            raise RecoveryError("The captured Build's packaging checks differ from its committed recipe.")
+        names = [row["name"] for row in checks if row.get("kind") == "unit"]
+        if (not names or any(not isinstance(name, str) or not name.strip() for name in names)
+                or len(set(names)) != len(names)):
+            raise RecoveryError("The committed Build recipe lacks an unambiguous top-tier unit gate.")
+        required.update((build["component"], build["build"], name) for name in names)
+    return required
+
+
+def verify_qualification(value: dict[str, Any], candidates: list[dict[str, Any]],
+                         required: set[tuple[str, str, str]]) -> None:
+    if (set(value) != {"format", "kind", "independent", "result", "builds", "checks", "journeys"}
+            or type(value["format"]) is not int or value["format"] != 1
+            or value["kind"] != "exchange-format-2-qualification" or value["independent"] is not True
+            or value["result"] != "passed" or value["builds"] != candidates):
+        raise RecoveryError("Qualification does not bind the exact candidate Builds and packages.")
+    identities = {(item["component"], item["build"]) for item in candidates}
+    for group in ("checks", "journeys"):
+        rows = value[group]
+        if not isinstance(rows, list) or any(not isinstance(row, dict)
+                or set(row) != {"component", "build", "name", "passed"}
+                or not isinstance(row["component"], str) or not isinstance(row["build"], str)
+                or (row["component"], row["build"]) not in identities
+                or not isinstance(row["name"], str) or not row["name"].strip() or row["passed"] is not True
+                for row in rows):
+            raise RecoveryError("Qualification contains an invalid or failed named result.")
+        names = [(row["component"], row["build"], row["name"]) for row in rows]
+        if len(names) != len(set(names)) or (group == "checks" and set(names) != required):
+            raise RecoveryError("Qualification does not exactly cover the committed unit gates.")
+
+
 def exchange_transition_evidence(inventory: dict[str, Any], builds: list[dict[str, Any]], output: Path) -> dict[str, Any]:
     """Capture selected stable routes and bind successor qualification to candidate and installed bytes."""
     spec = exchange_transition_spec(inventory["exchangeTransition"])
@@ -839,6 +897,7 @@ def exchange_transition_evidence(inventory: dict[str, Any], builds: list[dict[st
                 "candidateSha256": sha(canonical(tree(candidate, exclude=frozenset(MUTABLE_BUILD_FILES)))),
                 "packageManifestSha256": build["evidence"]["packageManifestSha256"],
                 "checks": candidate_record["checks"]})
+            selected[-1]["candidateSha256"] = candidate_evidence[-1]["candidateSha256"]
     result: dict[str, Any] = {"role": spec["role"], "admissionRelease": spec["admissionRelease"],
                               "admissionReleaseDirectory": spec["admissionReleaseDirectory"], "selected": selected}
     if spec["role"] == "successor":
@@ -847,24 +906,7 @@ def exchange_transition_evidence(inventory: dict[str, Any], builds: list[dict[st
         if source.is_symlink() or not source.is_file() or digest(source) != spec["qualificationSha256"]:
             raise RecoveryError("The named qualification evidence does not match its approved digest.")
         qualification = document(source)
-        if (set(qualification) != {"format", "kind", "independent", "result", "builds", "checks"}
-                or type(qualification["format"]) is not int or qualification["format"] != 1
-                or qualification["kind"] != "exchange-format-2-qualification"
-                or qualification["independent"] is not True or qualification["result"] != "passed"
-                or qualification["builds"] != candidate_evidence):
-            raise RecoveryError("Qualification does not bind the exact candidate Builds, packages and checks.")
-        checks = qualification["checks"]
-        identities = {(item["component"], item["build"]) for item in candidate_evidence}
-        if (not isinstance(checks, list) or not checks or any(not isinstance(row, dict)
-                or set(row) != {"component", "build", "name", "passed"}
-                or not isinstance(row["component"], str) or not isinstance(row["build"], str)
-                or (row["component"], row["build"]) not in identities
-                or not isinstance(row["name"], str) or not row["name"].strip() or row["passed"] is not True
-                for row in checks)):
-            raise RecoveryError("Qualification checks must pass for the exact selected Builds.")
-        names = [(row["component"], row["build"], row["name"]) for row in checks]
-        if len(set(names)) != len(names) or {(row["component"], row["build"]) for row in checks} != identities:
-            raise RecoveryError("Qualification must cover every selected Build without duplicate checks.")
+        verify_qualification(qualification, candidate_evidence, required_unit_checks(output, builds))
         target = output / "exchange-qualification.json"
         retain_pinned_input(source, target, spec["qualificationSha256"])
         result["qualification"] = {"sha256": spec["qualificationSha256"], "path": target.name}
@@ -928,6 +970,92 @@ def record_release(inventory_path: Path, destination: Path) -> str:
         return digest(receipt)
 
 
+def verify_exchange_transition(folder: Path, value: dict[str, Any]) -> None:
+    """Revalidate archived transition roles, selected entries and successor qualification."""
+    try:
+        transition = value["exchangeTransition"]
+        if not isinstance(transition, dict) or transition.get("role") not in ("prior", "successor"):
+            raise RecoveryError("The archived Exchange transition role is invalid.")
+        role = transition["role"]
+        keys = {"role", "admissionRelease", "admissionReleaseDirectory", "selected"}
+        if (set(transition) != (keys | {"qualification"} if role == "successor" else keys)
+                or value.get("kind") != "current"
+                or ("exchangeCapabilities" in value) != (role == "successor")
+                or not isinstance(transition["admissionRelease"], str)
+                or DIGEST.fullmatch(transition["admissionRelease"]) is None
+                or not isinstance(transition["admissionReleaseDirectory"], str)
+                or not Path(transition["admissionReleaseDirectory"]).is_absolute()):
+            raise RecoveryError("The archived Exchange transition is invalid.")
+        builds, selected = value["builds"], transition["selected"]
+        if (not isinstance(builds, list) or len(builds) != 3 or not isinstance(selected, list) or len(selected) != 3
+                or {build["component"] for build in builds} != {"arbol", "arbol-trunk/steady", "arbol-trunk/trivial"}):
+            raise RecoveryError("The archived Exchange Build set is invalid.")
+        candidates: list[dict[str, Any]] = []
+        for index, (build, item) in enumerate(zip(builds, selected, strict=True)):
+            fields = {"component", "build", "entries"} | ({"candidateSha256"} if role == "successor" else set())
+            if (not isinstance(item, dict) or set(item) != fields or item["component"] != build["component"]
+                    or item["build"] != build["build"] or build["savedAt"] != f"builds/{index}"
+                    or not isinstance(build["evidence"].get("installedFilesSha256"), str)
+                    or DIGEST.fullmatch(build["evidence"]["installedFilesSha256"]) is None):
+                raise RecoveryError("The archived selected Build evidence is invalid.")
+            names = [item["component"].replace("/", "-")]
+            if item["component"] == "arbol":
+                names.append("arbol-exchanges")
+            entries = item["entries"]
+            if not isinstance(entries, list) or len(entries) != len(names):
+                raise RecoveryError("The archived stable entries are incomplete.")
+            for entry, name in zip(entries, names, strict=True):
+                expected = f"builds/{index}/entry-{name}"
+                if (not isinstance(entry, dict)
+                        or set(entry) != {"name", "sha256", "mode", "interpreter", "interpreterSha256", "savedAt"}
+                        or entry["name"] != name or entry["savedAt"] != expected
+                        or not isinstance(entry["sha256"], str) or DIGEST.fullmatch(entry["sha256"]) is None
+                        or type(entry["mode"]) is not int or not entry["mode"] & 0o111
+                        or not isinstance(entry["interpreter"], str) or not Path(entry["interpreter"]).is_absolute()
+                        or not isinstance(entry["interpreterSha256"], str)
+                        or DIGEST.fullmatch(entry["interpreterSha256"]) is None
+                        or (folder / expected).is_symlink() or digest(folder / expected) != entry["sha256"]):
+                    raise RecoveryError("The archived stable entry evidence differs.")
+                lines = (folder / expected).read_bytes().splitlines()
+                marker_index = 2 if item["component"].startswith("arbol-trunk/") else 1
+                if (len(lines) <= marker_index or lines[0] != os.fsencode(f"#!{entry['interpreter']} -ISB")
+                        or not lines[marker_index].startswith(b"# stable-payload ")):
+                    raise RecoveryError("The archived stable entry identity is unreadable.")
+                payload = Path(os.fsdecode(lines[marker_index][len(b"# stable-payload "):]))
+                suffix = Path(".local/lib/sylvan-stack/arbol/stable") / item["component"] / item["build"]
+                if not payload.is_absolute() or payload.parts[-len(suffix.parts):] != suffix.parts:
+                    raise RecoveryError("The archived stable entry identifies a different payload.")
+                executable = str(payload / ("bin/arbol-exchanges" if name == "arbol-exchanges" else relative(build["entry"])))
+                if lines[-1] != f"os.execv({executable!r}, [{executable!r}, *arguments])".encode():
+                    raise RecoveryError("The archived stable entry executes a different payload.")
+                if marker_index == 2:
+                    marker = b"# arbol-installed-trunk "
+                    if not lines[1].startswith(marker):
+                        raise RecoveryError("The archived Trunk entry lacks its identity.")
+                    metadata = json.loads(lines[1][len(marker):])
+                    if (not isinstance(metadata, dict) or metadata.get("component") != item["component"]
+                            or metadata.get("build") != item["build"]):
+                        raise RecoveryError("The archived Trunk entry identifies a different Build.")
+            if role == "successor":
+                if not isinstance(item["candidateSha256"], str) or DIGEST.fullmatch(item["candidateSha256"]) is None:
+                    raise RecoveryError("The archived candidate identity is invalid.")
+                candidates.append({"component": item["component"], "build": item["build"],
+                    "candidateSha256": item["candidateSha256"],
+                    "packageManifestSha256": build["evidence"]["packageManifestSha256"],
+                    "checks": build["evidence"]["recordedChecks"]})
+        if role == "successor":
+            attachment = transition["qualification"]
+            if (not isinstance(attachment, dict) or set(attachment) != {"path", "sha256"}
+                    or attachment["path"] != "exchange-qualification.json"
+                    or not isinstance(attachment["sha256"], str) or DIGEST.fullmatch(attachment["sha256"]) is None
+                    or (folder / attachment["path"]).is_symlink()
+                    or digest(folder / attachment["path"]) != attachment["sha256"]):
+                raise RecoveryError("The archived independent qualification attachment differs.")
+            verify_qualification(document(folder / attachment["path"]), candidates, required_unit_checks(folder, builds))
+    except (AttributeError, KeyError, TypeError, ValueError, OSError, RecursionError, subprocess.SubprocessError) as error:
+        raise RecoveryError("The archived Exchange transition evidence is unreadable or invalid.") from error
+
+
 def verify_release(folder: Path, expected: str | None = None, *,
                    archive: Archive | None = None) -> tuple[dict[str, Any], str]:
     folder = recovery_dir(folder, archive)
@@ -947,6 +1075,8 @@ def verify_release(folder: Path, expected: str | None = None, *,
         if value["kind"] != "current":
             raise RecoveryError("Exchange capabilities require a current release.")
         exchange_capabilities(value["exchangeCapabilities"], value["builds"])
+    if "exchangeTransition" in value:
+        verify_exchange_transition(folder, value)
     return value, actual
 
 
