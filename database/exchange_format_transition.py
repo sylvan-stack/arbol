@@ -42,6 +42,7 @@ class VerifiedDeployment:
     release: str
     manifest: str
     inventory: dict[str, Any]
+    missing_guards: tuple[str, ...] = ()
 
 
 def physical(path: Path) -> None:
@@ -51,8 +52,10 @@ def physical(path: Path) -> None:
         raise RecoveryError("A managed deployment directory is not physical and owner controlled.")
 
 
-def guarded_file(path: Path, stack: ExitStack, mode: int, *, install: bool = False) -> None:
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+def guarded_file(path: Path, stack: ExitStack, mode: int, *, install: bool = False,
+                 create: bool = False) -> None:
+    flags = (os.O_RDWR | os.O_CREAT if create else os.O_RDONLY) | os.O_NOFOLLOW | os.O_NONBLOCK
+    fd = os.open(path, flags, 0o600)
     stack.callback(os.close, fd)
     before = os.fstat(fd)
     named = path.lstat()
@@ -126,7 +129,8 @@ def attachment(release_dir: Path, record: dict[str, Any], name: str, expected: s
 
 @contextmanager
 def verified_deployment(release_dir: Path, release: str, manifest_sha256: str,
-                        refusal_sha256: str | None = None) -> Iterator[VerifiedDeployment]:
+                        refusal_sha256: str | None = None, *, allow_missing: bool = False,
+                        create_guards: bool = False) -> Iterator[VerifiedDeployment]:
     """Verify a pinned deployment under locks held until the caller exits.
 
     Only independently approved attachment hashes are accepted as inputs; a
@@ -172,10 +176,15 @@ def verified_deployment(release_dir: Path, release: str, manifest_sha256: str,
         for root in (home, registry, stable, apps, aliases, tool):
             physical(root)
         guarded_file(tool / ".install.lock", stack, fcntl.LOCK_SH, install=True)
+        missing: list[str] = []
         for role in ROLES:
             physical(registry / role)
             physical(stable / role)
-            guarded_file(registry / role / ".stable-promotion.lock", stack, fcntl.LOCK_SH)
+            guard = registry / role / ".stable-promotion.lock"
+            if allow_missing and not os.path.lexists(guard):
+                missing.append(role)
+            else:
+                guarded_file(guard, stack, fcntl.LOCK_SH, create=create_guards)
         payloads: list[dict[str, str]] = []
         executables: dict[str, str] = {}
         for role in ROLES:
@@ -235,7 +244,7 @@ def verified_deployment(release_dir: Path, release: str, manifest_sha256: str,
             legacy = [row for row in payloads if (row["role"], row["build"]) not in selected]
             if refusal["payloads"] != legacy or refusal["executables"] != executables:
                 raise RecoveryError("The legacy direct-writer refusal evidence does not cover the retained payloads.")
-        yield VerifiedDeployment(actual, manifest_sha256, manifest)
+        yield VerifiedDeployment(actual, manifest_sha256, manifest, tuple(missing))
 
 
 # Qualification labels are literal and are bound to each archived candidate.
@@ -265,6 +274,8 @@ def request(path: Path, command: str) -> dict[str, Any]:
         keys |= {"schema", "historical", "prior"}
     if command in ("apply", "rollback"):
         keys |= {"session", "snapshot", "restore"}
+    if command == "freeze":
+        keys.add("session")
     if command == "apply":
         keys |= {"successor", "qualificationSha256"}
     if (not isinstance(value, dict) or set(value) != keys or type(value["format"]) is not int
@@ -281,15 +292,17 @@ def request(path: Path, command: str) -> dict[str, Any]:
             expected = {"directory", "sha256"} if key == "historical" else {"directory", "sha256", "manifestSha256"}
             if key == "successor":
                 expected.add("refusalSha256")
+            if key == "prior" and command in ("prepare", "drain", "freeze") and "refusalSha256" in item:
+                expected.add("refusalSha256")
             if (not isinstance(item, dict) or set(item) != expected
                     or not isinstance(item["directory"], str) or not Path(item["directory"]).is_absolute()
                     or any(not isinstance(item[k], str) or SHA.fullmatch(item[k]) is None
                            for k in expected - {"directory"})):
                 raise RecoveryError("The operation request has invalid release pins.")
-    if command in ("apply", "rollback"):
+    if command in ("apply", "rollback", "freeze"):
         if (not isinstance(value["session"], str) or re.fullmatch(r"[0-9a-f]{32}", value["session"]) is None
-                or any(not isinstance(value[k], str) or not Path(value[k]).is_absolute()
-                       for k in ("snapshot", "restore"))):
+                or (command != "freeze" and any(not isinstance(value[k], str) or not Path(value[k]).is_absolute()
+                       for k in ("snapshot", "restore")))):
             raise RecoveryError("The operation request has invalid recovery inputs.")
     if command == "apply" and (not isinstance(value["qualificationSha256"], str)
                                 or SHA.fullmatch(value["qualificationSha256"]) is None):
@@ -367,9 +380,9 @@ def stage(folder: int, data: bytes, release: str) -> str:
     return checksum
 
 
-def operate(spec: dict[str, Any], command: Literal["prepare", "status", "apply", "rollback"]) -> dict[str, str]:
+def operate(spec: dict[str, Any], command: Literal["prepare", "status", "drain", "freeze", "apply", "rollback"]) -> dict[str, str]:
     from arbol_backend.exchange_context import context
-    from arbol_backend.exchange_drain import GuardedSelection, inspect_database, reopen
+    from arbol_backend.exchange_drain import GuardedSelection, begin_maintenance, freeze, inspect_database, reopen
     from arbol_installation.admission import GATE, directory, lock, read_state, runtime_folder
 
     role = "successor" if command == "apply" else "prior"
@@ -378,16 +391,21 @@ def operate(spec: dict[str, Any], command: Literal["prepare", "status", "apply",
         if state.source != spec["source"]:
             raise RecoveryError("Admission belongs to a different database target.")
         if command == "status":
-            if state.exchange_authorization is not None:
+            if state.phase == "normal" and state.exchange_authorization is not None:
                 if state.release is None:
                     raise RecoveryError("The active authorization has no release.")
                 verify_authorization(folder, state.exchange_authorization, state.release)
             return {"status": state.phase, "release": state.release or ""}
-        if command == "prepare":
+        if command in ("prepare", "drain"):
             if state.phase != "normal" or state.release != spec["historical"]["sha256"]:
                 raise RecoveryError("Preparation requires the selected normal prior admission release.")
             if state.exchange_authorization is not None:
                 verify_authorization(folder, state.exchange_authorization, state.release)
+        elif command == "freeze":
+            if state.phase not in ("draining", "exclusive") or state.session != spec["session"]:
+                raise RecoveryError("Freeze requires the exact maintenance session.")
+            if state.release != spec["historical"]["sha256"]:
+                raise RecoveryError("The historical admission release changed.")
         elif state.phase == "normal":
             if state.release != spec[role]["sha256"]:
                 raise RecoveryError("A different release is already active.")
@@ -406,9 +424,24 @@ def operate(spec: dict[str, Any], command: Literal["prepare", "status", "apply",
     ctx = context(package, {})
     if asyncio.run(inspect_database(ctx, spec["source"], idle=False)) != spec["schema"]:
         raise RecoveryError("The installed schema differs from the request.")
-    if command == "prepare":
-        with verified_deployment(Path(item["directory"]), item["sha256"], item["manifestSha256"]):
-            return {"status": "prepared", "release": item["sha256"]}
+    if command in ("prepare", "drain", "freeze"):
+        with verified_deployment(Path(item["directory"]), item["sha256"], item["manifestSha256"],
+                                 item.get("refusalSha256"), allow_missing=command == "prepare",
+                                 create_guards=command == "drain") as deployment:
+            if command == "prepare":
+                return {"status": "guards_missing" if deployment.missing_guards else "prepared",
+                        "release": item["sha256"], "missingGuards": ",".join(deployment.missing_guards)}
+            if command == "drain":
+                session = begin_maintenance(spec["source"], runtime=ctx.identity.folder)
+            else:
+                session = freeze(ctx, spec["source"], spec["session"])
+            with directory(ctx.identity.folder) as folder, lock(folder, GATE, fcntl.LOCK_SH):
+                closed = read_state(folder)
+                if (closed.source != spec["source"] or closed.session != session
+                        or closed.release != spec["historical"]["sha256"]
+                        or closed.phase not in (("draining", "exclusive") if command == "drain" else ("exclusive",))):
+                    raise RecoveryError("The resulting maintenance state differs from the request.")
+            return {"status": closed.phase, "release": closed.release or "", "session": session}
 
     @contextmanager
     def selection(folder: int, current: Any) -> Iterator[GuardedSelection]:
@@ -448,7 +481,7 @@ def operate(spec: dict[str, Any], command: Literal["prepare", "status", "apply",
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("prepare", "status", "apply", "rollback"))
+    parser.add_argument("command", choices=("prepare", "status", "drain", "freeze", "apply", "rollback"))
     parser.add_argument("--request", type=Path, required=True)
     args = parser.parse_args()
     try:
