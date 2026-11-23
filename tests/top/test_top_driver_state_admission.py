@@ -517,6 +517,7 @@ from driver_identity_qualification import (
     TerminalView,
     WholeCheckController,
     Workspace,
+    reported_h1_custody,
     require,
 )
 
@@ -1856,7 +1857,11 @@ def _raw_authority_image(authority: Authority) -> Object:
                     "Raw metadata changed during serialized capture.")
             total += len(image.raw)
             require(total <= 4 * 1024 * 1024, "Raw authority bytes exceed their finite bound.")
-            item["rawHex"] = image.raw.hex()
+            # A Claude handoff or its immutable context can contain the real
+            # broker handshake. Keep its exact physical identity/length/digest,
+            # including archived trees, without duplicating private authority.
+            if authority.component != "arbol-claude-driver" or "handoffs" not in Path(row["path"]).parts[:-1]:
+                item["rawHex"] = image.raw.hex()
         entries.append(item)
     require(tree_inventory(authority.folder) == inventory,
             "Authority inventory changed during serialized raw capture.")
@@ -2501,9 +2506,10 @@ class H1SpanObservation:
                 require(retained == self.observations["beforeAuthority"],
                         "Actual loss changed original writer/handoff/context/marker/control bytes beyond taint.")
                 self.observations["afterAuthority"] = after_metadata
-                self.observations["unknownCustody"] = {"unknown": custody.unknown, "active": custody.active,
+                self.observations["unknownCustody"] = reported_h1_custody(self.component, {
+                    "unknown": custody.unknown, "active": custody.active,
                     "pending": custody.pending, "taint": self.authority.read("taint"),
-                    "writers": list(custody.writers), "handoffs": list(custody.handoffs)}
+                    "writers": list(custody.writers), "handoffs": list(custody.handoffs)})
             require(not _h1_raw_ex(self.authority, view.admission_lock),
                     "Kernel-gone participants left another unexplained SH holder; no closure proof.")
             self.observations["freshRawExAvailableWithCustodyStillUnknown"] = True

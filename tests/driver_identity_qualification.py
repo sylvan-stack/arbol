@@ -1221,6 +1221,20 @@ class H1Schedule:
         return raw
 
 
+def reported_h1_custody(component: str, custody: Object) -> Object:
+    """Keep the original broker registration material inside its private registry."""
+    if component != "arbol-claude-driver":
+        return custody
+    handoffs = []
+    for row in custody["handoffs"]:
+        if row["entry"] == "bin/metadata-helper.py":
+            handoffs.append({"handoff": row["handoff"], "entry": row["entry"],
+                             "contextSha256": row["contextSha256"], "handoffSha256": digest(canonical(row))})
+        else:
+            handoffs.append(row)
+    return {**custody, "handoffs": handoffs}
+
+
 @dataclass(frozen=True)
 class H1View:
     """Verified report/process/source binding, NOT permission to signal a claim."""
@@ -1882,7 +1896,7 @@ class WholeCheckController:
                     self.evidence.write("h1-verified-preterminal.json", {"component": component, "case": case,
                         "provider": child.owner.object(), "suite": view.suite.object(), "helper": view.helper.object(),
                         "suiteContextSha256": view.suite_context_sha256, "helperContextSha256": view.helper_context_sha256,
-                        "admissionLock": view.admission_lock, "custody": view.custody,
+                        "admissionLock": view.admission_lock, "custody": reported_h1_custody(component, view.custody),
                         "reports": {name: image.evidence() for name, image in view.images.items()},
                         "readyObservedAt": collector.ready_observed_at})
                     current = self.verify_h1_ready(component, baseline=baseline, child=child, case=case,
