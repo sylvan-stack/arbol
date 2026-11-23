@@ -546,6 +546,39 @@ def _maintenance_error() -> None:
                                     "message": "Driver maintenance refused; preserve closed recovery authority."}}))
 
 
+def _install_fresh(arguments: list[str], provider: Payload) -> Object:
+    from arbol_installation.paths import installation_root
+
+    from .driver_initial_install import install_fresh
+
+    if len(arguments) != 7 or not canonical_uuid(arguments[2]):
+        raise Refusal("Fresh Driver installation requires one UUID and four exact Build numbers.")
+    registry = physical(arguments[1])
+    session = arguments[2]
+    pairs = dict(zip(COMPONENTS, arguments[3:], strict=True))
+    if any(BUILD_PATTERN.fullmatch(build) is None for build in pairs.values()):
+        raise Refusal("Invalid fresh Driver Build number.")
+    pairings = {"arbol": provider.build, **pairs}
+    registration = None
+    producers: dict[str, Payload] = {}
+    for component, build in pairings.items():
+        wrapper = read(registry / component / build / "driver-registration.json")
+        digest = wrapper.get("registrationSha256")
+        if not valid_hash(digest) or (registration is not None and registration != digest):
+            raise Refusal("Fresh Driver packages are not in one committed registration.")
+        registration = digest
+        payload = registered(registry, component, build)
+        if component == "arbol":
+            if payload != provider:
+                raise Refusal("Use the exact registered arbol cli for fresh Driver installation.")
+        else:
+            producers[component] = payload
+    routes = {name: Path.home() / "Applications/Arbol/bin" / name for name in COMPONENTS}
+    root = installation_root() / "driver-state" / session
+    directories = {name: root / name.removeprefix("arbol-").removesuffix("-driver") for name in COMPONENTS}
+    return install_fresh(registry, provider, producers, session, routes, directories)
+
+
 def provider_entry(descriptor: Object) -> None:
     """Called only by the sealed immutable script after isolated M/D verification."""
     if signal.getsignal(signal.SIGINT) is signal.default_int_handler:
@@ -560,6 +593,14 @@ def provider_entry(descriptor: Object) -> None:
                 or Path(sys.argv[0]).resolve() != Path(provider.prefix[2])):
             raise Refusal("Unverified immutable provider entry.")
         arguments = sys.argv[1:]
+        if arguments[:1] == ["--driver-install-fresh"]:
+            try:
+                installed = _install_fresh(arguments, provider)
+            except (OSError, ValueError, RuntimeError) as error:
+                write_all(1, canonical({"error": {"code": "builds_failed", "message": str(error)}}))
+                raise SystemExit(1) from None
+            write_all(1, canonical(installed))
+            raise SystemExit(0)
         if arguments[:1] in (["--driver-launch"], ["--driver-launch-fresh"]):
             fresh_route = arguments[0] == "--driver-launch-fresh"
             if len(arguments) < (5 if fresh_route else 4) or arguments[2] not in COMPONENTS:
