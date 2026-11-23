@@ -72,11 +72,13 @@ def __arbol_initial(root):
 
 
 def _standalone(path: Path) -> str:
-    """Embed our trusted verifier text, rather than import application code before M verifies."""
+    """Embed the verifier without importing application code before M verifies."""
     source = path.read_text(encoding="utf-8")
     lines = source.splitlines(keepends=True)
     for node in reversed(ast.parse(source).body):
-        if isinstance(node, ast.ImportFrom) and (node.level or node.module == "__future__"):
+        if isinstance(node, ast.ImportFrom) and (
+            node.level or node.module in ("__future__", "arbol_installation.paths")
+        ):
             assert node.end_lineno is not None
             del lines[node.lineno - 1:node.end_lineno]
     return "".join(lines)
