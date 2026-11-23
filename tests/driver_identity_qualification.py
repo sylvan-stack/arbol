@@ -1152,6 +1152,12 @@ class InventoryPhase:
         require(inventory_sha256 == self.inventory_sha256, "Inner phase inventory bytes differ.")
 
 
+_SPAN_DUTIES = ("H1-span-completion", "terminal-close-closure")
+_CREATE_DUTIES = (*_SPAN_DUTIES, "create-publication-recovery", "create-publication-absence")
+_FIXED_DEFERRED = {"arbol-codex-driver": _SPAN_DUTIES, "arbol-claude-driver": _CREATE_DUTIES,
+                   "arbol-pi-driver": _CREATE_DUTIES}
+
+
 _H1_CASES = {component: ("tests/test_subscription_identity.py" if component == "arbol-mimo-driver"
                        else "tests/top/test_top_subscription_identity.py")
              + "::HelperSpanTests.test_helper_independent_lease" for component in COMPONENTS}
@@ -1554,6 +1560,7 @@ class TerminalSchedule:
     observer_sha256: str
     controller_sha256: str
     collector_sha256: str
+    maintenance_observer_sha256: str | None = None
 
     def verify(self, controller: WholeCheckController, baseline: Baseline,
                component: str, observer: TerminalObservations) -> Object:
@@ -1942,6 +1949,8 @@ class WholeCheckController:
                     and base["contextSha256"] == digest(suite_raw), "Original base report does not bind actual Suite.")
             selected, pending = _span_ids(base["selected"]), _span_ids(base["pendingExternal"])
             schedule.phase.validate(selected, pending, base["inventorySha256"])
+            if component in _FIXED_DEFERRED:
+                require(pending == _FIXED_DEFERRED[component], "The real Suite changed its fixed deferred case order.")
             require(selected == schedule.order and digest(inventory_raw) == base["inventorySha256"],
                     "Base report shortened/reordered the actual full local schedule.")
             local = _span_document(images["local-results.json"].raw, limit=1024 * 1024)
@@ -2260,7 +2269,8 @@ class WholeCheckController:
 
     def run_h1_positive(self, component: str, *, baseline: Baseline, case: str, schedule: H1Schedule,
                         terminal: TerminalSchedule, terminal_observer: TerminalObservations,
-                        environment: Mapping[str, str], observations: Sequence[DeferredObservation], seconds: float) -> None:
+                        environment: Mapping[str, str], seconds: float,
+                        observations: Sequence[DeferredObservation] | None = None) -> None:
         """Full positive unit: H1, genuine terminal interval and ALL deferred work.
 
         There is no H1-only positive check entry or optional terminal bypass.
@@ -2276,8 +2286,30 @@ class WholeCheckController:
                 "H1 launch needs the exact original baseline/case before any spawn.")
         schedule.verify(self.scope.producer(component))
         sources = terminal.verify(self, baseline, component, terminal_observer)
-        require(len({item.case_id for item in observations}) == len(observations)
-                and {item.case_id for item in observations} == set(schedule.phase.required_external_ids),
+        if component in _FIXED_DEFERRED:
+            require(observations is None, "Fixed whole-unit obligations cannot be replaced by caller-supplied cases.")
+            from importlib.util import find_spec
+            provider = self.scope.gate.provider
+            source = provider.root / "tests/top/test_top_driver_state_maintenance.py"
+            image = read_image(source, limit=1024 * 1024, private=False)
+            module = find_spec("top.test_top_driver_state_maintenance")
+            require(valid_hash(terminal.maintenance_observer_sha256) and image.sha256 == terminal.maintenance_observer_sha256
+                    and module is not None and module.origin is not None
+                    and Path(module.origin).resolve(strict=True) == source,
+                    "The fixed whole-unit observation module differs from its admitted provider source.")
+            from top.test_top_driver_state_maintenance import fixed_unit_observations
+            require(Path(fixed_unit_observations.__code__.co_filename).resolve(strict=True) == source,
+                    "The imported whole-unit allocator differs from that source.")
+            sources["sources"]["tests/top/test_top_driver_state_maintenance.py"] = image.evidence()
+            cases = fixed_unit_observations(self, baseline, component, case, terminal_observer, environment)
+            require(tuple(item.case_id for item in cases) == _FIXED_DEFERRED[component],
+                    "The fixed whole-unit observation order changed.")
+        else:
+            require(observations is not None, "Missing distinct allocation for this whole-unit component.")
+            assert observations is not None
+            cases = tuple(observations)
+        require(len({item.case_id for item in cases}) == len(cases)
+                and {item.case_id for item in cases} == set(schedule.phase.required_external_ids),
                 "H1 check lacks a complete static external assertion allocation.")
         from arbol_builds.driver_admission import without_authority
         child = OwnedChild(self.fixed_argv(component, self.scope.producer(component).build, "build-unit"),
@@ -2361,7 +2393,7 @@ class WholeCheckController:
                     # observer must establish actual direct-child wait/result/ACK
                     # source evidence and every resource, not merely PID absence or
                     # a reported boolean. This is no dynamically dispatched wire ID.
-                    for observation in observations:
+                    for observation in cases:
                         observation.observe(self)
                         self.finished_external.add(observation.case_id)
                     require(self.finished_external == set(schedule.phase.required_external_ids),

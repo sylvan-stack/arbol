@@ -19,6 +19,8 @@ from driver_identity_qualification import (
     ArchiveImage,
     ArchiveWitness,
     Baseline,
+    DeferredObservation,
+    TerminalObservations,
     TerminalView,
     WholeCheckController,
     require,
@@ -1633,6 +1635,36 @@ class PiCreateAbsence:
         require(len(absent) == 1, "The unique prepared-absent original subject is missing.")
         self.walk.execute(absent[0], absence=True)
         self.walk.finished.add(self.case_id)
+
+
+def fixed_unit_observations(controller: WholeCheckController, baseline: Baseline, component: str, case: str,
+                            observer: TerminalObservations, environment: Mapping[str, str]) -> tuple[DeferredObservation, ...]:
+    """Allocate original whole-unit cases on one fresh observer before the actual provider starts."""
+    require(type(observer) is TerminalSpanObservation and observer.component == component and observer.case == case
+            and observer.controller is None and observer.baseline is None and observer.original is None
+            and not observer.interval_seen and not observer.completed and not controller.finished_external
+            and controller.scope == baseline.scopes[component], "Expected the original fresh whole-unit subject.")
+    assert isinstance(observer, TerminalSpanObservation)
+    duties: tuple[DeferredObservation, ...] = (H1SpanCompletion(observer, controller, baseline, component, case),
+                                               TerminalCloseClosure(observer, controller, baseline, component, case))
+    if component == "arbol-claude-driver":
+        claude = ClaudeCreateWalk(controller, baseline, observer, environment)
+        duties += (ClaudeCreateRecovery(claude), ClaudeCreateAbsence(claude))
+    elif component == "arbol-pi-driver":
+        pi = PiCreateWalk(controller, baseline, observer, environment)
+        duties += (PiCreateRecovery(pi), PiCreateAbsence(pi))
+    else:
+        require(component == "arbol-codex-driver", "No fixed positive allocation for this component.")
+    provider = controller.scope.gate.provider.root
+    for index, duty in enumerate(duties):
+        source = provider / "tests/top" / ("test_top_driver_state_admission.py" if index < 2 else
+                                           "test_top_driver_state_maintenance.py")
+        method = duty.observe
+        require(getattr(method, "__self__", None) is duty
+                and Path(method.__code__.co_filename).resolve(strict=True) == source
+                and type(duty).observe is getattr(method, "__func__", None),
+                "A concrete deferred case differs from its source-bound provider method.")
+    return duties
 
 
 def maintenance_four_dispatch_rows(cases: Mapping[Operation, tuple[Maintenance, Execute]]) -> dict[Operation, Object]:
