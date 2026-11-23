@@ -50,6 +50,7 @@ from top.driver_state_support import (
 from arbol_builds.driver_admission import (
     COMPONENTS,
     Authority,
+    Custody,
     admission_fingerprint,
     archive_terminal,
     canonical,
@@ -1235,6 +1236,173 @@ def reported_h1_custody(component: str, custody: Object) -> Object:
     return {**custody, "handoffs": handoffs}
 
 
+@dataclass
+class PublicInvocations:
+    """Immutable case/child evidence kept across the whole-unit H1 and terminal intervals."""
+
+    invocations: set[str] = field(default_factory=set)
+    files: dict[Path, FileImage] = field(default_factory=dict)
+
+    def image(self, path: Path, expected_digest: str, limit: int) -> FileImage:
+        current = read_image(path, limit=limit)
+        require(current.sha256 == expected_digest and path.lstat().st_nlink == 1
+                and self.files.get(path, current) == current, "Public case evidence was replaced or linked.")
+        self.files[path] = current
+        return current
+
+    def recheck(self) -> None:
+        for path, original in self.files.items():
+            require(read_image(path, limit=max(1, len(original.raw))) == original and path.lstat().st_nlink == 1,
+                    "An immutable ordinary-call result or original fixture marker changed.")
+
+
+def pi_public_case(case_id: str, calls_by_fixture: Mapping[str, list[tuple[str, bool, str | None]]]) -> None:
+    base = "tests/top/test_top_subscription_identity.py::"
+    proof = ("identity", False, None)
+    matched = ("identity", True, None)
+    listing = ("list", False, None)
+    denied = [("identity", False, "internal"), ("list", False, "internal")]
+    expected = {
+        base + "LocalCaptureTests.test_concurrent_public_implicit_capture": (1, [proof, proof]),
+        base + "LocalCaptureTests.test_interrupted_conversion_refuses_public_identity_and_list": (1, denied),
+        base + "LocalCaptureTests.test_public_process_restart_preserves_implicit_proof": (1, [proof, listing, matched]),
+        base + "LocalProofLossTests.test_public_identity_and_list_refuse_missing_or_corrupt_root": (2, denied),
+        base + "LocalRetentionTests.test_relabel_and_synthetic_binding_keep_original_public_proof":
+            (1, [proof, matched, matched]),
+    }
+    count, sequence = expected.get(case_id, (0, []))
+    require(len(calls_by_fixture) == count and all(rows == sequence for rows in calls_by_fixture.values()),
+            "Pi ordinary invocation fixtures, operations or expected outcomes differ from the actual fixed case.")
+
+
+def codex_public_case(case_id: str, fixtures: Mapping[str, list[tuple[list[str], bytes, int, str | None]]]) -> None:
+    base = "tests/top/test_top_subscription_identity.py::LocalIdentityTests."
+    native = ("identity", "chatgpt")
+    matched = (*native, "--expect")
+    historical = ("identity", "historical-chatgpt")
+    created = ("identity", "historical-created")
+    listing = ("list",)
+    update = ("update", "chatgpt", "--label", "Preserved record")
+    relabel = ("update", "chatgpt", "--label", "Updated label")
+    create = ("create", "--family", "chatgpt", "--id", "historical-candidate", "--label", "Additional")
+    # These are the source-owned request patterns. A mixed completion order is
+    # allowed only for the two indistinguishable contending first captures.
+    scenarios: dict[str, list[list[tuple[tuple[str, ...], str | None]]]] = {
+        base + "test_signed_out_first_capture_contends_and_restart_accepts_persisted_proof":
+            [[(native, None), (native, None), (matched, None)]],
+        base + "test_qualified_list_preserves_format1_and_identity_requires_upgrade":
+            [[(listing, None), (native, "invalid_input")]],
+        base + "test_interrupted_conversion_rejects_proof_and_list_without_repair":
+            [[(native, "internal"), (listing, "internal")]] * 2,
+        base + "test_native_sign_out_and_removal_refuse_even_with_force_without_changing_proof":
+            [[(native, None), (("identity", "ChatGPT Account"), "invalid_input"),
+              *((request, "invalid_input") for request in (
+                  ("sign-out", "chatgpt"), ("sign-out", "chatgpt", "--force"),
+                  ("remove", "chatgpt"), ("remove", "chatgpt", "--force"))), (matched, None)]],
+        base + "test_public_removal_retires_only_the_historical_fixture_subscription":
+            [[(native, None), (historical, None), (("remove", "historical-chatgpt"), None),
+              (historical, "not_found"), (historical, None), (matched, None)]],
+        base + "test_relabel_and_recognizing_existing_login_retain_the_original_proof":
+            [[(native, None), (relabel, None), (matched, None)]],
+        base + "test_missing_sidecar_materializes_a_new_witness_and_rejects_old_expectation":
+            [[(native, None), (update, None), (matched, "in_use"), (native, None)]],
+        base + "test_corrupt_sidecar_and_lost_or_corrupt_root_refuse_without_regenerating_proof":
+            [[(native, None), (update, None), (matched, "internal")],
+             *([[(native, None), (update, None), (matched, "internal"), (listing, "internal")]] * 2)],
+        base + "test_public_create_cannot_add_a_second_chatgpt_subscription":
+            [[(native, None), (create, "invalid_input"), (matched, None)]],
+        base + "test_historical_create_journal_settles_only_the_exact_archived_witness":
+            [[(native, None), (created, None)], [(native, None), (created, "not_found")], [(native, None)], [(native, None)]],
+        "tests/top/test_top_subscription_identity.py::LifetimeRaceTests."
+        "test_fresh_list_reaps_a_dead_predecessor_receipt_without_adopting_its_verdict": [[(listing, None)]],
+    }
+    remaining = list(scenarios.get(case_id, []))
+    for calls in fixtures.values():
+        actual: list[tuple[tuple[str, ...], str | None]] = []
+        proofs: dict[str, list[tuple[str, str]]] = {}
+        for request, stdout, status, refusal in calls:
+            normalized = tuple(request)
+            if "--expect" in request:
+                require(len(request) == 4 and request[:3] == ["identity", "chatgpt", "--expect"]
+                        and len(request[3].split(".")) == 2 and all(valid_token(p) for p in request[3].split(".")),
+                        "Malformed ordinary Codex proof expectation.")
+                normalized = tuple(request[:3])
+                require("chatgpt" in proofs and ".".join(proofs["chatgpt"][0]) == request[3],
+                        "Public expectation differs from this fixture's original native proof.")
+            if status == 1:
+                result = document(stdout, limit=4096)
+                require(set(result) == {"error"} and isinstance(result["error"], dict)
+                        and isinstance(refusal, str) and result["error"].get("code") == refusal,
+                        "Codex ordinary refusal differs from the original output.")
+            else:
+                require(status == 0 and refusal is None, "Unexpected Codex ordinary result status.")
+                if request[0] == "identity":
+                    result = document(stdout, limit=4096)
+                    exact_fields(result, ("version", "driver", "subscription", "generation", "witness"))
+                    require(len(request) >= 2 and type(result["version"]) is int and result["version"] == 1
+                            and result["driver"] == "codex" and result["subscription"] == request[1]
+                            and valid_token(result["generation"]) and valid_token(result["witness"]),
+                            "Codex returned the wrong ordinary Subscription identity.")
+                    proof = (result["generation"], result["witness"])
+                    if normalized == matched:
+                        require(".".join(proof) == request[3], "Successful Codex expectation changed the returned proof.")
+                    proofs.setdefault(request[1], []).append(proof)
+                elif request[0] == "list":
+                    rows = document(b'{"entries":' + stdout + b'}', limit=4112)["entries"]
+                    expected_ids = ["chatgpt"] if case_id.startswith(base) else ["chatgpt", "historical-chatgpt"]
+                    require(isinstance(rows, list) and all(isinstance(item, dict) for item in rows)
+                            and [(item.get("id"), item.get("state")) for item in rows]
+                            == [(identifier, "signed_out") for identifier in expected_ids],
+                            "Codex ordinary catalogue has an unexpected account or state.")
+                elif request[0] == "update":
+                    require(document(stdout, limit=4096).get("label") == request[-1],
+                            "Codex ordinary update returned a different label.")
+                else:
+                    require(normalized == ("remove", "historical-chatgpt") and stdout == b"",
+                            "Unexpected successful ordinary Codex operation.")
+            actual.append((normalized, refusal))
+        require(actual in remaining, "Codex ordinary case omitted, added or substituted an expected call.")
+        remaining.remove(actual)
+        if "historical-created" in proofs:
+            require("chatgpt" in proofs and proofs["historical-created"][0][0] == proofs["chatgpt"][0][0],
+                    "Settled historical create returned a different generation from its native fixture.")
+        for selector, values in proofs.items():
+            require(len({generation for generation, _ in values}) == 1, "Original Codex fixture generation changed.")
+            replaced = (selector == "historical-chatgpt" or
+                        case_id == base + "test_missing_sidecar_materializes_a_new_witness_and_rejects_old_expectation")
+            if replaced:
+                require(len(values) == 2 and values[0] != values[1], "Codex replacement failed to change its witness.")
+            else:
+                require(len(set(values)) == 1, "Codex changed the original retained fixture witness.")
+    require(not remaining, "A fixed Codex fixture has no ordinary provider receipts.")
+
+
+def verify_pi_public_output(request: list[str], stdout: bytes, status: int, refusal: object) -> tuple[str, bool, str | None]:
+    require(request in (["list"], ["identity", "zai"]) or
+            (len(request) == 4 and request[:3] == ["identity", "zai", "--expect"]
+             and len(request[3].split(".")) == 2 and all(valid_token(part) for part in request[3].split("."))),
+            "Pi receipt names a command outside the admitted public cases.")
+    if status == 1:
+        result = document(stdout, limit=65536)
+        require(set(result) == {"error"} and isinstance(result["error"], dict)
+                and result["error"].get("code") == refusal == "internal", "Changed fixed ordinary Pi refusal.")
+        return request[0], len(request) == 4, "internal"
+    require(status == 0 and refusal is None, "Unexpected ordinary Pi status.")
+    if request == ["list"]:
+        entries = document(b'{"entries":' + stdout + b'}', limit=65548)["entries"]
+        require(isinstance(entries, list) and all(isinstance(row, dict) for row in entries)
+                and [row.get("state") for row in entries if row.get("id") == "zai"] == ["signed_out"],
+                "Ordinary restart list did not retain the single signed-out zai Subscription.")
+    else:
+        result = document(stdout, limit=65536)
+        exact_fields(result, ("version", "driver", "subscription", "generation", "witness"))
+        require(type(result["version"]) is int and result["version"] == 1 and result["driver"] == "pi"
+                and result["subscription"] == "zai" and valid_token(result["generation"]) and valid_token(result["witness"])
+                and (len(request) == 2 or request[3] == result["generation"] + "." + result["witness"]),
+                "Ordinary Pi identity returned another Subscription or lifetime.")
+    return request[0], len(request) == 4, None
+
+
 @dataclass(frozen=True)
 class H1View:
     """Verified report/process/source binding, NOT permission to signal a claim."""
@@ -1252,8 +1420,11 @@ class H1View:
     helper_context_sha256: str
     admission_lock: Object
     custody: Object
+    custody_sources: Mapping[str, ArchiveImage]
+    public: PublicInvocations
 
     def recheck_files(self) -> None:
+        self.public.recheck()
         require(directory_identity(self.root) == self.root_identity, "H1 fixture root was replaced.")
         for name, old in self.images.items():
             current = read_image(self.root / name, limit=_H1_FILES[name])
@@ -1388,6 +1559,7 @@ class TerminalView:
     sources: Object
     markers: MarkerImage
     control: Object
+    custody_sources: Mapping[str, ArchiveImage]
 
     def recheck_files(self) -> None:
         self.h1.recheck_files()
@@ -1395,6 +1567,33 @@ class TerminalView:
             after = read_image(self.h1.root / name, limit=max(1, len(before.raw)))
             require(after == before and (self.h1.root / name).lstat().st_nlink == 1,
                     "Terminal evidence was rewritten, replaced or linked.")
+
+
+def verified_custody_images(authority: Authority, custody: Custody) -> dict[str, ArchiveImage]:
+    """Bind the physical writer and handoff trees to the exact reconciled graph under its mutex."""
+    sources = custody_source_images(authority)
+    expected: dict[str, dict[str, str]] = {"writers": {}, "handoffs": {}}
+    for writer in custody.writers:
+        expected["writers"][f"{writer['invocation']}/{writer['writer']}.json"] = digest(canonical(writer))
+    for handoff in custody.handoffs:
+        prefix = handoff["handoff"]
+        expected["handoffs"][prefix + ".json"] = digest(canonical(handoff))
+        expected["handoffs"][prefix + ".context.json"] = handoff["contextSha256"]
+    require(len(expected["writers"]) == len(custody.writers)
+            and len(expected["handoffs"]) == 2 * len(custody.handoffs), "Duplicate custody file identity.")
+    for name, source in sources.items():
+        observed = {path: row["sha256"] for path, row in source.entries.items() if row["type"] == "file"}
+        directories = {path for path, row in source.entries.items() if row["type"] == "directory"}
+        require(observed == expected[name]
+                and directories == ({row["invocation"] for row in custody.writers} if name == "writers" else set()),
+                "Physical custody files or invocation directories differ from the reconciled graph.")
+        for path in observed:
+            row = source.entries[path]
+            current = (authority.folder / name / path).lstat()
+            require(stat.S_ISREG(current.st_mode) and current.st_nlink == 1
+                    and (current.st_dev, current.st_ino) == (row["device"], row["inode"]),
+                    "A custody file was replaced or linked during verification.")
+    return sources
 
 
 class WholeCheckController:
@@ -1459,6 +1658,134 @@ class WholeCheckController:
         require(self.finished_external == set(phase.required_external_ids), "An external assertion remains pending.")
         self.require_finished_graph(component)
 
+    def _public_call(self, public: PublicInvocations, component: str, root: Path, suite: Object,
+                     case_id: str, row: Object, custody: Custody) -> tuple[list[str], bytes]:
+        exact_fields(row, ("invocation", "rootWriter", "mainWriter", "handoff", "main", "contextSha256",
+                           "rootSha256", "mainSha256", "handoffSha256", "fixture", "fixtureOwnerSha256",
+                           "captureSha256", "operation", "argvSha256", "provider", "waitStatus",
+                           "stdoutSize", "stdoutSha256", "stderrSize", "stderrSha256", "refusal", "streams"))
+        invocation = row["invocation"]
+        require(all(valid_token(row[key]) for key in ("invocation", "rootWriter", "mainWriter", "handoff"))
+                and invocation != suite["invocation"] and invocation not in public.invocations
+                and all(valid_hash(row[key]) for key in ("contextSha256", "rootSha256", "mainSha256", "handoffSha256",
+                        "fixtureOwnerSha256", "captureSha256", "argvSha256", "stdoutSha256", "stderrSha256"))
+                and isinstance(row["fixture"], str) and re.fullmatch(r"[a-f0-9]{32}", row["fixture"]) is not None
+                and row["fixture"] != root.name and row["streams"] == "closed"
+                and type(row["waitStatus"]) is int and row["waitStatus"] in (0, 1),
+                "Malformed, duplicate or unmatched ordinary provider receipt.")
+        fixture = root.parent / row["fixture"]
+        owner = public.image(fixture / ".fixture-owner.json", row["fixtureOwnerSha256"], 4096)
+        marker = _span_document(owner.raw, limit=4096)
+        require(type(marker.get("version")) is int and marker == {"version": 1, "case": fixture.name,
+                "component": component, "invocation": suite["invocation"], "parentWriter": suite["writer"],
+                "payloadSha256": suite["payloadSha256"]}, "Ordinary fixture marker belongs to another original Suite.")
+        capture_name = digest(invocation.encode()) if component == "arbol-codex-driver" else invocation
+        actual = public.image(fixture / ("public-" + capture_name + ".json"), row["captureSha256"], 256 * 1024)
+        detail = _span_document(actual.raw, limit=256 * 1024)
+        exact_fields(detail, ("case", "fixture", "invocation", "request", "stdoutHex", "stderrHex"))
+        request = detail["request"]
+        require(detail["case"] == case_id and detail["fixture"] == fixture.name and detail["invocation"] == invocation
+                and isinstance(request, list) and 0 < len(request) <= 16
+                and all(isinstance(word, str) and len(word.encode()) <= 1024 and "\0" not in word for word in request)
+                and request[0] == row["operation"], "Ordinary child receipt has a different fixture, request or case.")
+        argv = self.fixed_argv(component, self.scope.producer(component).build, "driver",
+                               ["--state-dir", str(fixture / "state"), "subscriptions", *request])
+        require(digest(evidence_bytes(argv, limit=65536)) == row["argvSha256"], "Original public provider argv changed.")
+        require(isinstance(detail["stdoutHex"], str) and len(detail["stdoutHex"]) <= 2 * 65536
+                and re.fullmatch(r"(?:[a-f0-9]{2})*", detail["stdoutHex"]) is not None
+                and detail["stderrHex"] == "", "Malformed bounded ordinary output.")
+        stdout = bytes.fromhex(detail["stdoutHex"])
+        require(type(row["stdoutSize"]) is int and row["stdoutSize"] == len(stdout)
+                and type(row["stderrSize"]) is int and row["stderrSize"] == 0
+                and digest(stdout) == row["stdoutSha256"] and digest(b"") == row["stderrSha256"],
+                "Ordinary result stream bytes or published sizes changed.")
+        writers = [w for w in custody.writers if w["invocation"] == invocation]
+        handoffs = [h for h in custody.handoffs if h["invocation"] == invocation]
+        require(len(writers) == 2 and len(handoffs) == 1, "Ordinary call is not a two-writer direct MAIN invocation.")
+        roots = [w for w in writers if w["parent"] is None]
+        require(len(roots) == 1, "Ordinary invocation has no unique provider root.")
+        provider = roots[0]
+        main = next(w for w in writers if w is not provider)
+        transfer = handoffs[0]
+        for writer, label, name in ((provider, "provider", "root"), (main, "main", "main")):
+            process = ExactProcess.read(row[label])
+            require(writer["phase"] == "terminal" and writer["writer"] == row[name + "Writer"]
+                    and {key: writer[key] for key in ("pid", "startedAt")} == process.object() and not process.live()
+                    and digest(canonical(writer)) == row[name + "Sha256"],
+                    "Ordinary call process or exact terminal writer differs from the original capture.")
+        require(transfer["phase"] == "accepted" and transfer["role"] == "main"
+                and transfer["entry"] == self.scope.producer(component).descriptor["entry"]
+                and transfer["handoff"] == row["handoff"] and transfer["parent"] == provider["writer"] == main["parent"]
+                and transfer["child"] == main["writer"] and transfer["contextSha256"] == main["contextSha256"] == row["contextSha256"]
+                and transfer["acceptanceSha256"] == suite["acceptanceSha256"]
+                and digest(canonical(transfer)) == row["handoffSha256"], "Ordinary MAIN transfer or context changed.")
+        # reconcile has already authenticated both the context bytes and the original
+        # component, epoch, boot, payload, argv entry and concrete parent/child tuple.
+        public.invocations.add(invocation)
+        return request, stdout
+
+    def _public_invocations(self, component: str, root: Path, suite: Object, local: Object,
+                            custody: Custody) -> PublicInvocations:
+        public = PublicInvocations()
+        if component == "arbol-pi-driver":
+            for entry in local["rows"]:
+                case_id = entry["id"]
+                if case_id == _H1_CASES[component] or case_id == "tests/top/programs/work_barrier.mjs":
+                    continue
+                image = public.image(root / ("result-" + entry["resultSha256"] + ".json"), entry["resultSha256"], 65536)
+                result = _span_document(image.raw, limit=65536)
+                exact_fields(result, ("version", "kind", "id", "publicCalls"))
+                require(type(result["version"]) is int and result["version"] == 1
+                        and result["kind"] == "abr38-unittest-success" and result["id"] == case_id
+                        and isinstance(result["publicCalls"], list) and len(result["publicCalls"]) <= 128,
+                        "Ordinary calls are not bound to the actual original unittest result.")
+                calls: dict[str, list[tuple[str, bool, str | None]]] = {}
+                proofs: dict[str, bytes] = {}
+                for row in result["publicCalls"]:
+                    require(isinstance(row, dict), "Malformed ordinary call witness.")
+                    request, stdout = self._public_call(public, component, root, suite, case_id, row, custody)
+                    outcome = verify_pi_public_output(request, stdout, row["waitStatus"], row["refusal"])
+                    calls.setdefault(row["fixture"], []).append(outcome)
+                    if outcome[0] == "identity" and outcome[2] is None:
+                        parsed = canonical(document(stdout, limit=65536))
+                        require(proofs.setdefault(row["fixture"], parsed) == parsed,
+                                "Pi concurrent capture, relabel or restart changed the original returned proof.")
+                pi_public_case(case_id, calls)
+        if component == "arbol-codex-driver":
+            for entry in local["rows"]:
+                case_id = entry["id"]
+                if case_id == _H1_CASES[component]:
+                    continue
+                image = public.image(root / ("result-" + entry["resultSha256"] + ".json"), entry["resultSha256"], 65536)
+                wrapper = _span_document(image.raw, limit=65536)
+                exact_fields(wrapper, ("version", "kind", "id", "status", "resultHex"))
+                require(type(wrapper["version"]) is int and wrapper["version"] == 1
+                        and wrapper["kind"] == "abr38-actual-local-result" and wrapper["status"] == "passed"
+                        and wrapper["id"] == case_id and isinstance(wrapper["resultHex"], str)
+                        and re.fullmatch(r"(?:[a-f0-9]{2})+", wrapper["resultHex"]) is not None,
+                        "Codex original success envelope differs.")
+                success = _span_document(bytes.fromhex(wrapper["resultHex"]), limit=65536)
+                exact_fields(success, ("version", "kind", "id", "publicCallsSha256"))
+                require(type(success["version"]) is int and success["version"] == 1 and success["id"] == case_id
+                        and success["kind"] == "abr38-unittest-success" and valid_hash(success["publicCallsSha256"]),
+                        "Codex public calls are not bound to the actual case result.")
+                calls_file = public.image(root / ("public-calls-" + success["publicCallsSha256"] + ".json"),
+                                          success["publicCallsSha256"], 1024 * 1024)
+                grouped = _span_document(calls_file.raw, limit=1024 * 1024)
+                exact_fields(grouped, ("case", "publicCalls"))
+                require(grouped["case"] == case_id and isinstance(grouped["publicCalls"], list)
+                        and len(grouped["publicCalls"]) <= 128, "Codex public call file belongs to another case.")
+                case_calls: dict[str, list[tuple[list[str], bytes, int, str | None]]] = {}
+                for row in grouped["publicCalls"]:
+                    require(isinstance(row, dict), "Malformed Codex ordinary call witness.")
+                    request, stdout = self._public_call(public, component, root, suite, case_id, row, custody)
+                    case_calls.setdefault(row["fixture"], []).append((request, stdout, row["waitStatus"], row["refusal"]))
+                codex_public_case(case_id, case_calls)
+        require({w["invocation"] for w in custody.writers} == {suite["invocation"], *public.invocations}
+                and {h["invocation"] for h in custody.handoffs} == {suite["invocation"], *public.invocations},
+                "A provider root or accepted handoff is absent from the source-attributed whole-unit call set.")
+        return public
+
     def verify_h1_ready(self, component: str, *, baseline: Baseline, child: OwnedChild,
                         case: str, schedule: H1Schedule, ready_raw: bytes) -> H1View:
         """Read only owned fixture bytes AFTER exact real runtime/M-D validation.
@@ -1497,7 +1824,8 @@ class WholeCheckController:
             custody = reconcile(authority, persist_unknown=False, candidate=self.scope)
             require(not custody.unknown and custody.active == 2 and custody.pending == 0,
                     "H1 does not have exactly active Suite + independent helper.")
-            roots = [row for row in custody.writers if row["parent"] is None]
+            roots = [row for row in custody.writers if row["parent"] is None
+                     and {key: row[key] for key in ("pid", "startedAt")} == child.owner.object()]
             require(len(roots) == 1 and roots[0]["phase"] == "terminal"
                     and {key: roots[0][key] for key in ("pid", "startedAt")} == child.owner.object(),
                     "Actual fixed provider/root transfer differs from owned Popen.")
@@ -1557,6 +1885,7 @@ class WholeCheckController:
                         (("h1-preconditions-done", "pending") if expected_id == _H1_CASES[component]
                          else ("passed", "not-applicable")),
                         "Failed/skipped/unavailable/pending local work cannot arm H1 or a complete check.")
+            public = self._public_invocations(component, root, suite_context, local, custody)
             report = _span_document(images["helper-span.json"].raw, limit=16 * 1024)
             exact_fields(report, ("version", "kind", "case", "component", "phaseReportSha256", "localResultsSha256",
                                   "inventorySha256", "suite", "helper", "actorReadySha256", "admissionLock", "pendingExternal"))
@@ -1629,14 +1958,16 @@ class WholeCheckController:
                         "writer": helper_context["writer"], "handoff": helper_context["handoff"],
                         "contextSha256": digest(helper_raw), **helper.object()}, "H1 claimed participants are not actual verified processes.")
             for writer in custody.writers:
-                if writer["writer"] in (roots[0]["writer"], suite_context["writer"], helper_context["writer"]):
+                if writer["invocation"] == suite_context["invocation"] and writer["writer"] in (
+                        roots[0]["writer"], suite_context["writer"], helper_context["writer"]):
                     continue
                 require(writer["phase"] == "terminal" and not ExactProcess.read(
                     {key: writer[key] for key in ("pid", "startedAt")}).live(),
                     "Another metadata helper is not genuinely finished before H1 span.")
             view = H1View(component, case, root, root_identity, images, suite, helper, suite_context, helper_context,
                           digest(suite_raw), digest(helper_raw), lock_identity(authority, "admission.lock"),
-                          {"writers": list(custody.writers), "handoffs": list(custody.handoffs)})
+                          {"writers": list(custody.writers), "handoffs": list(custody.handoffs)},
+                          verified_custody_images(authority, custody), public)
             view.recheck_files()
         self.scope.recheck()
         view.recheck_files()
@@ -1711,8 +2042,11 @@ class WholeCheckController:
                 and isinstance(settled["helpers"], list)
                 and len(settled["helpers"]) == len(terminal.helper_entries) <= 4096,
                 "Settled report omits/reorders full local work or deferred assertions.")
-        for index, (expected_id, row) in enumerate(zip(schedule.order, settled["rows"], strict=True)):
-            require(isinstance(row, dict), "Malformed final local result row.")
+        provisional = _span_document(view.images["local-results.json"].raw, limit=1024 * 1024)
+        for index, (expected_id, original, row) in enumerate(zip(schedule.order, provisional["rows"], settled["rows"], strict=True)):
+            require(isinstance(row, dict) and original["id"] == expected_id
+                    and (row.get("resultSha256") == original["resultSha256"]) == (expected_id != _H1_CASES[component]),
+                    "Completed local result changed, or H1 reused its provisional evidence.")
             exact_fields(row, ("id", "resultSha256"))
             require(row["id"] == expected_id and valid_hash(row["resultSha256"])
                     and digest(preserved(f"terminal-local-{index:04d}.result", 65536)) == row["resultSha256"],
@@ -1730,19 +2064,21 @@ class WholeCheckController:
                     and lock_identity(authority, "admission.lock") == view.admission_lock
                     and not os.path.lexists(authority.folder / "taint.json"),
                     "Real terminal/control/marker/lock/custody obligations are incomplete.")
-            prior_writers = {row["writer"]: row for row in view.custody["writers"]}
-            actual_writers = {row["writer"]: row for row in custody.writers}
+            prior_writers = {(row["invocation"], row["writer"]): row for row in view.custody["writers"]}
+            actual_writers = {(row["invocation"], row["writer"]): row for row in custody.writers}
             require(set(actual_writers) == set(prior_writers)
                     and list(custody.handoffs) == view.custody["handoffs"],
                     "Terminal graph adds/removes an actual writer or accepted transfer.")
             for writer, before in prior_writers.items():
                 require(actual_writers[writer] == {**before, "phase": "terminal"},
                         "Terminal writer altered original ownership/tuple/context.")
-                if writer not in (view.suite_context["writer"], view.suite_context["parent"]["writer"]):
+                if writer not in ((view.suite_context["invocation"], view.suite_context["writer"]),
+                                  (view.suite_context["invocation"], view.suite_context["parent"]["writer"])):
                     require(not ExactProcess.read({key: before[key] for key in ("pid", "startedAt")}).live(),
                             "Another writer could still hold an independent SH.")
             handoffs = {row["handoff"]: row for row in custody.handoffs
-                        if row["handoff"] != view.suite_context["handoff"]}
+                        if row["invocation"] == view.suite_context["invocation"]
+                        and row["handoff"] != view.suite_context["handoff"]}
             seen: set[str] = set()
             for index, (entry, status, row) in enumerate(zip(terminal.helper_entries, terminal.helper_wait_statuses,
                                                             settled["helpers"], strict=True)):
@@ -1770,7 +2106,7 @@ class WholeCheckController:
                 context = document(context_raw, limit=65536)
                 normal_context(context)
                 handoff = handoffs[row["handoff"]]
-                expected_writer = actual_writers.get(row["writer"])
+                expected_writer = actual_writers.get((row["invocation"], row["writer"]))
                 require(expected_writer is not None and handoff["entry"] == entry
                         and handoff["phase"] == "accepted" and handoff["child"] == row["writer"]
                         and handoff["contextSha256"] == row["contextSha256"] == digest(context_raw)
@@ -1797,7 +2133,15 @@ class WholeCheckController:
                 _span_document(ack_raw, limit=65536)
             require(seen == set(handoffs) and view.helper_context["handoff"] in seen,
                     "An actual helper is omitted from the complete fixed settlement.")
-        result = TerminalView(view, images, intent, settled, sources, original_markers, original_control)
+            terminal_sources = verified_custody_images(authority, custody)
+            before, after = view.custody_sources["writers"], terminal_sources["writers"]
+            transitioned = {f"{context['invocation']}/{context['writer']}.json"
+                            for context in (view.suite_context, view.helper_context)}
+            require(terminal_sources["handoffs"] == view.custody_sources["handoffs"]
+                    and after.root == before.root and after.entries.keys() == before.entries.keys()
+                    and all(after.entries[path] == row for path, row in before.entries.items() if path not in transitioned),
+                    "A terminal writer, accepted handoff or immutable context changed since H1.")
+        result = TerminalView(view, images, intent, settled, sources, original_markers, original_control, terminal_sources)
         result.recheck_files()
         require(time.monotonic() < collector.terminal_interval_ends_at, "Terminal validation exceeded its interval.")
         return result
@@ -1825,6 +2169,13 @@ class WholeCheckController:
                     fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError as error:
                     raise ObservationFailed("Original admission SH remains held after real positive closure.") from error
+                # This same mutex and freshly owned original EX delimit the final
+                # comparison. A new fully terminal invocation is still foreign.
+                final = reconcile(authority, persist_unknown=False, candidate=self.scope)
+                require(final.resolved and all(row["phase"] == "terminal" for row in final.writers)
+                        and verified_custody_images(authority, final) == view.custody_sources,
+                        "Final custody differs from the exact graph verified at the terminal interval.")
+                view.recheck_files()
                 require(lock_identity(authority, "admission.lock") == view.h1.admission_lock,
                         "Original admission name changed during final raw EX.")
             finally:

@@ -15,7 +15,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from driver_identity_qualification import ArchiveImage, ArchiveWitness, Baseline, WholeCheckController, require
+from driver_identity_qualification import (
+    ArchiveImage,
+    ArchiveWitness,
+    Baseline,
+    TerminalView,
+    WholeCheckController,
+    require,
+    verified_custody_images,
+)
 
 from arbol_builds.driver_admission import (
     COMPONENTS,
@@ -615,6 +623,48 @@ class Maintenance:
         self.lock_identity = (required.st_dev, required.st_ino)
         self.folder = self.authority.folder / "sessions" / self.session
         self.result = self.folder / "result.json"
+        self.pre_drain_custody: dict[str, dict[str, Object]] = {"writers": {}, "handoffs": {}}
+
+    def _retain_pre_drain_call(self, capture: Captured) -> None:
+        """Pin the one ordinary provider/MAIN actually reaped on this create walk."""
+        owned = [child for child in self.controller.reaped if child.owner == capture.owner]
+        require(len(owned) == 1 and owned[0].reaped and owned[0].process.returncode == capture.returncode
+                and all(stream is not None and stream.closed for stream in (
+                    owned[0].process.stdin, owned[0].process.stdout, owned[0].process.stderr)),
+                "Pre-drain ordinary result is not the actual joined child with closed streams.")
+        with self.authority.mutex():
+            graph = reconcile(self.authority, persist_unknown=False, candidate=self.controller.scope)
+            roots = [row for row in graph.writers if row["parent"] is None
+                     and (row["pid"], row["startedAt"]) == (capture.owner.pid, capture.owner.started_at)]
+            require(graph.resolved and len(roots) == 1, "Pre-drain ordinary child has no unique verified root.")
+            root = roots[0]
+            invocation = root["invocation"]
+            writers = [row for row in graph.writers if row["invocation"] == invocation]
+            transfers = [row for row in graph.handoffs if row["invocation"] == invocation]
+            require(len(writers) == 2 and all(row["phase"] == "terminal" for row in writers)
+                    and len(transfers) == 1 and transfers[0]["phase"] == "accepted"
+                    and transfers[0]["role"] == "main" and transfers[0]["entry"] == self.payload.descriptor["entry"]
+                    and transfers[0]["parent"] == root["writer"]
+                    and any(row["writer"] == transfers[0]["child"] and row["parent"] == root["writer"] for row in writers),
+                    "Pre-drain ordinary call is not exactly its accepted root and terminal MAIN.")
+            sources = verified_custody_images(self.authority, graph)
+            handoff = transfers[0]["handoff"]
+            names = {"writers": [invocation, *(invocation + "/" + row["writer"] + ".json" for row in writers)],
+                     "handoffs": [handoff + ".json", handoff + ".context.json"]}
+            for tree, paths in names.items():
+                target = self.pre_drain_custody[tree]
+                for relative in paths:
+                    require(relative not in target, "A pre-drain ordinary capture was reused.")
+                    target[relative] = sources[tree].entries[relative]
+
+    def verify_first_drain_source(self, view: TerminalView, witness: ArchiveWitness) -> None:
+        """The first actual drain must archive the verified graph plus these fixed calls only."""
+        for tree, closed in view.custody_sources.items():
+            additions = self.pre_drain_custody[tree]
+            source = witness.sources[tree]
+            require(not (closed.entries.keys() & additions.keys()) and closed.root == source.root
+                    and {**closed.entries, **additions} == source.entries,
+                    "First drain changed, lost or added custody beyond the original graph and its verified calls.")
 
     def argv(self, command: str, arguments: Mapping[str, str], *, session: str | None = None) -> list[str]:
         argv = ["driver-state", command, "--registry-dir", str(self.controller.workspace.registry),
@@ -1019,6 +1069,8 @@ class Maintenance:
                 and result.get("version") == 1 and result.get("driver") == self.component.removeprefix("arbol-").removesuffix("-driver")
                 and valid_token(result.get("generation")) and valid_token(result.get("witness")),
                 "Fresh proven identity is malformed or belongs to another Subscription.")
+        if name == "create-before-upgrade":
+            self._retain_pre_drain_call(capture)
         return result
 
     def claude_create_refusal(self, state: Path, *, absent: bool) -> None:
@@ -1058,6 +1110,8 @@ class Maintenance:
                     and row["writer"] == handoffs[0]["child"] and row["parent"] == parent["writer"]
                     and row["phase"] == "terminal" for row in graph.writers) == 1,
                     "The actual refusal MAIN did not finish through its accepted handoff.")
+        if not absent:
+            self._retain_pre_drain_call(capture)
 
 
     def pi_create_refusal(self, state: Path, *, absent: bool) -> None:
@@ -1097,6 +1151,8 @@ class Maintenance:
                     and row["writer"] == handoffs[0]["child"] and row["parent"] == parent["writer"]
                     and row["phase"] == "terminal" for row in graph.writers) == 1,
                     "The actual refusal MAIN did not finish through its accepted handoff.")
+        if not absent:
+            self._retain_pre_drain_call(capture)
 
 
 def maintenance_child_substitution(subject: Maintenance, request: Execute, fault: Fault) -> None:
@@ -1183,6 +1239,10 @@ class ClaudeCreateWalk:
             require(witness is not None, "The first drain did not preserve the original terminal trees.")
             assert witness is not None
             witness.verify(self.controller.workspace)
+            view = self.observer.terminal_view
+            require(view is not None, "Original terminal graph is unavailable.")
+            assert view is not None
+            subject.verify_first_drain_source(view, witness)
             additions = set(witness.after.entries) - set(witness.before.entries)
             roots = {name.split("/", 1)[0] for name in additions if name.startswith("custody-")}
             require(len(roots) == 1, "First drain has no unique actual custody destination.")
@@ -1209,7 +1269,10 @@ class ClaudeCreateWalk:
         if self.archive is not None:
             self.archive.verify(self.controller.workspace)
             current = ArchiveImage.capture(authority.folder / "archive")
+            first = base.name + "/"
             require(current.root == self.archive.after.root
+                    and {name for name in current.entries if name.startswith(first)}
+                    == {name for name in self.archive.after.entries if name.startswith(first)}
                     and all(current.entries.get(name) == row for name, row in self.archive.after.entries.items()),
                     "The first real archive or its original evidence changed during a later drain.")
         for relative, original in self.custody.items():
@@ -1400,6 +1463,10 @@ class PiCreateWalk:
             require(witness is not None, "The first drain did not preserve the original terminal trees.")
             assert witness is not None
             witness.verify(self.controller.workspace)
+            view = self.observer.terminal_view
+            require(view is not None, "Original terminal graph is unavailable.")
+            assert view is not None
+            subject.verify_first_drain_source(view, witness)
             additions = set(witness.after.entries) - set(witness.before.entries)
             roots = {name.split("/", 1)[0] for name in additions if name.startswith("custody-")}
             require(len(roots) == 1, "First drain has no unique actual custody destination.")
@@ -1426,7 +1493,10 @@ class PiCreateWalk:
         if self.archive is not None:
             self.archive.verify(self.controller.workspace)
             current = ArchiveImage.capture(authority.folder / "archive")
+            first = base.name + "/"
             require(current.root == self.archive.after.root
+                    and {name for name in current.entries if name.startswith(first)}
+                    == {name for name in self.archive.after.entries if name.startswith(first)}
                     and all(current.entries.get(name) == row for name, row in self.archive.after.entries.items()),
                     "The first real archive or its original evidence changed during a later drain.")
         for relative, original in self.custody.items():
