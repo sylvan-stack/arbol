@@ -5,7 +5,7 @@
   "schemaCompatibility": [
     {
       "compatibilityVersion": 1,
-      "minRevision": 5
+      "minRevision": 4
     }
   ],
   "build": [

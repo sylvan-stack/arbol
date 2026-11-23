@@ -248,3 +248,9 @@ release. Rehearse the replay on isolated state and compare the result with
 the preserved current state before changing the installation. If any write
 cannot be accounted for or replayed without loss, repair forward. Record the
 write boundary, the evidence of replay and the release that reopens.
+
+## Backend and session import compatibility
+
+The backend can run on schema revision 4 with compatibility version 1.
+Session import requires revision 5 for its fingerprint table. The import
+command verifies that revision before reading or writing fingerprints.
