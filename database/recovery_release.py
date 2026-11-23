@@ -802,7 +802,7 @@ def unit_checks(
         promoted = [row["name"] for row in results]
         if len(set(promoted)) != len(promoted):
             raise RecoveryError("The recorded promotion unit results are duplicated.")
-        if promoted and selection is not None and set(promoted) != set(selection):
+        if "promotionUnitResults" in build["evidence"] and selection is not None and set(promoted) != set(selection):
             raise RecoveryError("The recorded promotion units differ from the committed selection.")
         required.update((*identity, name) for name in promoted)
     return declared, required
