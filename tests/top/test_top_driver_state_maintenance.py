@@ -364,6 +364,7 @@ class ClaudeCreateSubject:
     case: str
     root: Path
     root_identity: Object
+    physical: Object
     owner: FileImage
     checkpoint: FileImage
     settlement: FileImage
@@ -455,12 +456,18 @@ def claude_create_subjects(controller: WholeCheckController, baseline: Baseline,
             current = document(read_image(path).raw) if os.path.lexists(path) else None
             require(current == after.get(key), "Saved subject differs from its actual settled checkpoint.")
         proof, guard = read_image(state / "identity.json"), read_image(state / "identity.guard")
+        state_identity = directory_identity(state)
+        physical = {"case": {key: root_identity[key] for key in ("device", "inode")},
+                    "state": {key: state_identity[key] for key in ("device", "inode")},
+                    "guard": {"device": guard.device, "inode": guard.inode}}
+        require(before.get("physical") == after.get("physical") == physical,
+                "Original checkpoint, settlement and intake physical identities differ.")
         generation = document(proof.raw).get("generation")
         require(valid_token(generation) and read_image(state / "format").raw.strip() == b"2",
                 "Original format-two generation is unavailable.")
         record_image = read_image(subscription / "record.json") if after.get("record") is not None else None
         assert isinstance(case, str) and isinstance(generation, str) and isinstance(witness, str)
-        subjects.append(ClaudeCreateSubject(window, command, case, root, root_identity, owner, checkpoint,
+        subjects.append(ClaudeCreateSubject(window, command, case, root, root_identity, physical, owner, checkpoint,
                                              settlement, actor_result, ack, proof, guard, record_image,
                                              generation, witness))
     view.recheck_files()
@@ -1041,6 +1048,8 @@ class ClaudeCreateWalk:
         view.recheck_files()
         self.check_custody()
         require(directory_identity(item.root) == item.root_identity
+                and {key: directory_identity(item.root / "state")[key] for key in ("device", "inode")}
+                == item.physical["state"]
                 and read_image(item.root / ".fixture-owner.json") == item.owner
                 and read_image(item.root / "create-checkpoint.json") == item.checkpoint
                 and read_image(item.root / "create-settlement.json") == item.settlement
