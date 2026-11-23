@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from driver_identity_qualification import Baseline, WholeCheckController, require
+from driver_identity_qualification import ArchiveImage, ArchiveWitness, Baseline, WholeCheckController, require
 
 from arbol_builds.driver_admission import (
     COMPONENTS,
@@ -954,7 +954,9 @@ class ClaudeCreateWalk:
         self.controller, self.baseline, self.observer = controller, baseline, observer
         self.environment = without_authority(dict(environment))
         self.subjects: tuple[ClaudeCreateSubject, ...] | None = None
-        self.suite_terminal: FileImage | None = None
+        self.custody: dict[str, FileImage] = {}
+        self.archive: ArchiveWitness | None = None
+        self.archive_root: Path | None = None
         self.sessions: set[str] = set()
         self.attempted: set[str] = set()
         self.finished: set[str] = set()
@@ -966,9 +968,68 @@ class ClaudeCreateWalk:
             assert view is not None
             suite = view.h1.suite_context
             authority = Authority(self.controller.workspace.registry, "arbol-claude-driver")
-            self.suite_terminal = read_image(authority.folder / "writers" / suite["invocation"] /
-                                             (suite["writer"] + ".json"))
+            contexts = [suite] + [document(view.images[f"terminal-helper-{index:04d}.context"].raw)
+                                  for index in range(11)]
+            for index, context in enumerate(contexts):
+                writer = "writers/" + context["invocation"] + "/" + context["writer"] + ".json"
+                handoff = "handoffs/" + context["handoff"] + ".json"
+                context_file = "handoffs/" + context["handoff"] + ".context.json"
+                for relative in (writer, handoff, context_file):
+                    require(relative not in self.custody, "Original create custody has duplicate identities.")
+                    self.custody[relative] = read_image(authority.folder / relative)
+                require(self.custody[context_file].raw == (view.images[f"terminal-helper-{index - 1:04d}.context"].raw
+                        if index else canonical(suite)), "Original custody context differs from the observed Suite.")
+                if index:
+                    require(self.custody[writer].raw == view.images[f"terminal-helper-{index - 1:04d}.terminal"].raw,
+                            "Original helper terminal bytes differ from the observed witness.")
+            require(len(self.custody) == 36, "Original Suite and all eleven helper records are incomplete.")
         return self.subjects
+
+    def archived(self, subject: Maintenance) -> None:
+        """Bind the first actual drain's rename and preserve its exact later image."""
+        observed = self.controller.last_administration
+        require(observed is not None and observed.command == "drain" and observed.session == subject.session
+                and observed.component == subject.component, "The actual subject drain is unavailable.")
+        assert observed is not None
+        witness = observed.archive_witness
+        if self.archive is None:
+            require(witness is not None, "The first drain did not preserve the original terminal trees.")
+            assert witness is not None
+            witness.verify(self.controller.workspace)
+            additions = set(witness.after.entries) - set(witness.before.entries)
+            roots = {name.split("/", 1)[0] for name in additions if name.startswith("custody-")}
+            require(len(roots) == 1, "First drain has no unique actual custody destination.")
+            root_name = next(iter(roots))
+            for relative, image in self.custody.items():
+                tree, _, child = relative.partition("/")
+                source = witness.sources[tree].entries.get(child)
+                require(source is not None and source.get("type") == "file"
+                        and source.get("sha256") == image.sha256 and source.get("device") == image.device
+                        and source.get("inode") == image.inode and source.get("mode") == image.mode,
+                        "First drain did not archive the exact original source inode and bytes.")
+                assert source is not None
+                moved = witness.after.entries.get(root_name + "/" + relative)
+                require(moved == {**source, "path": root_name + "/" + relative},
+                        "Actual archive destination differs from the original custody image.")
+            self.archive, self.archive_root = witness, subject.authority.folder / "archive" / root_name
+        self.check_custody()
+
+    def check_custody(self) -> None:
+        authority = Authority(self.controller.workspace.registry, "arbol-claude-driver")
+        base = authority.folder if self.archive is None else self.archive_root
+        require(base is not None and len(self.custody) == 36, "Original custody is unavailable.")
+        assert base is not None
+        if self.archive is not None:
+            self.archive.verify(self.controller.workspace)
+            current = ArchiveImage.capture(authority.folder / "archive")
+            require(current.root == self.archive.after.root
+                    and all(current.entries.get(name) == row for name, row in self.archive.after.entries.items()),
+                    "The first real archive or its original evidence changed during a later drain.")
+        for relative, original in self.custody.items():
+            current_image = read_image(base / relative)
+            require((current_image.raw, current_image.device, current_image.inode, current_image.mode) ==
+                    (original.raw, original.device, original.inode, original.mode),
+                    "Original Suite/helper writer, accepted handoff or context changed.")
 
     def unchanged(self, item: ClaudeCreateSubject) -> None:
         self.controller.workspace.verify(self.controller.evidence)
@@ -976,17 +1037,7 @@ class ClaudeCreateWalk:
         require(view is not None, "Original terminal observation is unavailable.")
         assert view is not None
         view.recheck_files()
-        authority = Authority(self.controller.workspace.registry, "arbol-claude-driver")
-        suite = view.h1.suite_context
-        require(self.suite_terminal is not None and read_image(authority.folder / "writers" /
-                suite["invocation"] / (suite["writer"] + ".json")) == self.suite_terminal,
-                "The original Suite terminal writer was replaced.")
-        for index in range(11):
-            prefix = f"terminal-helper-{index:04d}."
-            context = document(view.images[prefix + "context"].raw)
-            terminal = authority.folder / "writers" / context["invocation"] / (context["writer"] + ".json")
-            require(read_image(terminal).raw == view.images[prefix + "terminal"].raw,
-                    "An original actor terminal writer was replaced after whole-runner completion.")
+        self.check_custody()
         require(directory_identity(item.root) == item.root_identity
                 and read_image(item.root / ".fixture-owner.json") == item.owner
                 and read_image(item.root / "create-checkpoint.json") == item.checkpoint
@@ -1027,6 +1078,7 @@ class ClaudeCreateWalk:
             require(item.window == _CLAUDE_CREATE_WINDOWS[0] and item.command == "abort-io"
                     and item.record is None, "Only prepared-absent C1 uses targeted retirement.")
             subject.open()
+            self.archived(subject)
             result = subject.execute_observed(request, "observe")
             require(result["generation"] == item.generation, "Targeted retirement changed root generation.")
             subject.finish(request, result)
@@ -1044,7 +1096,10 @@ class ClaudeCreateWalk:
             require(before["generation"] == item.generation and before["witness"] == item.witness,
                     "Fresh ordinary identity differs from the original create witness.")
             self.metadata(item, state="active")
-            result = maintenance_exact_dispatch(subject, request)
+            subject.open()
+            self.archived(subject)
+            result = subject.execute_observed(request, "observe")
+            subject.finish(request, result)
             require(result["generation"] == item.generation, "No-op format-two upgrade changed generation.")
             self.metadata(item, state="active")
             after = subject.admitted_proof(request.state, "anthropic-2", expectation=expected,
