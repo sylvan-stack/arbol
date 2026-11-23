@@ -397,8 +397,10 @@ def operate(spec: dict[str, Any], command: Literal["prepare", "status", "drain",
                 verify_authorization(folder, state.exchange_authorization, state.release)
             return {"status": state.phase, "release": state.release or ""}
         if command in ("prepare", "drain"):
-            if state.phase != "normal" or state.release != spec["historical"]["sha256"]:
-                raise RecoveryError("Preparation requires the selected normal prior admission release.")
+            allowed = ("normal",) if command == "prepare" else ("normal", "draining", "exclusive")
+            if (state.phase not in allowed or state.release != spec["historical"]["sha256"]
+                    or (state.phase != "normal" and state.session is None)):
+                raise RecoveryError("The selected prior admission release or session cannot be verified.")
             if state.exchange_authorization is not None:
                 verify_authorization(folder, state.exchange_authorization, state.release)
         elif command == "freeze":
@@ -433,6 +435,8 @@ def operate(spec: dict[str, Any], command: Literal["prepare", "status", "drain",
                         "release": item["sha256"], "missingGuards": ",".join(deployment.missing_guards)}
             if command == "drain":
                 session = begin_maintenance(spec["source"], runtime=ctx.identity.folder)
+                if state.phase != "normal" and session != state.session:
+                    raise RecoveryError("The existing maintenance session changed during drain.")
             else:
                 session = freeze(ctx, spec["source"], spec["session"])
             with directory(ctx.identity.folder) as folder, lock(folder, GATE, fcntl.LOCK_SH):
