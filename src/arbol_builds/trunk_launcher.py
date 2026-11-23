@@ -8,7 +8,9 @@ import os
 import signal
 from pathlib import Path
 
-from arbol_installation.paths import INSTALLATION_LAYOUT
+from arbol_installation.paths import INSTALLATION_LAYOUT, build_payload_directory, build_registry
+from arbol_installation.admission import Admission, AdmissionRefusal, GENERATION_ENV, runtime_folder
+from arbol_installation.exchange_release import writer_version
 
 from .launcher import (
     BUILD_PATTERN,
@@ -36,6 +38,17 @@ from .schema_state import SCHEMA_ERRORS, SchemaPair, SchemaState, read_schema
 
 DEFAULT_TRUNK = "trivial"
 LIST = "list"
+POLICY_CHECK_ENV = "ARBOL_EXCHANGE_POLICY_CHECK"
+
+
+def admission_runtime() -> Path:
+    value = os.environ.get("ARBOL_EXCHANGE_RUNTIME_DIR")
+    if value is None:
+        return runtime_folder()
+    path = Path(value)
+    if not path.is_absolute():
+        raise ValueError("The Exchange runtime path must be absolute.")
+    return path
 
 
 class Refused(Exception):
@@ -172,6 +185,7 @@ def installed_trunks() -> dict[str, tuple[Path, Record]]:
         with entry.open("rb") as stream:
             stream.readline(512)
             line = stream.readline(4096)
+            payload_line = stream.readline(4096)
         if not line.startswith(marker) or not line.endswith(b"\n"):
             raise ValueError(f"The installed launcher for {code} has no Trunk identity.")
         record = json.loads(line[len(marker):])
@@ -179,6 +193,9 @@ def installed_trunks() -> dict[str, tuple[Path, Record]]:
                 or not isinstance(record.get("build"), str) or not BUILD_PATTERN.fullmatch(record["build"])
                 or not schema_compatibility(record.get("schemaCompatibility"))):
             raise ValueError(f"The installed launcher for {code} has an invalid Trunk identity.")
+        payload = build_payload_directory(build_registry(), record["component"], record["build"])
+        if payload.resolve(strict=True) != payload or payload_line != b"# stable-payload " + os.fsencode(payload) + b"\n":
+            raise ValueError(f"The installed launcher for {code} names a different payload.")
         result[code] = (entry, record)
     return result
 
@@ -213,7 +230,19 @@ def launch_installed_trunk(args: list[str]) -> int:
         if not compatible or call.build not in (None, record["build"]):
             raise Refused("no_fit", f"{TRUNKS}/{code} has no matching installed Build.",
                           [record["build"]] if compatible else [])
+        if call.command[0] == "run":
+            with Admission(admission_runtime()).lease("normal", generation=os.environ.get(GENERATION_ENV)) as lease:
+                writer_version(lease, record["component"], record["build"],
+                               build_payload_directory(build_registry(), record["component"], record["build"]))
+                if os.environ.pop(POLICY_CHECK_ENV, None) == "1":
+                    write_all(1, json_line({"build": record["build"], "generation": lease.state.generation}))
+                    return 0
+                os.environ[GENERATION_ENV] = lease.state.generation
+                os.execv(entry, [str(entry), *call.command])
         os.execv(entry, [str(entry), *call.command])
+    except AdmissionRefusal as error:
+        write_all(1, json_line({"error": {"code": error.code, "message": str(error)}, "available": []}))
+        return 1
     except Refused as error:
         write_all(1, json_line({"error": {"code": error.code, "message": str(error)}, "available": error.available}))
         return 1
@@ -242,6 +271,29 @@ def launch_trunk(registry: str, args: list[str]) -> int:
             raise Refused(*SCHEMA_ERRORS[schema.status])
         component = f"{TRUNKS}/{code}"
         selected = pick_build(registry, component, call.build, schema.pair)
+        if call.command[0] == "run":
+            with Admission(admission_runtime()).lease("normal", generation=os.environ.get(GENERATION_ENV)) as lease:
+                writer_version(lease, component, selected["build"],
+                               build_payload_directory(registry, component, selected["build"]))
+                if os.environ.pop(POLICY_CHECK_ENV, None) == "1":
+                    write_all(1, json_line({"build": selected["build"], "generation": lease.state.generation}))
+                    return 0
+                os.environ[GENERATION_ENV] = lease.state.generation
+                line = warning(component, selected)
+                if line is not None:
+                    try:
+                        write_all(2, readable(line))
+                    except OSError:
+                        pass
+                use_descriptor = hold_build_use(registry, component, selected["build"])
+                folder = os.path.join(registry, component, selected["build"])
+                entry = registered_entry(registry, selected)
+                if entry is None:
+                    raise OSError(f"The program of {component}@{selected['build']} is no longer there.")
+                record_start(folder)
+                signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+                signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
+                os.execv(entry, [entry, *call.command])
         line = warning(component, selected)
         if line is not None:
             try:
@@ -257,10 +309,10 @@ def launch_trunk(registry: str, args: list[str]) -> int:
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
         signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
         os.execv(entry, [entry, *call.command])
-    except Refused as refused:
+    except (Refused, AdmissionRefusal) as refused:
         try:
             write_all(1, json_line({"error": {"code": refused.code, "message": str(refused)},
-                                    "available": refused.available}))
+                                    "available": getattr(refused, "available", [])}))
         except OSError:
             pass
         return 1

@@ -354,7 +354,19 @@ def launcher_source(registry: str, component: str, python: str) -> bytes:
         raise ValueError("The legacy Root entry point has been retired.")
     first = shebang(python)
     if component == TRUNKS:
+        installation = Path(PACKAGE).parent / "arbol_installation"
+        modules = {name: (installation / f"{name}.py").read_text(encoding="utf-8")
+                   for name in ("paths", "admission", "exchange_release")}
+        bootstrap = ("import sys, types\n"
+                     "package = types.ModuleType('arbol_installation')\n"
+                     "package.__path__ = []\n"
+                     "sys.modules['arbol_installation'] = package\n"
+                     f"for name, source in {modules!r}.items():\n"
+                     "    module = types.ModuleType('arbol_installation.' + name)\n"
+                     "    sys.modules[module.__name__] = module\n"
+                     "    exec(compile(source, module.__name__, 'exec'), module.__dict__)\n")
         body = "\n".join(module_text(name) for name in TRUNK_MODULES)
+        body = bootstrap + body
         call = f"sys.exit(launch_trunk({os.path.abspath(registry)!r}, sys.argv[1:]))"
     elif component == "arbol":
         body = "\n".join(module_text(name) for name in ("launcher.py", "schema_state.py"))

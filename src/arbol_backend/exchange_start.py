@@ -149,6 +149,19 @@ def forget(path: Path) -> None:
         pass
 
 
+def verify_selection(context: Context, code: str, build: str, generation: str, timeout: float) -> None:
+    env = {**context.environment(), GENERATION_ENV: generation, "ARBOL_EXCHANGE_POLICY_CHECK": "1"}
+    try:
+        result = subprocess.run([str(context.bin_dir / "arbol-trunk"), code, "-v", build, "run"],
+                                env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, timeout=timeout, check=False)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        raise Refusal("trunk_unavailable", "The selected Trunk policy could not be verified.") from None
+    value = object_line(result.stdout) if len(result.stdout) <= MAX_REPLY else None
+    if result.returncode or value != {"build": build, "generation": generation}:
+        raise Refusal("no_fit", "The selected Trunk is not authorized by the current release.")
+
+
 def start(context: Context, command: Command, *, timeout: float = ACCEPT_SECONDS) -> Reply:
     deadline = time.monotonic() + timeout
     exchange = command.options["--exchange"]
@@ -172,6 +185,21 @@ def start(context: Context, command: Command, *, timeout: float = ACCEPT_SECONDS
     if prior is not None:
         return prior
     with admission.lease("normal", generation=generation), ExitStack() as stack:
+        assert command.code is not None
+        try:
+            selected = select_build(context, command, timeout=max(0, deadline - time.monotonic()))
+            if isinstance(selected, Reply):
+                prior = asyncio.run(receipt(context, exchange, max(0, deadline - time.monotonic())))
+                if prior is not None:
+                    return prior
+                return selected
+            verify_selection(context, command.code, selected, generation, max(0, deadline - time.monotonic()))
+        except Refusal:
+            # An acceptance racing policy validation still belongs to this UUID.
+            prior = asyncio.run(receipt(context, exchange, max(0, deadline - time.monotonic())))
+            if prior is not None:
+                return prior
+            raise
         captured = None
         request_refusal = None
         try:
@@ -200,18 +228,9 @@ def start(context: Context, command: Command, *, timeout: float = ACCEPT_SECONDS
             forget(lock_path)
             raise request_refusal
         assert captured is not None
-        try:
-            selected = select_build(context, command, timeout=max(0, deadline - time.monotonic()))
-        except Refusal:
-            forget(lock_path)
-            raise
-        if isinstance(selected, Reply):
-            forget(lock_path)
-            return selected
         if time.monotonic() >= deadline:
             forget(lock_path)
             raise Refusal("no_answer", "The start time limit expired during Build selection.")
-        assert command.code is not None
         try:
             # The offset is rewound before the Trunk opens its inherited snapshot via /dev/fd.
             snapshot = stack.enter_context(tempfile.TemporaryFile())
@@ -231,6 +250,7 @@ def start(context: Context, command: Command, *, timeout: float = ACCEPT_SECONDS
                      "--exchange", exchange, "--request", f"/dev/fd/{snapshot_fd}", *command.forward]
         try:
             env = {**context.environment(), GENERATION_ENV: generation}
+            env.pop("ARBOL_EXCHANGE_POLICY_CHECK", None)
             child = subprocess.Popen(arguments, env=env, start_new_session=True,
                                      stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.DEVNULL,
                                      pass_fds=(lock, snapshot_fd))
