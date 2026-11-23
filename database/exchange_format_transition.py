@@ -6,6 +6,7 @@ procedure. It must separately verify the recovery and release selection.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import fcntl
 import hashlib
 import json
@@ -242,7 +243,7 @@ TRUNK_JOURNEYS = {"format2-lifecycle", "legacy-drain", "pruning"}
 BACKEND_JOURNEYS = {"note-replay", "interruption-rollback"}
 
 
-def request(path: Path) -> dict[str, Any]:
+def request(path: Path, command: str) -> dict[str, Any]:
     """Read a bounded owner-only request, rejecting duplicate or extra fields."""
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
@@ -259,48 +260,73 @@ def request(path: Path) -> dict[str, Any]:
     finally:
         os.close(fd)
     value = json.loads(raw, object_pairs_hook=pairs, parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
-    keys = {"format", "source", "schema", "session", "historical", "prior", "successor",
-            "snapshot", "restore", "qualificationSha256"}
+    keys = {"format", "source"}
+    if command != "status":
+        keys |= {"schema", "historical", "prior"}
+    if command in ("apply", "rollback"):
+        keys |= {"session", "snapshot", "restore"}
+    if command == "apply":
+        keys |= {"successor", "qualificationSha256"}
     if (not isinstance(value, dict) or set(value) != keys or type(value["format"]) is not int
-            or value["format"] != 1 or not isinstance(value["source"], dict)
-            or not isinstance(value["schema"], dict)
-            or set(value["schema"]) != {"revision", "compatibilityVersion"}
-            or any(type(x) is not int or x < 1 for x in value["schema"].values())
-            or not isinstance(value["session"], str) or re.fullmatch(r"[0-9a-f]{32}", value["session"]) is None
-            or not isinstance(value["qualificationSha256"], str)
-            or SHA.fullmatch(value["qualificationSha256"]) is None):
+            or value["format"] != 1 or not isinstance(value["source"], dict)):
         raise RecoveryError("The operation request is invalid.")
-    for key in ("historical", "prior", "successor"):
-        item = value[key]
-        expected = {"directory", "sha256"} if key == "historical" else {"directory", "sha256", "manifestSha256"}
-        if key == "successor":
-            expected.add("refusalSha256")
-        if (not isinstance(item, dict) or set(item) != expected
-                or not isinstance(item["directory"], str) or not Path(item["directory"]).is_absolute()
-                or any(not isinstance(item[k], str) or SHA.fullmatch(item[k]) is None for k in expected - {"directory"})):
-            raise RecoveryError("The operation request has invalid release pins.")
-    if any(not isinstance(value[k], str) or not Path(value[k]).is_absolute() for k in ("snapshot", "restore")):
-        raise RecoveryError("The operation request has invalid recovery paths.")
+    if command != "status":
+        schema = value["schema"]
+        if (not isinstance(schema, dict) or set(schema) != {"revision", "compatibilityVersion"}
+                or any(type(x) is not int or x < 1 for x in schema.values())):
+            raise RecoveryError("The operation schema is invalid.")
+        names = ("historical", "prior", "successor") if command == "apply" else ("historical", "prior")
+        for key in names:
+            item = value[key]
+            expected = {"directory", "sha256"} if key == "historical" else {"directory", "sha256", "manifestSha256"}
+            if key == "successor":
+                expected.add("refusalSha256")
+            if (not isinstance(item, dict) or set(item) != expected
+                    or not isinstance(item["directory"], str) or not Path(item["directory"]).is_absolute()
+                    or any(not isinstance(item[k], str) or SHA.fullmatch(item[k]) is None
+                           for k in expected - {"directory"})):
+                raise RecoveryError("The operation request has invalid release pins.")
+    if command in ("apply", "rollback"):
+        if (not isinstance(value["session"], str) or re.fullmatch(r"[0-9a-f]{32}", value["session"]) is None
+                or any(not isinstance(value[k], str) or not Path(value[k]).is_absolute()
+                       for k in ("snapshot", "restore"))):
+            raise RecoveryError("The operation request has invalid recovery inputs.")
+    if command == "apply" and (not isinstance(value["qualificationSha256"], str)
+                                or SHA.fullmatch(value["qualificationSha256"]) is None):
+        raise RecoveryError("The operation request has an invalid qualification pin.")
     from arbol_installation.admission import checked_source
     value["source"] = checked_source(value["source"])
     return cast(dict[str, Any], value)
 
 
-def verify_inputs(spec: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+def verify_inputs(spec: dict[str, Any], command: str) -> dict[str, dict[str, Any]]:
     """Verify archive membership, independent journeys and same-session recovery."""
     from archive_volume import require_archive
     from recovery import verify_recovery
 
     archive = require_archive()
     records: dict[str, dict[str, Any]] = {}
-    for name in ("historical", "prior", "successor"):
+    for name in (("historical", "prior", "successor") if command == "apply" else ("historical", "prior")):
         item = spec[name]
         records[name], _ = verify_release(Path(item["directory"]), item["sha256"], archive=archive)
-    for name in ("prior", "successor"):
-        transition = records[name].get("exchangeTransition", {})
-        if (transition.get("role") != name or transition.get("admissionRelease") != spec["historical"]["sha256"]
-                or transition.get("admissionReleaseDirectory") != spec["historical"]["directory"]):
-            raise RecoveryError("The release roles or historical admission evidence differ.")
+    prior_transition = records["prior"].get("exchangeTransition", {})
+    forward = (spec["prior"]["sha256"] == spec["historical"]["sha256"]
+               and prior_transition.get("role") == "successor")
+    if not forward and (prior_transition.get("role") != "prior"
+                        or prior_transition.get("admissionRelease") != spec["historical"]["sha256"]
+                        or prior_transition.get("admissionReleaseDirectory") != spec["historical"]["directory"]):
+        raise RecoveryError("The prior and historical admission evidence differ.")
+    if command == "rollback" and forward:
+        raise RecoveryError("A format-2 predecessor cannot be used as a format-1 rollback.")
+    if command in ("apply", "rollback"):
+        verify_recovery(Path(spec["snapshot"]), Path(spec["restore"]), source=spec["source"], schema=spec["schema"],
+                        release_sha256=spec["prior"]["sha256"], maintenance_session=spec["session"])
+    if command != "apply":
+        return records
+    transition = records["successor"].get("exchangeTransition", {})
+    if (transition.get("role") != "successor" or transition.get("admissionRelease") != spec["historical"]["sha256"]
+            or transition.get("admissionReleaseDirectory") != spec["historical"]["directory"]):
+        raise RecoveryError("The successor and historical admission evidence differ.")
     qualification = records["successor"]["exchangeTransition"]["qualification"]
     if qualification["sha256"] != spec["qualificationSha256"]:
         raise RecoveryError("The successor qualification is not independently approved.")
@@ -317,9 +343,7 @@ def verify_inputs(spec: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]
     required |= {("arbol", builds["arbol"], name) for name in BACKEND_JOURNEYS}
     if not required <= passed:
         raise RecoveryError("The approved qualification lacks required passing journeys.")
-    verify_recovery(Path(spec["snapshot"]), Path(spec["restore"]), source=spec["source"], schema=spec["schema"],
-                    release_sha256=spec["prior"]["sha256"], maintenance_session=spec["session"])
-    return records["prior"], records["successor"]
+    return records
 
 
 def stage(folder: int, data: bytes, release: str) -> str:
@@ -344,65 +368,75 @@ def stage(folder: int, data: bytes, release: str) -> str:
 
 
 def operate(spec: dict[str, Any], command: Literal["prepare", "status", "apply", "rollback"]) -> dict[str, str]:
-    from migrate_schema import database_target
-
     from arbol_backend.exchange_context import context
-    from arbol_backend.exchange_drain import GuardedSelection, reopen
+    from arbol_backend.exchange_drain import GuardedSelection, inspect_database, reopen
     from arbol_installation.admission import GATE, directory, lock, read_state, runtime_folder
 
-    role = "prior" if command == "rollback" else "successor"
-    item = spec[role]
+    role = "successor" if command == "apply" else "prior"
     with directory(runtime_folder()) as folder, lock(folder, GATE, fcntl.LOCK_SH):
         state = read_state(folder)
         if state.source != spec["source"]:
             raise RecoveryError("Admission belongs to a different database target.")
-        if state.phase == "normal":
-            if state.release != item["sha256"]:
+        if command == "status":
+            if state.exchange_authorization is not None:
+                if state.release is None:
+                    raise RecoveryError("The active authorization has no release.")
+                verify_authorization(folder, state.exchange_authorization, state.release)
+            return {"status": state.phase, "release": state.release or ""}
+        if command == "prepare":
+            if state.phase != "normal" or state.release != spec["historical"]["sha256"]:
+                raise RecoveryError("Preparation requires the selected normal prior admission release.")
+            if state.exchange_authorization is not None:
+                verify_authorization(folder, state.exchange_authorization, state.release)
+        elif state.phase == "normal":
+            if state.release != spec[role]["sha256"]:
                 raise RecoveryError("A different release is already active.")
             if state.exchange_authorization is not None:
                 verify_authorization(folder, state.exchange_authorization, state.release)
             elif role == "successor":
                 raise RecoveryError("The active successor lacks authorization.")
-            return {"status": "active", "release": item["sha256"]}
-        if state.session != spec["session"] or (state.phase != "exclusive" and command not in ("prepare", "status")):
-            raise RecoveryError("The operation requires the same maintenance session and exclusive apply.")
-        if command == "status":
-            return {"status": state.phase, "release": state.release or ""}
-    prior, successor = verify_inputs(spec)
-    selected_record = prior if role == "prior" else successor
+            return {"status": "active", "release": state.release}
+        elif state.phase != "exclusive" or state.session != spec["session"]:
+            raise RecoveryError("The operation requires the same exclusive session.")
+    records = verify_inputs(spec, command)
+    item = spec[role]
+    selected_record = records[role]
     package = (Path.home() / ".local/lib/sylvan-stack/arbol/stable/arbol"
                / next(row["build"] for row in selected_record["builds"] if row["component"] == "arbol"))
     ctx = context(package, {})
-    target = database_target(str(spec["source"]["database"]))
-    with target.connect() as connection:
-        if target.identity(connection) != spec["source"]:
-            raise RecoveryError("The live database identity differs from the request.")
+    if asyncio.run(inspect_database(ctx, spec["source"], idle=False)) != spec["schema"]:
+        raise RecoveryError("The installed schema differs from the request.")
     if command == "prepare":
-        with verified_deployment(Path(item["directory"]), item["sha256"], item["manifestSha256"],
-                                 item["refusalSha256"]):
+        with verified_deployment(Path(item["directory"]), item["sha256"], item["manifestSha256"]):
             return {"status": "prepared", "release": item["sha256"]}
 
     @contextmanager
     def selection(folder: int, current: Any) -> Iterator[GuardedSelection]:
         if current.session != spec["session"] or current.source != spec["source"]:
             raise RecoveryError("The exclusive session changed.")
-        if current.exchange_authorization is None:
-            if current.release != spec["historical"]["sha256"]:
-                raise RecoveryError("The historical admission release changed.")
-        elif role == "prior":
-            raise RecoveryError("Prior rollback is unavailable after successor activation.")
-        else:
-            verify_authorization(folder, current.exchange_authorization, current.release)
-            if current.release != item["sha256"]:
-                raise RecoveryError("Forward recovery requires the same approved successor.")
-        checked_prior, checked_successor = verify_inputs(spec)
-        if checked_prior != prior or checked_successor != successor:
+        checked = verify_inputs(spec, command)
+        if checked != records:
             raise RecoveryError("The archived release evidence changed.")
+        if current.release != spec["historical"]["sha256"]:
+            raise RecoveryError("The historical admission release changed.")
+        if current.exchange_authorization is not None:
+            if role == "prior":
+                raise RecoveryError("Prior rollback is unavailable after successor activation.")
+            old = authorization_from_release(checked["historical"], current.release)
+            if hashlib.sha256(old).hexdigest() != current.exchange_authorization:
+                raise RecoveryError("The active authorization differs from its archived release.")
+            new = authorization_from_release(checked["successor"], item["sha256"])
+            try:
+                verify_authorization(folder, current.exchange_authorization, current.release)
+            except (OSError, ValueError, TypeError, KeyError, RecursionError):
+                verify_authorization(folder, hashlib.sha256(new).hexdigest(), item["sha256"])
+        elif checked["prior"].get("exchangeTransition", {}).get("role") == "successor":
+            raise RecoveryError("The active successor commitment is missing.")
         with verified_deployment(Path(item["directory"]), item["sha256"], item["manifestSha256"],
                                  item.get("refusalSha256")):
             authorization = None
             if role == "successor":
-                data = authorization_from_release(checked_successor, item["sha256"])
+                data = authorization_from_release(checked["successor"], item["sha256"])
                 authorization = stage(folder, data, item["sha256"])
             yield GuardedSelection(cast(Literal["prior", "successor"], role), spec["source"], spec["session"],
                                    current.generation, current.release, item["sha256"], authorization)
@@ -418,7 +452,7 @@ def main() -> int:
     parser.add_argument("--request", type=Path, required=True)
     args = parser.parse_args()
     try:
-        result = operate(request(args.request), args.command)
+        result = operate(request(args.request, args.command), args.command)
     except Exception:
         print("Exchange transition refused: required evidence or the maintenance session could not be verified.",
               file=sys.stderr)
