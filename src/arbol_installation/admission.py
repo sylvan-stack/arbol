@@ -16,6 +16,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+from typing import Any
 from uuid import uuid4
 
 from .paths import INSTALLATION_LAYOUT, installation_root, prepare_installation
@@ -111,6 +112,15 @@ class State:
     exchange_authorization: str | None = None
 
 
+def unique_pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in items:
+        if key in result:
+            raise ValueError("Duplicate admission field.")
+        result[key] = value
+    return result
+
+
 def read_state(folder: int, *, layout: int = INSTALLATION_LAYOUT) -> State:
     fd = os.open(STATE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)
     try:
@@ -120,7 +130,7 @@ def read_state(folder: int, *, layout: int = INSTALLATION_LAYOUT) -> State:
             raise ValueError("Admission state exceeds its size limit.")
     finally:
         os.close(fd)
-    value = json.loads(raw)
+    value = json.loads(raw, object_pairs_hook=unique_pairs)
     keys = {"format", "state", "generation", "source", "session", "release"}
     if (not isinstance(value, dict) or set(value) not in (keys, keys | {"exchangeAuthorization"})
             or type(value["format"]) is not int or value["format"] != layout):
