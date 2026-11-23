@@ -58,7 +58,7 @@ def _read_record(path: Path) -> Object:
 
 
 def _entry(root: Path, name: str) -> tuple[int, str]:
-    path = physical(contained(root, name, regular=True), directory=False)
+    path = physical(contained(root, name, regular=True).resolve(strict=True), directory=False)
     before = path.lstat()
     mode = stat.S_IMODE(before.st_mode)
     if before.st_nlink != 1 or mode & 0o7022 or not mode & stat.S_IXUSR:
