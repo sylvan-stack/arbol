@@ -388,8 +388,10 @@ def claude_create_subjects(controller: WholeCheckController, baseline: Baseline,
     assert view is not None
     suite = view.h1.suite_context
     helpers = view.settled["helpers"]
-    require(isinstance(helpers, list) and len(helpers) == 11,
-            "The ten create actors and final H1 actor have not all settled.")
+    require(isinstance(helpers, list) and len(helpers) == 12,
+            "The ten create actors, broker and final H1 actor have not all settled.")
+    require(tuple(row["waitStatus"] for row in helpers) == (0, 1) * 5 + (0, 0),
+            "The actual Claude helper wait order differs from the fixed schedule.")
     subjects: list[ClaudeCreateSubject] = []
     for index, (window, command) in enumerate((w, c) for w in _CLAUDE_CREATE_WINDOWS
                                                for c in ("continue", "abort-io")):
@@ -1139,8 +1141,18 @@ class ClaudeCreateWalk:
             assert view is not None
             suite = view.h1.suite_context
             authority = Authority(self.controller.workspace.registry, "arbol-claude-driver")
-            contexts = [suite] + [document(view.images[f"terminal-helper-{index:04d}.context"].raw)
-                                  for index in range(11)]
+            contexts = [suite]
+            for index, row in enumerate(view.settled["helpers"]):
+                if index == 10:
+                    # Broker registration context remains at its original private
+                    # authority; the bounded report contains only its digest.
+                    raw = read_image(authority.folder / "handoffs" / (row["handoff"] + ".context.json")).raw
+                    require(digest(raw) == row["contextSha256"], "Broker private context digest changed.")
+                    require(document(raw)["entry"] == "bin/metadata-helper.py",
+                            "The scheduled broker is not the declared metadata helper.")
+                else:
+                    raw = view.images[f"terminal-helper-{index:04d}.context"].raw
+                contexts.append(document(raw))
             for index, context in enumerate(contexts):
                 writer = "writers/" + context["invocation"] + "/" + context["writer"] + ".json"
                 handoff = "handoffs/" + context["handoff"] + ".json"
@@ -1148,12 +1160,16 @@ class ClaudeCreateWalk:
                 for relative in (writer, handoff, context_file):
                     require(relative not in self.custody, "Original create custody has duplicate identities.")
                     self.custody[relative] = read_image(authority.folder / relative)
-                require(self.custody[context_file].raw == (view.images[f"terminal-helper-{index - 1:04d}.context"].raw
-                        if index else canonical(suite)), "Original custody context differs from the observed Suite.")
+                if index == 11:
+                    require(digest(self.custody[context_file].raw) == view.settled["helpers"][10]["contextSha256"],
+                            "Original private broker context differs from the observed digest.")
+                else:
+                    require(self.custody[context_file].raw == (view.images[f"terminal-helper-{index - 1:04d}.context"].raw
+                            if index else canonical(suite)), "Original custody context differs from the observed Suite.")
                 if index:
                     require(self.custody[writer].raw == view.images[f"terminal-helper-{index - 1:04d}.terminal"].raw,
                             "Original helper terminal bytes differ from the observed witness.")
-            require(len(self.custody) == 36, "Original Suite and all eleven helper records are incomplete.")
+            require(len(self.custody) == 39, "Original Suite and all twelve helper records are incomplete.")
         return self.subjects
 
     def archived(self, subject: Maintenance) -> None:
@@ -1188,7 +1204,7 @@ class ClaudeCreateWalk:
     def check_custody(self) -> None:
         authority = Authority(self.controller.workspace.registry, "arbol-claude-driver")
         base = authority.folder if self.archive is None else self.archive_root
-        require(base is not None and len(self.custody) == 36, "Original custody is unavailable.")
+        require(base is not None and len(self.custody) == 39, "Original custody is unavailable.")
         assert base is not None
         if self.archive is not None:
             self.archive.verify(self.controller.workspace)
