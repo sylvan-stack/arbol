@@ -94,7 +94,10 @@ def authorization_from_release(release_record: dict[str, Any], release: str) -> 
                    and item.get("build") == build]
         if len(matches) != 1 or not isinstance(matches[0].get("evidence"), dict):
             raise ValueError("The verified release does not identify one selected payload.")
-        return matches[0]["evidence"]["installedFilesSha256"]
+        result = matches[0]["evidence"].get("installedFilesSha256")
+        if not isinstance(result, str) or DIGEST.fullmatch(result) is None:
+            raise ValueError("The selected payload digest is invalid.")
+        return result
     backend = policy["backend"]
     trunks = policy["trunks"]
     value = {"format": 1, "release": release, "readExchange": policy["readExchange"],
@@ -137,8 +140,11 @@ def writer_version(lease: Lease, component: str, build: str, payload: Path) -> i
     """Check the exact successor Build and payload under its active admission lease."""
     try:
         lease.require()
+        commitment, release = lease.state.exchange_authorization, lease.state.release
+        if commitment is None or release is None:
+            raise ValueError("The writer lease lacks compact authorization.")
         with directory(lease.runtime) as folder:
-            value = verify_authorization(folder, lease.state.exchange_authorization, lease.state.release)
+            value = verify_authorization(folder, commitment, release)
         if component == "arbol":
             role, version = value["backend"], value["backend"]["writeNote"]
         elif component in ("arbol-trunk/steady", "arbol-trunk/trivial"):
@@ -148,6 +154,8 @@ def writer_version(lease: Lease, component: str, build: str, payload: Path) -> i
             raise ValueError("Unknown writer role.")
         if role["build"] != build or payload_digest(payload) != role["payloadSha256"]:
             raise ValueError("Writer Build or payload differs from authorization.")
+        if type(version) is not int:
+            raise ValueError("Invalid writer version.")
         lease.require()
         return version
     except (OSError, ValueError, TypeError, KeyError, RecursionError):
