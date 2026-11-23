@@ -52,8 +52,6 @@ from .driver_admission import (
     without_authority,
 )
 from .driver_payload import (
-    DESCRIPTOR,
-    SUBTREE,
     CandidateScope,
     Gate,
     MetadataBackup,
@@ -130,27 +128,13 @@ def _admission_marker(authority: Authority, control: Object, *, invocation: str,
     publish(path, marker)
 
 
-def _legacy_taint(authority: Authority, control: Object, *, invocation: str,
-                  payload: str | None, boot: str) -> None:
-    try:
-        prior = read_bytes(authority.folder / "taint.json")
-    except FileNotFoundError:
-        prior = None
-    if prior is not None:
-        archive = private_directory(authority.folder / "archive") / ("taint-" + sha256(prior) + ".json")
-        if archive.exists() and read_bytes(archive) != prior:
-            raise Refusal("An earlier taint archive does not match.")
-        if not archive.exists():
-            publish_bytes(archive, prior)
-    authority.write("taint", {"version": 1, "component": authority.component, "epoch": control["epoch"],
-                              "boot": boot, "reason": "legacy", "invocation": invocation,
-                              "payloadSha256": payload})
-
-
 def launch_selected(registry: str, component: str, selected: Record, arguments: list[str],
-                    entry: str, use_descriptor: int | None, *, route: str | None = None) -> int:
+                    use_descriptor: int | None, *, route: str | None = None) -> int:
     if component not in COMPONENTS:
         raise Refusal("Unknown Driver component.")
+    layout = selected.get("dataFormat")
+    if type(layout) is not int or layout != 2:
+        raise Refusal("The selected Build must support Driver state layout 2.")
     authority = Authority(physical(registry), component)
     try:
         _route(authority, route or sys.argv[0])
@@ -162,47 +146,18 @@ def launch_selected(registry: str, component: str, selected: Record, arguments: 
     assert descriptor is not None
     try:
         _use_current(authority, selected["build"], descriptor)
-        payload: Payload | None = None
-        qualified = False
-        descriptor_path = authority.registry / component / selected["build"] / SUBTREE / DESCRIPTOR
+        payload = registered(authority.registry, component, selected["build"])
+        verify_acceptance(authority, payload)
+        guardian = Guardian.admit(authority, payload)
         try:
-            descriptor_path.lstat()
-            declared = True
-        except FileNotFoundError:
-            if descriptor_path.parent.exists():
-                raise Refusal("The declared Driver payload is incomplete.") from None
-            declared = False
-        if declared:
-            # A damaged declared format2 payload is a refusal, never legacy fallback.
-            payload = registered(authority.registry, component, selected["build"])
-            try:
-                verify_acceptance(authority, payload)
-                qualified = True
-            except (OSError, Refusal):
-                qualified = False
-        if qualified:
-            assert payload is not None
-            guardian = Guardian.admit(authority, payload)
-            try:
-                with authority.mutex():
-                    control = normal_control(authority, epoch=guardian.epoch)
-                    _admission_marker(authority, control, invocation=guardian.invocation,
-                                      build=payload.build, payload=payload.digest, boot=guardian.boot)
-            except BaseException:
-                guardian.abort()
-                raise
-            return supervise(guardian, arguments)
-        boot, invocation = boot_uuid(), token()
-        with authority.mutex():
-            control = normal_control(authority)
-            digest = payload.digest if payload is not None else None
-            _admission_marker(authority, control, invocation=invocation,
-                              build=selected["build"], payload=digest, boot=boot)
-            _legacy_taint(authority, control, invocation=invocation, payload=digest, boot=boot)
-            # The short control description closes atomically with exec. The
-            # already admitted legacy invocation remains tainted after main exit.
-            os.set_inheritable(descriptor, True)
-            os.execve(entry, [entry, *arguments], without_authority(os.environ.copy()))
+            with authority.mutex():
+                control = normal_control(authority, epoch=guardian.epoch)
+                _admission_marker(authority, control, invocation=guardian.invocation,
+                                  build=payload.build, payload=payload.digest, boot=guardian.boot)
+        except BaseException:
+            guardian.abort()
+            raise
+        return supervise(guardian, arguments)
     except (OSError, ValueError, RuntimeError) as error:
         if isinstance(error, Refusal):
             raise
@@ -210,13 +165,12 @@ def launch_selected(registry: str, component: str, selected: Record, arguments: 
     finally:
         if owned:
             os.close(descriptor)
-    return 1
 
 
 def launch_gated(registry: str, component: str, route: str, arguments: list[str]) -> int:
     """Fixed publisher-generated route; all remaining arguments keep normal -v parsing."""
-    def admitted(reg: str, comp: str, record: Record, args: list[str], entry: str, guard: int | None) -> int:
-        return launch_selected(reg, comp, record, args, entry, guard, route=route)
+    def admitted(reg: str, comp: str, record: Record, args: list[str], _entry: str, guard: int | None) -> int:
+        return launch_selected(reg, comp, record, args, guard, route=route)
 
     return launch(registry, component, arguments, driver_launch=admitted)
 
