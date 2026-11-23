@@ -150,9 +150,9 @@ def forget(path: Path) -> None:
 
 
 def verify_selection(context: Context, code: str, build: str, generation: str, timeout: float) -> None:
-    env = {**context.environment(), GENERATION_ENV: generation, "ARBOL_EXCHANGE_POLICY_CHECK": "1"}
+    env = {**context.environment(), GENERATION_ENV: generation}
     try:
-        result = subprocess.run([str(context.bin_dir / "arbol-trunk"), code, "-v", build, "run"],
+        result = subprocess.run([str(context.bin_dir / "arbol-trunk"), code, "-v", build, "verify-start"],
                                 env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL, timeout=timeout, check=False)
     except (OSError, ValueError, subprocess.TimeoutExpired):
@@ -250,7 +250,6 @@ def start(context: Context, command: Command, *, timeout: float = ACCEPT_SECONDS
                      "--exchange", exchange, "--request", f"/dev/fd/{snapshot_fd}", *command.forward]
         try:
             env = {**context.environment(), GENERATION_ENV: generation}
-            env.pop("ARBOL_EXCHANGE_POLICY_CHECK", None)
             child = subprocess.Popen(arguments, env=env, start_new_session=True,
                                      stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.DEVNULL,
                                      pass_fds=(lock, snapshot_fd))

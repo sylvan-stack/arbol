@@ -38,7 +38,7 @@ from .schema_state import SCHEMA_ERRORS, SchemaPair, SchemaState, read_schema
 
 DEFAULT_TRUNK = "trivial"
 LIST = "list"
-POLICY_CHECK_ENV = "ARBOL_EXCHANGE_POLICY_CHECK"
+VERIFY_START = "verify-start"
 
 
 def admission_runtime() -> Path:
@@ -72,7 +72,7 @@ def read_call(args: list[str]) -> Call:
     index = 0
     trunk: str | None = None
     build: str | None = None
-    if args and args[0] not in COMMAND_WORDS and not args[0].startswith("-"):
+    if args and args[0] not in (*COMMAND_WORDS, VERIFY_START) and not args[0].startswith("-"):
         trunk = args[0]
         if not code_name(trunk):
             raise Refused("invalid_input", f"Invalid Trunk code name {shown(trunk)!r}.")
@@ -83,10 +83,12 @@ def read_call(args: list[str]) -> Call:
             raise Refused("invalid_input", "Build numbers are lower-case hexadecimal without a leading zero.")
         index += 2
     command = args[index:]
-    if not command or command[0] not in COMMAND_WORDS:
+    if not command or command[0] not in (*COMMAND_WORDS, VERIFY_START):
         raise Refused("invalid_input", "Use arbol-trunk [<code name>] [-v <build>] <run|settle|list> …")
     if command[0] == LIST and (build is not None or len(command) > 1):
         raise Refused("invalid_input", "list takes no -v or trailing arguments.")
+    if command[0] == VERIFY_START and (build is None or len(command) != 1):
+        raise Refused("invalid_input", "verify-start requires one explicit Build and no trailing arguments.")
     return Call(trunk, build, command)
 
 
@@ -230,11 +232,11 @@ def launch_installed_trunk(args: list[str]) -> int:
         if not compatible or call.build not in (None, record["build"]):
             raise Refused("no_fit", f"{TRUNKS}/{code} has no matching installed Build.",
                           [record["build"]] if compatible else [])
-        if call.command[0] == "run":
+        if call.command[0] in ("run", VERIFY_START):
             with Admission(admission_runtime()).lease("normal", generation=os.environ.get(GENERATION_ENV)) as lease:
                 writer_version(lease, record["component"], record["build"],
                                build_payload_directory(build_registry(), record["component"], record["build"]))
-                if os.environ.pop(POLICY_CHECK_ENV, None) == "1":
+                if call.command[0] == VERIFY_START:
                     write_all(1, json_line({"build": record["build"], "generation": lease.state.generation}))
                     return 0
                 os.environ[GENERATION_ENV] = lease.state.generation
@@ -271,11 +273,11 @@ def launch_trunk(registry: str, args: list[str]) -> int:
             raise Refused(*SCHEMA_ERRORS[schema.status])
         component = f"{TRUNKS}/{code}"
         selected = pick_build(registry, component, call.build, schema.pair)
-        if call.command[0] == "run":
+        if call.command[0] in ("run", VERIFY_START):
             with Admission(admission_runtime()).lease("normal", generation=os.environ.get(GENERATION_ENV)) as lease:
                 writer_version(lease, component, selected["build"],
                                build_payload_directory(registry, component, selected["build"]))
-                if os.environ.pop(POLICY_CHECK_ENV, None) == "1":
+                if call.command[0] == VERIFY_START:
                     write_all(1, json_line({"build": selected["build"], "generation": lease.state.generation}))
                     return 0
                 os.environ[GENERATION_ENV] = lease.state.generation
