@@ -107,6 +107,10 @@ def main(args: list[str]) -> int:
                 output(prune_browser_releases(home, args[2], args[3]))
                 return 0
             raise ValueError("Usage: arbol-builds browser-release inspect | retire <selected-build> <selected-sha256>.")
+        if args[:1] == ["driver-install"]:
+            from .driver_registration import install_command
+
+            return install_command(args[1:], Path(locations().registry))
         if args[:1] == ["driver-state"]:
             from .driver_state import command as driver_state_command
             return driver_state_command(args[1:], locations().registry)
