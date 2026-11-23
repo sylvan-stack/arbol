@@ -82,6 +82,8 @@ def checked(value: object, release: str) -> dict[str, Any]:
 
 def authorization_from_release(release_record: dict[str, Any], release: str) -> bytes:
     """Derive canonical bytes only after the operator verifies the complete archived release."""
+    if hashlib.sha256(canonical(release_record)).hexdigest() != release:
+        raise ValueError("The verified release record does not match its digest.")
     policy = release_record["exchangeCapabilities"]
     builds = release_record["builds"]
     if (release_record.get("kind") != "current" or not isinstance(policy, dict)
