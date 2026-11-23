@@ -41,13 +41,19 @@ LIST = "list"
 VERIFY_START = "verify-start"
 
 
-def admission_runtime() -> Path:
+def admission_runtime(registry: str | None = None) -> Path:
+    managed = runtime_folder().resolve()
+    if registry is None or Path(registry).resolve() == build_registry().resolve():
+        return managed
     value = os.environ.get("ARBOL_EXCHANGE_RUNTIME_DIR")
     if value is None:
-        return runtime_folder()
+        raise ValueError("An isolated registry requires an isolated Exchange runtime.")
     path = Path(value)
     if not path.is_absolute():
         raise ValueError("The Exchange runtime path must be absolute.")
+    path = path.resolve()
+    if path == managed or path.is_relative_to(managed) or managed.is_relative_to(path):
+        raise ValueError("An isolated registry cannot address the managed Exchange runtime.")
     return path
 
 
@@ -240,6 +246,7 @@ def launch_installed_trunk(args: list[str]) -> int:
                     write_all(1, json_line({"build": record["build"], "generation": lease.state.generation}))
                     return 0
                 os.environ[GENERATION_ENV] = lease.state.generation
+                os.environ.pop("ARBOL_EXCHANGE_RUNTIME_DIR", None)
                 os.execv(entry, [str(entry), *call.command])
         os.execv(entry, [str(entry), *call.command])
     except AdmissionRefusal as error:
@@ -274,13 +281,15 @@ def launch_trunk(registry: str, args: list[str]) -> int:
         component = f"{TRUNKS}/{code}"
         selected = pick_build(registry, component, call.build, schema.pair)
         if call.command[0] in ("run", VERIFY_START):
-            with Admission(admission_runtime()).lease("normal", generation=os.environ.get(GENERATION_ENV)) as lease:
+            with Admission(admission_runtime(registry)).lease("normal", generation=os.environ.get(GENERATION_ENV)) as lease:
                 writer_version(lease, component, selected["build"],
                                build_payload_directory(registry, component, selected["build"]))
                 if call.command[0] == VERIFY_START:
                     write_all(1, json_line({"build": selected["build"], "generation": lease.state.generation}))
                     return 0
                 os.environ[GENERATION_ENV] = lease.state.generation
+                if Path(registry).resolve() == build_registry().resolve():
+                    os.environ.pop("ARBOL_EXCHANGE_RUNTIME_DIR", None)
                 line = warning(component, selected)
                 if line is not None:
                     try:
