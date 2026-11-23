@@ -1275,7 +1275,7 @@ def pi_public_case(case_id: str, calls_by_fixture: Mapping[str, list[tuple[str, 
             "Pi ordinary invocation fixtures, operations or expected outcomes differ from the actual fixed case.")
 
 
-def codex_public_case(case_id: str, fixtures: Mapping[str, list[tuple[list[str], bytes, int, str | None]]]) -> None:
+def codex_public_scenarios() -> dict[str, list[list[tuple[tuple[str, ...], str | None]]]]:
     base = "tests/top/test_top_subscription_identity.py::LocalIdentityTests."
     native = ("identity", "chatgpt")
     matched = (*native, "--expect")
@@ -1316,65 +1316,137 @@ def codex_public_case(case_id: str, fixtures: Mapping[str, list[tuple[list[str],
         "tests/top/test_top_subscription_identity.py::LifetimeRaceTests."
         "test_fresh_list_reaps_a_dead_predecessor_receipt_without_adopting_its_verdict": [[(listing, None)]],
     }
-    remaining = list(scenarios.get(case_id, []))
+    return scenarios
+
+
+def local_public_scenarios(family: str) -> dict[str, list[list[tuple[tuple[str, ...], str | None]]]]:
+    if family == "codex":
+        return codex_public_scenarios()
+    require(family in ("claude", "mimo"), "Unsupported ordinary Driver case family.")
+    claude = family == "claude"
+    base = ("tests/top/test_top_subscription_identity.py" if claude else "tests/test_subscription_identity.py") + "::"
+    prefix = base + "LocalIdentityTests."
+    selector = "anthropic" if claude else "xiaomi"
+    native = ("identity", selector)
+    matched = (*native, "--expect")
+    listing = ("list",)
+    interrupted: list[tuple[tuple[str, ...], str | None]] = [(listing, "internal"), (native, "internal")]
+    refused_remove = [(request, "invalid_input") for request in (
+        ("sign-out", selector), ("sign-out", selector, "--force"),
+        ("remove", selector), ("remove", selector, "--force"))]
+    initial: list[tuple[tuple[str, ...], str | None]] = [(native, None)]
+    if claude:
+        initial.append((("update", selector, "--label", "Preserved"), None))
+    proof_loss = [[*initial, (matched, "in_use"), (native, None)], [*initial, (native, "internal")],
+                  *([[*initial, (native, "internal"), (listing, "internal")]] * 2)]
+    if claude:
+        secondary = ("identity", "anthropic-2")
+        create = ("create", "--family", selector, "--id", "anthropic-2", "--label")
+        aliases = [(("identity", name), "invalid_input") for name in ("zai", "claude-zai")]
+        return {
+            prefix + "test_two_implicit_captures_contend_and_a_fresh_invocation_accepts_exact_proof":
+                [[(native, None), (native, None), (matched, None)]],
+            prefix + "test_legacy_list_keeps_supported_record_and_rejects_retired_aliases":
+                [[(listing, None), (native, "invalid_input"), (secondary, "invalid_input"), *aliases]],
+            prefix + "test_interrupted_conversion_refuses_list_and_proof_without_recovering": [interrupted] * 2,
+            prefix + "test_lost_or_corrupt_proof_refuses_without_regeneration": proof_loss,
+            prefix + "test_native_refusals_preserve_proof_and_native_state":
+                [[(native, None), *refused_remove, *aliases, (matched, None), ((*create, "Local"), None),
+                  (secondary, None), (("remove", "anthropic-2"), None), (secondary, "not_found"),
+                  ((*create, "Recreated"), None), (secondary, None), (matched, None)]],
+        }
+    return {
+        prefix + "test_relabel_and_local_binding_settlement_retain_original_proof":
+            [[(native, None), (matched, None), (matched, None)]],
+        prefix + "test_native_removal_signout_and_aliases_preserve_xiaomi_proof":
+            [[(native, None), *refused_remove, (("identity", "Xiaomi"), "invalid_input"),
+              (("identity", "mimo"), "not_found"), (matched, None)]],
+        prefix + "test_missing_and_corrupt_local_proof_fails_closed": proof_loss,
+        prefix + "test_format_one_list_preserved_and_identity_requires_upgrade": [[(listing, None), (native, "invalid_input")]],
+        prefix + "test_interrupted_conversion_refuses_without_repair": [interrupted] * 2,
+        prefix + "test_concurrent_first_capture_persists_and_restart_accepts_exact_proof":
+            [[(native, None), (native, None), (matched, None)]],
+        base + "HistoricalCreateTests.test_public_second_production_create_refuses_and_preserves_proof":
+            [[(native, None), (("create", "--family", "xiaomi", "--id", "xiaomi-2", "--label", "Additional"), "invalid_input"),
+              (matched, None)]],
+    }
+
+
+def verify_public_case(family: str, case_id: str, fixtures: Mapping[str, list[tuple[list[str], bytes, int, str | None]]]) -> None:
+    selector = {"codex": "chatgpt", "claude": "anthropic", "mimo": "xiaomi"}[family]
+    matched = ("identity", selector, "--expect")
+    remaining = list(local_public_scenarios(family).get(case_id, []))
     for calls in fixtures.values():
         actual: list[tuple[tuple[str, ...], str | None]] = []
         proofs: dict[str, list[tuple[str, str]]] = {}
         for request, stdout, status, refusal in calls:
             normalized = tuple(request)
             if "--expect" in request:
-                require(len(request) == 4 and request[:3] == ["identity", "chatgpt", "--expect"]
+                require(len(request) == 4 and request[:3] == list(matched)
                         and len(request[3].split(".")) == 2 and all(valid_token(p) for p in request[3].split(".")),
-                        "Malformed ordinary Codex proof expectation.")
+                        "Malformed ordinary Driver proof expectation.")
                 normalized = tuple(request[:3])
-                require("chatgpt" in proofs and ".".join(proofs["chatgpt"][0]) == request[3],
+                require(selector in proofs and ".".join(proofs[selector][0]) == request[3],
                         "Public expectation differs from this fixture's original native proof.")
             if status == 1:
                 result = document(stdout, limit=4096)
                 require(set(result) == {"error"} and isinstance(result["error"], dict)
                         and isinstance(refusal, str) and result["error"].get("code") == refusal,
-                        "Codex ordinary refusal differs from the original output.")
+                        "Ordinary Driver refusal differs from the original output.")
             else:
-                require(status == 0 and refusal is None, "Unexpected Codex ordinary result status.")
+                require(status == 0 and refusal is None, "Unexpected Ordinary Driver result status.")
                 if request[0] == "identity":
                     result = document(stdout, limit=4096)
                     exact_fields(result, ("version", "driver", "subscription", "generation", "witness"))
                     require(len(request) >= 2 and type(result["version"]) is int and result["version"] == 1
-                            and result["driver"] == "codex" and result["subscription"] == request[1]
+                            and result["driver"] == family and result["subscription"] == request[1]
                             and valid_token(result["generation"]) and valid_token(result["witness"]),
-                            "Codex returned the wrong ordinary Subscription identity.")
+                            "Driver returned the wrong ordinary Subscription identity.")
                     proof = (result["generation"], result["witness"])
                     if normalized == matched:
-                        require(".".join(proof) == request[3], "Successful Codex expectation changed the returned proof.")
+                        require(".".join(proof) == request[3], "Successful Driver expectation changed the returned proof.")
                     proofs.setdefault(request[1], []).append(proof)
                 elif request[0] == "list":
                     rows = document(b'{"entries":' + stdout + b'}', limit=4112)["entries"]
-                    expected_ids = ["chatgpt"] if case_id.startswith(base) else ["chatgpt", "historical-chatgpt"]
+                    expected_ids = [selector]
+                    if family == "claude":
+                        expected_ids.append("anthropic-2")
+                    elif family == "codex" and "::LifetimeRaceTests." in case_id:
+                        expected_ids.append("historical-chatgpt")
                     require(isinstance(rows, list) and all(isinstance(item, dict) for item in rows)
                             and [(item.get("id"), item.get("state")) for item in rows]
                             == [(identifier, "signed_out") for identifier in expected_ids],
-                            "Codex ordinary catalogue has an unexpected account or state.")
+                            "Ordinary Driver catalogue has an unexpected account or state.")
+                    if "::LifetimeRaceTests." not in case_id:
+                        require(all(item.get("auth") == "vendor_login" for item in rows),
+                                "Legacy Driver catalogue changed the supported authentication method.")
+                        if family == "codex":
+                            exact_fields(rows[0], ("id", "family", "label", "auth", "state", "createdAt", "updatedAt", "settings"))
+                            require(rows[0]["family"] == "chatgpt", "Legacy Codex family changed.")
                 elif request[0] == "update":
                     require(document(stdout, limit=4096).get("label") == request[-1],
-                            "Codex ordinary update returned a different label.")
+                            "Ordinary Driver update returned a different label.")
+                elif request[0] == "create":
+                    value = document(stdout, limit=4096)
+                    require(family == "claude" and value.get("id") == "anthropic-2" and value.get("label") == request[-1],
+                            "Ordinary create returned a different local Subscription.")
                 else:
-                    require(normalized == ("remove", "historical-chatgpt") and stdout == b"",
-                            "Unexpected successful ordinary Codex operation.")
+                    require(normalized in (("remove", "historical-chatgpt"), ("remove", "anthropic-2")) and stdout == b"",
+                            "Unexpected successful ordinary Driver operation.")
             actual.append((normalized, refusal))
-        require(actual in remaining, "Codex ordinary case omitted, added or substituted an expected call.")
+        require(actual in remaining, "Ordinary Driver case omitted, added or substituted an expected call.")
         remaining.remove(actual)
         if "historical-created" in proofs:
             require("chatgpt" in proofs and proofs["historical-created"][0][0] == proofs["chatgpt"][0][0],
                     "Settled historical create returned a different generation from its native fixture.")
-        for selector, values in proofs.items():
-            require(len({generation for generation, _ in values}) == 1, "Original Codex fixture generation changed.")
-            replaced = (selector == "historical-chatgpt" or
-                        case_id == base + "test_missing_sidecar_materializes_a_new_witness_and_rejects_old_expectation")
+        for account, values in proofs.items():
+            require(len({generation for generation, _ in values}) == 1, "Original fixture generation changed.")
+            replaced = account in ("historical-chatgpt", "anthropic-2") or (account == selector and (matched, "in_use") in actual)
             if replaced:
-                require(len(values) == 2 and values[0] != values[1], "Codex replacement failed to change its witness.")
+                require(len(values) == 2 and values[0] != values[1], "Driver replacement failed to change its witness.")
             else:
-                require(len(set(values)) == 1, "Codex changed the original retained fixture witness.")
-    require(not remaining, "A fixed Codex fixture has no ordinary provider receipts.")
+                require(len(set(values)) == 1, "Driver changed the original retained fixture witness.")
+    require(not remaining, "A fixed Driver fixture has no ordinary provider receipts.")
 
 
 def verify_pi_public_output(request: list[str], stdout: bytes, status: int, refusal: object) -> tuple[str, bool, str | None]:
@@ -1751,36 +1823,41 @@ class WholeCheckController:
                         require(proofs.setdefault(row["fixture"], parsed) == parsed,
                                 "Pi concurrent capture, relabel or restart changed the original returned proof.")
                 pi_public_case(case_id, calls)
-        if component == "arbol-codex-driver":
-            for entry in local["rows"]:
+        else:
+            family = component.removeprefix("arbol-").removesuffix("-driver")
+            for index, entry in enumerate(local["rows"]):
                 case_id = entry["id"]
                 if case_id == _H1_CASES[component]:
                     continue
-                image = public.image(root / ("result-" + entry["resultSha256"] + ".json"), entry["resultSha256"], 65536)
-                wrapper = _span_document(image.raw, limit=65536)
-                exact_fields(wrapper, ("version", "kind", "id", "status", "resultHex"))
-                require(type(wrapper["version"]) is int and wrapper["version"] == 1
-                        and wrapper["kind"] == "abr38-actual-local-result" and wrapper["status"] == "passed"
-                        and wrapper["id"] == case_id and isinstance(wrapper["resultHex"], str)
-                        and re.fullmatch(r"(?:[a-f0-9]{2})+", wrapper["resultHex"]) is not None,
-                        "Codex original success envelope differs.")
-                success = _span_document(bytes.fromhex(wrapper["resultHex"]), limit=65536)
+                if family == "codex":
+                    image = public.image(root / ("result-" + entry["resultSha256"] + ".json"), entry["resultSha256"], 65536)
+                    wrapper = _span_document(image.raw, limit=65536)
+                    exact_fields(wrapper, ("version", "kind", "id", "status", "resultHex"))
+                    require(type(wrapper["version"]) is int and wrapper["version"] == 1
+                            and wrapper["kind"] == "abr38-actual-local-result" and wrapper["status"] == "passed"
+                            and wrapper["id"] == case_id and isinstance(wrapper["resultHex"], str)
+                            and re.fullmatch(r"(?:[a-f0-9]{2})+", wrapper["resultHex"]) is not None,
+                            "Codex original success envelope differs.")
+                    success = _span_document(bytes.fromhex(wrapper["resultHex"]), limit=65536)
+                else:
+                    image = public.image(root / "local-evidence" / f"{index:04d}.result", entry["resultSha256"], 65536)
+                    success = _span_document(image.raw, limit=65536)
                 exact_fields(success, ("version", "kind", "id", "publicCallsSha256"))
                 require(type(success["version"]) is int and success["version"] == 1 and success["id"] == case_id
                         and success["kind"] == "abr38-unittest-success" and valid_hash(success["publicCallsSha256"]),
-                        "Codex public calls are not bound to the actual case result.")
+                        "Public calls are not bound to the actual case result.")
                 calls_file = public.image(root / ("public-calls-" + success["publicCallsSha256"] + ".json"),
                                           success["publicCallsSha256"], 1024 * 1024)
                 grouped = _span_document(calls_file.raw, limit=1024 * 1024)
                 exact_fields(grouped, ("case", "publicCalls"))
                 require(grouped["case"] == case_id and isinstance(grouped["publicCalls"], list)
-                        and len(grouped["publicCalls"]) <= 128, "Codex public call file belongs to another case.")
+                        and len(grouped["publicCalls"]) <= 128, "Public call file belongs to another case.")
                 case_calls: dict[str, list[tuple[list[str], bytes, int, str | None]]] = {}
                 for row in grouped["publicCalls"]:
-                    require(isinstance(row, dict), "Malformed Codex ordinary call witness.")
+                    require(isinstance(row, dict), "Malformed ordinary call witness.")
                     request, stdout = self._public_call(public, component, root, suite, case_id, row, custody)
                     case_calls.setdefault(row["fixture"], []).append((request, stdout, row["waitStatus"], row["refusal"]))
-                codex_public_case(case_id, case_calls)
+                verify_public_case(family, case_id, case_calls)
         require({w["invocation"] for w in custody.writers} == {suite["invocation"], *public.invocations}
                 and {h["invocation"] for h in custody.handoffs} == {suite["invocation"], *public.invocations},
                 "A provider root or accepted handoff is absent from the source-attributed whole-unit call set.")
