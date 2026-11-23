@@ -11,6 +11,8 @@ from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
 
+from arbol_installation.exchange_release import verify_authorization
+
 from .database import Database, credentials
 from .exchange_admission import (
     DATABASE_WRITER_LOCK,
@@ -191,15 +193,18 @@ def reopen(context: Context, source: Source, session: str, *, release: str, sche
         state = current(folder)
         bound(state, checked_source(source), session)
         idle = state.phase == "exclusive"
-        if not idle and release != state.release:
-            raise Refusal("maintenance", "Only the unchanged prior release can resume during drainage.")
-        if state.exchange_authorization is not None and release != state.release:
-            raise Refusal("maintenance", "Changing an authorized Exchange release requires its guarded transition.")
+        if release != state.release:
+            raise Refusal("maintenance", "Changing the Exchange release requires its guarded transition.")
         # Keep the operator lock but allow accepted work to progress while the
         # operator verifies the unchanged release during drainage.
         if verify_release() != release:
             raise Refusal("maintenance", "The installed release did not pass verification.")
         with gate(folder, idle=idle):
+            if state.exchange_authorization is not None:
+                try:
+                    verify_authorization(folder, state.exchange_authorization, release)
+                except (OSError, ValueError, TypeError, KeyError, RecursionError):
+                    raise Refusal("maintenance", "The active Exchange authorization cannot be verified.") from None
             if idle:
                 drained_inventory(context)
                 try:
