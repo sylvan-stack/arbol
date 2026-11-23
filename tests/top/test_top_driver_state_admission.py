@@ -2683,6 +2683,12 @@ class TerminalSpanObservation:
         self.images: dict[str, FileImage] = {}
         self.interval_seen = False
         self.completed = False
+        self.controller: WholeCheckController | None = None
+        self.baseline: Baseline | None = None
+        self.terminal_view: TerminalView | None = None
+        self.owned_provider: OwnedChild | None = None
+        self.final_capture: Captured | None = None
+        self.final_evidence: FileImage | None = None
         self.record: Object = {"component": component, "case": case, "completeCheckClaimed": False}
 
     def precontinue(self, controller: WholeCheckController, baseline: Baseline,
@@ -2692,6 +2698,7 @@ class TerminalSpanObservation:
                 and view.component == self.component and view.case == self.case
                 and without_authority(dict(os.environ)) == dict(os.environ),
                 "Positive external observer is repeated, foreign or carries admission authority.")
+        self.controller, self.baseline = controller, baseline
         self.original = view
         span = H1SpanObservation.bind(controller, baseline, collector, component=self.component,
             case=self.case, schedule=schedule, ready_raw=ready_raw, programs=self.programs)
@@ -2891,7 +2898,8 @@ class TerminalSpanObservation:
 
     def finished(self, controller: WholeCheckController, baseline: Baseline,
                  collector: TerminalSpanCollector, view: TerminalView, captured: Captured) -> None:
-        require(self.interval_seen and not self.completed and self.original == view.h1
+        require(self.controller is controller and self.baseline is baseline
+                and self.interval_seen and not self.completed and self.original == view.h1
                 and collector.child.reaped and captured.owner == collector.child.owner
                 and captured.returncode == 0 and not view.h1.suite.live() and not view.h1.helper.live(),
                 "Actual positive Suite/helper/provider close/zero-exit/reaps did not complete.")
@@ -2907,7 +2915,90 @@ class TerminalSpanObservation:
             "providerActuallyReaped": collector.child.reaped, "suiteKernelGone": True, "helperKernelGone": True,
             "observerReapedDescendant": False, "allOriginalDeferredAssertionsStillRequired": True}
         controller.evidence.write("terminal-independent-positive.json", self.record, limit=16 * 1024 * 1024)
+        self.final_evidence = read_image(controller.evidence.root / "terminal-independent-positive.json",
+                                         limit=16 * 1024 * 1024)
+        self.terminal_view, self.owned_provider, self.final_capture = view, collector.child, captured
         self.completed = True
+
+
+def _completed_positive_subject(observer: TerminalSpanObservation, controller: WholeCheckController,
+                                baseline: Baseline, component: str, case: str) -> TerminalView:
+    """Rebind deferred work to the same actual no-SH observer and immutable evidence."""
+    require(type(observer) is TerminalSpanObservation and observer.controller is controller
+            and observer.baseline is baseline and observer.component == component and observer.case == case
+            and observer.completed and observer.interval_seen and observer.original is not None
+            and observer.h1 is not None and observer.ps is not None
+            and observer.terminal_view is not None and observer.owned_provider is not None
+            and observer.final_capture is not None and observer.final_evidence is not None,
+            "The exact ordered positive observation did not finish.")
+    view, provider, captured, evidence = (observer.terminal_view, observer.owned_provider,
+                                         observer.final_capture, observer.final_evidence)
+    assert view is not None and provider is not None and captured is not None and evidence is not None
+    require(view.h1 == observer.original and view.h1.component == component and view.h1.case == case
+            and controller.scope == baseline.scopes[component]
+            and provider.reaped and sum(item is provider for item in controller.reaped) == 1
+            and captured.owner == provider.owner and captured.returncode == 0
+            and not provider.owner.live() and not view.h1.suite.live() and not view.h1.helper.live(),
+            "The actual provider, Suite or helper closure differs from the bound subject.")
+    require(read_image(controller.evidence.root / "terminal-independent-positive.json",
+                       limit=16 * 1024 * 1024) == evidence
+            and evidence.raw == canonical(observer.record)
+            and controller.evidence.files.get("terminal-independent-positive.json") == evidence.evidence(),
+            "The original independent positive evidence changed or was substituted.")
+    view.recheck_files()
+    controller.require_finished_graph(component)
+    return view
+
+
+@dataclass(frozen=True)
+class H1SpanCompletion:
+    """The deferred H1 duty bound to one real, already completed terminal observer."""
+
+    observer: TerminalSpanObservation
+    controller: WholeCheckController
+    baseline: Baseline
+    component: str
+    case: str
+
+    @property
+    def case_id(self) -> str:
+        return "H1-span-completion"
+
+    def observe(self, controller: WholeCheckController) -> None:
+        require(controller is self.controller, "H1 deferred observation changed controller.")
+        view = _completed_positive_subject(self.observer, controller, self.baseline, self.component, self.case)
+        require("h1Precontinue" in self.observer.record and "h1ActualCompletion" in self.observer.record,
+                "H1 precontinue or actual owner completion evidence is missing.")
+        original = dict(self.observer.record)
+        self.observer._helpers(controller, view)
+        require(self.observer.record == original, "Rechecking actual helper ACK/wait/result changed evidence.")
+        _completed_positive_subject(self.observer, controller, self.baseline, self.component, self.case)
+
+
+@dataclass(frozen=True)
+class TerminalCloseClosure:
+    """The distinct deferred terminal-close duty on that same actual observer."""
+
+    observer: TerminalSpanObservation
+    controller: WholeCheckController
+    baseline: Baseline
+    component: str
+    case: str
+
+    @property
+    def case_id(self) -> str:
+        return "terminal-close-closure"
+
+    def observe(self, controller: WholeCheckController) -> None:
+        require(controller is self.controller, "Terminal deferred observation changed controller.")
+        view = _completed_positive_subject(self.observer, controller, self.baseline, self.component, self.case)
+        require(self.observer.record.get("soleSuiteOriginalShBlockedEx") is True
+                and "sourceBoundProviderProgress" in self.observer.record
+                and "sourceBoundProviderWait" in self.observer.record
+                and "realWholeClosure" in self.observer.record,
+                "The actual interval, source-bound wait or whole closure is missing.")
+        controller.verify_terminal_closure(self.component, baseline=self.baseline, view=view)
+        _completed_positive_subject(self.observer, controller, self.baseline, self.component, self.case)
 
 
 _MIMO_MAIN_COMPONENT = "arbol-mimo-driver"
