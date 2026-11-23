@@ -1255,7 +1255,10 @@ class ClaudeCreateWalk:
                     and item.record is None, "Only prepared-absent C1 uses targeted retirement.")
             subject.open()
             self.archived(subject)
+            self.unchanged(item)
+            operation_before = create_operation_before(item, request, absence=absence)
             result = subject.execute_observed(request, "observe")
+            verify_create_operation_before(subject, request, result, operation_before)
             require(result["generation"] == item.generation, "Targeted retirement changed root generation.")
             subject.finish(request, result)
             self.metadata(item, state="retired")
@@ -1274,7 +1277,10 @@ class ClaudeCreateWalk:
             self.metadata(item, state="active")
             subject.open()
             self.archived(subject)
+            self.unchanged(item)
+            operation_before = create_operation_before(item, request, absence=absence)
             result = subject.execute_observed(request, "observe")
+            verify_create_operation_before(subject, request, result, operation_before)
             subject.finish(request, result)
             require(result["generation"] == item.generation, "No-op format-two upgrade changed generation.")
             self.metadata(item, state="active")
@@ -1645,6 +1651,81 @@ class MetadataArchive:
         require((value["format"] is None or type(value["format"]) is int) and value["format"] == number,
                 "Archived format marker and manifest disagree.")
         return cls(manifest.raw, number, files)
+
+
+@dataclass(frozen=True)
+class CreateOperationBefore:
+    """Raw actual metadata immediately before one fixed create-subject execute."""
+
+    case: str
+    operation: Operation
+    subscription: str
+    values: Mapping[str, bytes | None]
+
+
+def create_operation_before(item: ClaudeCreateSubject | PiCreateSubject, request: Execute, *,
+                            absence: bool) -> CreateOperationBefore:
+    subscription = "anthropic-2" if type(item) is ClaudeCreateSubject else "zai-2"
+    require(request.state == item.root / "state"
+            and request.operation == ("identity-recover" if absence else "upgrade")
+            and request.subscription == (subscription if absence else None),
+            "Create before-image must use the original fixed subject and operation.")
+    prefix = "subscriptions/" + subscription + "/"
+    names = ("format", "identity.json", prefix + "identity-pending.json", prefix + "identity.json")
+    values: dict[str, bytes | None] = {}
+    for name in names:
+        path = request.state / name
+        values[name] = read_image(path).raw if os.path.lexists(path) else None
+    require(values["format"] == b"2\n" and values["identity.json"] == item.root_proof.raw
+            and document(item.root_proof.raw).get("generation") == item.generation,
+            "Actual preoperation format or original root generation changed.")
+    journal, sidecar = values[prefix + "identity-pending.json"], values[prefix + "identity.json"]
+    if absence:
+        checkpoint = document(item.checkpoint.raw)
+        require(item.window == "C1-prepared-durable" and item.command == "abort-io" and item.record is None
+                and journal is not None and sidecar is None
+                and document(journal) == checkpoint.get("journal")
+                and document(journal) == {"version": 1, "operation": "create", "phase": "prepared",
+                                          "witness": item.witness},
+                "Prepared-absent C1 must preserve its exact original pending witness and absent sidecar.")
+    else:
+        require(item.record is not None and journal is None and sidecar is not None
+                and document(sidecar) == {"version": 1, "state": "active", "witness": item.witness},
+                "Present upgrade requires the settled original witness and no pending journal.")
+    return CreateOperationBefore(item.case, request.operation, subscription, values)
+
+
+def verify_create_operation_before(subject: Maintenance, request: Execute, result: Object,
+                                   captured: CreateOperationBefore) -> None:
+    """Join physical archive bytes to this operation's real result and history before finish."""
+    require(captured.operation == request.operation and captured.subscription ==
+            (request.subscription if request.operation == "identity-recover" else
+             "anthropic-2" if subject.component == "arbol-claude-driver" else "zai-2"),
+            "Create archive observation belongs to another operation.")
+    before = MetadataArchive.read(request.backup / "before")
+    require(before.format == 2 and all(name in before.files and before.files[name] == raw
+                                      for name, raw in captured.values.items()),
+            "Physical before archive does not contain every exact preoperation byte and absence row.")
+    result_image = read_image(subject.result)
+    actual = document(result_image.raw)
+    history = subject.folder / "attempts" / result["attempt"]
+    operation = document(read_image(history / "operation.json").raw)
+    marker_image = read_image(request.state / "identity-maintenance.json")
+    marker = document(marker_image.raw)
+    require(actual == result and result["component"] == subject.component and result["session"] == subject.session
+            and result["operation"] == captured.operation and result["backupSha256"] == before.sha256
+            and marker["backupSha256"] == before.sha256 and operation["backupSha256"] == before.sha256
+            and marker["attempt"] == operation["attempt"] == result["attempt"]
+            and read_image(history / "result.json").raw == result_image.raw
+            and read_image(history / "marker.json").raw == marker_image.raw,
+            "Before archive digest is not bound to the actual result, marker and operation history.")
+    subject.controller.evidence.write("create-before-" + subject.session + ".json", {
+        "version": 1, "case": captured.case, "component": subject.component, "session": subject.session,
+        "attempt": result["attempt"], "operation": captured.operation, "subscription": captured.subscription,
+        "beforeManifestSha256": before.sha256,
+        "actualMetadataHex": {name: None if raw is None else raw.hex() for name, raw in captured.values.items()},
+        "resultSha256": result_image.sha256, "markerSha256": marker_image.sha256,
+    })
 
 
 def _restore_state_metadata(state: Path) -> dict[str, bytes]:
