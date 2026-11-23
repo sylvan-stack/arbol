@@ -406,7 +406,12 @@ def claude_create_subjects(controller: WholeCheckController, baseline: Baseline,
                               "outcome": "completed" if command == "continue" else "injected-failure"}
                 and helpers[index]["waitStatus"] == (0 if command == "continue" else 1),
                 "Original actor, ordered result or actual wait differs.")
-        root = controller.workspace.registry / ".driver-qualification" / "fixtures" / suite["invocation"] / case
+        controller.workspace.verify(controller.evidence)
+        root = controller.workspace.fixture_root / component / "create-publication" / suite["invocation"] / case
+        for directory in (controller.workspace.registry.parent, controller.workspace.fixture_root,
+                          controller.workspace.fixture_root / component,
+                          controller.workspace.fixture_root / component / "create-publication", root.parent):
+            physical_owned(directory, directory=True)
         root_identity = directory_identity(root)
         state, subscription = root / "state", root / "state" / "subscriptions" / "anthropic-2"
         physical_owned(state, directory=True)
@@ -966,6 +971,7 @@ class ClaudeCreateWalk:
         return self.subjects
 
     def unchanged(self, item: ClaudeCreateSubject) -> None:
+        self.controller.workspace.verify(self.controller.evidence)
         view = self.observer.terminal_view
         require(view is not None, "Original terminal observation is unavailable.")
         assert view is not None
