@@ -6,9 +6,10 @@ import asyncio
 import fcntl
 import os
 from collections.abc import Callable, Iterator
-from contextlib import ExitStack, contextmanager
-from dataclasses import replace
+from contextlib import AbstractContextManager, ExitStack, contextmanager
+from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
 from arbol_installation.exchange_release import verify_authorization
@@ -179,39 +180,94 @@ def exclusive_upgrade(source: Source, session: str, *, runtime: Path | None = No
         yield session
 
 
-def reopen(context: Context, source: Source, session: str, *, release: str, schema: dict[str, int],
-           verify_release: Callable[[], str]) -> None:
-    """Reopen only after verifying the deployed release and reading back its exact schema.
+@dataclass(frozen=True)
+class GuardedSelection:
+    """Selection established by the operator while its deployment locks remain held.
 
-    The caller verifies the installed artifacts, data invariants and retirement
-    of incompatible writer paths. It returns the digest of that verified
-    release. Rescheduling during drainage requires the unchanged prior release.
+    The verifier must prove the actual prior or qualified format-2 successor,
+    its archive and recovery evidence, and the selected installed artifacts.
+    ``incumbent_release`` is the historical admission digest, which need not
+    identify the actual prior deployed payload. For a successor, authorization
+    is the digest of the compact policy staged under the admission locks.
+    """
+
+    role: Literal["prior", "successor"]
+    source: Source
+    session: str
+    generation: str
+    incumbent_release: str | None
+    release: str
+    authorization: str | None
+
+
+def reopen(context: Context, source: Source, session: str, *, release: str, schema: dict[str, int],
+           verify_release: Callable[[], str] | None = None,
+           verify_selection: Callable[[int, State], AbstractContextManager[GuardedSelection]] | None = None) -> None:
+    """Reopen after verification, with a guarded path for changing releases.
+
+    The selection verifier receives a borrowed admission directory descriptor
+    and the closed state under OWNER, GATE and WRITERS. Its context manager
+    must retain all deployment selection locks through the state write. It
+    verifies the archive, qualification, recovery and actual installed files,
+    and stages successor authorization before yielding its exact selection.
+    The descriptor is borrowed and must not be closed by the verifier.
     """
     if SHA256.fullmatch(release) is None:
         raise Refusal("maintenance", "Reopening requires a verified release digest.")
+    if (verify_release is None) == (verify_selection is None):
+        raise Refusal("maintenance", "Choose exactly one release verification path.")
+    source = checked_source(source)
     with operation(context.identity.folder) as folder:
         state = current(folder)
-        bound(state, checked_source(source), session)
+        bound(state, source, session)
         idle = state.phase == "exclusive"
-        if release != state.release:
-            raise Refusal("maintenance", "Changing the Exchange release requires its guarded transition.")
-        # Keep the operator lock but allow accepted work to progress while the
-        # operator verifies the unchanged release during drainage.
-        if verify_release() != release:
-            raise Refusal("maintenance", "The installed release did not pass verification.")
+        if verify_selection is None:
+            first = idle and state.release is None and state.exchange_authorization is None
+            if release != state.release and not first:
+                raise Refusal("maintenance", "Changing the Exchange release requires its guarded transition.")
+            # Allow accepted work to progress while verifying during drainage.
+            assert verify_release is not None
+            if verify_release() != release:
+                raise Refusal("maintenance", "The installed release did not pass verification.")
+        elif not idle:
+            raise Refusal("maintenance", "A guarded transition requires exclusive maintenance.")
+
         with gate(folder, idle=idle):
-            if state.exchange_authorization is not None:
-                try:
-                    verify_authorization(folder, state.exchange_authorization, release)
-                except (OSError, ValueError, TypeError, KeyError, RecursionError):
-                    raise Refusal("maintenance", "The active Exchange authorization cannot be verified.") from None
-            if idle:
-                drained_inventory(context)
-                try:
-                    NoteFiles(context.identity).require_empty()
-                except (OSError, ValueError, Refused):
-                    raise Refusal("maintenance_busy", "Recovery note custody is not empty or cannot be verified.") from None
-            if asyncio.run(inspect_database(context, source, idle=idle)) != schema:
-                raise Refusal("schema_incompatible", "The installed schema does not match the verified release.")
-            write_state(folder, State("normal", uuid4().hex, state.source, None, release,
-                                      state.exchange_authorization))
+            if current(folder) != state:
+                raise Refusal("maintenance", "The maintenance state changed during verification.")
+
+            def finish(authorization: str | None) -> None:
+                if authorization is not None:
+                    try:
+                        verify_authorization(folder, authorization, release)
+                    except (OSError, ValueError, TypeError, KeyError, RecursionError):
+                        raise Refusal("maintenance", "The active Exchange authorization cannot be verified.") from None
+                if idle:
+                    drained_inventory(context)
+                    try:
+                        NoteFiles(context.identity).require_empty()
+                    except (OSError, ValueError, Refused):
+                        raise Refusal("maintenance_busy", "Recovery note custody is not empty or cannot be verified.") from None
+                if asyncio.run(inspect_database(context, source, idle=idle)) != schema:
+                    raise Refusal("schema_incompatible", "The installed schema does not match the verified release.")
+                write_state(folder, State("normal", uuid4().hex, state.source, None, release, authorization))
+
+            if verify_selection is None:
+                finish(state.exchange_authorization)
+            else:
+                with verify_selection(folder, state) as selection:
+                    if (not isinstance(selection, GuardedSelection)
+                            or selection.role not in ("prior", "successor")
+                            or selection.source != source or selection.session != session
+                            or selection.generation != state.generation
+                            or selection.incumbent_release != state.release
+                            or selection.release != release or state.release is None
+                            or current(folder) != state):
+                        raise Refusal("maintenance", "The guarded release selection does not match this session.")
+                    if selection.role == "prior":
+                        if state.exchange_authorization is not None or selection.authorization is not None:
+                            raise Refusal("maintenance", "Prior rollback is unavailable after successor activation.")
+                    elif (not isinstance(selection.authorization, str)
+                          or SHA256.fullmatch(selection.authorization) is None):
+                        raise Refusal("maintenance", "The successor requires its compact authorization digest.")
+                    finish(selection.authorization)
