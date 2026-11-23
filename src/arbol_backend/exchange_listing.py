@@ -45,7 +45,8 @@ def read_record(catalogue: int, name: str) -> dict[str, Any]:
 
 def project(record: dict[str, Any], name: str) -> dict[str, Any]:
     if (record.get('exchange') != name or not UUID.fullmatch(name)
-            or type(record.get('exchangeFormat')) is not int or record['exchangeFormat'] != 1
+            or 'root' in record or 'rootContract' in record
+            or type(record.get('exchangeFormat')) is not int or record['exchangeFormat'] not in (1, 2)
             or not isinstance(record.get('chat'), str) or not UUID.fullmatch(record['chat'])
             or not isinstance(record.get('trunk'), str) or not CODE.fullmatch(record['trunk'])
             or not isinstance(record.get('build'), str)

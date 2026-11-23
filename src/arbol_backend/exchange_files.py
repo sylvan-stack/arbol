@@ -74,7 +74,8 @@ class Record:
 
 def record(value: Params, exchange: str, *, secrets: tuple[str, ...] = ()) -> Record:
     try:
-        if type(value.get("exchangeFormat")) is not int or value["exchangeFormat"] != 1 or "root" in value:
+        if (type(value.get("exchangeFormat")) is not int or value["exchangeFormat"] not in (1, 2)
+                or "root" in value or "rootContract" in value):
             raise Error("no_answer")
         if uuid_id(value.get("exchange")) != exchange:
             raise Error("no_answer")
@@ -111,7 +112,8 @@ def record(value: Params, exchange: str, *, secrets: tuple[str, ...] = ()) -> Re
                     ended["error"]["message"] = message(ended["error"]["message"], secrets=secrets,
                         fallback="The Exchange failed; its diagnostic is not safe to display.")
         # Structural equality of these private metadata values is enough to detect a rewritten identity.
-        immutable = (chat, trunk, build, pid, started, value["route"], value.get("smallCallRoute"), folder)
+        immutable = (value["exchangeFormat"], chat, trunk, build, pid, started, value["route"],
+                     value.get("smallCallRoute"), folder)
         return Record(exchange, chat, trunk, build, pid, started, accepted, heartbeat, waiting, since, ended, immutable)
     except (Refused, ValueError, UnicodeError, KeyError, TypeError) as error:
         raise Error("no_answer") from error
