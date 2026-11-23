@@ -5,13 +5,16 @@ from __future__ import annotations
 import asyncio
 from functools import partial
 
+from arbol_installation.admission import AdmissionRefusal
+from arbol_installation.exchange_release import writer_version
+
 from .bridge import Params
 from .chats import Chats
-from .database import Database, protected_thread
+from .database import Database, current_lease, protected_thread
 from .live import Live
 from .metadata import iso, now
 from .model import Identity, Refused
-from .note_files import NOTE_VERSION, Note, NoteFiles
+from .note_files import Note, NoteFiles
 
 NOTE_SECONDS = 5.0
 
@@ -30,7 +33,15 @@ class Notes:
             return await self.record_admitted(exchange, chat, at=at)
 
     async def record_admitted(self, exchange: str, chat: str, *, at: str | None = None) -> Params:
-        note = await protected_thread(partial(self.files.put, {"version": NOTE_VERSION,
+        lease = current_lease(self.files.identity.folder)
+        if lease is None:
+            raise Refused("maintenance", "The recovery note requires the current writer permit.")
+        try:
+            version = await protected_thread(partial(writer_version, lease, "arbol", self.files.identity.build,
+                                                     self.files.identity.package))
+        except AdmissionRefusal as error:
+            raise Refused(error.code, str(error)) from None
+        note = await protected_thread(partial(self.files.put, {"version": version,
             "exchange": exchange, "chat": chat, "kind": "ended_stuck", "at": at if at is not None else now()}))
         self.request()
         return note.wire
