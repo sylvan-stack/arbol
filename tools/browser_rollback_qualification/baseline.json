@@ -1,0 +1,94 @@
+{
+  "additive": "src/arbol_builds/browser_qualification.py",
+  "captures": [
+    {
+      "files": {
+        "module-before.json": "a2e43f0cbf8f6983132c42328f261922ed58455f2caabd517af98a0bec3041b2",
+        "overlay/src/arbol_builds/service.py": "50333949d48fb7835abeb050727c7ccee00b4d04f49ee739ef9444bd9bfd52ae",
+        "overlay/src/arbol_builds/trunk_launcher.py": "acc501998d85394f7ed62b1b9618704156d9ec673cca9d58b04d1cd0bd5dd914",
+        "overlay/src/arbol_builds/unused.py": "a0f836f1c275f5e88fd467e4ba6de86c3a6794f66752c10afbebbbbfa52d7c3e",
+        "overlay/src/arbol_installation/admission.py": "ef46615acbd1bdfb661425a18c8dd4e6df7d9e9b1bc24dee3e5fec4ed7db32c6",
+        "overlay/src/arbol_installation/exchange_release.py": "27d98ecec901bcf0148fe25d75c36d5873ee0a2a2258667f71feaec049baf5d2",
+        "tool-source.json": "bf7856feb259e4c916473cee859a11d46176be5da21d319fb76ea7dacfeaca36",
+        "tool-source.tar": "0b70ce8ee513311425803bd8982671739130f884f4687d5d4b2d7c8984563a4d"
+      },
+      "root": "/Volumes/Mercury/Arbol/backups/browser-build-tool-exchange-baseline-826237f",
+      "sha256": "2fcea1b53ec3a50e4a7be0e9534dddd2afdecc6d0f39497f8ef81927a7060be3"
+    },
+    {
+      "files": {
+        "browser-source-route.patch": "b13d7f7858c1aac5a8e02d35ecce54078695abf72d9e6d18d6a5887ce10c1081",
+        "cli.py": "e32111a750fc86e1df65cf8c0f3fecd683ac20aa103dc787e6a108d831cf3b4c",
+        "exchange-tool-source.json": "bf7856feb259e4c916473cee859a11d46176be5da21d319fb76ea7dacfeaca36",
+        "module-before.json": "a2e43f0cbf8f6983132c42328f261922ed58455f2caabd517af98a0bec3041b2"
+      },
+      "root": "/Volumes/Mercury/Arbol/backups/browser-format-2-source-route-e32111a7",
+      "sha256": "fe02699cf154fe44174d876218bc290c70a4117677f2acaed2f17203f4e17c29"
+    }
+  ],
+  "commonFiles": [
+    "src/arbol_builds/service.py",
+    "src/arbol_builds/rollback.py",
+    "src/arbol_builds/browser_rollback.py",
+    "src/arbol_builds/stable_catalog.py",
+    "src/arbol_builds/promotion.py",
+    "src/arbol_builds/cli.py"
+  ],
+  "historical": {
+    "commit": "826237f1088029f681b841ee1fcc47ea9d68bd9b",
+    "repository": "/Users/msix/repos/tray-component-builds.0CLyKlLt/arbol-build-tool",
+    "tree": "389bf4692fcecf081916bfee22ef523e94766a3f"
+  },
+  "installer": {
+    "pyproject.toml": "c6c3515b96f005a729c1bf1ce88c6c71a7b73895d879d0c26692ce9f9af25a34",
+    "scripts/build_support.py": "9a298ec8381433f4aeecaa7be3e99156dcbaefcdb7a14d25c836d490b36c3dd9",
+    "scripts/install_builds.py": "8418bc4ad7a20dc62122218c115b744f3468bf10f5eafd01da0deccac1a7eba5",
+    "scripts/python-distribution.json": "5ec5639488713796a48725b7042720206abbe621ce4c26638b79eec40b03d4a5",
+    "uv.lock": "2c9c081e524b18b5354707f8d732ec43ed219792d007d925dec82cfe1d1d3d19"
+  },
+  "migration": {
+    "commit": "a9793e9b2f423be84c1d1759fdf724bbb5337b67",
+    "repository": "/Users/msix/repos/sylvan-stack/arbol"
+  },
+  "modules": {
+    "src/arbol_agents/__init__.py": "dcb80919c518acfbbe08f0faa45ab53662104105de7c82df50ea0762acf490ce",
+    "src/arbol_agents/cli.py": "8fc3012c5dcf65fe72b58ba0b508a300a9d69442ad0106fc1ce7d895115b7e9c",
+    "src/arbol_agents/codex.py": "a890ed392af297a9acc7424bfb4a99a5285c0642e5de05cb71b1fd61f6e50273",
+    "src/arbol_agents/hooks.py": "2258efae5e0e367340ca1366c40777cd35a30eca6fece82e318560797720bbf0",
+    "src/arbol_agents/installation.py": "e3589d93962327e9d4af6993a56dcccfb1669cf20b26a2993c6ea6f2bd0482c8",
+    "src/arbol_agents/kimi_config.py": "8b52d0eae454bff5bdc75b94872b9afb147bc24a925c253729f024bc6926ae16",
+    "src/arbol_agents/model.py": "68955dabd99becfde6a0e71aa9443ee09214d9fbcc8beaa35461b0872047ef78",
+    "src/arbol_agents/owner.py": "4707e7b937a828ecb3a4e37abec2a6915d258967f3ed5437aae42b632f19fa49",
+    "src/arbol_agents/records.py": "28e766aeb970082b13b0d2fa0e134666c5ce29fd94cabbc060efed2bb2fb54c2",
+    "src/arbol_agents/settings.py": "6870ce228ecd731b4c4321d15cd0773850c0ddec605840c851f44394f60b2533",
+    "src/arbol_builds/__init__.py": "5b842184a8075fe1d83cc32b050d704728d752509b31e0585805fa454ce26f6e",
+    "src/arbol_builds/browser_rollback.py": "badee4986bd21370aa69224926f5572a051089177fae105698f1e1f611acbad3",
+    "src/arbol_builds/candidates.py": "3c30c969bc603949a0fc79cbb509a321fc560d59ef15da6ba32968d7de97a2f9",
+    "src/arbol_builds/cli.py": "e32111a750fc86e1df65cf8c0f3fecd683ac20aa103dc787e6a108d831cf3b4c",
+    "src/arbol_builds/config.py": "d5f5a3ec7227f384b820f3821e1fe03ee7a0546a999d58004fea0023eda3e1b0",
+    "src/arbol_builds/driver_admission.py": "e4fcfa9a47bf9bd8848984771d59ae7a111cee5937f71ec681b80ad329585cbf",
+    "src/arbol_builds/driver_bootstrap.py": "fda291cd24cab1bc87c9e763f0a2787f1be9d5ab3e2925fab13c05de1f26069c",
+    "src/arbol_builds/driver_payload.py": "23f85207990cc12b58970ac12b06495057f24b8a7d10527011d28e80cc3ea9c2",
+    "src/arbol_builds/driver_process.py": "8461cbe20dab1da3713bf6ef5d76e9091e48ee7ece3f058d0ef75d5a89fe9dfb",
+    "src/arbol_builds/driver_state.py": "c65ca9f9ebe157ec6f1b1726e3ddf067ee250588ca8b1771a394c3331d273c0e",
+    "src/arbol_builds/launcher.py": "f52db0b27895544c1c826d9bcf0d8f2b8691cdcb297d47642dda39739765ae25",
+    "src/arbol_builds/mutation.py": "5b58d0c5e9a6fdb4fec79a209d27121a503ffa21e53c8275ed7cbc651b94fd76",
+    "src/arbol_builds/promotion.py": "80e945950ebc3424329eaa8def9fb214336137637eeb2a9b6e1a137c5a9a3cd6",
+    "src/arbol_builds/pruning.py": "d83deda831f64608d5376d8fd6e9b5bbdec2c5acba416a3aa8949ca87d8232cc",
+    "src/arbol_builds/rollback.py": "396b91d682f118b20d871df8e26c83702a7980bb89083df5e3904835d08ff19a",
+    "src/arbol_builds/root_launcher.py": "b572147d927cc7a4ca3379801dd7f73e1980a4cb021e5ccc3a69c4881ec5ccc2",
+    "src/arbol_builds/roots.py": "ffb1efad0d4021c43a70cec76a192db1b52904b77defccfb908b1f148630fe86",
+    "src/arbol_builds/schema_state.py": "e8912d153e590966636ce7379cf169b47c5d21bc0227e23de56d83073b1fd620",
+    "src/arbol_builds/service.py": "50333949d48fb7835abeb050727c7ccee00b4d04f49ee739ef9444bd9bfd52ae",
+    "src/arbol_builds/stable_catalog.py": "d7f444c1cbb90811c8654d44f260f8f5aaa15b221aedcf32c50612d84192e21a",
+    "src/arbol_builds/trunk_launcher.py": "acc501998d85394f7ed62b1b9618704156d9ec673cca9d58b04d1cd0bd5dd914",
+    "src/arbol_builds/unused.py": "a0f836f1c275f5e88fd467e4ba6de86c3a6794f66752c10afbebbbbfa52d7c3e",
+    "src/arbol_installation/__init__.py": "51f8a75d1ee91b41e53c125963eb044e0a2aae330daaadb08230518416acc8d4",
+    "src/arbol_installation/admission.py": "ef46615acbd1bdfb661425a18c8dd4e6df7d9e9b1bc24dee3e5fec4ed7db32c6",
+    "src/arbol_installation/build_output.py": "9ad8e42451d9cf0973d0b158554c9a58c5fa371e0d1355d6325ddb568b91f2bf",
+    "src/arbol_installation/exchange_release.py": "27d98ecec901bcf0148fe25d75c36d5873ee0a2a2258667f71feaec049baf5d2",
+    "src/arbol_installation/paths.py": "178a0b50cf4e13dc5c647d4edd0eb6f605efe5ca38750a850d9b5501e2dceeed"
+  },
+  "received": "/Users/msix/Builds/afm9-source-route.qB70OQDO",
+  "schema": 1
+}

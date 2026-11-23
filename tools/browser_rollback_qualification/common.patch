@@ -1,0 +1,523 @@
+--- a/src/arbol_builds/service.py
++++ b/src/arbol_builds/service.py
+@@ -92,25 +92,40 @@
+     return dumped.encode("utf-8", "backslashreplace")
+ 
+ 
+-def atomic_write(path: str, contents: bytes, mode: int = 0o600, *, durable: bool = False) -> None:
++def atomic_write(path: str, contents: bytes, mode: int = 0o600, *, durable: bool = False, context=None) -> None:
++    if context is not None:
++        with context.publication(Path(path)) as parent:
++            _atomic_write(Path(path).name, contents, mode, durable=durable, parent=parent, context=context)
++        return
++    _atomic_write(path, contents, mode, durable=durable)
++
++
++def _atomic_write(path: str, contents: bytes, mode: int, *, durable: bool, parent=None, context=None) -> None:
+     temporary = f"{path}.{os.getpid()}.{uuid.uuid4()}.tmp"
+     try:
+-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
++        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode, dir_fd=parent)
+         with os.fdopen(fd, "wb") as stream:
++            if context is not None:
++                context.temporary_created(temporary, stream.fileno())
+             stream.write(contents)
+             if durable:
+                 stream.flush()
+                 os.fsync(stream.fileno())
+-        os.replace(temporary, path)
++        if context is not None:
++            context.before_replace(contents, mode)
++        os.replace(temporary, path, src_dir_fd=parent, dst_dir_fd=parent)
++        if context is not None:
++            context.temporary_closed()
+         if durable:
+-            parent = os.open(os.path.dirname(path), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
++            directory = parent if parent is not None else os.open(os.path.dirname(path), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+             try:
+-                os.fsync(parent)
++                os.fsync(directory)
+             finally:
+-                os.close(parent)
++                if parent is None:
++                    os.close(directory)
+     finally:
+         try:
+-            os.unlink(temporary)
++            os.unlink(temporary, dir_fd=parent)
+         except FileNotFoundError:
+             pass
+ 
+@@ -219,7 +234,9 @@
+         os.rmdir(canonical)
+ 
+ 
+-def browser_support(home: Path) -> Path:
++def browser_support(home: Path, context=None) -> Path:
++    if context is not None:
++        return context.support
+     return home / ".local/lib/sylvan-stack/arbol-browser"
+ 
+ 
+@@ -296,25 +313,29 @@
+     return isinstance(value, str) and BROWSER_DIGEST.fullmatch(value) is not None
+ 
+ 
+-def browser_release_receipt(home: Path, build: str) -> Record:
++def browser_release_receipt(home: Path, build: str, context=None) -> Record:
+     if not browser_release_number(build):
+         raise ValueError("Invalid installed Browser Build number.")
+-    receipt, _ = browser_document(browser_support(home) / "releases" / f"{build}.json")
++    receipt, _ = (context.document if context else browser_document)(browser_support(home, context) / "releases" / f"{build}.json", 4096 if context else 16384)
+     if (set(receipt) != {"format", "build", "imageSha256", "source", "payloadDigest", "launcherSha256"}
+             or receipt["format"] != 1 or receipt["build"] != build
+             or not all(browser_sha(receipt[key]) for key in ("imageSha256", "payloadDigest", "launcherSha256"))
+             or not isinstance(receipt["source"], str) or not re.fullmatch(r"[0-9a-f]{40}", receipt["source"])):
+         raise ValueError("Invalid installed Browser release receipt.")
++    if context is not None:
++        context.check_receipt(receipt)
+     return receipt
+ 
+ 
+-def installed_browser_selection(home: Path) -> Record | None:
++def installed_browser_selection(home: Path, context=None) -> Record | None:
+     """Verify the canonical selection without launching or remounting any release."""
+-    support = browser_support(home)
++    support = browser_support(home, context)
++    if context is not None:
++        context.observe_optional(support / "install-transaction.json")
+     if os.path.lexists(support / "install-transaction.json"):
+         raise ValueError("Browser installation transaction needs recovery.")
+     try:
+-        selected, _ = browser_document(support / "selected.json", 4096)
++        selected, _ = (context.document if context else browser_document)(support / "selected.json", 4096)
+     except FileNotFoundError:
+         return None
+     if selected.get("scope") == "rehearsal":
+@@ -323,16 +344,21 @@
+             or not browser_release_number(selected["build"]) or not browser_sha(selected["imageSha256"])):
+         raise ValueError("Invalid installed Browser selection.")
+     build = selected["build"]
+-    receipt = browser_release_receipt(home, build)
++    receipt = browser_release_receipt(home, build, context)
+     image = support / "images" / f"{build}.dmg"
+-    launcher = home / "Applications/Arbol Browser/bin/arbol-browser"
++    launcher = context.launcher if context else home / "Applications/Arbol Browser/bin/arbol-browser"
+     if (selected["imageSha256"] != receipt["imageSha256"]
+-            or browser_file_digest(image, 1073741824) != receipt["imageSha256"]
+-            or browser_file_digest(launcher, 67108864, 0o755) != receipt["launcherSha256"]):
++            or (context.digest if context else browser_file_digest)(image, 1073741824) != receipt["imageSha256"]
++            or (context.digest if context else browser_file_digest)(launcher, 67108864, context.live_mode(receipt["launcherSha256"]) if context else 0o755) != receipt["launcherSha256"]):
+         raise ValueError("Selected Browser image or launcher differs from its release.")
++    if context is not None:
++        context.verify_signature(launcher, receipt["launcherSha256"])
++        if context.document(support / "selected.json", 4096)[0] != selected:
++            raise ValueError("Selected Browser release changed during verification.")
++        return selected
+     checked = subprocess.run(["/usr/bin/codesign", "--verify", "--strict", "-R", f"={BROWSER_LAUNCHER}", str(launcher)],
+                              env={"PATH": "/usr/bin:/bin"}, capture_output=True, timeout=15, check=False)
+-    if checked.returncode or browser_document(support / "selected.json", 4096)[0] != selected:
++    if checked.returncode or (context.document if context else browser_document)(support / "selected.json", 4096)[0] != selected:
+         raise ValueError("Selected Browser release could not be verified.")
+     return selected
+ 
+@@ -651,8 +677,10 @@
+     return code == 0 and not stop.requested
+ 
+ 
+-def check_stable_source(home: Path, component: str, commit: str) -> None:
+-    failures = deployment_failures(str(build_registry(home)), component)
++def check_stable_source(home: Path, component: str, commit: str, context=None) -> None:
++    if context is not None:
++        context.check_failure_ledger()
++    failures = context.failures(component) if context else deployment_failures(str(build_registry(home)), component)
+     for build, failure in failures.items():
+         if failure["sourceCommit"] == commit:
+             raise ValueError(
+--- a/src/arbol_builds/rollback.py
++++ b/src/arbol_builds/rollback.py
+@@ -44,9 +44,9 @@
+ from .trunk_launcher import fits
+ 
+ 
+-def stable_record(home: Path, component: str, build: str) -> dict:
++def stable_record(home: Path, component: str, build: str, context=None) -> dict:
+     if component == BROWSER:
+-        receipt = browser_release_receipt(home, build)
++        receipt = browser_release_receipt(home, build, context)
+         return {"build": build, "source": {"commit": receipt["source"]}, "status": "working"}
+     return show_build(str(build_registry(home)), component, build)
+ 
+@@ -167,22 +167,26 @@
+ 
+ 
+ def rollback(component: str, build: str, reason: str, *, to: str | None = None,
+-             already_restored: bool = False) -> dict:
++             already_restored: bool = False, context=None) -> dict:
+     if not BUILD_PATTERN.fullmatch(build) or (to is not None and not BUILD_PATTERN.fullmatch(to)):
+         raise ValueError("Use a lower-case hexadecimal Build number without a leading zero.")
+-    home = Path.home()
++    home = context.root if context else Path.home()
+     reopen = False
+     try:
+-        with stable_lock(home, component) as registry, ExitStack() as guards:
+-            catalog = read_catalog(build_registry(home).parent)
++        with stable_lock(home, component, context) as registry, ExitStack() as guards:
++            if context is not None:
++                guards.enter_context(context.custody((build, to)))
++                context.check_failure_ledger()
++                context.archive_inventory()
++            catalog = read_catalog(context.registries if context else build_registry(home).parent, context)
+             former = {row["build"] for row in catalog["builds"] if row["component"] == component}
+             if build not in former:
+                 raise ValueError(f"{component} Build {build} has no stable installation history.")
+-            failures = deployment_failures(str(build_registry(home)), component)
++            failures = context.failures(component) if context else deployment_failures(str(build_registry(home)), component)
+             known = failures.get(build)
+             if component == BROWSER and known:
+-                recover_browser_rollback(home, build, known["restoredBuild"])
+-            current = installed_number(home, component)
++                recover_browser_rollback(home, build, known["restoredBuild"], context)
++            current = installed_number(home, component, context)
+             if current is None and component.endswith("-driver"):
+                 route = home / "Applications/Arbol/bin" / component
+                 if driver_gate_identity(route) is not None:
+@@ -194,13 +198,13 @@
+             elif current != build and not (known and target == current == known["restoredBuild"]):
+                 raise ValueError(f"Expected {component} Build {build}; its stable selection is {current or 'missing'}.")
+ 
+-            failed = stable_record(home, component, build)
++            failed = stable_record(home, component, build, context)
+             commit = failed["source"]["commit"]
+             if not isinstance(commit, str) or len(commit) != 40 or any(char not in "0123456789abcdef" for char in commit):
+                 raise ValueError("The failed Build has no verified source commit.")
+ 
+             def eligible(number: str) -> dict | None:
+-                record = stable_record(home, component, number)
++                record = stable_record(home, component, number, context)
+                 if (record["status"] != "working" or record.get("prunedAt") or record["source"]["commit"] == commit
+                         or deployment_failure(failures, record) is not None
+                         or (component != BROWSER and not layout_fits(record))):
+@@ -223,15 +227,17 @@
+             browser_restore = None
+             if current == build:
+                 if component == BROWSER:
+-                    transaction = browser_route(home, build, target, guards)
+-                    launcher = home / "Applications/Arbol Browser/bin/arbol-browser"
+-                    if installed_number(home, component) != build:
++                    transaction = browser_route(home, build, target, guards, context)
++                    launcher = context.launcher if context else home / "Applications/Arbol Browser/bin/arbol-browser"
++                    if installed_number(home, component, context) != build:
+                         raise ValueError("The installed Browser release changed during rollback.")
+-                    previous = browser_support(home) / "rollback-launchers" / target
++                    previous = browser_support(home, context) / "rollback-launchers" / target
++                    if context is not None:
++                        context.require_archive(previous)
+                     if not previous.is_file():
+                         raise ValueError(f"The signed Browser rollback launcher for Build {target} is unavailable.")
+-                    original = signed_launcher(launcher, transaction["before"]["launcherSha256"])
+-                    replacement = signed_launcher(previous, transaction["after"]["launcherSha256"])
++                    original = signed_launcher(launcher, transaction["before"]["launcherSha256"], context)
++                    replacement = signed_launcher(previous, transaction["after"]["launcherSha256"], context)
+                     browser_restore = (transaction, original, replacement)
+                 elif component in NATIVE_APPLICATIONS:
+                     archive = native_restore_folder(home, component, restored, guards)
+@@ -244,20 +250,20 @@
+                 failures[build] = failure
+                 document = {"schemaVersion": 1, "builds": failures}
+                 atomic_write(str(registry / ".failed-deployments.json"),
+-                             (json.dumps(document, ensure_ascii=False, indent=2) + "\n").encode(), durable=True)
++                             (json.dumps(document, ensure_ascii=False, indent=2) + "\n").encode(), durable=True, context=context)
+             try:
+                 if current == build and component in NATIVE_APPLICATIONS:
+                     was_open = install_app(home, archive, registry / target, restored, restore=True)
+                     reopen = was_open or component == TRAY
+                 elif browser_restore is not None:
+-                    restore_browser(home, *browser_restore)
++                    restore_browser(home, *browser_restore, context=context)
+                 elif changes:
+                     replace_routes(changes)
+             except Exception:
+                 with suppress(OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
+-                    refresh(home)
++                    refresh(home, context)
+                 raise
+-            refresh(home)
++            refresh(home, context)
+             if component == "arbol":
+                 restart_backend(home, build, target)
+     finally:
+--- a/src/arbol_builds/browser_rollback.py
++++ b/src/arbol_builds/browser_rollback.py
+@@ -25,9 +25,12 @@
+ LAUNCHER_LIMIT = 67108864
+ 
+ 
+-def signed_launcher(path: Path, digest: str) -> bytes:
+-    subprocess.run(["/usr/bin/codesign", "--verify", "--strict", "-R", f"={BROWSER_LAUNCHER}", path], check=True)
+-    with browser_file(path, 0o755) as (stream, info):
++def signed_launcher(path: Path, digest: str, context=None) -> bytes:
++    if context is not None:
++        context.verify_signature(path, digest)
++    else:
++        subprocess.run(["/usr/bin/codesign", "--verify", "--strict", "-R", f"={BROWSER_LAUNCHER}", path], check=True)
++    with (context.file if context else browser_file)(path, context.file_mode(path, digest) if context else 0o755) as (stream, info):
+         if not 1 <= info.st_size <= LAUNCHER_LIMIT:
+             raise ValueError("Invalid signed Browser launcher size.")
+         data = stream.read(LAUNCHER_LIMIT + 1)
+@@ -36,92 +39,97 @@
+     return data
+ 
+ 
+-def archive_launcher(home: Path) -> None:
+-    support = browser_support(home)
++def archive_launcher(home: Path, context=None) -> None:
++    support = browser_support(home, context)
+     if not os.path.lexists(support / "selected.json"):
+         return
+-    with browser_lock(support / "selection.lock", shared=True):
+-        selection = installed_browser_selection(home)
++    with (context.custody() if context else browser_lock(support / "selection.lock", shared=True)):
++        selection = installed_browser_selection(home, context)
+         if selection is None:
+             return
+         build = selection["build"]
+-        receipt = browser_release_receipt(home, build)
++        receipt = browser_release_receipt(home, build, context)
+         directory = support / "rollback-launchers"
+-        directory.mkdir(mode=0o700, exist_ok=True)
++        context.directory(directory, create=True) if context else directory.mkdir(mode=0o700, exist_ok=True)
+         browser_private_directory(directory)
+         destination = directory / build
++        if context is not None:
++            context.observe_optional(destination, LAUNCHER_LIMIT, 0o755)
+         if os.path.lexists(destination):
+-            signed_launcher(destination, receipt["launcherSha256"])
++            signed_launcher(destination, receipt["launcherSha256"], context)
+             return
+-        launcher = home / "Applications/Arbol Browser/bin/arbol-browser"
+-        data = signed_launcher(launcher, receipt["launcherSha256"])
+-        atomic_write(str(destination), data, 0o755, durable=True)
++        launcher = context.launcher if context else home / "Applications/Arbol Browser/bin/arbol-browser"
++        data = signed_launcher(launcher, receipt["launcherSha256"], context)
++        atomic_write(str(destination), data, 0o755, durable=True, context=context)
+ 
+ 
+-def browser_route(home: Path, source: str, target: str, guards: ExitStack) -> dict:
+-    support = browser_support(home)
+-    guards.enter_context(browser_lock(support / "selection.lock"))
+-    for build in sorted((source, target)):
+-        guards.enter_context(browser_lock(support / "uses" / build))
+-    launcher = home / "Applications/Arbol Browser/bin/arbol-browser"
+-    alias = home / ".local/bin/arbol-browser"
++def browser_route(home: Path, source: str, target: str, guards: ExitStack, context=None) -> dict:
++    support = browser_support(home, context)
++    if context is not None:
++        guards.enter_context(context.custody((source, target)))
++    else:
++        guards.enter_context(browser_lock(support / "selection.lock"))
++        for build in sorted((source, target)):
++            guards.enter_context(browser_lock(support / "uses" / build))
++    launcher = context.launcher if context else home / "Applications/Arbol Browser/bin/arbol-browser"
++    alias = context.alias if context else home / ".local/bin/arbol-browser"
+     if not alias.is_symlink() or alias.lstat().st_uid != os.getuid() or Path(os.readlink(alias)) != launcher:
+         raise ValueError("The installed Browser PATH entry differs from its stable launcher.")
+     sides = []
+     for build in (source, target):
+-        receipt = browser_release_receipt(home, build)
++        receipt = browser_release_receipt(home, build, context)
+         image = support / "images" / f"{build}.dmg"
+-        if browser_file_digest(image, IMAGE_LIMIT) != receipt["imageSha256"]:
++        if (context.digest if context else browser_file_digest)(image, IMAGE_LIMIT) != receipt["imageSha256"]:
+             raise ValueError(f"Browser Build {build} does not match its installed image receipt.")
+         selection = {key: receipt[key] for key in ("format", "build", "imageSha256")}
+         sides.append({"selection": selection, "launcherSha256": receipt["launcherSha256"]})
+     return {"format": 2, "aliasBefore": True, "before": sides[0], "after": sides[1]}
+ 
+ 
+-def write_selection(path: Path, document: dict) -> None:
+-    atomic_write(str(path), (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode(), durable=True)
++def write_selection(path: Path, document: dict, context=None) -> None:
++    atomic_write(str(path), (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode(), durable=True, context=context)
+ 
+ 
+-def recover_browser_rollback(home: Path, source: str, target: str) -> None:
+-    support = browser_support(home)
++def recover_browser_rollback(home: Path, source: str, target: str, context=None) -> None:
++    support = browser_support(home, context)
+     journal = support / "install-transaction.json"
+     if not os.path.lexists(journal):
+         return
+     with ExitStack() as guards:
+-        expected = browser_route(home, source, target, guards)
+-        if browser_document(journal)[0] != expected:
++        expected = browser_route(home, source, target, guards, context)
++        if (context.document if context else browser_document)(journal)[0] != expected:
+             raise ValueError("The Browser installation has a different transaction pending.")
+-        complete_browser_transaction(home, expected)
++        complete_browser_transaction(home, expected, context)
+ 
+ 
+-def complete_browser_transaction(home: Path, transaction: dict) -> None:
+-    support = browser_support(home)
++def complete_browser_transaction(home: Path, transaction: dict, context=None) -> None:
++    support = browser_support(home, context)
+     before, after = transaction["before"], transaction["after"]
+-    selected = browser_document(support / "selected.json")[0]
++    selected = (context.document if context else browser_document)(support / "selected.json")[0]
+     backup = support / "install-previous-launcher"
+-    launcher = home / "Applications/Arbol Browser/bin/arbol-browser"
+-    digest = browser_file_digest(launcher, LAUNCHER_LIMIT, 0o755)
++    launcher = context.launcher if context else home / "Applications/Arbol Browser/bin/arbol-browser"
++    digest = (context.digest if context else browser_file_digest)(launcher, LAUNCHER_LIMIT, context.observed_live_mode() if context else 0o755)
+     if selected == before["selection"] and digest == after["launcherSha256"]:
+-        original = signed_launcher(backup, before["launcherSha256"])
+-        atomic_write(str(launcher), original, 0o755, durable=True)
++        original = signed_launcher(backup, before["launcherSha256"], context)
++        atomic_write(str(launcher), original, context.live_mode(before["launcherSha256"]) if context else 0o755, durable=True, context=context)
+         digest = before["launcherSha256"]
+     if not any(selected == entry["selection"] and digest == entry["launcherSha256"] for entry in (before, after)):
+         raise ValueError("The Browser launcher and selection disagree during rollback.")
+-    signed_launcher(launcher, digest)
+-    (support / "install-transaction.json").unlink()
+-    backup.unlink(missing_ok=True)
++    signed_launcher(launcher, digest, context)
++    context.unlink(support / "install-transaction.json") if context else (support / "install-transaction.json").unlink()
++    context.unlink(backup, missing_ok=True) if context else backup.unlink(missing_ok=True)
+     sync_directory(support)
+ 
+ 
+-def restore_browser(home: Path, transaction: dict, original: bytes, previous: bytes) -> None:
+-    support = browser_support(home)
+-    launcher = home / "Applications/Arbol Browser/bin/arbol-browser"
++def restore_browser(home: Path, transaction: dict, original: bytes, previous: bytes, context=None) -> None:
++    support = browser_support(home, context)
++    launcher = context.launcher if context else home / "Applications/Arbol Browser/bin/arbol-browser"
+     journal = support / "install-transaction.json"
+     backup = support / "install-previous-launcher"
+-    atomic_write(str(backup), original, 0o755, durable=True)
+-    write_selection(journal, transaction)
++    atomic_write(str(backup), original, 0o755, durable=True, context=context)
++    write_selection(journal, transaction, context)
+     try:
+-        atomic_write(str(launcher), previous, 0o755, durable=True)
+-        write_selection(support / "selected.json", transaction["after"]["selection"])
++        atomic_write(str(launcher), previous, context.live_mode(transaction["after"]["launcherSha256"]) if context else 0o755, durable=True, context=context)
++        write_selection(support / "selected.json", transaction["after"]["selection"], context)
+     finally:
+-        complete_browser_transaction(home, transaction)
++        complete_browser_transaction(home, transaction, context)
+--- a/src/arbol_builds/stable_catalog.py
++++ b/src/arbol_builds/stable_catalog.py
+@@ -140,16 +140,25 @@
+     return DESCRIPTIONS.get(component, component)
+ 
+ 
+-def installed_number(home: Path, component: str) -> str | None:
++def installed_number(home: Path, component: str, context=None) -> str | None:
+     if component == "arbol-browser":
+         from .service import installed_browser_selection
+ 
+-        selected = installed_browser_selection(home)
++        selected = installed_browser_selection(home, context)
+         return selected["build"] if selected is not None else None
+     return _arbol_installed(home, component, home / ".local/lib/sylvan-stack/arbol/stable")
+ 
+ 
+-def _installed(home: Path, registries: Path) -> Iterator[tuple[dict, dict]]:
++def _installed(home: Path, registries: Path, context=None) -> Iterator[tuple[dict, dict]]:
++    if context is not None:
++        from .service import installed_browser_selection, browser_release_receipt
++        selected = installed_browser_selection(home, context)
++        if selected is not None:
++            build = selected["build"]
++            receipt = context.support / "releases" / f"{build}.json"
++            record = browser_release_receipt(home, build, context)
++            yield _entry("arbol-browser", build, record, receipt=receipt), record
++        return
+     arbol_registry = str(registries / "arbol")
+     arbol_payloads = home / ".local/lib/sylvan-stack/arbol/stable"
+     for component in components_in(arbol_registry):
+@@ -197,7 +206,10 @@
+     return _record_name(row.get("component"), _COMPONENT), _record_name(row.get("build"), _NUMBER)
+ 
+ 
+-def refresh(home: Path) -> Path:
++def refresh(home: Path, context=None) -> Path:
++    if context is not None:
++        with context.custody(), context.catalog_lock():
++            return _refresh(home, context.registries, context)
+     registries = home / "Builds/registries"
+     registries.mkdir(parents=True, mode=0o700, exist_ok=True)
+     if registries.resolve(strict=True) != registries:
+@@ -211,9 +223,9 @@
+         return _refresh(home, registries)
+ 
+ 
+-def read_catalog(registries: Path) -> dict:
++def read_catalog(registries: Path, context=None) -> dict:
+     try:
+-        document = _read_object(registries / CATALOG_NAME)
++        document = context.catalog_document() if context else _read_object(registries / CATALOG_NAME)
+     except FileNotFoundError:
+         document = {"schemaVersion": 1, "builds": []}
+     if document.get("schemaVersion") != 1 or not isinstance(document.get("builds"), list):
+@@ -223,17 +235,19 @@
+     return document
+ 
+ 
+-def _refresh(home: Path, registries: Path) -> Path:
++def _refresh(home: Path, registries: Path, context=None) -> Path:
+     path = registries / CATALOG_NAME
+-    existing = read_catalog(registries)
++    existing = read_catalog(registries, context)
+     rows = {_key(row): {**row, "current": False} for row in existing["builds"]}
+-    for entry, record in _installed(home, registries):
++    for entry, record in _installed(home, registries, context):
+         key = _key(entry)
+-        description = rows.get(key, {}).get("description") or _description(home, key[0], record)
++        description = rows.get(key, {}).get("description") or (DESCRIPTIONS["arbol-browser"] if context else _description(home, key[0], record))
+         rows[key] = {**entry, "description": description, "current": True}
+     arbol_registry = str(registries / "arbol")
++    if context is not None:
++        context.check_failure_ledger()
+     for component in {key[0] for key in rows if key[0] != "mycel"}:
+-        for build, failure in deployment_failures(arbol_registry, component).items():
++        for build, failure in (context.failures(component) if context else deployment_failures(arbol_registry, component)).items():
+             if row := rows.get((component, build)):
+                 row["deploymentFailure"] = failure
+     ordered = sorted(rows.values(), key=lambda row: (not row["current"], row["component"], -int(row["build"], 16)))
+@@ -241,5 +255,5 @@
+     if current == existing and path.is_file():
+         return path
+     data = json.dumps(current, ensure_ascii=False, indent=2) + "\n"
+-    atomic_write(str(path), data.encode(), durable=True)
++    atomic_write(str(path), data.encode(), durable=True, context=context)
+     return path
+--- a/src/arbol_builds/promotion.py
++++ b/src/arbol_builds/promotion.py
+@@ -454,7 +454,11 @@
+ 
+ 
+ @contextmanager
+-def stable_lock(home: Path, component: str):
++def stable_lock(home: Path, component: str, context=None):
++    if context is not None:
++        with context.operation(component) as registry:
++            yield registry
++        return
+     registry = build_registry(home) / component
+     registry.mkdir(parents=True, mode=0o700, exist_ok=True)
+     if registry.resolve(strict=True) != registry:
+--- a/src/arbol_builds/cli.py
++++ b/src/arbol_builds/cli.py
+@@ -180,6 +180,9 @@
+         write_all(1, json_line(value))
+ 
+     try:
++        if args[:2] == ["browser-release", "qualification"]:
++            from .browser_qualification import entry as qualification_entry
++            return qualification_entry(args[2:])
+         if args in (["catalog"], ["maintenance"]):
+             from .stable_catalog import refresh
+             home = Path.home()
