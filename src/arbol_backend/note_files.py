@@ -62,10 +62,10 @@ class NoteFiles:
 
     def validate(self, value: object, exchange: str) -> Params:
         if (not isinstance(value, dict) or "root" in value
-                or type(value.get("version")) is not int or value["version"] != NOTE_VERSION
+                or type(value.get("version")) is not int or value["version"] not in (1, 2)
                 or uuid_id(value.get("exchange")) != exchange or value.get("kind") != "ended_stuck"):
             raise Error("no_answer")
-        return {"version": NOTE_VERSION, "exchange": exchange, "chat": uuid_id(value.get("chat")),
+        return {"version": value["version"], "exchange": exchange, "chat": uuid_id(value.get("chat")),
                 "kind": "ended_stuck", "at": iso(timestamp(value.get("at")))}
 
     def heal(self, parent: int, exchange: str, expected: os.stat_result) -> None:
@@ -120,7 +120,7 @@ class NoteFiles:
         except FileNotFoundError:
             pass
         else:
-            if any(previous.value[key] != value[key] for key in ("version", "exchange", "chat", "kind")):
+            if any(previous.value[key] != value[key] for key in ("exchange", "chat", "kind")):
                 raise Error("no_answer")
             return previous  # The first timestamp of this same immutable Exchange wins.
         raw = (json.dumps(value, ensure_ascii=False, separators=(",", ":"))+"\n").encode()
@@ -155,7 +155,7 @@ class NoteFiles:
             finally:
                 os.close(parent)
         result = self.read(exchange)
-        if any(result.value[key] != value[key] for key in ("version", "exchange", "chat", "kind")):
+        if any(result.value[key] != value[key] for key in ("exchange", "chat", "kind")):
             raise Error("no_answer")
         return result
 
