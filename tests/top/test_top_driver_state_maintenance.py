@@ -962,6 +962,8 @@ class ClaudeCreateWalk:
         self.finished: set[str] = set()
 
     def prepare(self) -> tuple[ClaudeCreateSubject, ...]:
+        require({"H1-span-completion", "terminal-close-closure"} <= self.controller.finished_external,
+                "The controller has not completed its original H1 and terminal duties in order.")
         if self.subjects is None:
             self.subjects = claude_create_subjects(self.controller, self.baseline, self.observer)
             view = self.observer.terminal_view
@@ -1062,6 +1064,9 @@ class ClaudeCreateWalk:
         self.unchanged(item)
 
     def execute(self, item: ClaudeCreateSubject, *, absence: bool) -> None:
+        require({"H1-span-completion", "terminal-close-closure"} <= self.controller.finished_external
+                and self.subjects is not None and any(item is original for original in self.subjects),
+                "Maintenance requires the completed outer duties and the bound original subject.")
         self.unchanged(item)
         subject = Maintenance(self.controller, "arbol-claude-driver", self.environment)
         require(subject.session not in self.sessions, "Two original subjects share a maintenance session.")
@@ -1112,7 +1117,10 @@ class ClaudeCreateWalk:
 @dataclass(frozen=True)
 class ClaudeCreateRecovery:
     walk: ClaudeCreateWalk
-    case_id: str = "create-publication-recovery"
+
+    @property
+    def case_id(self) -> str:
+        return "create-publication-recovery"
 
     def observe(self, controller: WholeCheckController) -> None:
         require(controller is self.walk.controller and self.case_id not in self.walk.attempted,
@@ -1128,7 +1136,10 @@ class ClaudeCreateRecovery:
 @dataclass(frozen=True)
 class ClaudeCreateAbsence:
     walk: ClaudeCreateWalk
-    case_id: str = "create-publication-absence"
+
+    @property
+    def case_id(self) -> str:
+        return "create-publication-absence"
 
     def observe(self, controller: WholeCheckController) -> None:
         require(controller is self.walk.controller and self.case_id not in self.walk.attempted,
