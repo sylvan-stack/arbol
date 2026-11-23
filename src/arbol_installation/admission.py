@@ -138,6 +138,7 @@ def read_state(folder: int, *, layout: int = INSTALLATION_LAYOUT) -> State:
 class Lease:
     state: State
     pid: int
+    runtime: Path
 
     def require(self) -> None:
         if self.pid != os.getpid():
@@ -186,7 +187,7 @@ def directory_lease(runtime: Path, mode: Mode, generation: str | None) -> Iterat
                 leases.enter_context(lock(folder, WRITERS, fcntl.LOCK_SH))
         except (OSError, ValueError, RecursionError):
             raise AdmissionRefusal("maintenance", "The installation writer admission is unavailable.") from None
-        lease = Lease(state, os.getpid())
+        lease = Lease(state, os.getpid(), runtime)
         try:
             yield lease
         finally:
