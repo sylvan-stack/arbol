@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from driver_identity_qualification import WholeCheckController, require
+from driver_identity_qualification import Baseline, WholeCheckController, require
 
 from arbol_builds.driver_admission import (
     COMPONENTS,
@@ -29,6 +29,7 @@ from arbol_builds.driver_admission import (
 from arbol_builds.driver_payload import request_binding
 from top.driver_state_support import (
     Captured,
+    FileImage,
     Object,
     OwnedChild,
     canonical,
@@ -41,6 +42,7 @@ from top.driver_state_support import (
     sync_directory,
     tree_inventory,
 )
+from top.test_top_driver_state_admission import H1SpanCompletion, TerminalCloseClosure, TerminalSpanObservation
 
 Operation = Literal["upgrade", "identity-reset", "restore", "identity-recover"]
 Fault = Literal["no-fd", "wrong-inode", "separate-description", "receipt", "state", "operation",
@@ -347,6 +349,118 @@ class ExternalMaintenance:
         controller.require_finished_graph(self.component)
         self.run(controller)
         controller.require_finished_graph(self.component)
+
+
+_CLAUDE_CREATE_WINDOWS = ("C1-prepared-durable", "C2-record-durable", "C3-sidecar-durable",
+                          "C4-committed-durable", "C5-clear-durable")
+
+
+@dataclass(frozen=True)
+class ClaudeCreateSubject:
+    """Original immutable evidence, captured before any external operation."""
+
+    window: str
+    command: str
+    case: str
+    root: Path
+    root_identity: Object
+    owner: FileImage
+    checkpoint: FileImage
+    settlement: FileImage
+    actor_result: FileImage
+    ack: FileImage
+    root_proof: FileImage
+    guard: FileImage
+    record: FileImage | None
+    generation: str
+    witness: str
+
+
+def claude_create_subjects(controller: WholeCheckController, baseline: Baseline,
+                           observer: TerminalSpanObservation) -> tuple[ClaudeCreateSubject, ...]:
+    """Bind all ten genuine source-owned subjects before maintenance changes any."""
+    component = "arbol-claude-driver"
+    require(observer.component == component, "Create evidence belongs to another component.")
+    H1SpanCompletion(observer, controller, baseline, component, observer.case).observe(controller)
+    TerminalCloseClosure(observer, controller, baseline, component, observer.case).observe(controller)
+    view = observer.terminal_view
+    assert view is not None
+    suite = view.h1.suite_context
+    helpers = view.settled["helpers"]
+    require(isinstance(helpers, list) and len(helpers) == 11,
+            "The ten create actors and final H1 actor have not all settled.")
+    subjects: list[ClaudeCreateSubject] = []
+    for index, (window, command) in enumerate((w, c) for w in _CLAUDE_CREATE_WINDOWS
+                                               for c in ("continue", "abort-io")):
+        prefix = f"terminal-helper-{index:04d}."
+        context = document(view.images[prefix + "context"].raw)
+        actor_raw = view.images[prefix + "result"].raw
+        actor = document(actor_raw)
+        case = actor.get("case")
+        require(isinstance(case, str) and re.fullmatch(r"[0-9a-f]{32}", case, re.ASCII) is not None
+                and case != observer.case and case not in {item.case for item in subjects}
+                and context["invocation"] == suite["invocation"]
+                and context["parent"] == {"writer": suite["writer"], **suite["process"]}
+                and context["entry"] == "tests/identity_actor.py" and context["role"] == "helper"
+                and actor == {"version": 1, "kind": "actor-result", "case": case, "action": "create-stop",
+                              "outcome": "completed" if command == "continue" else "injected-failure"}
+                and helpers[index]["waitStatus"] == (0 if command == "continue" else 1),
+                "Original actor, ordered result or actual wait differs.")
+        root = controller.workspace.registry / ".driver-qualification" / "fixtures" / suite["invocation"] / case
+        root_identity = directory_identity(root)
+        state, subscription = root / "state", root / "state" / "subscriptions" / "anthropic-2"
+        physical_owned(state, directory=True)
+        physical_owned(subscription, directory=True)
+        owner = read_image(root / ".fixture-owner.json")
+        require(document(owner.raw) == {"version": 1, "case": case, "component": component,
+                "invocation": suite["invocation"], "parentWriter": suite["writer"],
+                "payloadSha256": controller.scope.producer(component).digest}, "Original fixture owner differs.")
+        checkpoint, settlement = (read_image(root / name) for name in
+                                  ("create-checkpoint.json", "create-settlement.json"))
+        actor_result, ack = read_image(root / "create-actor-result.json"), read_image(root / "helper-ack.json")
+        require(actor_result.raw == actor_raw and ack.raw == view.images[prefix + "ack"].raw,
+                "Original actor result or actual synchronous ACK changed.")
+        before, after = document(checkpoint.raw), document(settlement.raw)
+        require(before.get("window") == after.get("window") == window
+                and before.get("command") == after.get("command") == command,
+                "Original checkpoint and settlement identify another case.")
+        position = index // 2 + 1
+        journal, record, sidecar = (before.get(key) for key in ("journal", "record", "sidecar"))
+        require((journal is not None) == (position <= 4) and (record is not None) == (position >= 2)
+                and (sidecar is not None) == (position >= 3), "Original checkpoint window differs.")
+        if journal is not None:
+            require(isinstance(journal, dict) and journal.get("operation") == "create"
+                    and journal.get("phase") == ("committed" if position == 4 else "prepared"),
+                    "Original create journal is malformed.")
+        witness = journal.get("witness") if isinstance(journal, dict) else (
+            sidecar.get("witness") if isinstance(sidecar, dict) else None)
+        require(valid_token(witness), "Original create witness is unavailable.")
+        require(sidecar is None or sidecar == {"version": 1, "state": "active", "witness": witness},
+                "Original checkpoint sidecar differs from the journal witness.")
+        if command == "abort-io":
+            require(all(after.get(key) == before.get(key) for key in ("journal", "record", "sidecar")),
+                    "Actual injected failure did not retain its original checkpoint.")
+        else:
+            require(after.get("journal") is None and isinstance(after.get("record"), dict)
+                    and after.get("sidecar") == {"version": 1, "state": "active", "witness": witness},
+                    "Actual continued create did not finish with its original witness.")
+        for name, key in (("identity-pending.json", "journal"), ("record.json", "record"),
+                          ("identity.json", "sidecar")):
+            path = subscription / name
+            current = document(read_image(path).raw) if os.path.lexists(path) else None
+            require(current == after.get(key), "Saved subject differs from its actual settled checkpoint.")
+        proof, guard = read_image(state / "identity.json"), read_image(state / "identity.guard")
+        generation = document(proof.raw).get("generation")
+        require(valid_token(generation) and read_image(state / "format").raw.strip() == b"2",
+                "Original format-two generation is unavailable.")
+        record_image = read_image(subscription / "record.json") if after.get("record") is not None else None
+        assert isinstance(case, str) and isinstance(generation, str) and isinstance(witness, str)
+        subjects.append(ClaudeCreateSubject(window, command, case, root, root_identity, owner, checkpoint,
+                                             settlement, actor_result, ack, proof, guard, record_image,
+                                             generation, witness))
+    view.recheck_files()
+    controller.require_finished_graph(component)
+    return tuple(subjects)
 
 
 class Maintenance:
@@ -825,6 +939,146 @@ def maintenance_exact_dispatch(subject: Maintenance, request: Execute) -> Object
     result = subject.execute_observed(request, "observe")
     subject.finish(request, result)
     return result
+
+
+class ClaudeCreateWalk:
+    """Shared fixed original-subject capture for the two deferred create cases."""
+
+    def __init__(self, controller: WholeCheckController, baseline: Baseline,
+                 observer: TerminalSpanObservation, environment: Mapping[str, str]) -> None:
+        self.controller, self.baseline, self.observer = controller, baseline, observer
+        self.environment = without_authority(dict(environment))
+        self.subjects: tuple[ClaudeCreateSubject, ...] | None = None
+        self.suite_terminal: FileImage | None = None
+        self.sessions: set[str] = set()
+        self.attempted: set[str] = set()
+        self.finished: set[str] = set()
+
+    def prepare(self) -> tuple[ClaudeCreateSubject, ...]:
+        if self.subjects is None:
+            self.subjects = claude_create_subjects(self.controller, self.baseline, self.observer)
+            view = self.observer.terminal_view
+            assert view is not None
+            suite = view.h1.suite_context
+            authority = Authority(self.controller.workspace.registry, "arbol-claude-driver")
+            self.suite_terminal = read_image(authority.folder / "writers" / suite["invocation"] /
+                                             (suite["writer"] + ".json"))
+        return self.subjects
+
+    def unchanged(self, item: ClaudeCreateSubject) -> None:
+        view = self.observer.terminal_view
+        require(view is not None, "Original terminal observation is unavailable.")
+        assert view is not None
+        view.recheck_files()
+        authority = Authority(self.controller.workspace.registry, "arbol-claude-driver")
+        suite = view.h1.suite_context
+        require(self.suite_terminal is not None and read_image(authority.folder / "writers" /
+                suite["invocation"] / (suite["writer"] + ".json")) == self.suite_terminal,
+                "The original Suite terminal writer was replaced.")
+        for index in range(11):
+            prefix = f"terminal-helper-{index:04d}."
+            context = document(view.images[prefix + "context"].raw)
+            terminal = authority.folder / "writers" / context["invocation"] / (context["writer"] + ".json")
+            require(read_image(terminal).raw == view.images[prefix + "terminal"].raw,
+                    "An original actor terminal writer was replaced after whole-runner completion.")
+        require(directory_identity(item.root) == item.root_identity
+                and read_image(item.root / ".fixture-owner.json") == item.owner
+                and read_image(item.root / "create-checkpoint.json") == item.checkpoint
+                and read_image(item.root / "create-settlement.json") == item.settlement
+                and read_image(item.root / "create-actor-result.json") == item.actor_result
+                and read_image(item.root / "helper-ack.json") == item.ack
+                and read_image(item.root / "state" / "identity.json") == item.root_proof
+                and read_image(item.root / "state" / "identity.guard") == item.guard,
+                "Original fixture, root, guard or immutable actor evidence changed.")
+        record_path = item.root / "state" / "subscriptions" / "anthropic-2" / "record.json"
+        if item.record is None:
+            require(not os.path.lexists(record_path), "A record appeared in the absent create subject.")
+        else:
+            require(read_image(record_path) == item.record, "Original create record changed.")
+
+    def metadata(self, item: ClaudeCreateSubject, *, state: str) -> None:
+        target = item.root / "state" / "subscriptions" / "anthropic-2"
+        pending, sidecar = target / "identity-pending.json", target / "identity.json"
+        require(not os.path.lexists(pending) and document(read_image(sidecar).raw) == {
+            "version": 1, "state": state, "witness": item.witness},
+            "The original witness did not reach its exact required terminal state.")
+        self.unchanged(item)
+
+    def execute(self, item: ClaudeCreateSubject, *, absence: bool) -> None:
+        self.unchanged(item)
+        subject = Maintenance(self.controller, "arbol-claude-driver", self.environment)
+        require(subject.session not in self.sessions, "Two original subjects share a maintenance session.")
+        self.sessions.add(subject.session)
+        backup = self.controller.workspace.fixture_root / ("claude-create-" + item.case + "-" + subject.session)
+        backup.mkdir(mode=0o700)
+        sync_directory(backup.parent)
+        request = Execute(item.root / "state", backup, "identity-recover" if absence else "upgrade",
+                          subscription="anthropic-2" if absence else None)
+        # Check all paths before begin; an unaccepted fixture path cannot leave
+        # a component draining or be bypassed by a different subject.
+        request.verify(self.controller)
+        if absence:
+            require(item.window == _CLAUDE_CREATE_WINDOWS[0] and item.command == "abort-io"
+                    and item.record is None, "Only prepared-absent C1 uses targeted retirement.")
+            subject.open()
+            result = subject.execute_observed(request, "observe")
+            require(result["generation"] == item.generation, "Targeted retirement changed root generation.")
+            subject.finish(request, result)
+            self.metadata(item, state="retired")
+            subject.claude_create_refusal(request.state, absent=True)
+            self.metadata(item, state="retired")
+        else:
+            require(item.record is not None, "A present-create walk requires its original record.")
+            if item.command == "abort-io" and item.window in _CLAUDE_CREATE_WINDOWS[1:4]:
+                subject.claude_create_refusal(request.state, absent=False)
+            self.metadata(item, state="active")
+            expected = item.generation + "." + item.witness
+            before = subject.admitted_proof(request.state, "anthropic-2", expectation=expected,
+                                            name="create-before-upgrade")
+            require(before["generation"] == item.generation and before["witness"] == item.witness,
+                    "Fresh ordinary identity differs from the original create witness.")
+            self.metadata(item, state="active")
+            result = maintenance_exact_dispatch(subject, request)
+            require(result["generation"] == item.generation, "No-op format-two upgrade changed generation.")
+            self.metadata(item, state="active")
+            after = subject.admitted_proof(request.state, "anthropic-2", expectation=expected,
+                                           name="create-after-upgrade")
+            require(after == before, "Ordinary restart did not preserve the exact original proof.")
+            self.metadata(item, state="active")
+        self.controller.require_finished_graph("arbol-claude-driver")
+
+
+@dataclass(frozen=True)
+class ClaudeCreateRecovery:
+    walk: ClaudeCreateWalk
+    case_id: str = "create-publication-recovery"
+
+    def observe(self, controller: WholeCheckController) -> None:
+        require(controller is self.walk.controller and self.case_id not in self.walk.attempted,
+                "Create recovery is foreign or repeated.")
+        self.walk.attempted.add(self.case_id)
+        subjects = self.walk.prepare()
+        for item in subjects:
+            if (item.window, item.command) != (_CLAUDE_CREATE_WINDOWS[0], "abort-io"):
+                self.walk.execute(item, absence=False)
+        self.walk.finished.add(self.case_id)
+
+
+@dataclass(frozen=True)
+class ClaudeCreateAbsence:
+    walk: ClaudeCreateWalk
+    case_id: str = "create-publication-absence"
+
+    def observe(self, controller: WholeCheckController) -> None:
+        require(controller is self.walk.controller and self.case_id not in self.walk.attempted,
+                "Create absence is foreign or repeated.")
+        self.walk.attempted.add(self.case_id)
+        subjects = self.walk.prepare()
+        absent = [item for item in subjects if (item.window, item.command) ==
+                  (_CLAUDE_CREATE_WINDOWS[0], "abort-io")]
+        require(len(absent) == 1, "The unique prepared-absent original subject is missing.")
+        self.walk.execute(absent[0], absence=True)
+        self.walk.finished.add(self.case_id)
 
 
 def maintenance_four_dispatch_rows(cases: Mapping[Operation, tuple[Maintenance, Execute]]) -> dict[Operation, Object]:
