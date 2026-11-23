@@ -770,6 +770,44 @@ class Maintenance:
                 "Fresh proven identity is malformed or belongs to another Subscription.")
         return result
 
+    def claude_create_refusal(self, state: Path, *, absent: bool) -> None:
+        """Capture one of the two fixed ordinary routes in the reviewed create walk.
+
+        The caller still owns all before/after state and original-subject checks.
+        No caller-supplied command, subscription, error code or success flag is
+        accepted by this narrow observation.
+        """
+        require(self.component == "arbol-claude-driver", "Create refusal belongs to Claude only.")
+        self.controller.require_finished_graph(self.component)
+        tail = ["--state-dir", str(state), "subscriptions"]
+        if absent:
+            tail.extend(("identity", "anthropic-2"))
+        else:
+            tail.extend(("create", "--family", "anthropic", "--id", "anthropic-2",
+                         "--label", "ABR-38 duplicate create"))
+        capture = self.capture(self.controller.fixed_argv(self.component, self.payload.build, "driver", tail),
+                               "create-absence" if absent else "create-settlement")
+        require(capture.returncode == 1 and not capture.stderr,
+                "The actual ordinary create observation did not refuse cleanly.")
+        result = document(capture.stdout)
+        require(set(result) == {"error"} and isinstance(result["error"], dict)
+                and result["error"].get("code") == ("not_found" if absent else "in_use"),
+                "The actual ordinary create refusal differs from the fixed route.")
+        self.controller.require_finished_graph(self.component)
+        with self.authority.mutex():
+            graph = reconcile(self.authority, persist_unknown=False, candidate=self.controller.scope)
+            parents = [row for row in graph.writers if row["parent"] is None and row["phase"] == "terminal"
+                       and (row["pid"], row["startedAt"]) == (capture.owner.pid, capture.owner.started_at)]
+            require(graph.resolved and len(parents) == 1, "The actual refusal provider did not finish.")
+            parent = parents[0]
+            handoffs = [row for row in graph.handoffs if row["invocation"] == parent["invocation"]
+                        and row["parent"] == parent["writer"] and row["role"] == "main"
+                        and row["phase"] == "accepted" and row["entry"] == self.payload.descriptor["entry"]]
+            require(len(handoffs) == 1 and sum(row["invocation"] == parent["invocation"]
+                    and row["writer"] == handoffs[0]["child"] and row["parent"] == parent["writer"]
+                    and row["phase"] == "terminal" for row in graph.writers) == 1,
+                    "The actual refusal MAIN did not finish through its accepted handoff.")
+
 
 def maintenance_child_substitution(subject: Maintenance, request: Execute, fault: Fault) -> None:
     """Use a separate disposable subject for each selected child substitution."""
