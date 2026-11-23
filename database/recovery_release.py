@@ -751,8 +751,11 @@ def selected_entry(path: Path) -> tuple[bytes, int]:
         os.close(fd)
 
 
-def required_unit_checks(folder: Path, builds: list[dict[str, Any]]) -> set[tuple[str, str, str]]:
-    """Read the exact committed recipes retained with this release, not promotion results."""
+def unit_checks(
+    folder: Path, builds: list[dict[str, Any]], *, legacy: bool,
+) -> tuple[set[tuple[str, str, str]], set[tuple[str, str, str]]]:
+    """Derive declared and recorded unit names from the retained release evidence."""
+    declared: set[tuple[str, str, str]] = set()
     required: set[tuple[str, str, str]] = set()
     for index, build in enumerate(builds):
         if build.get("savedAt") != f"builds/{index}":
@@ -779,20 +782,43 @@ def required_unit_checks(folder: Path, builds: list[dict[str, Any]]) -> set[tupl
         if build["evidence"].get("recordedChecks") != packaging:
             raise RecoveryError("The captured Build's packaging checks differ from its committed recipe.")
         names = [row["name"] for row in checks if row.get("kind") == "unit"]
-        if (not names or any(not isinstance(name, str) or not name.strip() for name in names)
+        if ((legacy and not names) or any(not isinstance(name, str) or not name.strip() for name in names)
                 or len(set(names)) != len(names)):
-            raise RecoveryError("The committed Build recipe lacks an unambiguous top-tier unit gate.")
-        required.update((build["component"], build["build"], name) for name in names)
-    return required
+            raise RecoveryError("The committed Build recipe has ambiguous unit gates.")
+        identity = (build["component"], build["build"])
+        declared.update((*identity, name) for name in names)
+        if legacy:
+            continue
+        selection = recipe.get("promotionUnitTests")
+        if "promotionUnitTests" in recipe and (not isinstance(selection, list)
+                or any(not isinstance(name, str) or name not in names for name in selection)
+                or len(set(selection)) != len(selection)):
+            raise RecoveryError("The committed promotion unit selection is invalid.")
+        results = build["evidence"].get("promotionUnitResults", [])
+        if (not isinstance(results, list) or any(not isinstance(row, dict)
+                or set(row) != {"name", "passed"} or not isinstance(row["name"], str)
+                or not row["name"].strip() or row["passed"] is not True for row in results)):
+            raise RecoveryError("The recorded promotion unit results are invalid or failed.")
+        promoted = [row["name"] for row in results]
+        if len(set(promoted)) != len(promoted):
+            raise RecoveryError("The recorded promotion unit results are duplicated.")
+        if promoted and selection is not None and set(promoted) != set(selection):
+            raise RecoveryError("The recorded promotion units differ from the committed selection.")
+        required.update((*identity, name) for name in promoted)
+    return declared, required
 
 
 def verify_qualification(value: dict[str, Any], candidates: list[dict[str, Any]],
-                         required: set[tuple[str, str, str]]) -> None:
+                         folder: Path, builds: list[dict[str, Any]], *, capture: bool = False) -> None:
     if (set(value) != {"format", "kind", "independent", "result", "builds", "checks", "journeys"}
-            or type(value["format"]) is not int or value["format"] != 1
+            or type(value["format"]) is not int or value["format"] not in ((2,) if capture else (1, 2))
             or value["kind"] != "exchange-format-2-qualification" or value["independent"] is not True
             or value["result"] != "passed" or value["builds"] != candidates):
         raise RecoveryError("Qualification does not bind the exact candidate Builds and packages.")
+    legacy = value["format"] == 1
+    declared, promoted = unit_checks(folder, builds, legacy=legacy)
+    required = declared if legacy else promoted
+    allowed = declared | promoted
     identities = {(item["component"], item["build"]) for item in candidates}
     for group in ("checks", "journeys"):
         rows = value[group]
@@ -804,8 +830,9 @@ def verify_qualification(value: dict[str, Any], candidates: list[dict[str, Any]]
                 for row in rows):
             raise RecoveryError("Qualification contains an invalid or failed named result.")
         names = [(row["component"], row["build"], row["name"]) for row in rows]
-        if len(names) != len(set(names)) or (group == "checks" and set(names) != required):
-            raise RecoveryError("Qualification does not exactly cover the committed unit gates.")
+        if (len(names) != len(set(names)) or (group == "checks" and
+                (not required <= set(names) or not set(names) <= allowed))):
+            raise RecoveryError("Qualification does not cover the allowed and required unit results.")
 
 
 def exchange_transition_evidence(inventory: dict[str, Any], builds: list[dict[str, Any]], output: Path) -> dict[str, Any]:
@@ -886,6 +913,8 @@ def exchange_transition_evidence(inventory: dict[str, Any], builds: list[dict[st
             units = installed_record.pop("promotionUnitResults", None)
             if not isinstance(promoted, str) or not promoted or installed_record != candidate_record:
                 raise RecoveryError("The installed Build record is not the selected promoted candidate.")
+            if units != build["evidence"].get("promotionUnitResults"):
+                raise RecoveryError("Installed promotion unit results changed during capture.")
             if units is not None and (not isinstance(units, list) or any(not isinstance(row, dict)
                     or set(row) != {"name", "passed"} or not isinstance(row["name"], str)
                     or type(row["passed"]) is not bool for row in units)):
@@ -905,10 +934,9 @@ def exchange_transition_evidence(inventory: dict[str, Any], builds: list[dict[st
         private_dir(source.parent)
         if source.is_symlink() or not source.is_file() or digest(source) != spec["qualificationSha256"]:
             raise RecoveryError("The named qualification evidence does not match its approved digest.")
-        qualification = document(source)
-        verify_qualification(qualification, candidate_evidence, required_unit_checks(output, builds))
         target = output / "exchange-qualification.json"
         retain_pinned_input(source, target, spec["qualificationSha256"])
+        verify_qualification(document(target), candidate_evidence, output, builds, capture=True)
         result["qualification"] = {"sha256": spec["qualificationSha256"], "path": target.name}
     return result
 
@@ -1051,7 +1079,7 @@ def verify_exchange_transition(folder: Path, value: dict[str, Any]) -> None:
                     or (folder / attachment["path"]).is_symlink()
                     or digest(folder / attachment["path"]) != attachment["sha256"]):
                 raise RecoveryError("The archived independent qualification attachment differs.")
-            verify_qualification(document(folder / attachment["path"]), candidates, required_unit_checks(folder, builds))
+            verify_qualification(document(folder / attachment["path"]), candidates, folder, builds)
     except (AttributeError, KeyError, TypeError, ValueError, OSError, RecursionError, subprocess.SubprocessError) as error:
         raise RecoveryError("The archived Exchange transition evidence is unreadable or invalid.") from error
 
