@@ -34,6 +34,7 @@ from .driver_admission import (
     decode,
     deployment_mutex,
     fields,
+    fresh_install,
     lock_identity,
     normal_control,
     physical,
@@ -129,7 +130,7 @@ def _admission_marker(authority: Authority, control: Object, *, invocation: str,
 
 
 def launch_selected(registry: str, component: str, selected: Record, arguments: list[str],
-                    use_descriptor: int | None, *, route: str | None = None) -> int:
+                    use_descriptor: int | None, *, route: str | None = None, promotion: str | None = None) -> int:
     if component not in COMPONENTS:
         raise Refusal("Unknown Driver component.")
     layout = selected.get("dataFormat")
@@ -147,7 +148,9 @@ def launch_selected(registry: str, component: str, selected: Record, arguments: 
     try:
         _use_current(authority, selected["build"], descriptor)
         payload = registered(authority.registry, component, selected["build"])
-        verify_acceptance(authority, payload)
+        acceptance = verify_acceptance(authority, payload)
+        if promotion is not None and acceptance["evidenceSha256"] != promotion:
+            raise Refusal("Driver acceptance differs from its installed promotion record.")
         guardian = Guardian.admit(authority, payload)
         try:
             with authority.mutex():
@@ -173,6 +176,42 @@ def launch_gated(registry: str, component: str, route: str, arguments: list[str]
         return launch_selected(reg, comp, record, args, guard, route=route)
 
     return launch(registry, component, arguments, driver_launch=admitted)
+
+
+def launch_fresh(registry: Path, gate: Gate, component: str, route: str, directory: str,
+                 arguments: list[str]) -> int:
+    from arbol_installation.paths import installation_root
+
+    authority = Authority(registry, component)
+    fresh = fresh_install(registry)
+    if (fresh is None or fresh["phase"] != "complete" or fresh["gateSha256"] != gate.digest
+            or fresh["registrySha256"] != sha256(canonical(authority.identity))):
+        raise Refusal("The four Driver launchers have not finished installation.")
+    row = next(item for item in fresh["components"] if item["component"] == component)
+    gate_row = next(item for item in gate.document["components"] if item["component"] == component)
+    short_name = component.removeprefix("arbol-").removesuffix("-driver")
+    expected = installation_root() / "driver-state" / fresh["session"] / short_name
+    if (route != row["launcher"] or route != gate_row["launcher"] or directory != str(expected)
+            or directory != row["stateDirectory"] or row["launcherSha256"] != gate_row["launcherSha256"]):
+        raise Refusal("Driver launch differs from the recorded fresh installation.")
+    info = private_directory(expected).lstat()
+    if row["stateDirectoryIdentity"] != {"device": info.st_dev, "inode": info.st_ino}:
+        raise Refusal("The installed Driver state directory changed.")
+    if arguments[:1] == ["-v"]:
+        if arguments[1:2] != [row["build"]]:
+            raise Refusal(f"Only installed Driver Build {row['build']} is available.")
+        arguments = arguments[2:]
+    if any(arg == "--state-dir" or arg.startswith("--state-dir=") for arg in arguments):
+        raise Refusal("The installed Driver uses its recorded state directory.")
+    promotion = fresh["promotionSha256"]
+    raw = read_bytes(authority.shared / "promotions" / (promotion + ".json"), limit=64 * 1024)
+    if sha256(raw) != promotion:
+        raise Refusal("The stable Driver promotion record changed.")
+    record, payload = _registered_payload(registry, component, row["build"])
+    if payload.digest != row["payloadSha256"]:
+        raise Refusal("Driver package differs from the recorded installation.")
+    return launch_selected(str(registry), component, record, ["--state-dir", directory, *arguments],
+                           None, route=route, promotion=promotion)
 
 
 def launch_candidate(provider: Payload, arguments: list[str]) -> int:
@@ -521,15 +560,23 @@ def provider_entry(descriptor: Object) -> None:
                 or Path(sys.argv[0]).resolve() != Path(provider.prefix[2])):
             raise Refusal("Unverified immutable provider entry.")
         arguments = sys.argv[1:]
-        if arguments[:1] == ["--driver-launch"]:
-            if len(arguments) < 4 or arguments[2] not in COMPONENTS:
+        if arguments[:1] in (["--driver-launch"], ["--driver-launch-fresh"]):
+            fresh_route = arguments[0] == "--driver-launch-fresh"
+            if len(arguments) < (5 if fresh_route else 4) or arguments[2] not in COMPONENTS:
                 raise Refusal("Invalid fixed Driver launcher dispatch.")
             registry = physical(arguments[1])
-            selected = verify_gate(registry).provider
+            gate = verify_gate(registry)
+            selected = gate.provider
             if selected.root != provider.root or selected.digest != provider.digest:
                 raise Refusal("Driver launcher provider differs from installed gate.")
             with pin_payloads(registry, [provider]):
-                result = launch_gated(str(registry), arguments[2], arguments[3], arguments[4:])
+                if fresh_route:
+                    result = launch_fresh(registry, gate, arguments[2], arguments[3], arguments[4], arguments[5:])
+                else:
+                    fresh = fresh_install(registry)
+                    if fresh is not None and fresh["gateSha256"] == gate.digest:
+                        raise Refusal("Use the installed Driver launcher with its recorded state directory.")
+                    result = launch_gated(str(registry), arguments[2], arguments[3], arguments[4:])
             raise SystemExit(result)
         if arguments[:1] == ["--qualification-launch"]:
             raise SystemExit(launch_candidate(provider, arguments))

@@ -389,7 +389,8 @@ def early_driver_signals(source: bytes) -> bytes:
     return future + SIGINT_LINE.encode("ascii") + b"\n" + source[len(future):]
 
 
-def driver_launcher_source(registry: str, component: str, route: str, provider: Payload) -> bytes:
+def driver_launcher_source(registry: str, component: str, route: str, provider: Payload, *,
+                           state_directory: Path | None = None) -> bytes:
     """Stage exact gate bytes; this function never installs or issues acceptance."""
     from .driver_admission import COMPONENTS, physical
     from .driver_payload import SUBTREE, load
@@ -409,7 +410,12 @@ def driver_launcher_source(registry: str, component: str, route: str, provider: 
     # This route always executes the exact M-inventoried sealed provider entry.
     # It never renders trusted bootstrap bytes from mutable source/installed
     # library modules. This is the same fixed literal wrapper used for spaces.
-    words = [interpreter, "-ISB", entry, "--driver-launch", str(registry_path), component, str(target)]
+    selector = "--driver-launch" if state_directory is None else "--driver-launch-fresh"
+    words = [interpreter, "-ISB", entry, selector, str(registry_path), component, str(target)]
+    if state_directory is not None:
+        if not state_directory.is_absolute() or ".." in state_directory.parts:
+            raise ValueError("A fresh Driver launcher requires its exact absolute state directory.")
+        words.append(str(state_directory))
     command = "exec " + " ".join(shlex.quote(word) for word in words) + ' "$@"\n'
     return ("#!/bin/sh\n" + DRIVER_LAUNCHER_MARK + "\n" + command).encode("utf-8")
 
@@ -517,8 +523,10 @@ def driver_gate_identity(path: Path) -> tuple[str, str] | None:
             raise ValueError
         if lines[0] == "#!/bin/sh":
             words = shlex.split("\n".join(lines[2:]), posix=True)
-            if (len(words) != 9 or words[0] != "exec" or words[2] != "-ISB"
-                    or words[4] != "--driver-launch" or words[8] != "$@"):
+            if (len(words) not in (9, 10) or words[0] != "exec" or words[2] != "-ISB" or words[-1] != "$@"):
+                raise ValueError
+            if ((len(words) == 9 and words[4] != "--driver-launch")
+                    or (len(words) == 10 and (words[4] != "--driver-launch-fresh" or not Path(words[8]).is_absolute()))):
                 raise ValueError
             registry, component, route = words[5:8]
         else:

@@ -472,11 +472,42 @@ def read_handoff(authority: Authority, handoff: str) -> Object:
     return value
 
 
+def fresh_install(registry: Path) -> Object | None:
+    try:
+        value = read(registry / ".driver-qualification" / "fresh-install.json")
+    except FileNotFoundError:
+        return None
+    fields(value, "version kind mode session boot registrySha256 gateSha256 promotionSha256 phase components")
+    if (value["kind"] != "driver-fresh-install" or value["mode"] != "fresh"
+            or value["phase"] not in ("staging", "complete")
+            or not canonical_uuid(value["session"]) or not canonical_uuid(value["boot"])
+            or any(not valid_hash(value[name]) for name in ("registrySha256", "gateSha256", "promotionSha256"))
+            or not isinstance(value["components"], list) or len(value["components"]) != len(COMPONENTS)):
+        refuse()
+    row_fields = set("component build payloadSha256 launcher launcherSha256 stateDirectory stateDirectoryIdentity epoch".split())
+    for name, row in zip(COMPONENTS, value["components"], strict=True):
+        if (not isinstance(row, dict) or set(row) != row_fields or row["component"] != name
+                or not isinstance(row["build"], str) or not isinstance(row["launcher"], str)
+                or not isinstance(row["stateDirectory"], str) or not valid_hash(row["payloadSha256"])
+                or not valid_hash(row["launcherSha256"]) or not valid_token(row["epoch"])):
+            refuse()
+        identity = row["stateDirectoryIdentity"]
+        if identity is None and value["phase"] == "staging":
+            continue
+        if (not isinstance(identity, dict) or set(identity) != {"device", "inode"}
+                or not natural(identity["device"]) or not natural(identity["inode"], positive=True)):
+            refuse()
+    return value
+
+
 def normal_control(authority: Authority, *, epoch: str | None = None,
                    candidate: CandidateScope | None = None) -> Object:
     """Caller holds the mutex. A durable closed deployment overrides normal controls."""
     control = authority.read("control")
     if control["phase"] != "normal" or (epoch is not None and control["epoch"] != epoch):
+        refuse()
+    fresh = fresh_install(authority.registry)
+    if fresh is not None and fresh["phase"] != "complete":
         refuse()
     deployment = authority.shared / "deployment.json"
     if deployment.exists():
