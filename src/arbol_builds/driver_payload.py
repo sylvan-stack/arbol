@@ -361,6 +361,43 @@ class Gate:
     candidate: CandidateScope | None = None
 
 
+def _private_registration(registry: Path, component: str, build: str, folder: Path) -> tuple[Object, Object]:
+    import pwd
+
+    if registry != build_registry(Path(pwd.getpwuid(os.getuid()).pw_dir)):
+        refuse()
+    wrapper = decode(read_bytes(folder / "driver-registration.json", limit=MANIFEST_LIMIT), limit=MANIFEST_LIMIT)
+    fields(wrapper, "version kind registrationSha256 record")
+    digest, record = wrapper["registrationSha256"], wrapper["record"]
+    if wrapper["kind"] != "driver-registered-build" or not valid_hash(digest) or not isinstance(record, dict):
+        refuse()
+    shared = private_directory(registry / ".driver-qualification")
+    history = private_directory(shared / "registrations")
+    raw = read_bytes(history / (digest + ".json"), limit=MANIFEST_LIMIT)
+    group = decode(raw, limit=MANIFEST_LIMIT)
+    fields(group, "version kind scope builds")
+    expected = sorted((*COMPONENTS, "arbol"))
+    if (sha256(raw) != digest or group["kind"] != "driver-build-registration"
+            or group["scope"] != str(registry) or not isinstance(group["builds"], list)
+            or len(group["builds"]) != len(expected)):
+        refuse()
+    selected: Object | None = None
+    row_fields = set("component build source manifestSha256 descriptorSha256 recordSha256 entry entrySha256 entryMode candidate".split())
+    for name, row in zip(expected, group["builds"], strict=True):
+        if (not isinstance(row, dict) or set(row) != row_fields or row["component"] != name
+                or not isinstance(row["build"], str) or BUILD.fullmatch(row["build"]) is None
+                or any(not valid_hash(row[key]) for key in (
+                    "manifestSha256", "descriptorSha256", "recordSha256", "entrySha256"))):
+            refuse()
+        if name == component and row["build"] == build:
+            selected = row
+    if (selected is None or sha256(canonical(record)) != selected["recordSha256"]
+            or record.get("entry") != selected["entry"] or record.get("status") != "working"
+            or record.get("packageOnly") is not True or record.get("stableCandidate") is not True):
+        refuse()
+    return record, selected
+
+
 def _registered_payload(registry: Path, component: str, build: str) -> tuple[Object, Payload]:
     """Read one physical registered image, without assigning launch authority."""
     from .launcher import executable_entry, valid_record
@@ -369,12 +406,25 @@ def _registered_payload(registry: Path, component: str, build: str) -> tuple[Obj
         refuse()
     private_directory(registry)
     folder = private_directory(registry / component / build)
-    record = decode(read_bytes(folder / "build.json"), exact=False)
+    row = None
+    if os.path.lexists(folder / "driver-registration.json"):
+        if os.path.lexists(folder / "build.json"):
+            refuse()
+        record, row = _private_registration(registry, component, build, folder)
+    else:
+        record = decode(read_bytes(folder / "build.json"), exact=False)
     payload_folder = build_payload_directory(registry, component, build)
-    if (not valid_record(record, component, build) or record.get("prunedAt")
-            or executable_entry(str(payload_folder), record.get("entry")) is None):
+    entry = executable_entry(str(payload_folder), record.get("entry"))
+    if not valid_record(record, component, build) or record.get("prunedAt") or entry is None:
         refuse()
     payload = load(payload_folder / SUBTREE, component, build)
+    if row is not None and (payload.digest != row["descriptorSha256"]
+                            or payload.descriptor["payloadManifestSha256"] != row["manifestSha256"]
+                            or payload.descriptor["source"] != row["source"]
+                            or not natural(row["entryMode"])
+                            or stat.S_IMODE(Path(entry).lstat().st_mode) != row["entryMode"]
+                            or _file_hash(Path(entry))[1] != row["entrySha256"]):
+        refuse()
     source = record.get("source")
     if (not isinstance(source, dict) or source.get("commit") != payload.descriptor["source"]["commit"]
             or source.get("uncommittedChanges") is not False):
