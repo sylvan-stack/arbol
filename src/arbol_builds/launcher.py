@@ -212,9 +212,11 @@ def valid_record(value: object, component: str, build: str) -> bool:
         return False
     if "entry" in value and entry_path("/build", value["entry"]) is None:
         return False
+    packaged_candidate = value.get("packageOnly") is True and value.get("stableCandidate") is True
     if value["status"] in ("working", "withdrawn") and (
-            not date(value.get("finishedAt")) or not text(value.get("entry")) or (selection is None and not checks)
-            or not set(selection or ()).issubset(check["name"] for check in checks)
+            not date(value.get("finishedAt")) or not text(value.get("entry"))
+            or (not packaged_candidate and ((selection is None and not checks)
+                or not set(selection or ()).issubset(check["name"] for check in checks)))
             or any(check["passed"] is not True for check in checks)):
         return False
     if value["status"] == "withdrawn":
