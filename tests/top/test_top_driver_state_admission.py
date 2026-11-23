@@ -2776,14 +2776,31 @@ class TerminalSpanObservation:
         h1_index: int | None = None
         for index, row in enumerate(view.settled["helpers"]):
             prefix = f"terminal-helper-{index:04d}."
-            context_raw = view.images[prefix + "context"].raw
+            broker = self.component == "arbol-claude-driver" and index == 10
+            if broker:
+                require(prefix + "context" not in view.images,
+                        "Broker registration context must stay at its private authority.")
+                context_raw = read_bytes(authority.folder / "handoffs" / (row["handoff"] + ".context.json"))
+                require(digest(context_raw) == row["contextSha256"], "Actual private broker context changed.")
+            else:
+                context_raw = view.images[prefix + "context"].raw
             context = document(context_raw, limit=65536)
             accepted_raw = read_bytes(authority.folder / "handoffs" / (context["handoff"] + ".json"))
             accepted = document(accepted_raw)
             ack_raw = view.images[prefix + "ack"].raw
             ack = _h1_canonical(ack_raw, limit=65536)
-            if self.component == "arbol-codex-driver":
-                expected_ack: Object = {"version": 1, "kind": "abr38-terminal-helper-actual-ack",
+            if broker:
+                expected_ack: Object = {"version": 1, "kind": "abr38-broker-registration",
+                    "pid": context["process"]["pid"], "contextSha256": digest(context_raw),
+                    "handoffSha256": digest(accepted_raw), "joinedReturn": "none"}
+                result = _h1_canonical(view.images[prefix + "result"].raw, limit=65536)
+                require(context["entry"] == "bin/metadata-helper.py" and row["waitStatus"] == 0
+                        and result == {"version": 1, "kind": "abr38-broker-close",
+                            "pid": context["process"]["pid"], "closedReplySha256": digest(canonical({"type": "closed"})),
+                            "waitStatus": 0, "applicationChannel": "closed", "streams": "devnull"},
+                        "Actual broker registration or distinct application close observation is unavailable.")
+            elif self.component == "arbol-codex-driver":
+                expected_ack = {"version": 1, "kind": "abr38-terminal-helper-actual-ack",
                     "handoff": accepted, "contextSha256": digest(context_raw), "process": context["process"],
                     "ackPath": "synchronous-acknowledge-returned-before-ticket-close"}
             elif self.component == "arbol-pi-driver":
