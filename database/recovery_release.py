@@ -549,17 +549,31 @@ def capture_build(
             or version != record["packageVersion"] or not entry_path.resolve(strict=True).is_relative_to(folder)
             or not entry_path.is_file() or not os.access(entry_path, os.X_OK)):
         raise RecoveryError("Build identity, entry or package version differs from its committed configuration.")
+    transition = inventory.get("exchangeTransition")
     expected_checks = [{"name": check["name"], "passed": True} for check in build_config["checks"]]
     recorded_checks = record.get("checks")
-    if recorded_checks != expected_checks or any(check["passed"] is not True for check in recorded_checks):
+    if transition is None and (recorded_checks != expected_checks or any(check["passed"] is not True for check in recorded_checks)):
         raise RecoveryError("The Build has not recorded every committed check as successful.")
+    if transition is not None and (not isinstance(recorded_checks, list) or any(
+            not isinstance(check, dict) or set(check) != {"name", "passed"} or not isinstance(check["name"], str)
+            or not check["name"] or type(check["passed"]) is not bool for check in recorded_checks)):
+        raise RecoveryError("The installed Build's historical checks are unreadable.")
+    if transition is not None and transition["role"] == "successor" and (
+            not expected_checks or recorded_checks != expected_checks):
+        raise RecoveryError("The successor Build lacks its exact successful Build checks.")
 
     evidence: dict[str, Any] = {}
+    if transition is not None:
+        evidence["recordedChecks"] = recorded_checks
+        if "promotionUnitResults" in record:
+            evidence["promotionUnitResults"] = record["promotionUnitResults"]
     payload = folder
     sealed = folder / "driver-payload"
     git_tree = None
     native_consumer_parent = None
-    if os.path.lexists(sealed) or (layout >= 2 and component in SEALED_LAYOUT_2):
+    require_sealed = layout >= 2 and component in SEALED_LAYOUT_2 and not (
+        transition is not None and transition["role"] == "prior")
+    if os.path.lexists(sealed) or require_sealed:
         git_tree = commit_id(git(checkout, "rev-parse", f"{commit}^{{tree}}").decode().strip())
         evidence["sealedPayload"] = sealed_payload_evidence(sealed, component, build, commit, git_tree)
         if component != "arbol":
@@ -696,6 +710,167 @@ def exchange_capabilities(value: object, builds: object) -> dict[str, Any]:
     return value
 
 
+def exchange_transition_spec(value: object) -> dict[str, Any]:
+    if (not isinstance(value, dict) or value.get("role") not in ("prior", "successor")
+            or set(value) != ({"role", "admissionRelease", "admissionReleaseDirectory"} if value.get("role") == "prior"
+                              else {"role", "admissionRelease", "admissionReleaseDirectory", "qualification", "qualificationSha256"})
+            or not isinstance(value.get("admissionRelease"), str)
+            or DIGEST.fullmatch(value["admissionRelease"]) is None
+            or not isinstance(value.get("admissionReleaseDirectory"), str)
+            or not Path(value["admissionReleaseDirectory"]).is_absolute()):
+        raise RecoveryError("Invalid Exchange transition capture specification.")
+    if value["role"] == "successor" and (not isinstance(value["qualification"], str)
+            or not isinstance(value["qualificationSha256"], str)
+            or DIGEST.fullmatch(value["qualificationSha256"]) is None):
+        raise RecoveryError("The successor needs an exact independent qualification record.")
+    return value
+
+
+def selected_entry(path: Path) -> tuple[bytes, int]:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_nlink != 1
+                or not before.st_mode & 0o111):
+            raise RecoveryError("A selected stable entry is not an owned executable file.")
+        raw = bytearray()
+        while len(raw) <= 65536:
+            chunk = os.read(fd, min(65536, 65537 - len(raw)))
+            if not chunk:
+                break
+            raw.extend(chunk)
+        after = os.fstat(fd)
+        named = path.lstat()
+        if (len(raw) > 65536 or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+                or (before.st_dev, before.st_ino) != (named.st_dev, named.st_ino)):
+            raise RecoveryError("A selected stable entry changed during capture.")
+        return bytes(raw), stat.S_IMODE(before.st_mode)
+    finally:
+        os.close(fd)
+
+
+def exchange_transition_evidence(inventory: dict[str, Any], builds: list[dict[str, Any]], output: Path) -> dict[str, Any]:
+    """Capture selected stable routes and bind successor qualification to candidate and installed bytes."""
+    spec = exchange_transition_spec(inventory["exchangeTransition"])
+    required = {"arbol", "arbol-trunk/steady", "arbol-trunk/trivial"}
+    if len(builds) != 3 or {build["component"] for build in builds} != required:
+        raise RecoveryError("An Exchange release must identify exactly the Backend and both Trunks.")
+    items = inventory["builds"]
+    selected: list[dict[str, Any]] = []
+    candidate_evidence: list[dict[str, Any]] = []
+    for index, (item, build) in enumerate(zip(items, builds, strict=True)):
+        component, number = build["component"], build["build"]
+        folder = Path(item["directory"])
+        expected = Path.home() / ".local/lib/sylvan-stack/arbol/stable" / component / number
+        if folder != expected or folder.resolve(strict=True) != expected:
+            raise RecoveryError("Exchange capture requires the exact installed stable payload path.")
+        record = document(folder / "build.json")
+        guard = (folder / "use.lock").lstat()
+        if (not stat.S_ISREG(guard.st_mode) or guard.st_uid != os.getuid() or guard.st_nlink != 1
+                or stat.S_IMODE(guard.st_mode) != 0o600):
+            raise RecoveryError("The installed payload's use lock is not a private regular file.")
+        routes = [component.replace("/", "-")]
+        if component == "arbol":
+            routes.append("arbol-exchanges")
+        entry_evidence = []
+        for name in routes:
+            route = Path.home() / "Applications/Arbol/bin" / name
+            raw, mode = selected_entry(route)
+            lines = raw.splitlines()
+            marker = b"# stable-payload " + os.fsencode(expected)
+            marker_index = 2 if component.startswith("arbol-trunk/") else 1
+            if len(lines) <= marker_index or lines[marker_index] != marker:
+                raise RecoveryError("A stable entry does not select the recorded payload.")
+            if marker_index == 2:
+                prefix = b"# arbol-installed-trunk "
+                if not lines[1].startswith(prefix):
+                    raise RecoveryError("A stable Trunk entry lacks its identity.")
+                metadata = json.loads(lines[1][len(prefix):])
+                if metadata != {key: record[key] for key in ("component", "build", "installationLayout", "schemaCompatibility")}:
+                    raise RecoveryError("A stable Trunk entry differs from its installed Build.")
+            entry = "bin/arbol-exchanges" if name == "arbol-exchanges" else record["entry"]
+            executable = str(expected / relative(entry))
+            expected_body = [b"import fcntl", b"import json", b"import os", b"import sys", b"",
+                b"arguments = sys.argv[1:]", b'if arguments[:1] == ["-v"]:',
+                f"    if arguments[1:2] != [{number!r}]:".encode(),
+                b'        print(json.dumps({"error": {"code": "refused", "message": "Only the installed stable Build is available."}}))',
+                b"        raise SystemExit(1)", b"    arguments = arguments[2:]",
+                f"guard = os.open({str(expected / 'use.lock')!r}, os.O_RDONLY | os.O_NOFOLLOW)".encode(),
+                b"fcntl.flock(guard, fcntl.LOCK_SH)", b"os.set_inheritable(guard, True)",
+                f"os.execv({executable!r}, [{executable!r}, *arguments])".encode()]
+            if not lines[0].startswith(b"#!") or not lines[0].endswith(b" -ISB") or lines[marker_index + 1:] != expected_body:
+                raise RecoveryError("A selected stable entry does not execute its recorded payload entry.")
+            interpreter = Path(os.fsdecode(lines[0][2:-5]))
+            runtime = (Path.home() / ".local/lib/sylvan-stack/arbol/bin/.arbol-builds/runtime").resolve(strict=True)
+            actual_interpreter = interpreter.resolve(strict=True)
+            if (not interpreter.is_absolute() or not actual_interpreter.is_relative_to(runtime)
+                    or not actual_interpreter.is_file() or not os.access(actual_interpreter, os.X_OK)):
+                raise RecoveryError("A selected stable entry does not use the managed Build interpreter.")
+            interpreter_sha = digest(actual_interpreter)
+            route_sha = sha(raw)
+            destination = output / "builds" / str(index) / ("entry-" + name)
+            with os.fdopen(os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), "wb") as stream:
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            if selected_entry(route) != (raw, mode):
+                raise RecoveryError("A stable entry changed during capture.")
+            entry_evidence.append({"name": name, "sha256": route_sha, "mode": mode,
+                                   "interpreter": str(interpreter), "interpreterSha256": interpreter_sha,
+                                   "savedAt": destination.relative_to(output).as_posix()})
+        selected.append({"component": component, "build": number, "entries": entry_evidence})
+        if spec["role"] == "successor":
+            candidate = Path(item["candidateDirectory"]).resolve(strict=True)
+            candidate_record = document(candidate / "build.json")
+            installed_record = dict(record)
+            promoted = installed_record.pop("promotedAt", None)
+            units = installed_record.pop("promotionUnitResults", None)
+            if not isinstance(promoted, str) or not promoted or installed_record != candidate_record:
+                raise RecoveryError("The installed Build record is not the selected promoted candidate.")
+            if units is not None and (not isinstance(units, list) or any(not isinstance(row, dict)
+                    or set(row) != {"name", "passed"} or not isinstance(row["name"], str)
+                    or type(row["passed"]) is not bool for row in units)):
+                raise RecoveryError("Installed promotion unit results are unreadable.")
+            excluded = frozenset(MUTABLE_BUILD_FILES | {"build.json", "use.lock"})
+            if (os.path.lexists(candidate / "use.lock") or tree(candidate, exclude=excluded) != tree(folder, exclude=excluded)):
+                raise RecoveryError("Installed payload differs from the qualified candidate beyond promotion changes.")
+            candidate_evidence.append({"component": component, "build": number,
+                "candidateSha256": sha(canonical(tree(candidate, exclude=frozenset(MUTABLE_BUILD_FILES)))),
+                "packageManifestSha256": build["evidence"]["packageManifestSha256"],
+                "checks": candidate_record["checks"]})
+    result: dict[str, Any] = {"role": spec["role"], "admissionRelease": spec["admissionRelease"],
+                              "admissionReleaseDirectory": spec["admissionReleaseDirectory"], "selected": selected}
+    if spec["role"] == "successor":
+        source = Path(spec["qualification"])
+        private_dir(source.parent)
+        if source.is_symlink() or not source.is_file() or digest(source) != spec["qualificationSha256"]:
+            raise RecoveryError("The named qualification evidence does not match its approved digest.")
+        qualification = document(source)
+        if (set(qualification) != {"format", "kind", "independent", "result", "builds", "checks"}
+                or type(qualification["format"]) is not int or qualification["format"] != 1
+                or qualification["kind"] != "exchange-format-2-qualification"
+                or qualification["independent"] is not True or qualification["result"] != "passed"
+                or qualification["builds"] != candidate_evidence):
+            raise RecoveryError("Qualification does not bind the exact candidate Builds, packages and checks.")
+        checks = qualification["checks"]
+        identities = {(item["component"], item["build"]) for item in candidate_evidence}
+        if (not isinstance(checks, list) or not checks or any(not isinstance(row, dict)
+                or set(row) != {"component", "build", "name", "passed"}
+                or not isinstance(row["component"], str) or not isinstance(row["build"], str)
+                or (row["component"], row["build"]) not in identities
+                or not isinstance(row["name"], str) or not row["name"].strip() or row["passed"] is not True
+                for row in checks)):
+            raise RecoveryError("Qualification checks must pass for the exact selected Builds.")
+        names = [(row["component"], row["build"], row["name"]) for row in checks]
+        if len(set(names)) != len(names) or {(row["component"], row["build"]) for row in checks} != identities:
+            raise RecoveryError("Qualification must cover every selected Build without duplicate checks.")
+        target = output / "exchange-qualification.json"
+        retain_pinned_input(source, target, spec["qualificationSha256"])
+        result["qualification"] = {"sha256": spec["qualificationSha256"], "path": target.name}
+    return result
+
+
 def record_release(inventory_path: Path, destination: Path) -> str:
     archive = require_archive()
     private_dir(inventory_path.parent)
@@ -703,6 +878,14 @@ def record_release(inventory_path: Path, destination: Path) -> str:
     kind = inventory["kind"]
     if kind not in ("legacy", "current") or not isinstance(inventory["builds"], list):
         raise RecoveryError("Select a legacy or current release with an explicit Build inventory.")
+    if "exchangeTransition" in inventory:
+        transition_spec = exchange_transition_spec(inventory["exchangeTransition"])
+        if kind != "current":
+            raise RecoveryError("Exchange transition capture requires a current release.")
+        if (transition_spec["role"] == "successor") != ("exchangeCapabilities" in inventory):
+            raise RecoveryError("Only the successor capture must declare Exchange capabilities.")
+        verify_release(Path(transition_spec["admissionReleaseDirectory"]), transition_spec["admissionRelease"],
+                       archive=archive)
     configuration = inventory["configuration"]
     required = {"installation", "root"} if kind == "legacy" else {"installation"}
     if not isinstance(configuration, dict) or not required <= configuration.keys():
@@ -729,10 +912,13 @@ def record_release(inventory_path: Path, destination: Path) -> str:
             problems.append("The legacy Arbol package must preserve its exact external Root Contract SQL.")
         if problems:
             raise RecoveryError("Unresolved release provenance: " + " ".join(problems))
+        transition = exchange_transition_evidence(inventory, builds, output) if "exchangeTransition" in inventory else None
         labels = copy_configuration(configuration, output / "configuration")
         inputs = copy_configuration(inventory.get("inputs", {}), output / "inputs")
         payload = {"format": 1, "kind": kind, "builds": builds, "configuration": labels, "inputs": inputs,
                    "files": tree(output)}
+        if transition is not None:
+            payload["exchangeTransition"] = transition
         if "exchangeCapabilities" in inventory:
             if kind != "current":
                 raise RecoveryError("Exchange capabilities require a current release.")
