@@ -108,6 +108,7 @@ class State:
     source: Source
     session: str | None
     release: str | None
+    exchange_authorization: str | None = None
 
 
 def read_state(folder: int, *, layout: int = INSTALLATION_LAYOUT) -> State:
@@ -120,18 +121,22 @@ def read_state(folder: int, *, layout: int = INSTALLATION_LAYOUT) -> State:
     finally:
         os.close(fd)
     value = json.loads(raw)
-    if (not isinstance(value, dict) or value.keys() != {"format", "state", "generation", "source", "session", "release"}
+    keys = {"format", "state", "generation", "source", "session", "release"}
+    if (not isinstance(value, dict) or set(value) not in (keys, keys | {"exchangeAuthorization"})
             or type(value["format"]) is not int or value["format"] != layout):
         raise ValueError("Unknown admission format.")
     phase, generation, session, release = (value[key] for key in ("state", "generation", "session", "release"))
+    authorization = value.get("exchangeAuthorization")
     if (phase not in ("normal", "draining", "exclusive")
             or not isinstance(generation, str) or TOKEN.fullmatch(generation) is None
             or (session is not None and (not isinstance(session, str) or TOKEN.fullmatch(session) is None))
             or (release is not None and (not isinstance(release, str) or SHA256.fullmatch(release) is None))
+            or ("exchangeAuthorization" in value and (not isinstance(authorization, str)
+                or SHA256.fullmatch(authorization) is None or release is None))
             or (phase == "normal" and (session is not None or release is None))
             or (phase != "normal" and session is None)):
         raise ValueError("Unknown admission state.")
-    return State(phase, generation, checked_source(value["source"]), session, release)
+    return State(phase, generation, checked_source(value["source"]), session, release, authorization)
 
 
 @dataclass
@@ -197,6 +202,11 @@ def directory_lease(runtime: Path, mode: Mode, generation: str | None) -> Iterat
 def staged_state(folder: int, state: State, *, layout: int = INSTALLATION_LAYOUT) -> str:
     value = {"format": layout, "state": state.phase, "generation": state.generation,
              "source": state.source, "session": state.session, "release": state.release}
+    if state.exchange_authorization is not None:
+        if (not isinstance(state.exchange_authorization, str)
+                or SHA256.fullmatch(state.exchange_authorization) is None or state.release is None):
+            raise ValueError("Invalid Exchange authorization commitment.")
+        value["exchangeAuthorization"] = state.exchange_authorization
     name = f".{uuid4().hex}.tmp"
     fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder)
     try:

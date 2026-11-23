@@ -92,7 +92,8 @@ def begin_maintenance(source: Source, *, runtime: Path | None = None) -> str:
         # Normal -> draining closes only ordinary admission. Already-admitted
         # controlled dispatch can still reach its child in this generation.
         generation = state.generation if state else uuid4().hex
-        write_state(folder, State("draining", generation, source, session, state.release if state else None))
+        write_state(folder, State("draining", generation, source, session, state.release if state else None,
+                                  state.exchange_authorization if state else None))
         return session
 
 
@@ -151,7 +152,8 @@ def freeze(context: Context, source: Source, session: str) -> str:
         if state.phase == "draining":
             drained_inventory(context)
             asyncio.run(inspect_database(context, source, idle=True))
-            write_state(folder, State("exclusive", uuid4().hex, state.source, session, state.release))
+            write_state(folder, State("exclusive", uuid4().hex, state.source, session, state.release,
+                                      state.exchange_authorization))
         else:
             os.fsync(folder)
         return session
@@ -185,6 +187,8 @@ def reopen(context: Context, source: Source, session: str, *, release: str, sche
         idle = state.phase == "exclusive"
         if not idle and release != state.release:
             raise Refusal("maintenance", "Only the unchanged prior release can resume during drainage.")
+        if state.exchange_authorization is not None and release != state.release:
+            raise Refusal("maintenance", "Changing an authorized Exchange release requires its guarded transition.")
         # Keep the operator lock but allow accepted work to progress while the
         # operator verifies the unchanged release during drainage.
         if verify_release() != release:
@@ -194,4 +198,5 @@ def reopen(context: Context, source: Source, session: str, *, release: str, sche
                 drained_inventory(context)
             if asyncio.run(inspect_database(context, source, idle=idle)) != schema:
                 raise Refusal("schema_incompatible", "The installed schema does not match the verified release.")
-            write_state(folder, State("normal", uuid4().hex, state.source, None, release))
+            write_state(folder, State("normal", uuid4().hex, state.source, None, release,
+                                      state.exchange_authorization))
