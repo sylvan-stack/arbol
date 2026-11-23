@@ -475,6 +475,129 @@ def claude_create_subjects(controller: WholeCheckController, baseline: Baseline,
     return tuple(subjects)
 
 
+_PI_CREATE_WINDOWS = _CLAUDE_CREATE_WINDOWS
+
+
+@dataclass(frozen=True)
+class PiCreateSubject:
+    """Original immutable evidence, captured before any external operation."""
+
+    window: str
+    command: str
+    case: str
+    root: Path
+    root_identity: Object
+    physical: Object
+    owner: FileImage
+    checkpoint: FileImage
+    settlement: FileImage
+    actor_result: FileImage
+    ack: FileImage
+    root_proof: FileImage
+    guard: FileImage
+    record: FileImage | None
+    generation: str
+    witness: str
+
+
+def pi_create_subjects(controller: WholeCheckController, baseline: Baseline,
+                           observer: TerminalSpanObservation) -> tuple[PiCreateSubject, ...]:
+    """Bind all ten genuine source-owned subjects before maintenance changes any."""
+    component = "arbol-pi-driver"
+    require(observer.component == component, "Create evidence belongs to another component.")
+    H1SpanCompletion(observer, controller, baseline, component, observer.case).observe(controller)
+    TerminalCloseClosure(observer, controller, baseline, component, observer.case).observe(controller)
+    view = observer.terminal_view
+    assert view is not None
+    suite = view.h1.suite_context
+    helpers = view.settled["helpers"]
+    require(isinstance(helpers, list) and len(helpers) == 11,
+            "The ten create actors and final H1 actor have not all settled.")
+    subjects: list[PiCreateSubject] = []
+    for index, (window, command) in enumerate((w, c) for w in _PI_CREATE_WINDOWS
+                                               for c in ("continue", "abort-io")):
+        prefix = f"terminal-helper-{index:04d}."
+        context = document(view.images[prefix + "context"].raw)
+        actor_raw = view.images[prefix + "result"].raw
+        actor = document(actor_raw)
+        case = actor.get("case")
+        require(isinstance(case, str) and re.fullmatch(r"[0-9a-f]{32}", case, re.ASCII) is not None
+                and case != observer.case and case not in {item.case for item in subjects}
+                and context["invocation"] == suite["invocation"]
+                and context["parent"] == {"writer": suite["writer"], **suite["process"]}
+                and context["entry"] == "tests/identity_actor.py" and context["role"] == "helper"
+                and actor == {"version": 1, "kind": "actor-result", "case": case, "action": "create-stop",
+                              "outcome": "completed" if command == "continue" else "injected-failure"}
+                and helpers[index]["waitStatus"] == (0 if command == "continue" else 1),
+                "Original actor, ordered result or actual wait differs.")
+        controller.workspace.verify(controller.evidence)
+        root = controller.workspace.fixture_root / component / "create-publication" / suite["invocation"] / case
+        for directory in (controller.workspace.registry.parent, controller.workspace.fixture_root,
+                          controller.workspace.fixture_root / component,
+                          controller.workspace.fixture_root / component / "create-publication", root.parent):
+            physical_owned(directory, directory=True)
+        root_identity = directory_identity(root)
+        state, subscription = root / "state", root / "state" / "subscriptions" / "zai-2"
+        physical_owned(state, directory=True)
+        physical_owned(subscription, directory=True)
+        owner = read_image(root / ".fixture-owner.json")
+        require(document(owner.raw) == {"version": 1, "case": case, "component": component,
+                "invocation": suite["invocation"], "parentWriter": suite["writer"],
+                "payloadSha256": controller.scope.producer(component).digest}, "Original fixture owner differs.")
+        checkpoint, settlement = (read_image(root / name) for name in
+                                  ("create-checkpoint.json", "create-settlement.json"))
+        actor_result, ack = read_image(root / "create-actor-result.json"), read_image(root / "create-helper-ack.json")
+        require(actor_result.raw == actor_raw and ack.raw == view.images[prefix + "ack"].raw,
+                "Original actor result or actual synchronous ACK changed.")
+        before, after = document(checkpoint.raw), document(settlement.raw)
+        require(before.get("window") == after.get("window") == window
+                and before.get("command") == after.get("command") == command,
+                "Original checkpoint and settlement identify another case.")
+        position = index // 2 + 1
+        journal, record, sidecar = (before.get(key) for key in ("journal", "record", "sidecar"))
+        require((journal is not None) == (position <= 4) and (record is not None) == (position >= 2)
+                and (sidecar is not None) == (position >= 3), "Original checkpoint window differs.")
+        if journal is not None:
+            require(isinstance(journal, dict) and journal.get("operation") == "create"
+                    and journal.get("phase") == ("committed" if position == 4 else "prepared"),
+                    "Original create journal is malformed.")
+        witness = journal.get("witness") if isinstance(journal, dict) else (
+            sidecar.get("witness") if isinstance(sidecar, dict) else None)
+        require(valid_token(witness), "Original create witness is unavailable.")
+        require(sidecar is None or sidecar == {"version": 1, "state": "active", "witness": witness},
+                "Original checkpoint sidecar differs from the journal witness.")
+        if command == "abort-io":
+            require(all(after.get(key) == before.get(key) for key in ("journal", "record", "sidecar")),
+                    "Actual injected failure did not retain its original checkpoint.")
+        else:
+            require(after.get("journal") is None and isinstance(after.get("record"), dict)
+                    and after.get("sidecar") == {"version": 1, "state": "active", "witness": witness},
+                    "Actual continued create did not finish with its original witness.")
+        for name, key in (("identity-pending.json", "journal"), ("record.json", "record"),
+                          ("identity.json", "sidecar")):
+            path = subscription / name
+            current = document(read_image(path).raw) if os.path.lexists(path) else None
+            require(current == after.get(key), "Saved subject differs from its actual settled checkpoint.")
+        proof, guard = read_image(state / "identity.json"), read_image(state / "identity.guard")
+        state_identity = directory_identity(state)
+        physical = {"case": {key: root_identity[key] for key in ("device", "inode")},
+                    "state": {key: state_identity[key] for key in ("device", "inode")},
+                    "guard": {"device": guard.device, "inode": guard.inode}}
+        require(before.get("physical") == after.get("physical") == physical,
+                "Original checkpoint, settlement and intake physical identities differ.")
+        generation = document(proof.raw).get("generation")
+        require(valid_token(generation) and read_image(state / "format").raw.strip() == b"2",
+                "Original format-two generation is unavailable.")
+        record_image = read_image(subscription / "record.json") if after.get("record") is not None else None
+        assert isinstance(case, str) and isinstance(generation, str) and isinstance(witness, str)
+        subjects.append(PiCreateSubject(window, command, case, root, root_identity, physical, owner, checkpoint,
+                                             settlement, actor_result, ack, proof, guard, record_image,
+                                             generation, witness))
+    view.recheck_files()
+    controller.require_finished_graph(component)
+    return tuple(subjects)
+
+
 class Maintenance:
     def __init__(self, controller: WholeCheckController, component: str, environment: Mapping[str, str]) -> None:
         require(component in COMPONENTS, "Unknown Driver maintenance subject.")
@@ -935,6 +1058,45 @@ class Maintenance:
                     "The actual refusal MAIN did not finish through its accepted handoff.")
 
 
+    def pi_create_refusal(self, state: Path, *, absent: bool) -> None:
+        """Capture one of the two fixed ordinary routes in the reviewed create walk.
+
+        The caller still owns all before/after state and original-subject checks.
+        No caller-supplied command, subscription, error code or success flag is
+        accepted by this narrow observation.
+        """
+        require(self.component == "arbol-pi-driver", "Create refusal belongs to Pi only.")
+        self.controller.require_finished_graph(self.component)
+        tail = ["--state-dir", str(state), "subscriptions"]
+        if absent:
+            tail.extend(("identity", "zai-2"))
+        else:
+            tail.extend(("create", "--family", "zai", "--id", "zai-2",
+                         "--label", "ABR-38 duplicate create"))
+        capture = self.capture(self.controller.fixed_argv(self.component, self.payload.build, "driver", tail),
+                               "create-absence" if absent else "create-settlement")
+        require(capture.returncode == 1 and not capture.stderr,
+                "The actual ordinary create observation did not refuse cleanly.")
+        result = document(capture.stdout)
+        require(set(result) == {"error"} and isinstance(result["error"], dict)
+                and result["error"].get("code") == ("not_found" if absent else "in_use"),
+                "The actual ordinary create refusal differs from the fixed route.")
+        self.controller.require_finished_graph(self.component)
+        with self.authority.mutex():
+            graph = reconcile(self.authority, persist_unknown=False, candidate=self.controller.scope)
+            parents = [row for row in graph.writers if row["parent"] is None and row["phase"] == "terminal"
+                       and (row["pid"], row["startedAt"]) == (capture.owner.pid, capture.owner.started_at)]
+            require(graph.resolved and len(parents) == 1, "The actual refusal provider did not finish.")
+            parent = parents[0]
+            handoffs = [row for row in graph.handoffs if row["invocation"] == parent["invocation"]
+                        and row["parent"] == parent["writer"] and row["role"] == "main"
+                        and row["phase"] == "accepted" and row["entry"] == self.payload.descriptor["entry"]]
+            require(len(handoffs) == 1 and sum(row["invocation"] == parent["invocation"]
+                    and row["writer"] == handoffs[0]["child"] and row["parent"] == parent["writer"]
+                    and row["phase"] == "terminal" for row in graph.writers) == 1,
+                    "The actual refusal MAIN did not finish through its accepted handoff.")
+
+
 def maintenance_child_substitution(subject: Maintenance, request: Execute, fault: Fault) -> None:
     """Use a separate disposable subject for each selected child substitution."""
     subject.open()
@@ -1157,6 +1319,215 @@ class ClaudeCreateAbsence:
         subjects = self.walk.prepare()
         absent = [item for item in subjects if (item.window, item.command) ==
                   (_CLAUDE_CREATE_WINDOWS[0], "abort-io")]
+        require(len(absent) == 1, "The unique prepared-absent original subject is missing.")
+        self.walk.execute(absent[0], absence=True)
+        self.walk.finished.add(self.case_id)
+
+
+class PiCreateWalk:
+    """Shared fixed original-subject capture for the two deferred create cases."""
+
+    def __init__(self, controller: WholeCheckController, baseline: Baseline,
+                 observer: TerminalSpanObservation, environment: Mapping[str, str]) -> None:
+        self.controller, self.baseline, self.observer = controller, baseline, observer
+        self.environment = without_authority(dict(environment))
+        self.subjects: tuple[PiCreateSubject, ...] | None = None
+        self.custody: dict[str, FileImage] = {}
+        self.archive: ArchiveWitness | None = None
+        self.archive_root: Path | None = None
+        self.sessions: set[str] = set()
+        self.attempted: set[str] = set()
+        self.finished: set[str] = set()
+
+    def prepare(self) -> tuple[PiCreateSubject, ...]:
+        require({"H1-span-completion", "terminal-close-closure"} <= self.controller.finished_external,
+                "The controller has not completed its original H1 and terminal duties in order.")
+        if self.subjects is None:
+            self.subjects = pi_create_subjects(self.controller, self.baseline, self.observer)
+            view = self.observer.terminal_view
+            assert view is not None
+            suite = view.h1.suite_context
+            authority = Authority(self.controller.workspace.registry, "arbol-pi-driver")
+            contexts = [suite] + [document(view.images[f"terminal-helper-{index:04d}.context"].raw)
+                                  for index in range(11)]
+            for index, context in enumerate(contexts):
+                writer = "writers/" + context["invocation"] + "/" + context["writer"] + ".json"
+                handoff = "handoffs/" + context["handoff"] + ".json"
+                context_file = "handoffs/" + context["handoff"] + ".context.json"
+                for relative in (writer, handoff, context_file):
+                    require(relative not in self.custody, "Original create custody has duplicate identities.")
+                    self.custody[relative] = read_image(authority.folder / relative)
+                require(self.custody[context_file].raw == (view.images[f"terminal-helper-{index - 1:04d}.context"].raw
+                        if index else canonical(suite)), "Original custody context differs from the observed Suite.")
+                if index:
+                    require(self.custody[writer].raw == view.images[f"terminal-helper-{index - 1:04d}.terminal"].raw,
+                            "Original helper terminal bytes differ from the observed witness.")
+            require(len(self.custody) == 36, "Original Suite and all eleven helper records are incomplete.")
+        return self.subjects
+
+    def archived(self, subject: Maintenance) -> None:
+        """Bind the first actual drain's rename and preserve its exact later image."""
+        observed = self.controller.last_administration
+        require(observed is not None and observed.command == "drain" and observed.session == subject.session
+                and observed.component == subject.component, "The actual subject drain is unavailable.")
+        assert observed is not None
+        witness = observed.archive_witness
+        if self.archive is None:
+            require(witness is not None, "The first drain did not preserve the original terminal trees.")
+            assert witness is not None
+            witness.verify(self.controller.workspace)
+            additions = set(witness.after.entries) - set(witness.before.entries)
+            roots = {name.split("/", 1)[0] for name in additions if name.startswith("custody-")}
+            require(len(roots) == 1, "First drain has no unique actual custody destination.")
+            root_name = next(iter(roots))
+            for relative, image in self.custody.items():
+                tree, _, child = relative.partition("/")
+                source = witness.sources[tree].entries.get(child)
+                require(source is not None and source.get("type") == "file"
+                        and source.get("sha256") == image.sha256 and source.get("device") == image.device
+                        and source.get("inode") == image.inode and source.get("mode") == image.mode,
+                        "First drain did not archive the exact original source inode and bytes.")
+                assert source is not None
+                moved = witness.after.entries.get(root_name + "/" + relative)
+                require(moved == {**source, "path": root_name + "/" + relative},
+                        "Actual archive destination differs from the original custody image.")
+            self.archive, self.archive_root = witness, subject.authority.folder / "archive" / root_name
+        self.check_custody()
+
+    def check_custody(self) -> None:
+        authority = Authority(self.controller.workspace.registry, "arbol-pi-driver")
+        base = authority.folder if self.archive is None else self.archive_root
+        require(base is not None and len(self.custody) == 36, "Original custody is unavailable.")
+        assert base is not None
+        if self.archive is not None:
+            self.archive.verify(self.controller.workspace)
+            current = ArchiveImage.capture(authority.folder / "archive")
+            require(current.root == self.archive.after.root
+                    and all(current.entries.get(name) == row for name, row in self.archive.after.entries.items()),
+                    "The first real archive or its original evidence changed during a later drain.")
+        for relative, original in self.custody.items():
+            current_image = read_image(base / relative)
+            require((current_image.raw, current_image.device, current_image.inode, current_image.mode) ==
+                    (original.raw, original.device, original.inode, original.mode),
+                    "Original Suite/helper writer, accepted handoff or context changed.")
+
+    def unchanged(self, item: PiCreateSubject) -> None:
+        self.controller.workspace.verify(self.controller.evidence)
+        view = self.observer.terminal_view
+        require(view is not None, "Original terminal observation is unavailable.")
+        assert view is not None
+        view.recheck_files()
+        self.check_custody()
+        require(directory_identity(item.root) == item.root_identity
+                and {key: directory_identity(item.root / "state")[key] for key in ("device", "inode")}
+                == item.physical["state"]
+                and read_image(item.root / ".fixture-owner.json") == item.owner
+                and read_image(item.root / "create-checkpoint.json") == item.checkpoint
+                and read_image(item.root / "create-settlement.json") == item.settlement
+                and read_image(item.root / "create-actor-result.json") == item.actor_result
+                and read_image(item.root / "create-helper-ack.json") == item.ack
+                and read_image(item.root / "state" / "identity.json") == item.root_proof
+                and read_image(item.root / "state" / "identity.guard") == item.guard,
+                "Original fixture, root, guard or immutable actor evidence changed.")
+        record_path = item.root / "state" / "subscriptions" / "zai-2" / "record.json"
+        if item.record is None:
+            require(not os.path.lexists(record_path), "A record appeared in the absent create subject.")
+        else:
+            require(read_image(record_path) == item.record, "Original create record changed.")
+
+    def metadata(self, item: PiCreateSubject, *, state: str) -> None:
+        target = item.root / "state" / "subscriptions" / "zai-2"
+        pending, sidecar = target / "identity-pending.json", target / "identity.json"
+        require(not os.path.lexists(pending) and document(read_image(sidecar).raw) == {
+            "version": 1, "state": state, "witness": item.witness},
+            "The original witness did not reach its exact required terminal state.")
+        self.unchanged(item)
+
+    def execute(self, item: PiCreateSubject, *, absence: bool) -> None:
+        require({"H1-span-completion", "terminal-close-closure"} <= self.controller.finished_external
+                and self.subjects is not None and any(item is original for original in self.subjects),
+                "Maintenance requires the completed outer duties and the bound original subject.")
+        self.unchanged(item)
+        subject = Maintenance(self.controller, "arbol-pi-driver", self.environment)
+        require(subject.session not in self.sessions, "Two original subjects share a maintenance session.")
+        self.sessions.add(subject.session)
+        backup = self.controller.workspace.fixture_root / ("pi-create-" + item.case + "-" + subject.session)
+        backup.mkdir(mode=0o700)
+        sync_directory(backup.parent)
+        request = Execute(item.root / "state", backup, "identity-recover" if absence else "upgrade",
+                          subscription="zai-2" if absence else None)
+        # Check all paths before begin; an unaccepted fixture path cannot leave
+        # a component draining or be bypassed by a different subject.
+        request.verify(self.controller)
+        if absence:
+            require(item.window == _PI_CREATE_WINDOWS[0] and item.command == "abort-io"
+                    and item.record is None, "Only prepared-absent C1 uses targeted retirement.")
+            subject.open()
+            self.archived(subject)
+            result = subject.execute_observed(request, "observe")
+            require(result["generation"] == item.generation, "Targeted retirement changed root generation.")
+            subject.finish(request, result)
+            self.metadata(item, state="retired")
+            subject.pi_create_refusal(request.state, absent=True)
+            self.metadata(item, state="retired")
+        else:
+            require(item.record is not None, "A present-create walk requires its original record.")
+            if item.command == "abort-io" and item.window in _PI_CREATE_WINDOWS[1:4]:
+                subject.pi_create_refusal(request.state, absent=False)
+            self.metadata(item, state="active")
+            expected = item.generation + "." + item.witness
+            before = subject.admitted_proof(request.state, "zai-2", expectation=expected,
+                                            name="create-before-upgrade")
+            require(before["generation"] == item.generation and before["witness"] == item.witness,
+                    "Fresh ordinary identity differs from the original create witness.")
+            self.metadata(item, state="active")
+            subject.open()
+            self.archived(subject)
+            result = subject.execute_observed(request, "observe")
+            subject.finish(request, result)
+            require(result["generation"] == item.generation, "No-op format-two upgrade changed generation.")
+            self.metadata(item, state="active")
+            after = subject.admitted_proof(request.state, "zai-2", expectation=expected,
+                                           name="create-after-upgrade")
+            require(after == before, "Ordinary restart did not preserve the exact original proof.")
+            self.metadata(item, state="active")
+        self.controller.require_finished_graph("arbol-pi-driver")
+
+
+@dataclass(frozen=True)
+class PiCreateRecovery:
+    walk: PiCreateWalk
+
+    @property
+    def case_id(self) -> str:
+        return "create-publication-recovery"
+
+    def observe(self, controller: WholeCheckController) -> None:
+        require(controller is self.walk.controller and self.case_id not in self.walk.attempted,
+                "Create recovery is foreign or repeated.")
+        self.walk.attempted.add(self.case_id)
+        subjects = self.walk.prepare()
+        for item in subjects:
+            if (item.window, item.command) != (_PI_CREATE_WINDOWS[0], "abort-io"):
+                self.walk.execute(item, absence=False)
+        self.walk.finished.add(self.case_id)
+
+
+@dataclass(frozen=True)
+class PiCreateAbsence:
+    walk: PiCreateWalk
+
+    @property
+    def case_id(self) -> str:
+        return "create-publication-absence"
+
+    def observe(self, controller: WholeCheckController) -> None:
+        require(controller is self.walk.controller and self.case_id not in self.walk.attempted,
+                "Create absence is foreign or repeated.")
+        self.walk.attempted.add(self.case_id)
+        subjects = self.walk.prepare()
+        absent = [item for item in subjects if (item.window, item.command) ==
+                  (_PI_CREATE_WINDOWS[0], "abort-io")]
         require(len(absent) == 1, "The unique prepared-absent original subject is missing.")
         self.walk.execute(absent[0], absence=True)
         self.walk.finished.add(self.case_id)
