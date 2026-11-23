@@ -397,7 +397,7 @@ def driver_launcher_source(registry: str, component: str, route: str, provider: 
     registry_path = physical(registry)
     if component not in COMPONENTS or provider.component != "arbol":
         raise ValueError("A Driver gate requires its exact immutable Arbol provider.")
-    expected = registry_path / "arbol" / provider.build / SUBTREE
+    expected = build_payload_directory(registry_path, "arbol", provider.build) / SUBTREE
     verified = load(expected, "arbol", provider.build)
     if provider.root != expected or provider.digest != verified.digest:
         raise ValueError("The fixed provider payload does not match the registered gate.")
@@ -448,8 +448,8 @@ def _keep_driver_gate(bin_folder: str, registry: str, component: str) -> bool:
 
 def _driver_gate_authority(registry: Path, component: str) -> None:
     """Read-only preserve preflight, never initial deployment or acceptance issuance."""
-    from .driver_admission import Authority, Refusal, decode, private_directory, read_bytes, sha256, valid_hash
-    from .driver_payload import BUILD, DESCRIPTOR, SUBTREE, registered, verify_acceptance
+    from .driver_admission import Authority, Refusal, decode, read_bytes, sha256, valid_hash
+    from .driver_payload import BUILD, registered, registered_descriptor, verify_acceptance
 
     authority = Authority(registry, component)
     with authority.mutex(seconds=0):
@@ -473,17 +473,8 @@ def _driver_gate_authority(registry: Path, component: str) -> None:
                 raise Refusal("Driver gate registry exceeds its bounded inventory.")
             if BUILD.fullmatch(folder.name) is None:
                 continue
-            private_directory(folder)
-            root = folder / SUBTREE
-            # A genuine legacy Build has no payload root. Existing unsafe roots
-            # remain errors; do not broadly swallow Refusal or manufacture D.
-            if not os.path.lexists(root):
-                continue
-            try:
-                descriptor_raw = read_bytes(root / DESCRIPTOR)
-            except FileNotFoundError:
-                continue
-            if sha256(descriptor_raw) == value["producerPayloadSha256"]:
+            descriptor_raw = registered_descriptor(registry, component, folder.name)
+            if descriptor_raw is not None and sha256(descriptor_raw) == value["producerPayloadSha256"]:
                 matches.append(registered(registry, component, folder.name))
         if len(matches) != 1:
             raise Refusal("The exact qualified gate payload is unavailable.")

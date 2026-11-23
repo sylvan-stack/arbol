@@ -547,7 +547,7 @@ def _documents(folder: Path, *, limit: int = 100000) -> list[Path]:
 
 def _custody_payload(authority: Authority, digest: str, *,
                      candidate: CandidateScope | None = None) -> Object:
-    from .driver_payload import BUILD, optional_descriptor, registered
+    from .driver_payload import BUILD, registered, registered_descriptor
 
     if not valid_hash(digest):
         refuse()
@@ -559,7 +559,7 @@ def _custody_payload(authority: Authority, digest: str, *,
             refuse()
         if not BUILD.fullmatch(folder.name):
             continue
-        raw = optional_descriptor(folder)
+        raw = registered_descriptor(authority.registry, authority.component, folder.name)
         if raw is None:
             continue
         if sha256(raw) == digest:

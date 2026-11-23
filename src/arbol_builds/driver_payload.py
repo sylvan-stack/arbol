@@ -67,6 +67,19 @@ def optional_descriptor(folder: Path) -> bytes | None:
     return read_bytes(path)
 
 
+def registered_descriptor(registry: Path, component: str, build: str) -> bytes | None:
+    """Read the installed image's declaration, allowing retained record-only Builds."""
+    private_directory(registry / component / build)
+    payload = build_payload_directory(registry, component, build)
+    if payload.resolve(strict=False) != payload:
+        refuse()
+    try:
+        payload.lstat()
+    except FileNotFoundError:
+        return None
+    return optional_descriptor(payload)
+
+
 def relative(value: object) -> str:
     if not isinstance(value, str):
         refuse()
@@ -843,7 +856,7 @@ def _retention_builds(registry: Path, component: str, digests: set[str]) -> froz
             refuse()
         if not BUILD.fullmatch(folder.name):
             continue
-        raw = optional_descriptor(build_payload_directory(registry, component, folder.name))
+        raw = registered_descriptor(registry, component, folder.name)
         if raw is None:
             continue
         digest = sha256(raw)

@@ -64,9 +64,9 @@ from .driver_payload import (
     metadata_document,
     metadata_marker,
     metadata_upgrade,
-    optional_descriptor,
     pin_payloads,
     registered,
+    registered_descriptor,
     request_binding,
     resolve_candidate,
     resolve_provider,
@@ -581,7 +581,7 @@ def _component(request: Request) -> Iterator[tuple[Authority, Payload, Gate]]:
             raise Refusal("Registry exceeds its bounded tuple inventory.")
         if BUILD_PATTERN.fullmatch(folder.name) is None:
             continue
-        descriptor = optional_descriptor(folder)
+        descriptor = registered_descriptor(request.registry, request.component, folder.name)
         if descriptor is None:
             continue
         if sha256(descriptor) == producer_digest:
@@ -813,7 +813,7 @@ def _qualified_candidates(authorities: list[Authority], *, candidate: CandidateS
                 raise Refusal("Deployment registry exceeds its inventory bound.")
             if BUILD_PATTERN.fullmatch(folder.name) is None:
                 continue
-            descriptor = optional_descriptor(folder)
+            descriptor = registered_descriptor(authority.registry, authority.component, folder.name)
             if descriptor is None:
                 continue
             if sha256(descriptor) == value["producerPayloadSha256"]:
