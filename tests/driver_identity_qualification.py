@@ -1320,6 +1320,11 @@ class TerminalSchedule:
                 and all(entry in payload.descriptor["helpers"] for entry in self.helper_entries)
                 and "tests/identity_actor.py" in self.helper_entries,
                 "Missing fixed complete declared helper schedule.")
+        if component == "arbol-claude-driver":
+            require(self.helper_entries == ("tests/identity_actor.py",) * 10 +
+                    ("bin/metadata-helper.py", "tests/identity_actor.py")
+                    and self.helper_wait_statuses == (0, 1) * 5 + (0, 0),
+                    "Claude requires ten create actors, the real broker and final H1 in order.")
         family = component.removeprefix("arbol-").removesuffix("-driver").replace("-", "_")
         sources: Object = {}
         for subject, name, expected in (
@@ -1738,7 +1743,13 @@ class WholeCheckController:
                         "Missing/duplicate/failed actual helper wait/ACK evidence.")
                 seen.add(row["handoff"])
                 prefix = f"terminal-helper-{index:04d}."
-                context_raw = preserved(prefix + "context", 65536)
+                if component == "arbol-claude-driver" and index == 10:
+                    require(entry == "bin/metadata-helper.py" and
+                            not os.path.lexists(view.root / (prefix + "context")),
+                            "Private broker registration context must not be copied into reports.")
+                    context_raw = read_bytes(authority.folder / "handoffs" / (row["handoff"] + ".context.json"))
+                else:
+                    context_raw = preserved(prefix + "context", 65536)
                 terminal_raw = preserved(prefix + "terminal", 65536)
                 result_raw = preserved(prefix + "result", 65536)
                 ack_raw = preserved(prefix + "ack", 65536)
