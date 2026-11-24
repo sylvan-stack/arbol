@@ -81,6 +81,8 @@ RETARGET_RECORD = "layout-move-retarget.json"
 STARTED_RECORD = "layout-move-started.json"
 REOPEN_RECORD = "layout-move-reopen.json"
 BOUNDARY_RECORD = "layout-move-boundary.json"
+PRIOR_REOPEN_RECORD = "layout-move-prior-reopen.json"
+RECOVERY_BOUNDARY = "layout-move-recovery.json"
 MAX_RETARGET_BYTES = 32 * 1024 * 1024
 MAX_RENAME_RECORD_BYTES = 65536
 RENAME_EXCL = 0x00000004  # Darwin sys/stdio.h
@@ -107,6 +109,12 @@ class MovePaths:
     @property
     def bin(self) -> Path:
         return self.home / ".local/bin"
+
+
+class PriorPlaces(Places):
+    @property
+    def folder(self) -> Path:
+        return MovePaths(self.home).old / "database"
 
 
 def owner_directory(path: Path, *, private: bool = False) -> os.stat_result:
@@ -237,6 +245,13 @@ def write_move_document(folder: int, name: str, record: dict[str, Any]) -> None:
             os.unlink(temporary, dir_fd=folder)
         except FileNotFoundError:
             pass
+
+
+def optional_move_document(folder: int, name: str, *, limit: int = MAX_RENAME_RECORD_BYTES) -> dict[str, Any] | None:
+    try:
+        return read_move_document(folder, name, limit=limit)
+    except FileNotFoundError:
+        return None
 
 
 def read_rename_record(folder: int) -> dict[str, Any]:
@@ -1568,7 +1583,7 @@ def start_move_database(paths: MovePaths, session: str, record: dict[str, Any], 
 
 
 def verify_move_database(
-    paths: MovePaths, record: dict[str, Any], snapshot: dict[str, Any], *, compare_data: bool,
+    paths: MovePaths, record: dict[str, Any], snapshot: dict[str, Any], *, compare_data: bool, prior: bool = False,
 ) -> dict[str, Any]:
     from probe_database_server import (
         Context as Probe,
@@ -1579,7 +1594,7 @@ def verify_move_database(
         check_settings,
     )
 
-    places = Places(paths.home)
+    places = PriorPlaces(paths.home) if prior else Places(paths.home)
     probe = Probe(places, restart=False)
     try:
         for inspect_database in (check_settings, check_data_folder, check_listening, check_launch_agent):
@@ -1711,6 +1726,182 @@ def finish_move(
             if existing != boundary:
                 raise RecoveryError("An existing reopen boundary differs from the observed normal marker.")
         return boundary
+
+
+def recover_interrupted_drain(
+    paths: MovePaths, prepared: dict[str, Any], prior: tuple[Path, str], session: str,
+) -> dict[str, Any]:
+    raw, _ = read_settings(database_settings(paths.home))
+    archive = require_archive()
+    check_release(paths, resolve_registry(paths), archive, prior, 1, json.loads(raw))
+    package, backend = prior_backend(paths, prepared, prior[0])
+    operation = """
+from arbol_backend.exchange_drain import reopen
+
+with directory(ctx.identity.folder) as folder:
+    before = read_state(folder)
+    if (before.phase != "draining" or before.session != request["session"]
+            or before.source != request["source"] or before.release != request["release"]):
+        raise ValueError("Only the unchanged prior release can recover this drain.")
+    schema = asyncio.run(inspect_database(ctx, before.source, idle=False))
+    if schema != request["schema"] or read_state(folder) != before:
+        raise ValueError("The prior schema or admission changed during drain recovery.")
+    reopen(ctx, before.source, before.session, release=before.release, schema=schema,
+           verify_release=lambda: request["release"])
+    after = read_state(folder)
+    if after.phase != "normal" or after.source != before.source or after.release != before.release:
+        raise ValueError("The unchanged prior release did not reopen.")
+print(json.dumps({"status": "drain_recovered", "release": after.release, "generation": after.generation}))
+"""
+    request = {"source": checked_source(prepared["database"]), "schema": prepared["schema"],
+               "release": prior[1], "session": session}
+    return run_prior_backend(paths, package, backend["build"], request, operation, timeout=60)
+
+
+def stop_move_database(paths: MovePaths, folder: int, record: dict[str, Any]) -> None:
+    places = Places(paths.home)
+    running = database_service(paths)
+    pid = postmaster_pid(places.data) if places.data.exists() else None
+    if running is None and pid is None:
+        return
+    started = read_move_document(folder, STARTED_RECORD)
+    data_identity = list(identity(owner_directory(places.data, private=True)))
+    if (started.get("session") != record["session"] or started.get("dataIdentity") != data_identity
+            or started.get("plistSha256") != sha(canonical(file_image(places.plist)))
+            or not pid or running is None or running.get("pid") != str(pid) or running.get("path") != str(places.plist)):
+        raise RecoveryError("The running database is outside the recorded move startup.")
+    observer = move_provider_module("driver_process")
+    process = observed_process(observer, pid)
+    if process is None or process["executable"] != str((BIN / "postgres").resolve(strict=True)):
+        raise RecoveryError("The recorded move database executable changed.")
+    result = run([LAUNCHCTL, "bootout", f"gui/{os.getuid()}/{LABEL}"], paths.home, timeout=90)
+    if result.returncode:
+        raise RecoveryError("launchd did not unload the move's recorded database startup.")
+    stop_recorded_process(observer, process, None)
+    if database_service(paths) is not None or postmaster_pid(places.data) is not None:
+        raise RecoveryError("The move database did not stop before recovery.")
+
+
+def recover_move_files(paths: MovePaths, session: str, lease: ExclusiveLayoutLease) -> dict[str, Any]:
+    """Restore the local before-images while the same closed admission lease is held."""
+    with rename_roots(paths) as roots:
+        _, folder = roots
+        if optional_move_document(folder, BOUNDARY_RECORD) is not None:
+            raise RecoveryError("A published layout-2 reopen boundary excludes pre-reopen recovery.")
+        record = read_rename_record(folder)
+        positions = rename_positions(paths, roots, record)
+        marker = require_rename_fence(paths, record, positions, lease)
+        if marker.session != session:
+            raise RecoveryError("The move recovery session does not match.")
+        moved = "destination" in positions.values()
+        journal = optional_move_document(folder, RETARGET_RECORD, limit=MAX_RETARGET_BYTES)
+        if moved:
+            stop_move_database(paths, folder, record)
+            if journal is None:
+                raise RecoveryError("The moved installation has no original retarget configuration.")
+        if journal is not None and (moved or database_service(paths) is None):
+            prepared = {"handoffSha256": journal["handoffSha256"],
+                        "stagedLaunchers": {path: None for path in journal["routes"]
+                                            if path != str(Places(paths.home).plist)}}
+            retarget_move(paths, prepared, session, lease, reverse=True)
+        if moved:
+            relocate_renames(paths, session, lease, reverse=True)
+        runtime = paths.old / "runtime"
+        lease.convert_marker(runtime, session=session, before=INSTALLATION_LAYOUT, after=1)
+        if journal is not None:
+            saved = journal["exchangeAuthorization"]
+            authorization = runtime / "writer-admission" / EXCHANGE_AUTHORIZATION
+            active = file_image(authorization)
+            if active != saved:
+                attempt = optional_move_document(folder, REOPEN_RECORD)
+                if (attempt is None or active is None or "bytes" not in active
+                        or sha(base64.b64decode(active["bytes"], validate=True)) != attempt.get("authorizationSha256")):
+                    raise RecoveryError("The installed Exchange authorization is outside the recorded move.")
+                replace_move_file(authorization, active, saved)
+            if (file_image(PriorPlaces(paths.home).data / "postgresql.conf") != journal["config"]["before"]
+                    or any(file_image(Path(path)) != images["before"] for path, images in journal["routes"].items())
+                    or backup_excluded(paths, PriorPlaces(paths.home).data) != journal["excluded"]):
+                raise RecoveryError("The original configuration and backup exclusion did not return to their recorded state.")
+        return {**record, "status": "move_files_recovered"}
+
+
+def start_prior_database(paths: MovePaths, record: dict[str, Any], folder: int) -> None:
+    places = PriorPlaces(paths.home)
+    active = database_service(paths)
+    if active is None:
+        previous = read_move_document(folder, SERVICE_RECORD)
+        plist = file_image(places.plist)
+        if (previous["session"] != record["session"] or plist is None or "bytes" not in plist
+                or sha(base64.b64decode(plist["bytes"], validate=True)) != previous["plistSha256"]
+                or postmaster_pid(places.data) is not None):
+            raise RecoveryError("The verified prior launch agent is unavailable for recovery.")
+        result = run([LAUNCHCTL, "bootstrap", f"gui/{os.getuid()}", str(places.plist)], paths.home, timeout=30)
+        if result.returncode:
+            raise RecoveryError("launchd did not start the verified prior database.")
+    move_database_ready(paths, places.data, places.socket, int(record["database"]["port"]))
+
+
+def reopen_prior_release(
+    paths: MovePaths, folder: int, record: dict[str, Any], prior: tuple[Path, str],
+    snapshot: dict[str, Any], lease: ExclusiveLayoutLease, *, fallback: bool = False,
+) -> dict[str, Any]:
+    from arbol_backend.exchange_context import Context
+    from arbol_backend.exchange_drain import GuardedSelection, reopen
+    from arbol_backend.model import Identity, schema_compatibility
+
+    if record["priorRelease"] != prior[1]:
+        raise RecoveryError("Recovery requires the exact prior release.")
+    runtime = paths.old / "runtime"
+    admission = lease.require(runtime)
+    marker = read_state(admission, layout=1)
+    if marker.source != record["database"] or (marker.phase != "normal" and marker.session != record["session"]):
+        raise RecoveryError("The prior admission marker is outside this recovery session.")
+    start_prior_database(paths, record, folder)
+    checked = verify_move_database(paths, record, snapshot, compare_data=marker.phase != "normal", prior=True)
+    raw, _ = read_settings(database_settings(paths.home))
+    archive = require_archive()
+    registry = resolve_registry(paths)
+    builds = check_release(paths, registry, archive, prior, 1, json.loads(raw))
+    package, backend = builds[BACKEND]
+    context = Context(Identity(backend["build"], runtime, paths.bin, paths.new, None, paths.home,
+                               package, schema_compatibility(backend["schemaCompatibility"])))
+    expected = {"format": 1, "session": record["session"], "release": prior[1], "database": checked,
+                "snapshotFallback": fallback}
+    attempt = optional_move_document(folder, PRIOR_REOPEN_RECORD)
+    if attempt is None:
+        if marker.phase != "exclusive":
+            raise RecoveryError("There is no recorded prior reopen attempt for the normal marker.")
+        attempt = {**expected, "normalGeneration": uuid4().hex}
+        write_move_document(folder, PRIOR_REOPEN_RECORD, attempt)
+    else:
+        generation = attempt.get("normalGeneration")
+        if not isinstance(generation, str) or TOKEN.fullmatch(generation) is None or attempt != {**expected, "normalGeneration": generation}:
+            raise RecoveryError("A different prior reopen attempt is already recorded.")
+    if marker.phase == "exclusive":
+        common = {"release": prior[1], "schema": record["schema"], "layout": 1, "lease": lease,
+                  "generation": attempt["normalGeneration"]}
+        if marker.release == prior[1]:
+            reopen(context, record["database"], record["session"], verify_release=lambda: prior[1], **common)
+        else:
+            @contextmanager
+            def selected(_: int, state: State) -> Iterator[GuardedSelection]:
+                if state != marker:
+                    raise RecoveryError("The verified prior marker changed before reopen.")
+                yield GuardedSelection("prior", state.source, record["session"], state.generation, state.release,
+                                       prior[1], None)
+
+            reopen(context, record["database"], record["session"], verify_selection=selected, **common)
+    current = read_state(lease.require(runtime), layout=1)
+    if (current.phase != "normal" or current.release != prior[1] or current.generation != attempt["normalGeneration"]
+            or current.source != record["database"]):
+        raise RecoveryError("The prior release did not reach its recorded normal boundary.")
+    result = {**attempt, "status": "prior_reopened"}
+    previous = optional_move_document(folder, RECOVERY_BOUNDARY)
+    if previous is None:
+        write_move_document(folder, RECOVERY_BOUNDARY, result)
+    elif previous != result:
+        raise RecoveryError("The recorded prior recovery boundary differs from the normal marker.")
+    return result
 
 
 def main() -> int:
