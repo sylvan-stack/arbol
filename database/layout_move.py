@@ -7,6 +7,7 @@ import ctypes
 import json
 import os
 import plistlib
+import re
 import stat
 import subprocess
 from collections.abc import Iterator
@@ -21,6 +22,7 @@ from layout_archive import DIR, ENTRY, WORKING, identity, opened, stamp
 from migrate_schema import Refusal, database_target
 from recovery import verify_recovery
 from recovery_release import (
+    COMMIT,
     DIGEST,
     MUTABLE_BUILD_FILES,
     RecoveryError,
@@ -37,6 +39,7 @@ from arbol_installation.admission import (
     TOKEN,
     AdmissionRefusal,
     ExclusiveLayoutLease,
+    State,
     checked_source,
     read_state,
     unique_pairs,
@@ -56,6 +59,7 @@ MAX_SETTINGS_BYTES = 65536
 RENAME_RECORD = "layout-move-renames.json"
 MAX_RENAME_RECORD_BYTES = 65536
 RENAME_EXCL = 0x00000004  # Darwin sys/stdio.h
+WRITER_INVENTORY_FORMAT = 3
 
 
 @dataclass(frozen=True)
@@ -189,9 +193,22 @@ def read_rename_record(folder: int) -> dict[str, Any]:
     value = json.loads(raw, object_pairs_hook=unique_pairs)
     if not isinstance(value, dict) or canonical(value) != raw:
         raise RecoveryError("The move rename record is not a canonical JSON object.")
-    if value.get("format") == 2:
+    if value.get("format") in (2, WRITER_INVENTORY_FORMAT):
         rename_snapshot_pins(value)
+    if value.get("format") == WRITER_INVENTORY_FORMAT:
+        rename_inventory_proof(value)
     return value
+
+
+def rename_inventory_proof(record: dict[str, Any]) -> dict[str, str]:
+    proof = record.get("writerInventory")
+    if (not isinstance(proof, dict) or proof.keys() != {"backend", "sourceCommit", "generation"}
+            or any(not isinstance(value, str) for value in proof.values())
+            or re.fullmatch(r"[1-9a-f][0-9a-f]*", proof["backend"]) is None
+            or COMMIT.fullmatch(proof["sourceCommit"]) is None
+            or TOKEN.fullmatch(proof["generation"]) is None):
+        raise RecoveryError("The move rename record lacks a bound prior Backend writer inventory.")
+    return proof
 
 
 def rename_snapshot_pins(record: dict[str, Any]) -> dict[str, str]:
@@ -226,7 +243,7 @@ def verify_rename_snapshot(record: dict[str, Any], snapshot_directory: Path, res
 def rename_positions(paths: MovePaths, roots: tuple[int, int], record: dict[str, Any]) -> dict[str, str]:
     old, new = roots
     parents = [list(identity(os.fstat(descriptor))) for descriptor in roots]
-    if (type(record.get("format")) is not int or record["format"] not in (1, 2)
+    if (type(record.get("format")) is not int or record["format"] not in (1, 2, WRITER_INVENTORY_FORMAT)
             or record.get("parents") != parents
             or not isinstance(record.get("session"), str) or TOKEN.fullmatch(record["session"]) is None
             or any(not isinstance(record.get(field), str) or DIGEST.fullmatch(record[field]) is None
@@ -291,7 +308,7 @@ def rename_positions(paths: MovePaths, roots: tuple[int, int], record: dict[str,
 
 def require_rename_fence(
     paths: MovePaths, record: dict[str, Any], positions: dict[str, str], lease: ExclusiveLayoutLease,
-) -> None:
+) -> State:
     runtime = (paths.new if positions["runtime"] == "destination" else paths.old) / "runtime"
     folder = lease.require(runtime)
     try:
@@ -300,11 +317,14 @@ def require_rename_fence(
         marker = read_state(folder, layout=INSTALLATION_LAYOUT)
     if marker.phase != "exclusive" or marker.session != record["session"] or marker.source != record["database"]:
         raise RecoveryError("The held exclusive admission marker does not bind the move's database and session.")
+    if "writerInventory" in record and marker.generation != rename_inventory_proof(record)["generation"]:
+        raise RecoveryError("The held exclusive admission marker differs from the recorded writer inventory generation.")
+    return marker
 
 
 def record_renames(
     paths: MovePaths, prepared: dict[str, Any], session: str, lease: ExclusiveLayoutLease, *,
-    snapshot_directory: Path, restore_receipt: Path,
+    prior_release_directory: Path, snapshot_directory: Path, restore_receipt: Path,
 ) -> None:
     """Persist the complete before-images before the caller requests a rename."""
     if prepared.get("status") != "release_pair_verified":
@@ -315,16 +335,18 @@ def record_renames(
         data_info = owner_directory(data, private=True)
         record = {key: prepared[key] for key in ("database", "schema", "priorRelease", "stagedRelease",
                                                  "registry", "working", "absentWorking")}
-        record.update(format=2, session=session, parents=[list(identity(os.fstat(fd))) for fd in roots],
+        record.update(format=WRITER_INVENTORY_FORMAT, session=session, parents=[list(identity(os.fstat(fd))) for fd in roots],
                       dataIdentity=list(identity(data_info)))
         positions = rename_positions(paths, roots, record)
         if "destination" in positions.values():
             raise RecoveryError("A working directory moved before its before-image was written.")
-        require_rename_fence(paths, record, positions, lease)
+        marker = require_rename_fence(paths, record, positions, lease)
         record["snapshotProof"] = verify_rename_snapshot(record, snapshot_directory, restore_receipt)
+        record["writerInventory"] = verify_prior_writer_inventories(paths, record, prior_release_directory, marker, lease)
         if rename_positions(paths, roots, record) != positions:
-            raise RecoveryError("A recorded directory changed during snapshot verification.")
-        require_rename_fence(paths, record, positions, lease)
+            raise RecoveryError("A recorded directory changed during snapshot and writer inventory verification.")
+        if require_rename_fence(paths, record, positions, lease) != marker:
+            raise RecoveryError("The exclusive marker changed during snapshot and writer inventory verification.")
         temporary = f".{RENAME_RECORD}.{uuid4().hex}"
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=new)
         try:
@@ -351,8 +373,8 @@ def relocate_renames(paths: MovePaths, session: str, lease: ExclusiveLayoutLease
         positions = rename_positions(paths, roots, record)
         require_rename_fence(paths, record, positions, lease)
         if not reverse:
-            if record["format"] != 2:
-                raise RecoveryError("Forward relocation requires a snapshot-bound move rename record.")
+            if record["format"] != WRITER_INVENTORY_FORMAT:
+                raise RecoveryError("Forward relocation requires a rename record with snapshot and writer inventory proof.")
             pins = rename_snapshot_pins(record)
             observed = verify_rename_snapshot(record, Path(pins["snapshotDirectory"]), Path(pins["restoreReceipt"]))
             if observed != pins or read_rename_record(new) != record or rename_positions(paths, roots, record) != positions:
@@ -507,6 +529,67 @@ def verify_payload(paths: MovePaths, registry: Path, item: dict[str, Any], layou
     elif sha(canonical(tree(package, exclude=frozenset(MUTABLE_BUILD_FILES)))) != evidence.get("installedFilesSha256"):
         raise RecoveryError(f"The installed payload differs from the release record: {item['component']}.")
     return package, record
+
+
+def verify_prior_writer_inventories(
+    paths: MovePaths, rename_record: dict[str, Any], prior_release_directory: Path,
+    marker: State, lease: ExclusiveLayoutLease,
+) -> dict[str, str]:
+    archive = require_archive()
+    release, _ = verify_release(prior_release_directory, rename_record["priorRelease"], archive=archive)
+    backends = [item for item in release["builds"] if item["component"] == BACKEND]
+    if release.get("kind") != "current" or len(backends) != 1:
+        raise RecoveryError("The prior release does not identify one installed Backend.")
+    backend = backends[0]
+    package, _ = verify_payload(paths, Path(rename_record["registry"]), backend, 1)
+    runtime = paths.old / "runtime"
+    folder = lease.require(runtime)
+    if read_state(folder, layout=1) != marker:
+        raise RecoveryError("Writer inventory verification requires the unchanged layout-1 exclusive marker.")
+    request = {
+        "runtime": str(runtime), "home": str(paths.home), "build": backend["build"],
+        "admissionDirectory": list(identity(os.fstat(folder))),
+        "source": marker.source, "session": marker.session, "generation": marker.generation,
+    }
+    # The historical Backend owns these readers. They do not reacquire the
+    # parent's admission locks. The SQL reader takes its separate writer latch.
+    bootstrap = """
+import asyncio
+import json
+import os
+import sys
+from pathlib import Path
+
+package = Path(sys.argv[1])
+request = json.loads(sys.argv[2])
+sys.path[:0] = [str(package / "src"), str(package / "runtime/site-packages")]
+from arbol_backend.exchange_context import context
+from arbol_backend.exchange_drain import inspect_database
+from arbol_backend.exchange_listing import drained_inventory
+from arbol_installation.admission import directory, read_state
+
+ctx = context(package, {})
+if (str(ctx.identity.folder) != request["runtime"] or str(ctx.identity.home) != request["home"]
+        or ctx.identity.build != request["build"] or ctx.identity.fixture):
+    raise ValueError("The prior Backend opened a different installation context.")
+with directory(ctx.identity.folder) as folder:
+    info = os.fstat(folder)
+    marker = read_state(folder)
+    if ([info.st_dev, info.st_ino] != request["admissionDirectory"] or marker.phase != "exclusive"
+            or marker.source != request["source"] or marker.session != request["session"]
+            or marker.generation != request["generation"]):
+        raise ValueError("The prior Backend did not read the held admission marker.")
+    drained_inventory(ctx)
+    schema = asyncio.run(inspect_database(ctx, marker.source, idle=True))
+    if read_state(folder) != marker:
+        raise ValueError("The prior admission marker changed during writer inventory verification.")
+print(json.dumps({"backend": ctx.identity.build, "generation": marker.generation, "schema": schema}))
+"""
+    python = package / "runtime/python/bin/python3.14"
+    result = tool_json([str(python), "-I", "-B", "-c", bootstrap, str(package), canonical(request).decode()], paths.home)
+    if result != {"backend": backend["build"], "generation": marker.generation, "schema": rename_record["schema"]}:
+        raise RecoveryError("The prior Backend did not prove the expected writer inventories and schema.")
+    return {"backend": backend["build"], "sourceCommit": backend["sourceCommit"], "generation": marker.generation}
 
 
 def check_release(
