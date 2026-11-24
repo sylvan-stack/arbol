@@ -223,7 +223,8 @@ def package(root: Path = ROOT) -> Path:
     migrations = tomllib.loads((database / "migrations.toml").read_text())["migrations"]
     (folder / "database").mkdir()
     for name in ("migrations.toml", "migrate_schema.py", "database_server.py", "archive_volume.py",
-                 "recovery.py", "recovery_release.py", "exchange_format_transition.py",
+                 "recovery.py", "recovery_release.py", "exchange_format_transition.py", "layout_move.py",
+                 "layout_archive.py",
                  *(migration["file"] for migration in migrations)):
         if not isinstance(name, str) or Path(name).name != name or name in ("", ".", ".."):
             raise ValueError("Each migration input must be a file in the database directory.")
