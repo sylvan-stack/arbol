@@ -4,21 +4,27 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import fcntl
 import json
 import os
 import plistlib
 import re
+import signal
 import stat
 import subprocess
+import sys
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from importlib import import_module
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
 from archive_volume import BACKUPS, Archive, ArchiveUnavailable, require_archive
-from layout_archive import DIR, ENTRY, WORKING, identity, opened, stamp
+from database_server import BIN, LABEL, LAUNCHCTL, Places, postmaster_pid, run
+from layout_archive import DIR, ENTRY, WORKING, ensure_unused, identity, opened, stamp
 from migrate_schema import Refusal, database_target
 from recovery import verify_recovery
 from recovery_release import (
@@ -57,6 +63,8 @@ BACKEND = "arbol"
 SCHEMA_FIELDS = ("revision", "compatibilityVersion")
 MAX_SETTINGS_BYTES = 65536
 RENAME_RECORD = "layout-move-renames.json"
+SERVICE_RECORD = "layout-move-services.json"
+STOPPED_RECORD = "layout-move-stopped.json"
 MAX_RENAME_RECORD_BYTES = 65536
 RENAME_EXCL = 0x00000004  # Darwin sys/stdio.h
 WRITER_INVENTORY_FORMAT = 3
@@ -178,21 +186,43 @@ def rename_identity(folder: int, name: str) -> list[int] | None:
     return list(identity(info))
 
 
-def read_rename_record(folder: int) -> dict[str, Any]:
-    with opened(RENAME_RECORD, ENTRY, folder) as descriptor:
+def read_move_document(folder: int, name: str) -> dict[str, Any]:
+    with opened(name, ENTRY, folder) as descriptor:
         info = os.fstat(descriptor)
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
                 or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1
                 or info.st_size > MAX_RENAME_RECORD_BYTES):
-            raise RecoveryError("The move rename record is not a private owner file of the expected size.")
+            raise RecoveryError("The move record is not a private owner file of the expected size.")
         with os.fdopen(os.dup(descriptor), "rb") as stream:
             raw = stream.read(MAX_RENAME_RECORD_BYTES + 1)
-        named = os.stat(RENAME_RECORD, dir_fd=folder, follow_symlinks=False)
+        named = os.stat(name, dir_fd=folder, follow_symlinks=False)
         if len(raw) != info.st_size or stamp(info) != stamp(os.fstat(descriptor)) or stamp(info) != stamp(named):
-            raise RecoveryError("The move rename record changed while it was read.")
+            raise RecoveryError("The move record changed while it was read.")
     value = json.loads(raw, object_pairs_hook=unique_pairs)
     if not isinstance(value, dict) or canonical(value) != raw:
-        raise RecoveryError("The move rename record is not a canonical JSON object.")
+        raise RecoveryError("The move record is not a canonical JSON object.")
+    return value
+
+
+def write_move_document(folder: int, name: str, record: dict[str, Any]) -> None:
+    temporary = f".{name}.{uuid4().hex}"
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(canonical(record))
+            stream.flush()
+            os.fsync(stream.fileno())
+        rename_exclusive(folder, temporary, folder, name)
+        os.fsync(folder)
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=folder)
+        except FileNotFoundError:
+            pass
+
+
+def read_rename_record(folder: int) -> dict[str, Any]:
+    value = read_move_document(folder, RENAME_RECORD)
     if value.get("format") in (2, WRITER_INVENTORY_FORMAT):
         rename_snapshot_pins(value)
     if value.get("format") == WRITER_INVENTORY_FORMAT:
@@ -347,20 +377,7 @@ def record_renames(
             raise RecoveryError("A recorded directory changed during snapshot and writer inventory verification.")
         if require_rename_fence(paths, record, positions, lease) != marker:
             raise RecoveryError("The exclusive marker changed during snapshot and writer inventory verification.")
-        temporary = f".{RENAME_RECORD}.{uuid4().hex}"
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=new)
-        try:
-            with os.fdopen(descriptor, "wb") as stream:
-                stream.write(canonical(record))
-                stream.flush()
-                os.fsync(stream.fileno())
-            rename_exclusive(new, temporary, new, RENAME_RECORD)
-            os.fsync(new)
-        finally:
-            try:
-                os.unlink(temporary, dir_fd=new)
-            except FileNotFoundError:
-                pass
+        write_move_document(new, RENAME_RECORD, record)
 
 
 def relocate_renames(paths: MovePaths, session: str, lease: ExclusiveLayoutLease, *, reverse: bool = False) -> None:
@@ -380,6 +397,7 @@ def relocate_renames(paths: MovePaths, session: str, lease: ExclusiveLayoutLease
             if observed != pins or read_rename_record(new) != record or rename_positions(paths, roots, record) != positions:
                 raise RecoveryError("The move record, its directory positions or its snapshot proof changed.")
             require_rename_fence(paths, record, positions, lease)
+            require_stopped_installation(paths, new, record, positions)
         # A retry may observe a rename whose first directory sync failed.
         os.fsync(new)
         os.fsync(old)
@@ -573,6 +591,244 @@ if (str(ctx.identity.folder) != request["runtime"] or str(ctx.identity.home) != 
     python = package / "runtime/python/bin/python3.14"
     arguments = [str(python), "-I", "-B", "-c", bootstrap + operation, str(package), canonical(values).decode()]
     return tool_json(arguments, paths.home, timeout=timeout)
+
+
+def move_process_observer() -> Any:
+    """Load the process identity reader from the operator's packaged provider."""
+    source = Path(__file__).resolve().parents[1] / "driver-payload/src"
+    sys.path.insert(0, str(source))
+    try:
+        observer = import_module("arbol_builds.driver_process")
+    finally:
+        sys.path.pop(0)
+    if not Path(observer.__file__).resolve().is_relative_to(source):
+        raise RecoveryError("The move operator requires its packaged process identity reader.")
+    return observer
+
+
+def observed_process(observer: Any, pid: int) -> dict[str, Any] | None:
+    before = observer.inspect(pid)
+    if before is None:
+        return None
+    thread = observer.library().proc_pidpath
+    thread.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32)
+    thread.restype = ctypes.c_int
+    image = ctypes.create_string_buffer(4096)
+    length = thread(pid, image, len(image))
+    current = observer.inspect(pid)
+    if current is None or current.owner != before.owner:
+        return None
+    if not 0 < length < len(image) or not image.value.startswith(b"/"):
+        raise RecoveryError("Cannot identify the executable of an installation process.")
+    return {**before.owner, "executable": str(Path(os.fsdecode(image.value)).resolve(strict=True))}
+
+
+def app_executables(paths: MovePaths, release: dict[str, Any], registry: Path) -> set[str]:
+    apps = [item for item in release["builds"] if item["component"] == "arbol-app"]
+    if len(apps) != 1:
+        raise RecoveryError("The prior release does not identify one signed App.")
+    item = apps[0]
+    package, _ = verify_payload(paths, registry, item, 1)
+    recorded = package / relative(item["entry"]).parts[0]
+    installed = paths.home / "Applications/Arbol App/Arbol App.app"
+    bundles = [recorded]
+    if os.path.lexists(installed) and installed != recorded:
+        owner_directory(installed)
+        result = subprocess.run(["/usr/bin/codesign", "--verify", "--strict", str(installed)],
+                                timeout=45, capture_output=True)
+        if result.returncode or sha(canonical(tree(installed))) != item["evidence"]["signedApp"]["filesSha256"]:
+            raise RecoveryError("The installed App differs from the prior signed release.")
+        bundles.append(installed)
+    executables = set()
+    for bundle in bundles:
+        with (bundle / "Contents/Info.plist").open("rb") as stream:
+            metadata = plistlib.load(stream)
+        executable = metadata["CFBundleExecutable"]
+        if not isinstance(executable, str) or len(relative(executable).parts) != 1:
+            raise RecoveryError("The prior App has an invalid executable name.")
+        image = (bundle / "Contents/MacOS" / executable).resolve(strict=True)
+        if not image.is_relative_to(bundle):
+            raise RecoveryError("The signed App executable leaves its bundle.")
+        executables.add(str(image))
+    return executables
+
+
+def running_apps(observer: Any, images: set[str]) -> list[dict[str, Any]]:
+    scan = subprocess.run(["/usr/sbin/lsof", "-nP", "-F0pfn", "-d", "txt", "-a", "-u", str(os.getuid())],
+                          check=False, capture_output=True, timeout=45)
+    if scan.returncode not in (0, 1) or scan.stderr:
+        raise RecoveryError("Cannot verify the owner process executable inventory.")
+    pid = None
+    matches = {}
+    for field in scan.stdout.split(b"\0"):
+        field = field.lstrip(b"\n")
+        if field.startswith(b"p"):
+            pid = int(field[1:])
+        elif pid is not None and field.startswith(b"n/") and os.fsdecode(field[1:]) in images:
+            process = observed_process(observer, pid)
+            if process is not None and process["executable"] in images:
+                matches[pid] = process
+    return [matches[number] for number in sorted(matches)]
+
+
+def running_backend(paths: MovePaths, observer: Any, image: Path) -> dict[str, Any] | None:
+    try:
+        with opened(paths.old / "runtime/backend.lock", ENTRY) as descriptor:
+            info = os.fstat(descriptor)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                    or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600):
+                raise RecoveryError("The prior Backend lifetime lock is unsafe.")
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                owner = json.loads(os.read(descriptor, 4097))
+            else:
+                return None
+    except FileNotFoundError:
+        return None
+    if not isinstance(owner, dict) or type(owner.get("pid")) is not int or owner["pid"] <= 0:
+        raise RecoveryError("The prior Backend lifetime lock has an invalid process identity.")
+    process = observed_process(observer, owner["pid"])
+    if process is None or process["executable"] != str(image):
+        raise RecoveryError("The prior Backend lifetime lock names a different executable.")
+    return process
+
+
+def database_service(paths: MovePaths) -> dict[str, str] | None:
+    domain = f"gui/{os.getuid()}"
+    service = run([LAUNCHCTL, "print", f"{domain}/{LABEL}"], paths.home, timeout=15)
+    if service.returncode:
+        listing = run([LAUNCHCTL, "print", domain], paths.home, timeout=15)
+        if (listing.returncode or "Could not find service" not in service.stderr or LABEL not in service.stderr):
+            raise RecoveryError("Cannot establish the Arbol database launch agent's status.")
+        return None
+    return dict(line[1:].split(" = ", 1) for line in service.stdout.splitlines()
+                if line.startswith("\t") and not line.startswith("\t\t") and " = " in line)
+
+
+def stop_recorded_process(observer: Any, expected: dict[str, Any], number: int | None) -> None:
+    pid = expected["pid"]
+    if observed_process(observer, pid) != expected:
+        return
+    if number is not None:
+        try:
+            os.kill(pid, number)
+        except ProcessLookupError:
+            return
+    deadline = time.monotonic() + 45
+    while observed_process(observer, pid) == expected:
+        if time.monotonic() >= deadline:
+            raise RecoveryError("A recorded installation process did not stop.")
+        time.sleep(0.25)
+
+
+def stop_installation_services(
+    paths: MovePaths, session: str, lease: ExclusiveLayoutLease, prior_release_directory: Path,
+) -> dict[str, Any]:
+    """Save exact before-images and stop only the bound App, Backend and launch agent."""
+    if any(Path(name).resolve().is_relative_to(paths.old) for name in (__file__, sys.executable)):
+        raise RecoveryError("Run the move operator from a verified package outside the old installation.")
+    archive = require_archive()
+    observer = move_process_observer()
+    with rename_roots(paths) as roots:
+        _, new = roots
+        record = read_rename_record(new)
+        positions = rename_positions(paths, roots, record)
+        if (record["session"] != session or record["format"] != WRITER_INVENTORY_FORMAT
+                or "destination" in positions.values()):
+            raise RecoveryError("Service shutdown requires the verified, unmoved exclusive session.")
+        marker = require_rename_fence(paths, record, positions, lease)
+        pins = rename_snapshot_pins(record)
+        if verify_rename_snapshot(record, Path(pins["snapshotDirectory"]), Path(pins["restoreReceipt"])) != pins:
+            raise RecoveryError("The move snapshot or restore receipt changed before shutdown.")
+        release, _ = verify_release(prior_release_directory, record["priorRelease"], archive=archive)
+        registry = resolve_registry(paths)
+        if str(registry) != record["registry"]:
+            raise RecoveryError("The prior Build registry changed before shutdown.")
+        app_images = app_executables(paths, release, registry)
+        package, _ = prior_backend(paths, record, prior_release_directory)
+        backend_image = (package / "runtime/python/bin/python3.14").resolve(strict=True)
+        places = Places(paths.home)
+        data = paths.old / "database/data"
+        with opened(places.plist, ENTRY) as fd, os.fdopen(os.dup(fd), "rb") as plist_file:
+            prior_plist = plist_file.read(65537)
+        if (len(prior_plist) > 65536 or plistlib.loads(prior_plist).get("ProgramArguments")
+                != [str(BIN / "postgres"), "-D", str(data)]):
+            raise RecoveryError("The prior launch agent does not name the exact database data directory.")
+        service = database_service(paths)
+        try:
+            before = read_move_document(new, SERVICE_RECORD)
+        except FileNotFoundError:
+            pg_pid = postmaster_pid(data)
+            pg = observed_process(observer, pg_pid) if pg_pid is not None else None
+            if (service is None or service.get("state") != "running" or service.get("path") != str(places.plist)
+                    or service.get("pid") != str(pg_pid) or pg is None
+                    or pg["executable"] != str((BIN / "postgres").resolve(strict=True))):
+                raise RecoveryError("The prior launch agent and postmaster identities do not agree.")
+            before = {"format": 1, "session": session, "generation": marker.generation, "postgres": pg,
+                      "plistSha256": sha(prior_plist), "apps": running_apps(observer, app_images),
+                      "appImages": sorted(app_images), "backendImage": str(backend_image),
+                      "backend": running_backend(paths, observer, backend_image)}
+            write_move_document(new, SERVICE_RECORD, before)
+        if (before.get("format") != 1 or before.get("session") != session
+                or before.get("generation") != marker.generation or before.get("plistSha256") != sha(prior_plist)
+                or before.get("appImages") != sorted(app_images) or before.get("backendImage") != str(backend_image)
+                or require_rename_fence(paths, record, positions, lease) != marker):
+            raise RecoveryError("The saved service inventory does not bind this exclusive session.")
+        os.fsync(new)
+        for app in before["apps"]:
+            if app["executable"] not in app_images:
+                raise RecoveryError("The recorded App is outside the verified prior release.")
+            stop_recorded_process(observer, app, signal.SIGTERM)
+        backend = before["backend"]
+        if backend is not None:
+            live = running_backend(paths, observer, backend_image)
+            if live is not None and live != backend:
+                raise RecoveryError("The Backend lifetime lock changed before shutdown.")
+            if live is not None:
+                stop_recorded_process(observer, backend, signal.SIGTERM)
+        pg = before["postgres"]
+        if service is not None:
+            if (service.get("path") != str(places.plist) or service.get("pid") != str(pg["pid"])
+                    or postmaster_pid(data) != pg["pid"] or observed_process(observer, pg["pid"]) != pg):
+                raise RecoveryError("The database launch agent changed before shutdown.")
+            result = run([LAUNCHCTL, "bootout", f"gui/{os.getuid()}/{LABEL}"], paths.home, timeout=90)
+            if result.returncode:
+                raise RecoveryError("launchd did not unload the exact database service.")
+        stop_recorded_process(observer, pg, None)
+        if (database_service(paths) is not None or postmaster_pid(data) is not None
+                or running_apps(observer, app_images) or running_backend(paths, observer, backend_image) is not None):
+            raise RecoveryError("An installation service is still running after shutdown.")
+        ensure_unused({"prior installation": paths.old})
+        require_rename_fence(paths, record, positions, lease)
+        stopped = {"format": 1, "session": session, "servicesSha256": sha(canonical(before))}
+        try:
+            previous = read_move_document(new, STOPPED_RECORD)
+        except FileNotFoundError:
+            write_move_document(new, STOPPED_RECORD, stopped)
+        else:
+            if previous != stopped:
+                raise RecoveryError("The recorded shutdown differs from the verified service inventory.")
+        return before
+
+
+def require_stopped_installation(
+    paths: MovePaths, folder: int, record: dict[str, Any], positions: dict[str, str],
+) -> None:
+    before = read_move_document(folder, SERVICE_RECORD)
+    stopped = read_move_document(folder, STOPPED_RECORD)
+    if (before.get("session") != record["session"]
+            or before.get("generation") != rename_inventory_proof(record)["generation"]
+            or stopped != {"format": 1, "session": record["session"], "servicesSha256": sha(canonical(before))}):
+        raise RecoveryError("The move does not have a verified shutdown of its recorded services.")
+    data = paths.old / "database/data" if positions["database"] == "source" else paths.new / "postgres/data"
+    if database_service(paths) is not None or postmaster_pid(data) is not None:
+        raise RecoveryError("The database is still running before relocation.")
+    observer = move_process_observer()
+    if (running_apps(observer, set(before["appImages"])) or
+            (positions["runtime"] == "source" and running_backend(paths, observer, Path(before["backendImage"])) is not None)):
+        raise RecoveryError("The App or Backend restarted after the recorded shutdown.")
+    ensure_unused({"prior installation": paths.old})
 
 
 def verify_prior_writer_inventories(
