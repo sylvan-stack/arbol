@@ -16,9 +16,10 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from archive_volume import Archive, ArchiveUnavailable, require_archive
+from archive_volume import BACKUPS, Archive, ArchiveUnavailable, require_archive
 from layout_archive import DIR, ENTRY, WORKING, identity, opened, stamp
 from migrate_schema import Refusal, database_target
+from recovery import verify_recovery
 from recovery_release import (
     DIGEST,
     MUTABLE_BUILD_FILES,
@@ -188,13 +189,44 @@ def read_rename_record(folder: int) -> dict[str, Any]:
     value = json.loads(raw, object_pairs_hook=unique_pairs)
     if not isinstance(value, dict) or canonical(value) != raw:
         raise RecoveryError("The move rename record is not a canonical JSON object.")
+    if value.get("format") == 2:
+        rename_snapshot_pins(value)
     return value
+
+
+def rename_snapshot_pins(record: dict[str, Any]) -> dict[str, str]:
+    pins = record.get("snapshotProof")
+    paths = ("snapshotDirectory", "restoreReceipt")
+    digests = ("snapshotSha256", "receiptSha256")
+    if (not isinstance(pins, dict) or pins.keys() != set(paths + digests)
+            or any(not isinstance(value, str) for value in pins.values())
+            or any(not Path(pins[key]).is_relative_to(BACKUPS) or ".." in Path(pins[key]).parts for key in paths)
+            or any(DIGEST.fullmatch(pins[key]) is None for key in digests)):
+        raise RecoveryError("The move rename record does not pin the verified snapshot and restore receipt.")
+    return pins
+
+
+def verify_rename_snapshot(record: dict[str, Any], snapshot_directory: Path, restore_receipt: Path) -> dict[str, str]:
+    schema = record.get("schema")
+    if (not isinstance(schema, dict) or schema.keys() != set(SCHEMA_FIELDS)
+            or any(type(value) is not int or value <= 0 for value in schema.values())):
+        raise RecoveryError("The move rename record does not bind the verified starting schema.")
+    snapshot_directory = snapshot_directory.absolute()
+    restore_receipt = restore_receipt.absolute()
+    proof = verify_recovery(
+        snapshot_directory, restore_receipt, source=checked_source(record["database"]), schema=schema,
+        release_sha256=record["priorRelease"], maintenance_session=record["session"],
+    )
+    return {
+        "snapshotDirectory": str(snapshot_directory), "restoreReceipt": str(restore_receipt),
+        "snapshotSha256": proof["snapshotSha256"], "receiptSha256": proof["receiptSha256"],
+    }
 
 
 def rename_positions(paths: MovePaths, roots: tuple[int, int], record: dict[str, Any]) -> dict[str, str]:
     old, new = roots
     parents = [list(identity(os.fstat(descriptor))) for descriptor in roots]
-    if (type(record.get("format")) is not int or record["format"] != 1
+    if (type(record.get("format")) is not int or record["format"] not in (1, 2)
             or record.get("parents") != parents
             or not isinstance(record.get("session"), str) or TOKEN.fullmatch(record["session"]) is None
             or any(not isinstance(record.get(field), str) or DIGEST.fullmatch(record[field]) is None
@@ -270,22 +302,28 @@ def require_rename_fence(
         raise RecoveryError("The held exclusive admission marker does not bind the move's database and session.")
 
 
-def record_renames(paths: MovePaths, prepared: dict[str, Any], session: str, lease: ExclusiveLayoutLease) -> None:
+def record_renames(
+    paths: MovePaths, prepared: dict[str, Any], session: str, lease: ExclusiveLayoutLease, *,
+    snapshot_directory: Path, restore_receipt: Path,
+) -> None:
     """Persist the complete before-images before the caller requests a rename."""
-    require_archive()
     if prepared.get("status") != "release_pair_verified":
         raise RecoveryError("Directory renames require a verified release pair.")
     with rename_roots(paths) as roots:
         _, new = roots
         data = paths.old / "database/data"
         data_info = owner_directory(data, private=True)
-        record = {key: prepared[key] for key in ("database", "priorRelease", "stagedRelease",
-                                                  "registry", "working", "absentWorking")}
-        record.update(format=1, session=session, parents=[list(identity(os.fstat(fd))) for fd in roots],
+        record = {key: prepared[key] for key in ("database", "schema", "priorRelease", "stagedRelease",
+                                                 "registry", "working", "absentWorking")}
+        record.update(format=2, session=session, parents=[list(identity(os.fstat(fd))) for fd in roots],
                       dataIdentity=list(identity(data_info)))
         positions = rename_positions(paths, roots, record)
         if "destination" in positions.values():
             raise RecoveryError("A working directory moved before its before-image was written.")
+        require_rename_fence(paths, record, positions, lease)
+        record["snapshotProof"] = verify_rename_snapshot(record, snapshot_directory, restore_receipt)
+        if rename_positions(paths, roots, record) != positions:
+            raise RecoveryError("A recorded directory changed during snapshot verification.")
         require_rename_fence(paths, record, positions, lease)
         temporary = f".{RENAME_RECORD}.{uuid4().hex}"
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=new)
@@ -305,8 +343,6 @@ def record_renames(paths: MovePaths, prepared: dict[str, Any], session: str, lea
 
 def relocate_renames(paths: MovePaths, session: str, lease: ExclusiveLayoutLease, *, reverse: bool = False) -> None:
     """Advance or reverse the recorded renames under the same exclusive fence."""
-    if not reverse:
-        require_archive()
     with rename_roots(paths) as roots:
         old, new = roots
         record = read_rename_record(new)
@@ -314,6 +350,14 @@ def relocate_renames(paths: MovePaths, session: str, lease: ExclusiveLayoutLease
             raise RecoveryError("A different session owns the move rename record.")
         positions = rename_positions(paths, roots, record)
         require_rename_fence(paths, record, positions, lease)
+        if not reverse:
+            if record["format"] != 2:
+                raise RecoveryError("Forward relocation requires a snapshot-bound move rename record.")
+            pins = rename_snapshot_pins(record)
+            observed = verify_rename_snapshot(record, Path(pins["snapshotDirectory"]), Path(pins["restoreReceipt"]))
+            if observed != pins or read_rename_record(new) != record or rename_positions(paths, roots, record) != positions:
+                raise RecoveryError("The move record, its directory positions or its snapshot proof changed.")
+            require_rename_fence(paths, record, positions, lease)
         # A retry may observe a rename whose first directory sync failed.
         os.fsync(new)
         os.fsync(old)
