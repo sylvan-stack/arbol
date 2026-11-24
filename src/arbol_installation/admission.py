@@ -257,16 +257,36 @@ def write_state(folder: int, state: State, *, layout: int = INSTALLATION_LAYOUT)
                     pass
 
 
-def convert_admission_layout(runtime: Path, *, session: str, before: int, after: int) -> None:
-    """Change the state marker while keeping an exclusive fence and its permanent lock files."""
+def _require_layout_pair(before: int, after: int) -> None:
     if {before, after} != {1, INSTALLATION_LAYOUT}:
         raise ValueError("Select the two supported installation layouts for conversion.")
-    with (
-        directory(runtime) as folder,
-        lock(folder, OWNER, fcntl.LOCK_EX),
-        lock(folder, GATE, fcntl.LOCK_EX),
-        lock(folder, WRITERS, fcntl.LOCK_EX),
-    ):
+
+
+@dataclass
+class ExclusiveLayoutLease:
+    _folder: int
+    _locks: tuple[int, ...]
+    _pid: int
+
+    def require(self, runtime: Path) -> int:
+        """Borrow the held descriptor after verifying its name and permanent locks."""
+        if self._pid != os.getpid():
+            raise AdmissionRefusal("maintenance", "This exclusive admission lease is no longer held.")
+        with directory(runtime) as named_folder:
+            if not os.path.samestat(os.fstat(self._folder), os.fstat(named_folder)):
+                raise AdmissionRefusal("maintenance", "The runtime path does not name the held admission directory.")
+        for name, descriptor in zip((OWNER, GATE, WRITERS), self._locks, strict=True):
+            held = os.fstat(descriptor)
+            named_lock = os.stat(name, dir_fd=self._folder, follow_symlinks=False)
+            private_file(held)
+            private_file(named_lock)
+            if not os.path.samestat(held, named_lock):
+                raise AdmissionRefusal("maintenance", "A held admission lock was replaced.")
+        return self._folder
+
+    def convert_marker(self, runtime: Path, *, session: str, before: int, after: int) -> None:
+        _require_layout_pair(before, after)
+        folder = self.require(runtime)
         already_converted = False
         try:
             state = read_state(folder, layout=before)
@@ -279,6 +299,26 @@ def convert_admission_layout(runtime: Path, *, session: str, before: int, after:
             os.fsync(folder)
         else:
             write_state(folder, state, layout=after)
+
+
+@contextmanager
+def exclusive_layout_lease(runtime: Path) -> Iterator[ExclusiveLayoutLease]:
+    """Hold the operator and writer locks in order across a runtime rename."""
+    with ExitStack() as stack:
+        folder = stack.enter_context(directory(runtime))
+        locks = tuple(stack.enter_context(lock(folder, name, fcntl.LOCK_EX)) for name in (OWNER, GATE, WRITERS))
+        lease = ExclusiveLayoutLease(folder, locks, os.getpid())
+        try:
+            yield lease
+        finally:
+            lease._pid = -1
+
+
+def convert_admission_layout(runtime: Path, *, session: str, before: int, after: int) -> None:
+    """Change the state marker while keeping an exclusive fence and its permanent lock files."""
+    _require_layout_pair(before, after)
+    with exclusive_layout_lease(runtime) as lease:
+        lease.convert_marker(runtime, session=session, before=before, after=after)
 
 
 def prepare_directory(runtime: Path) -> None:
