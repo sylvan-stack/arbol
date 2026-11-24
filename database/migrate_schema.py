@@ -96,7 +96,8 @@ class Target:
 
 
 def database_target(
-    database: str, *, socket: Path | None = None, port: int | None = None, user: str | None = None
+    database: str, *, socket: Path | None = None, port: int | None = None, user: str | None = None,
+    home: Path | None = None, settings: bytes | None = None,
 ) -> Target:
     """Resolve an explicit installed database, or an independent private socket."""
     if (
@@ -106,15 +107,17 @@ def database_target(
         or database.lower() in {"postgres", "template0", "template1"}
     ):
         raise Refusal("invalid_input", "Name one Arbol database explicitly.")
+    home = Path.home() if home is None else home
     if socket is not None:
         try:
-            if not socket.is_absolute() or port is None or not 1 <= port <= 65535 or not user or "\0" in user:
+            if (settings is not None or not socket.is_absolute() or port is None or not 1 <= port <= 65535
+                    or not user or "\0" in user):
                 raise ValueError
             directory = socket.resolve(strict=True)
             mode = directory.stat()
             if (
                 "," in str(directory)
-                or directory == Places(Path.home()).socket.resolve()
+                or directory == Places(home).socket.resolve()
                 or not stat.S_ISDIR(mode.st_mode)
                 or mode.st_uid != os.getuid()
                 or mode.st_mode & 0o077
@@ -128,9 +131,9 @@ def database_target(
     if port is not None or user is not None:
         raise Refusal("invalid_input", "--port and --user require --socket.")
 
-    home = Path.home()
     try:
-        config = json.loads(Places(home).settings.read_text(encoding="utf-8"))
+        raw = Places(home).settings.read_bytes() if settings is None else settings
+        config = json.loads(raw.decode("utf-8"))
         if (
             not isinstance(config, dict)
             or set(config) not in ({"address"}, {"address", "database"})

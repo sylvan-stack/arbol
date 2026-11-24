@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from archive_volume import Archive, ArchiveUnavailable, require_archive
-from layout_archive import WORKING
+from layout_archive import ENTRY, WORKING, opened, stamp
 from migrate_schema import Refusal, database_target
 from recovery_release import (
     MUTABLE_BUILD_FILES,
@@ -26,9 +26,13 @@ from recovery_release import (
     verify_release,
 )
 
+# migrate_schema loads the installation path module from its own release.
+from arbol_installation.paths import build_payload_directory, build_registry, database_settings, installation_root
+
 REQUIRED = frozenset(("database", "runtime", "app", "builds", "drivers", "native-resources"))
 BACKEND = "arbol"
 SCHEMA_FIELDS = ("revision", "compatibilityVersion")
+MAX_SETTINGS_BYTES = 65536
 
 
 @dataclass(frozen=True)
@@ -41,10 +45,10 @@ class MovePaths:
 
     @property
     def new(self) -> Path:
-        return self.home / ".arbol"
+        return installation_root(self.home)
 
     @property
-    def registry(self) -> Path:
+    def historical_registry(self) -> Path:
         return self.old / "builds"
 
     @property
@@ -60,6 +64,20 @@ def owner_directory(path: Path, *, private: bool = False) -> os.stat_result:
     return info
 
 
+def resolve_registry(paths: MovePaths) -> Path:
+    managed = build_registry(paths.home)
+    historical = paths.historical_registry
+    if os.path.lexists(managed):
+        if os.path.lexists(historical):
+            raise RecoveryError("Both managed and historical Build registries exist. Resolve the active registry first.")
+        registry = managed
+    else:
+        registry = historical
+    if owner_directory(registry).st_mode & 0o022:
+        raise RecoveryError("The Build registry must be writable only by its owner.")
+    return registry
+
+
 def check_disk(data: Path) -> None:
     listing = subprocess.check_output(["/bin/df", "-Pk", str(data)], timeout=10).decode().splitlines()
     device = listing[1].split(None, 1)[0]
@@ -68,43 +86,62 @@ def check_disk(data: Path) -> None:
         raise RecoveryError("The PostgreSQL data directory must be on an internal, non-removable disk.")
 
 
-def working_paths(paths: MovePaths) -> dict[str, dict[str, Any]]:
+def working_paths(paths: MovePaths, registry: Path) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, str]]]:
     old = owner_directory(paths.old, private=True)
     new = owner_directory(paths.new, private=True)
     if old.st_dev != new.st_dev:
         raise RecoveryError("The old installation and the new folder are on different filesystem volumes.")
     working = {}
+    absent = {}
     for name in sorted(WORKING):
+        if name == "builds" and registry != paths.historical_registry:
+            continue
         source = paths.old / name
         destination = paths.new / ("postgres" if name == "database" else name)
+        if os.path.lexists(destination):
+            raise RecoveryError(f"Cannot rename the working directory without overwriting: {name}.")
         if not os.path.lexists(source) and name not in REQUIRED:
+            absent[name] = {"source": str(source), "destination": str(destination)}
             continue
         info = owner_directory(source)
-        if info.st_dev != new.st_dev or os.path.lexists(destination):
-            raise RecoveryError(f"Cannot rename the working directory without overwriting or crossing a volume: {name}.")
+        if info.st_dev != new.st_dev:
+            raise RecoveryError(f"Cannot rename the working directory across a volume: {name}.")
         working[name] = {"source": str(source), "destination": str(destination), "identity": [info.st_dev, info.st_ino]}
     data = paths.old / "database/data"
     if owner_directory(data, private=True).st_dev != new.st_dev:
         raise RecoveryError("The PostgreSQL data directory crosses a volume boundary.")
     check_disk(data)
-    return working
+    return working, absent
 
 
-def installation_database(paths: MovePaths) -> tuple[dict[str, Any], dict[str, str | int]]:
-    file = paths.new / "database.json"
-    info = file.lstat()
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
-        raise RecoveryError("The database settings must be a private owner file.")
-    settings = document(file)
+def read_settings(file: Path) -> tuple[bytes, tuple[int, ...]]:
+    with opened(file, ENTRY) as fd:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077
+                or info.st_nlink != 1 or info.st_size > MAX_SETTINGS_BYTES):
+            raise RecoveryError("The database settings must be a private owner file of the expected size.")
+        before = stamp(info)
+        with os.fdopen(os.dup(fd), "rb") as stream:
+            raw = stream.read(MAX_SETTINGS_BYTES + 1)
+        if len(raw) != info.st_size or stamp(os.fstat(fd)) != before or stamp(file.lstat()) != before:
+            raise RecoveryError("The database settings changed while they were read.")
+    return raw, before
+
+
+def installation_database(paths: MovePaths) -> tuple[dict[str, Any], dict[str, str | int], tuple[int, ...]]:
+    raw, version = read_settings(database_settings(paths.home))
+    settings = json.loads(raw.decode("utf-8"))
+    if not isinstance(settings, dict):
+        raise RecoveryError("The database settings must be a JSON object.")
     name = settings.get("database")
     if not isinstance(name, str):
         raise RecoveryError("The configured database name is unavailable.")
-    target = database_target(name)
+    target = database_target(name, home=paths.home, settings=raw)
     with target.connect() as connection:
         with connection.transaction():
             connection.execute("SET TRANSACTION READ ONLY")
             binding = target.identity(connection)
-    return settings, binding
+    return settings, binding, version
 
 
 def tool_json(arguments: list[str], home: Path) -> dict[str, Any]:
@@ -120,38 +157,74 @@ def tool_json(arguments: list[str], home: Path) -> dict[str, Any]:
     return value
 
 
-def read_schema(package: Path, paths: MovePaths, database: str) -> dict[str, int]:
+def read_schema(
+    package: Path, paths: MovePaths, binding: dict[str, str | int], settings_version: tuple[int, ...],
+) -> dict[str, int]:
     reader = package / "database/migrate_schema.py"
-    bootstrap = ("import runpy, sys; from pathlib import Path; "
-                 "p=Path(sys.argv.pop(1)); sys.path[:0]=[str(p.parent),str(p.parents[1]/'runtime/site-packages'),"
-                 "str(p.parents[1]/'src')]; runpy.run_path(str(p),run_name='__main__')")
+    # Use the release's own catalog and bind its ledger result to the database
+    # identity obtained in the same read-only transaction.
+    bootstrap = """
+import json
+import sys
+from pathlib import Path
+
+reader = Path(sys.argv[1])
+root = reader.parents[1]
+sys.path[:0] = [str(reader.parent), str(root / "runtime/site-packages"), str(root / "src")]
+from migrate_schema import database_target, load_manifest, read_prefix
+
+manifest = load_manifest(reader.with_name("migrations.toml"))
+target = database_target(sys.argv[2])
+with target.connect() as connection, connection.transaction():
+    connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+    identity = target.identity(connection)
+    rows = read_prefix(connection, manifest)
+if rows:
+    print(json.dumps({"status": "ready", "database": identity,
+                      "revision": rows[-1][0], "compatibilityVersion": rows[-1][3]}))
+else:
+    print(json.dumps({"status": "uninitialized"}))
+"""
     runtime = package / "runtime/python/bin/python3.14"
-    result = tool_json([str(runtime), "-I", "-B", "-c", bootstrap, str(reader), "--database", database, "status"], paths.home)
+    settings = database_settings(paths.home)
+    if stamp(settings.lstat()) != settings_version:
+        raise RecoveryError("The database settings changed before the packaged schema read.")
+    result = tool_json([str(runtime), "-I", "-B", "-c", bootstrap, str(reader), str(binding["database"])], paths.home)
+    if stamp(settings.lstat()) != settings_version or result.get("database") != binding:
+        raise RecoveryError("A recorded Backend read a different database or the database settings changed.")
     if result.get("status") != "ready" or any(type(result.get(key)) is not int for key in SCHEMA_FIELDS):
         raise RecoveryError("A recorded Backend could not read the current schema by its own catalog.")
     return {key: result[key] for key in SCHEMA_FIELDS}
 
 
-def selected_build(paths: MovePaths, component: str) -> dict[str, Any]:
-    return tool_json([str(paths.bin / "arbol-builds"), "show", component], paths.home)
+def selected_build(paths: MovePaths, registry: Path, component: str) -> dict[str, Any]:
+    return tool_json([str(paths.bin / "arbol-builds"), "show", component, "--registry-dir", str(registry)], paths.home)
 
 
-def verify_payload(paths: MovePaths, item: dict[str, Any], layout: int) -> tuple[Path, dict[str, Any]]:
+def verify_payload(paths: MovePaths, registry: Path, item: dict[str, Any], layout: int) -> tuple[Path, dict[str, Any]]:
     if item["installationLayout"] != layout:
         raise RecoveryError(f"The release lists a Build from the wrong layout: {item['component']}.")
-    package = paths.registry / relative(item["component"]) / relative(item["build"])
-    if not os.path.lexists(package):
+    component = str(relative(item["component"]))
+    build = str(relative(item["build"]))
+    record_file = registry / component / build / "build.json"
+    if not os.path.lexists(record_file):
         raise RecoveryError(f"The layout-{layout} release Build is not staged in the registry: {item['component']}.")
-    owner_directory(package)
-    record = document(package / "build.json")
+    owner_directory(record_file.parent)
+    info = record_file.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+        raise RecoveryError(f"The Build registry record is not an owner-controlled file: {component}.")
+    record = document(record_file)
     if (record.get("installationLayout", 1) != layout or record.get("status") != "working"
             or record.get("prunedAt") is not None
             or record.get("source", {}).get("commit") != item["sourceCommit"]
             or any(record.get(key) != item[key] for key in ("component", "build", "entry", "packageVersion"))):
         raise RecoveryError(f"Registry identity differs from the layout-{layout} release record: {item['component']}.")
+    package = build_payload_directory(registry, component, build, home=paths.home)
+    owner_directory(package)
     evidence = item["evidence"]
-    if item["component"] == "arbol-app":
+    if component == "arbol-app":
         app = package / relative(item["entry"]).parts[0]
+        owner_directory(app)
         result = subprocess.run(["/usr/bin/codesign", "--verify", "--strict", str(app)],
                                 timeout=45, capture_output=True)
         if result.returncode or sha(canonical(tree(app))) != evidence["signedApp"]["filesSha256"]:
@@ -162,7 +235,8 @@ def verify_payload(paths: MovePaths, item: dict[str, Any], layout: int) -> tuple
 
 
 def check_release(
-    paths: MovePaths, archive: Archive, proof: tuple[Path, str], layout: int, settings: dict[str, Any],
+    paths: MovePaths, registry: Path, archive: Archive,
+    proof: tuple[Path, str], layout: int, settings: dict[str, Any],
 ) -> dict[str, tuple[Path, dict[str, Any]]]:
     directory, expected = proof
     release, _ = verify_release(directory, expected, archive=archive)
@@ -173,10 +247,10 @@ def check_release(
     result = {}
     for item in release["builds"]:
         component = item["component"]
-        payload, record = verify_payload(paths, item, layout)
+        payload, record = verify_payload(paths, registry, item, layout)
         if component in components:
             raise RecoveryError(f"Choose one exact default Build of {component} for the move.")
-        if layout == 1 and selected_build(paths, component).get("build") != record["build"]:
+        if layout == 1 and selected_build(paths, registry, component).get("build") != record["build"]:
             raise RecoveryError(f"The live default differs from the layout-1 release: {component}.")
         components.add(component)
         result[component] = (payload, record)
@@ -193,32 +267,37 @@ def has_schema(record: dict[str, Any], schema: dict[str, int]) -> bool:
 
 def inspect(paths: MovePaths) -> dict[str, Any]:
     archive = require_archive()
-    working = working_paths(paths)
-    _, binding = installation_database(paths)
-    selected = selected_build(paths, BACKEND)
-    backend = paths.registry / BACKEND / relative(selected["build"])
-    return {"status": "inspected", "mercuryDevice": archive.device, "working": working,
-            "backend": selected["build"], "schema": read_schema(backend, paths, str(binding["database"]))}
+    registry = resolve_registry(paths)
+    working, absent = working_paths(paths, registry)
+    _, binding, settings_version = installation_database(paths)
+    selected = selected_build(paths, registry, BACKEND)
+    build = str(relative(selected["build"]))
+    backend = build_payload_directory(registry, BACKEND, build, home=paths.home)
+    owner_directory(backend)
+    schema = read_schema(backend, paths, binding, settings_version)
+    return {"status": "inspected", "mercuryDevice": archive.device, "working": working, "absentWorking": absent,
+            "registry": str(registry), "backend": build, "schema": schema, "database": binding}
 
 
 def verify_release_pair(
     paths: MovePaths, prior: tuple[Path, str], staged: tuple[Path, str],
 ) -> dict[str, Any]:
     archive = require_archive()
-    working = working_paths(paths)
-    settings, binding = installation_database(paths)
-    baseline = check_release(paths, archive, prior, 1, settings)
-    candidate = check_release(paths, archive, staged, 2, settings)
+    registry = resolve_registry(paths)
+    working, absent = working_paths(paths, registry)
+    settings, binding, settings_version = installation_database(paths)
+    baseline = check_release(paths, registry, archive, prior, 1, settings)
+    candidate = check_release(paths, registry, archive, staged, 2, settings)
     missing = baseline.keys() - candidate.keys()
     if missing:
         raise RecoveryError(f"The staged layout-2 release omits installed defaults: {', '.join(sorted(missing))}.")
     packages = (baseline[BACKEND], candidate[BACKEND])
-    name = str(binding["database"])
-    schema = read_schema(packages[0][0], paths, name)
-    if read_schema(packages[1][0], paths, name) != schema or any(not has_schema(record, schema) for _, record in packages):
+    schema = read_schema(packages[0][0], paths, binding, settings_version)
+    if (read_schema(packages[1][0], paths, binding, settings_version) != schema
+            or any(not has_schema(record, schema) for _, record in packages)):
         raise RecoveryError("The installed and staged Backends do not admit the same schema. Qualify the upgrade separately.")
-    return {"status": "release_pair_verified", "working": working, "schema": schema, "database": binding,
-            "priorRelease": prior[1], "stagedRelease": staged[1]}
+    return {"status": "release_pair_verified", "working": working, "absentWorking": absent, "registry": str(registry),
+            "schema": schema, "database": binding, "priorRelease": prior[1], "stagedRelease": staged[1]}
 
 
 def main() -> int:

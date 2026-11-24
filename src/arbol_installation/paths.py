@@ -15,10 +15,13 @@ def build_registry(home: Path | None = None) -> Path:
     return (Path.home() if home is None else home) / "Builds/registries/arbol"
 
 
-def build_payload_directory(registry: str | Path, component: str, build: str) -> Path:
+def build_payload_directory(
+    registry: str | Path, component: str, build: str, *, home: Path | None = None,
+) -> Path:
+    account = Path.home() if home is None else home
     root = Path(registry)
-    if root.resolve() == build_registry().resolve():
-        root = Path.home() / ".local/lib/sylvan-stack/arbol/stable"
+    if root.resolve() == build_registry(account).resolve():
+        root = account / ".local/lib/sylvan-stack/arbol/stable"
     return root / component / build
 
 
