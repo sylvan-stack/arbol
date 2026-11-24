@@ -1299,7 +1299,17 @@ def prepare_move_maintenance(
             write_move_document(folder, MOVE_INTENT, intent)
         else:
             if previous != intent:
-                raise RecoveryError("A different verified move already owns this installation.")
+                attempt = {"restoreDirectory", "isolated"}
+                accepted = optional_move_document(folder, SNAPSHOT_RECORD)
+                if (drain_only or {key: value for key, value in previous.items() if key not in attempt}
+                        != {key: value for key, value in intent.items() if key not in attempt}):
+                    raise RecoveryError("A different verified move already owns this installation.")
+                if accepted is not None and (accepted.get("restoreReceipt") != str(restore_directory / "restore.json")
+                                             or accepted.get("isolated") != intent["isolated"]):
+                    raise RecoveryError("The move already has a different verified isolated restore.")
+                # A failed isolated restore stays on Mercury. Retry only its
+                # disposable target, keeping the original drain attribution.
+                intent = previous
         session = drain_attribution(folder, intent, marker)
         if drain_only:
             return prior_maintenance_transition(paths, prepared, prior[0], action="drain", attributed_session=session,
@@ -1338,13 +1348,14 @@ def prepare_move_maintenance(
             bound_snapshot(starting.source, session)
             result = {"format": 1, "session": session, "generation": starting.generation, "handoffSha256": handoff[1],
                       "snapshotDirectory": str(snapshot_directory), "restoreReceipt": str(receipt),
-                      "snapshotSha256": proof["snapshotSha256"], "receiptSha256": proof["receiptSha256"]}
+                      "snapshotSha256": proof["snapshotSha256"], "receiptSha256": proof["receiptSha256"],
+                      "isolated": {"host": isolated.host, "port": isolated.port, "user": isolated.user}}
             try:
                 recorded = read_move_document(folder, SNAPSHOT_RECORD)
             except FileNotFoundError:
                 write_move_document(folder, SNAPSHOT_RECORD, result)
             else:
-                if recorded != result:
+                if recorded != result and recorded != {key: value for key, value in result.items() if key != "isolated"}:
                     raise RecoveryError("The existing move snapshot record changed.")
         return {**result, "status": "move_snapshot_verified"}
 
@@ -1973,10 +1984,9 @@ def stop_prior_for_fallback(
 
 def record_fallback(
     paths: MovePaths, folder: int, record: dict[str, Any], snapshot: dict[str, Any],
-    proof: dict[str, Any], intent: dict[str, Any],
+    proof: dict[str, Any], isolated: dict[str, Any],
 ) -> dict[str, Any]:
     places = PriorPlaces(paths.home)
-    isolated = intent["isolated"]
     if (proof["target"]["host"], proof["target"]["port"]) != (isolated["host"], isolated["port"]):
         raise RecoveryError("The verified restore belongs to a different isolated socket.")
     target = database_target(str(record["database"]["database"]), socket=Path(isolated["host"]), port=isolated["port"],
@@ -2086,7 +2096,9 @@ def recover_snapshot_fallback(
         if marker.session != record["session"] or marker.source != record["database"]:
             raise RecoveryError("A different database or session owns the prior marker.")
         stop_prior_for_fallback(paths, folder, record, snapshot)
-        fallback = record_fallback(paths, folder, record, snapshot, proof, read_move_document(folder, MOVE_INTENT))
+        captured = read_move_document(folder, SNAPSHOT_RECORD)
+        isolated = captured.get("isolated") or read_move_document(folder, MOVE_INTENT)["isolated"]
+        fallback = record_fallback(paths, folder, record, snapshot, proof, isolated)
     if (fallback["session"] != record["session"] or fallback["snapshotSha256"] != proof["snapshotSha256"]
             or fallback["restoreSha256"] != proof["receiptSha256"]
             or marker.source not in (fallback["source"], fallback["replacementSource"])
