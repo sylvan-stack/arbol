@@ -8,6 +8,7 @@ import fcntl
 import json
 import os
 import plistlib
+import pwd
 import re
 import signal
 import stat
@@ -24,6 +25,7 @@ from uuid import uuid4
 
 from archive_volume import BACKUPS, Archive, ArchiveUnavailable, require_archive
 from database_server import BIN, LABEL, LAUNCHCTL, Places, postmaster_pid, run
+from install_database_server import Installation, launch_agent
 from layout_archive import DIR, ENTRY, WORKING, ensure_unused, identity, opened, stamp
 from migrate_schema import Refusal, database_target
 from recovery import verify_recovery
@@ -68,6 +70,7 @@ STOPPED_RECORD = "layout-move-stopped.json"
 MAX_RENAME_RECORD_BYTES = 65536
 RENAME_EXCL = 0x00000004  # Darwin sys/stdio.h
 WRITER_INVENTORY_FORMAT = 3
+SEALED_DRIVERS = frozenset(f"arbol-{name}-driver" for name in ("claude", "codex", "mimo", "pi"))
 
 
 @dataclass(frozen=True)
@@ -1010,16 +1013,158 @@ def verify_release_pair(
             "schema": schema, "database": binding, "priorRelease": prior[1], "stagedRelease": staged[1]}
 
 
+def pinned_move_input(archive: Archive, path: Path, checksum: str, *, limit: int = 2**20) -> bytes:
+    if not isinstance(checksum, str) or DIGEST.fullmatch(checksum) is None:
+        raise RecoveryError("A prepared move input lacks its exact SHA-256.")
+    path = archive.backup_path(path)
+    with opened(path, ENTRY) as fd, os.fdopen(os.dup(fd), "rb") as stream:
+        info = os.fstat(fd)
+        raw = stream.read(limit + 1)
+        if (not stat.S_ISREG(info.st_mode) or len(raw) != info.st_size or len(raw) > limit
+                or stamp(info) != stamp(os.fstat(fd)) or stamp(info) != stamp(path.lstat()) or sha(raw) != checksum):
+            raise RecoveryError("A prepared move input is missing, changed or differs from its approved digest.")
+    return raw
+
+
+def move_object(raw: bytes) -> dict[str, Any]:
+    value = json.loads(raw, object_pairs_hook=unique_pairs)
+    if not isinstance(value, dict) or canonical(value) != raw:
+        raise RecoveryError("A prepared move input must be one canonical JSON object.")
+    return value
+
+
+def stage_input(archive: Archive, release: Path, record: dict[str, Any], pin: Any) -> bytes:
+    if (not isinstance(pin, dict) or pin.keys() != {"name", "sha256"}
+            or not isinstance(pin["name"], str) or len(relative(pin["name"]).parts) != 1
+            or pin["name"] not in record.get("inputs", ())):
+        raise RecoveryError("A move input is missing from the verified staged release attachments.")
+    return pinned_move_input(archive, release / "inputs" / pin["name"], pin["sha256"])
+
+
+def move_route(paths: MovePaths, value: Any) -> Path:
+    if not isinstance(value, str):
+        raise RecoveryError("The handoff does not name a safe launcher route.")
+    path = Path(value)
+    if (str(path) != value or path.parent not in (paths.bin, paths.home / "Applications/Arbol/bin")
+            or re.fullmatch(r"arbol(?:-[a-z0-9]+)*", path.name) is None):
+        raise RecoveryError("The handoff does not name a supported installation launcher route.")
+    return path
+
+
+def verify_staged_move(
+    paths: MovePaths, prior: tuple[Path, str], staged: tuple[Path, str], handoff: tuple[Path, str],
+) -> dict[str, Any]:
+    """Verify the approved AFL-16 input bundle before granting maintenance entry."""
+    archive = require_archive()
+    manifest = move_object(pinned_move_input(archive, *handoff))
+    expected_keys = {"format", "kind", "priorRelease", "stagedRelease", "database", "schema", "sourceRoot",
+                     "destinationRoot", "registry", "launchers", "databasePlist", "continuity", "sealedDrivers"}
+    if (manifest.keys() != expected_keys or type(manifest["format"]) is not int or manifest["format"] != 1
+            or manifest["kind"] != "arbol-layout-move-preparation" or manifest["priorRelease"] != prior[1]
+            or manifest["stagedRelease"] != staged[1] or manifest["sourceRoot"] != str(paths.old)
+            or manifest["destinationRoot"] != str(paths.new)):
+        raise RecoveryError("The handoff is not for this exact pair of releases and installation paths.")
+    prepared = verify_release_pair(paths, prior, staged)
+    if checked_source(manifest["database"]) != prepared["database"] or manifest["schema"] != prepared["schema"]:
+        raise RecoveryError("The handoff does not identify the current database and common schema.")
+    prior_record, _ = verify_release(*prior, archive=archive)
+    release, _ = verify_release(*staged, archive=archive)
+    before = {item["component"]: item["build"] for item in prior_record["builds"]}
+    selected = {item["component"]: item for item in release["builds"]}
+    after = {component: item["build"] for component, item in selected.items()}
+    registry = paths.new / "builds" if prepared["registry"] == str(paths.historical_registry) else Path(prepared["registry"])
+    if manifest["registry"] != {"source": prepared["registry"], "destination": str(registry),
+                                 "priorDefaults": before, "stagedDefaults": after}:
+        raise RecoveryError("The ordinary Build selection handoff differs from the recorded releases or registry paths.")
+
+    def attachment(pin: Any) -> bytes:
+        return stage_input(archive, staged[0], release, pin)
+
+    plan = manifest["launchers"]
+    if not isinstance(plan, list) or not 1 <= len(plan) <= 32:
+        raise RecoveryError("The handoff does not name the staged ordinary launchers.")
+    launchers = {}
+    for row in plan:
+        if not isinstance(row, dict) or row.keys() != {"route", "input"}:
+            raise RecoveryError("A staged launcher lacks its exact route and attachment.")
+        route = move_route(paths, row["route"])
+        raw = attachment(row["input"])
+        if (route.name in SEALED_DRIVERS or str(route) in launchers or not raw.startswith(b"#!")
+                or os.fsencode(paths.old) in raw):
+            raise RecoveryError("A staged ordinary launcher overlaps a sealed or relocating path.")
+        launchers[str(route)] = raw
+    if not {"arbol", "arbol-trunk"} <= {Path(route).name for route in launchers}:
+        raise RecoveryError("The staged ordinary Backend and Trunk launchers are required.")
+
+    owner = pwd.getpwuid(os.getuid())
+    plist = attachment(manifest["databasePlist"])
+    expected_plist = launch_agent(Installation(Places(paths.home), owner.pw_name, BIN))
+    if plistlib.loads(plist) != plistlib.loads(expected_plist.encode()):
+        raise RecoveryError("The staged database plist differs from the ordinary layout-2 launch agent.")
+
+    continuity = move_object(attachment(manifest["continuity"]))
+    if (continuity.keys() != {"format", "kind", "result", "destinationRoot", "promptsSent", "claudeVersion", "codexVersion"}
+            or type(continuity["format"]) is not int or continuity["format"] != 1
+            or continuity["kind"] != "arbol-layout-continuity" or continuity["result"] != "passed"
+            or continuity["destinationRoot"] != str(paths.new) or type(continuity["promptsSent"]) is not int
+            or continuity["promptsSent"] != 0
+            or any(not isinstance(continuity[key], str) or not continuity[key].strip()
+                   for key in ("claudeVersion", "codexVersion"))):
+        raise RecoveryError("The verified no-prompt continuity observations are missing for the destination paths.")
+
+    driver = manifest["sealedDrivers"]
+    if (not isinstance(driver, dict) or driver.keys() != {"gate", "acceptances"}
+            or not isinstance(driver["acceptances"], dict) or driver["acceptances"].keys() != SEALED_DRIVERS
+            or not SEALED_DRIVERS <= selected.keys()):
+        raise RecoveryError("The destination-bound sealed Driver handoff is incomplete.")
+    gate_raw = attachment(driver["gate"])
+    gate = move_object(gate_raw)
+    provider = selected[BACKEND]["evidence"]["sealedPayload"]["descriptorSha256"]
+    if (gate.keys() != {"version", "kind", "providerPayloadSha256", "components"}
+            or type(gate["version"]) is not int or gate["version"] != 1 or gate["kind"] != "driver-gate"
+            or gate["providerPayloadSha256"] != provider or not isinstance(gate["components"], list)
+            or len(gate["components"]) != len(SEALED_DRIVERS)):
+        raise RecoveryError("The staged Driver gate does not bind the verified provider and all four launchers.")
+    platform = os.uname()
+    for component, row in zip(sorted(SEALED_DRIVERS), gate["components"], strict=True):
+        if (not isinstance(row, dict) or row.keys() != {"component", "launcher", "launcherSha256"}
+                or row["component"] != component or not isinstance(row["launcherSha256"], str)
+                or DIGEST.fullmatch(row["launcherSha256"]) is None
+                or move_route(paths, row["launcher"]).name != component):
+            raise RecoveryError("The staged Driver gate has an invalid destination launcher.")
+        acceptance = move_object(attachment(driver["acceptances"][component]))
+        producer = selected[component]["evidence"]["sealedPayload"]["descriptorSha256"]
+        required = {
+            "version": 1, "kind": "driver-qualification", "scope": str(registry),
+            "contract": "DRV-browser-identity-1", "providerPayloadSha256": provider,
+            "producerPayloadSha256": producer, "gateSha256": sha(gate_raw),
+            "platform": {"system": platform.sysname, "release": platform.release, "machine": platform.machine},
+        }
+        if (acceptance.keys() != required.keys() | {"status", "evidenceSha256"}
+                or any(acceptance.get(key) != value for key, value in required.items())
+                or acceptance["status"] not in ("candidate", "qualified")
+                or (paths.home == Path(owner.pw_dir).resolve() and acceptance["status"] != "qualified")
+                or not isinstance(acceptance["evidenceSha256"], str)
+                or DIGEST.fullmatch(acceptance["evidenceSha256"]) is None):
+            raise RecoveryError("A sealed Driver acceptance does not match the destination and selected payload.")
+
+    return {**prepared, "handoffSha256": handoff[1], "targetRegistry": str(registry), "stage": manifest,
+            "stagedLaunchers": launchers, "stagedPlist": plist}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prior", nargs=2, metavar=("RELEASE_DIR", "SHA256"))
     parser.add_argument("--staged", nargs=2, metavar=("RELEASE_DIR", "SHA256"))
+    parser.add_argument("--handoff", nargs=2, metavar=("MANIFEST", "SHA256"))
     parser.add_argument("--rename-status", action="store_true", help="Read the recorded locations of working directories.")
     args = parser.parse_args()
     if (args.prior is None) != (args.staged is None):
         parser.error("Supply both exact release records or neither.")
-    if args.rename_status and args.prior is not None:
+    if args.rename_status and (args.prior is not None or args.handoff is not None):
         parser.error("Read rename status separately from release verification.")
+    if args.handoff is not None and args.prior is None:
+        parser.error("A handoff requires the exact prior and staged release records.")
     paths = MovePaths(Path.home().resolve())
     try:
         if args.rename_status:
@@ -1027,11 +1172,20 @@ def main() -> int:
         elif args.prior is None:
             result = inspect(paths)
         else:
-            result = verify_release_pair(paths, (Path(args.prior[0]), args.prior[1]), (Path(args.staged[0]), args.staged[1]))
+            prior = Path(args.prior[0]), args.prior[1]
+            staged = Path(args.staged[0]), args.staged[1]
+            if args.handoff is None:
+                result = verify_release_pair(paths, prior, staged)
+            else:
+                handoff = Path(args.handoff[0]), args.handoff[1]
+                prepared = verify_staged_move(paths, prior, staged, handoff)
+                result = {key: value for key, value in prepared.items()
+                          if key not in ("stage", "stagedLaunchers", "stagedPlist")}
+                result["status"] = "move_prepared"
         print(json.dumps(result))
         return 0
     except (AdmissionRefusal, ArchiveUnavailable, Refusal, RecoveryError, KeyError, OSError, ValueError,
-            subprocess.SubprocessError, IndexError) as error:
+            subprocess.SubprocessError, IndexError, TypeError, RecursionError) as error:
         code = error.code if isinstance(error, ArchiveUnavailable) else "move_refused"
         print(json.dumps({"status": code, "message": str(error)}))
         return 1
