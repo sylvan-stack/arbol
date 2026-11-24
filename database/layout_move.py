@@ -16,19 +16,21 @@ import subprocess
 import sys
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from importlib import import_module
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
+import psycopg
+
 from archive_volume import BACKUPS, Archive, ArchiveUnavailable, require_archive
 from database_server import BIN, LABEL, LAUNCHCTL, Places, postmaster_pid, run
 from install_database_server import Installation, launch_agent
 from layout_archive import DIR, ENTRY, WORKING, ensure_unused, identity, opened, stamp
 from migrate_schema import Refusal, database_target
-from recovery import verify_recovery
+from recovery import capture, restore, validate_snapshot, verify_recovery
 from recovery_release import (
     COMMIT,
     DIGEST,
@@ -49,6 +51,8 @@ from arbol_installation.admission import (
     ExclusiveLayoutLease,
     State,
     checked_source,
+    directory,
+    exclusive_layout_lease,
     read_state,
     unique_pairs,
 )
@@ -67,6 +71,9 @@ MAX_SETTINGS_BYTES = 65536
 RENAME_RECORD = "layout-move-renames.json"
 SERVICE_RECORD = "layout-move-services.json"
 STOPPED_RECORD = "layout-move-stopped.json"
+MOVE_INTENT = "layout-move-intent.json"
+DRAIN_RECORD = "layout-move-drain.json"
+SNAPSHOT_RECORD = "layout-move-snapshot.json"
 MAX_RENAME_RECORD_BYTES = 65536
 RENAME_EXCL = 0x00000004  # Darwin sys/stdio.h
 WRITER_INVENTORY_FORMAT = 3
@@ -462,10 +469,10 @@ def installation_database(paths: MovePaths) -> tuple[dict[str, Any], dict[str, s
     return settings, binding, version
 
 
-def tool_json(arguments: list[str], home: Path, *, timeout: int = 30) -> dict[str, Any]:
+def tool_json(arguments: list[str], home: Path, *, timeout: int = 30, pass_fds: tuple[int, ...] = ()) -> dict[str, Any]:
     env = {key: value for key, value in os.environ.items() if not key.startswith(("PG", "ARBOL_"))}
     env["HOME"] = str(home)
-    result = subprocess.run(arguments, env=env, timeout=timeout, capture_output=True, check=False)
+    result = subprocess.run(arguments, env=env, timeout=timeout, capture_output=True, check=False, pass_fds=pass_fds)
     try:
         value = json.loads(result.stdout)
     except ValueError as error:
@@ -569,7 +576,8 @@ def prior_backend(
 
 
 def run_prior_backend(
-    paths: MovePaths, package: Path, build: str, request: dict[str, Any], operation: str, *, timeout: int = 30,
+    paths: MovePaths, package: Path, build: str, request: dict[str, Any], operation: str, *,
+    timeout: int = 30, pass_fds: tuple[int, ...] = (),
 ) -> dict[str, Any]:
     values = {**request, "runtime": str(paths.old / "runtime"), "home": str(paths.home), "build": build}
     bootstrap = """
@@ -593,7 +601,7 @@ if (str(ctx.identity.folder) != request["runtime"] or str(ctx.identity.home) != 
 """
     python = package / "runtime/python/bin/python3.14"
     arguments = [str(python), "-I", "-B", "-c", bootstrap + operation, str(package), canonical(values).decode()]
-    return tool_json(arguments, paths.home, timeout=timeout)
+    return tool_json(arguments, paths.home, timeout=timeout, pass_fds=pass_fds)
 
 
 def move_process_observer() -> Any:
@@ -873,10 +881,11 @@ print(json.dumps({"backend": ctx.identity.build, "generation": marker.generation
 def prior_maintenance_transition(
     paths: MovePaths, prepared: dict[str, Any], prior_release_directory: Path, *,
     action: Literal["drain", "freeze"], attributed_session: str | None = None,
+    attribution: tuple[int, str] | None = None,
 ) -> dict[str, Any]:
     """Invoke a prior fence transition after preflight, using a journaled session on resume."""
     if (prepared.get("status") != "release_pair_verified" or action not in ("drain", "freeze")
-            or (action == "freeze" and attributed_session is None)
+            or (attributed_session is None and (action != "drain" or attribution is None))
             or (attributed_session is not None
                 and (not isinstance(attributed_session, str) or TOKEN.fullmatch(attributed_session) is None))):
         raise RecoveryError("The prior maintenance transition lacks verified preparation or its exact session.")
@@ -885,10 +894,12 @@ def prior_maintenance_transition(
         "action": action, "attributedSession": attributed_session,
         "source": checked_source(prepared["database"]), "schema": prepared["schema"],
         "runtimeIdentity": prepared["working"]["runtime"]["identity"],
+        "attribution": attribution,
     }
-    operation = """
+    operation = r"""
 from arbol_backend.exchange_drain import begin_maintenance, freeze
-from arbol_installation.admission import STATE
+from arbol_installation.admission import STATE, TOKEN
+from uuid import uuid4
 
 runtime = ctx.identity.folder
 runtime_info = runtime.lstat()
@@ -915,6 +926,41 @@ with directory(runtime) as folder:
         target = args[3]
         if target < 0 or not os.path.samestat(os.fstat(target), directory_info) or read_state(target) != before:
             raise ValueError("The prior maintenance marker or its directory changed under admission.")
+        if fresh:
+            journal, intent = request["attribution"]
+            with os.fdopen(os.open(args[0], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=args[2]), "rb") as stream:
+                next_state = json.load(stream)
+            session = next_state.get("session")
+            if (not isinstance(session, str) or TOKEN.fullmatch(session) is None
+                    or next_state.get("state") != "draining" or next_state.get("generation") != before.generation
+                    or next_state.get("source") != source or next_state.get("release") != before.release):
+                raise ValueError("The prior Backend did not stage the expected draining marker.")
+            receipt = {"format": 1, "intentSha256": intent, "session": session, "generation": before.generation}
+            name = "layout-move-drain.json"
+            try:
+                opened = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=journal)
+            except FileNotFoundError:
+                pass
+            else:
+                with os.fdopen(opened, "rb") as stream:
+                    previous = json.loads(stream.read(16385))
+                if previous.get("intentSha256") != intent or previous.get("generation") != before.generation:
+                    raise ValueError("An earlier move already owns the drain attribution.")
+            temporary = f".{name}.{uuid4().hex}"
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=journal)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                    json.dump(receipt, stream, sort_keys=True, separators=(",", ":"))
+                    stream.write("\n")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, name, src_dir_fd=journal, dst_dir_fd=journal)
+                os.fsync(journal)
+            finally:
+                try:
+                    os.unlink(temporary, dir_fd=journal)
+                except FileNotFoundError:
+                    pass
         marker_writes_observed.append(True)
 
     # os.replace emits os.rename before the write, while the historical
@@ -944,7 +990,8 @@ with directory(runtime) as folder:
 print(json.dumps({"status": after.phase, "session": session, "generation": after.generation,
                   "database": after.source, "schema": schema}))
 """
-    return run_prior_backend(paths, package, backend["build"], request, operation, timeout=60)
+    descriptors = () if attribution is None else (attribution[0],)
+    return run_prior_backend(paths, package, backend["build"], request, operation, timeout=60, pass_fds=descriptors)
 
 
 def check_release(
@@ -1152,11 +1199,139 @@ def verify_staged_move(
             "stagedLaunchers": launchers, "stagedPlist": plist}
 
 
+def verify_writer_refusal(archive: Archive, prepared: dict[str, Any], pin: tuple[Path, str]) -> None:
+    evidence = move_object(pinned_move_input(archive, *pin))
+    prior = prepared["stage"]["registry"]["priorDefaults"]
+    writers = {name for name in prior if name == BACKEND or name.startswith("arbol-trunk/")}
+    expected = {name: {"build": prior[name], "default": "refused", "explicit": "refused", "missingMarker": "refused"}
+                for name in writers}
+    expected["arbol-exchanges"] = expected[BACKEND]
+    if evidence != {"format": 1, "kind": "arbol-layout-writer-refusal", "priorRelease": prepared["priorRelease"],
+                    "handoffSha256": prepared["handoffSha256"], "isolated": True, "writers": expected}:
+        raise RecoveryError("The isolated prior writer refusal evidence does not cover the exact release and routes.")
+
+
+def drain_attribution(folder: int, intent: dict[str, Any], marker: State) -> str | None:
+    try:
+        receipt = read_move_document(folder, DRAIN_RECORD)
+    except FileNotFoundError:
+        if marker.phase != "normal":
+            raise RecoveryError("An existing closed session has no durable attribution to this move.")
+        return None
+    if (receipt.keys() != {"format", "intentSha256", "session", "generation"} or receipt["format"] != 1
+            or receipt["intentSha256"] != sha(canonical(intent))
+            or any(not isinstance(receipt[key], str) or TOKEN.fullmatch(receipt[key]) is None
+                   for key in ("session", "generation"))):
+        raise RecoveryError("The saved drain attribution does not match this move.")
+    if marker.phase == "normal":
+        if marker.generation != receipt["generation"]:
+            raise RecoveryError("The prior release reopened after the recorded drain intent.")
+        return None  # The child journaled the proposal but its marker write did not take effect.
+    if marker.session != receipt["session"] or (marker.phase == "draining" and marker.generation != receipt["generation"]):
+        raise RecoveryError("A different exclusive session owns the layout-1 runtime.")
+    return receipt["session"]
+
+
+def prepare_move_maintenance(
+    paths: MovePaths, prior: tuple[Path, str], staged: tuple[Path, str], handoff: tuple[Path, str], *,
+    refusal: tuple[Path, str], snapshot_directory: Path, restore_directory: Path,
+    restore_socket: Path, restore_port: int, restore_role: str, drain_only: bool,
+) -> dict[str, Any]:
+    archive = require_archive()
+    prepared = verify_staged_move(paths, prior, staged, handoff)
+    verify_writer_refusal(archive, prepared, refusal)
+    snapshot_directory = archive.backup_path(snapshot_directory, allow_missing=True)
+    restore_directory = archive.backup_path(restore_directory, allow_missing=True)
+    if (snapshot_directory == BACKUPS or restore_directory == BACKUPS
+            or snapshot_directory.is_relative_to(restore_directory) or restore_directory.is_relative_to(snapshot_directory)):
+        raise RecoveryError("Use separate private archive destinations for the snapshot and isolated restore.")
+    isolated = database_target(str(prepared["database"]["database"]), socket=restore_socket, port=restore_port,
+                               user=restore_role, home=paths.home)
+    if any(Path(isolated.host).is_relative_to(root) for root in (paths.old, paths.new)):
+        raise RecoveryError("The restore socket must be outside both installation layouts.")
+    intent = {
+        "format": 1, "handoffSha256": handoff[1], "priorRelease": prior[1], "stagedRelease": staged[1],
+        "priorDirectory": str(prior[0]), "stagedDirectory": str(staged[0]), "database": prepared["database"],
+        "schema": prepared["schema"], "refusalSha256": refusal[1], "snapshotDirectory": str(snapshot_directory),
+        "restoreDirectory": str(restore_directory),
+        "isolated": {"host": isolated.host, "port": isolated.port, "user": isolated.user},
+    }
+    runtime = paths.old / "runtime"
+    with rename_roots(paths) as (_, folder):
+        with directory(runtime) as admission:
+            marker = read_state(admission, layout=1)
+        if marker.source != prepared["database"]:
+            raise RecoveryError("The current layout-1 marker names a different source database.")
+        try:
+            previous = read_move_document(folder, MOVE_INTENT)
+        except FileNotFoundError:
+            if not drain_only or marker.phase != "normal":
+                raise RecoveryError("Start the exact move drain before freezing or capturing.")
+            write_move_document(folder, MOVE_INTENT, intent)
+        else:
+            if previous != intent:
+                raise RecoveryError("A different verified move already owns this installation.")
+        session = drain_attribution(folder, intent, marker)
+        if drain_only:
+            return prior_maintenance_transition(paths, prepared, prior[0], action="drain", attributed_session=session,
+                                                attribution=(folder, sha(canonical(intent))) if session is None else None)
+        if session is None:
+            raise RecoveryError("The exact move has yet to publish its draining marker.")
+        exclusive = prior_maintenance_transition(paths, prepared, prior[0], action="freeze", attributed_session=session)
+        with exclusive_layout_lease(runtime) as lease:
+            starting = read_state(lease.require(runtime), layout=1)
+            if (starting.phase != "exclusive" or starting.session != session or starting.source != prepared["database"]
+                    or starting.generation != exclusive["generation"]):
+                raise RecoveryError("The exclusive marker changed before snapshot capture.")
+
+            def bound_snapshot(source: dict[str, Any], owner: str) -> Any:
+                if source != starting.source or owner != session or read_state(lease.require(runtime), layout=1) != starting:
+                    raise RecoveryError("The snapshot no longer owns the exact exclusive move session.")
+                return nullcontext(session)
+
+            settings, _ = read_settings(database_settings(paths.home))
+            target = database_target(str(starting.source["database"]), home=paths.home, settings=settings)
+            if not os.path.lexists(snapshot_directory):
+                capture(target, prior[0], snapshot_directory, maintenance_session=session, exclusive=bound_snapshot,
+                        installed_data=paths.old / "database/data")
+            snapshot, _, _ = validate_snapshot(snapshot_directory, storage=archive)
+            expected = {"source": starting.source, "schema": prepared["schema"], "releaseSha256": prior[1],
+                        "maintenanceSession": session}
+            if any(snapshot.get(key) != value for key, value in expected.items()):
+                raise RecoveryError("The saved snapshot belongs to a different schema, release or move session.")
+            receipt = restore_directory / "restore.json"
+            if not os.path.lexists(restore_directory):
+                receipt = restore(isolated, snapshot_directory, restore_directory)
+            proof = verify_recovery(snapshot_directory, receipt, source=starting.source, schema=prepared["schema"],
+                                    release_sha256=prior[1], maintenance_session=session)
+            if (proof["target"]["host"], proof["target"]["port"]) != (isolated.host, isolated.port):
+                raise RecoveryError("The isolated restore receipt belongs to a different socket target.")
+            bound_snapshot(starting.source, session)
+            result = {"format": 1, "session": session, "generation": starting.generation, "handoffSha256": handoff[1],
+                      "snapshotDirectory": str(snapshot_directory), "restoreReceipt": str(receipt),
+                      "snapshotSha256": proof["snapshotSha256"], "receiptSha256": proof["receiptSha256"]}
+            try:
+                recorded = read_move_document(folder, SNAPSHOT_RECORD)
+            except FileNotFoundError:
+                write_move_document(folder, SNAPSHOT_RECORD, result)
+            else:
+                if recorded != result:
+                    raise RecoveryError("The existing move snapshot record changed.")
+        return {**result, "status": "move_snapshot_verified"}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prior", nargs=2, metavar=("RELEASE_DIR", "SHA256"))
     parser.add_argument("--staged", nargs=2, metavar=("RELEASE_DIR", "SHA256"))
     parser.add_argument("--handoff", nargs=2, metavar=("MANIFEST", "SHA256"))
+    maintenance = parser.add_mutually_exclusive_group()
+    maintenance.add_argument("--drain", action="store_true", help="Begin or read back this exact move's drain.")
+    maintenance.add_argument("--capture", action="store_true", help="Freeze and verify the move snapshot by isolated restore.")
+    parser.add_argument("--writer-refusal", nargs=2, metavar=("RECEIPT", "SHA256"))
+    parser.add_argument("--snapshot-directory", type=Path)
+    parser.add_argument("--restore-directory", type=Path)
+    parser.add_argument("--restore-target", nargs=3, metavar=("SOCKET_DIR", "PORT", "ROLE"))
     parser.add_argument("--rename-status", action="store_true", help="Read the recorded locations of working directories.")
     args = parser.parse_args()
     if (args.prior is None) != (args.staged is None):
@@ -1165,6 +1340,12 @@ def main() -> int:
         parser.error("Read rename status separately from release verification.")
     if args.handoff is not None and args.prior is None:
         parser.error("A handoff requires the exact prior and staged release records.")
+    capture_inputs = (args.writer_refusal, args.snapshot_directory, args.restore_directory, args.restore_target)
+    if args.drain or args.capture:
+        if args.handoff is None or not all(capture_inputs):
+            parser.error("Drain and capture require the verified handoff, writer proof and exact snapshot and restore inputs.")
+    elif any(capture_inputs):
+        parser.error("Snapshot and restore inputs require drain or capture.")
     paths = MovePaths(Path.home().resolve())
     try:
         if args.rename_status:
@@ -1178,12 +1359,23 @@ def main() -> int:
                 result = verify_release_pair(paths, prior, staged)
             else:
                 handoff = Path(args.handoff[0]), args.handoff[1]
-                prepared = verify_staged_move(paths, prior, staged, handoff)
-                result = {key: value for key, value in prepared.items()
-                          if key not in ("stage", "stagedLaunchers", "stagedPlist")}
-                result["status"] = "move_prepared"
+                if args.drain or args.capture:
+                    socket, port, role = args.restore_target
+                    result = prepare_move_maintenance(
+                        paths, prior, staged, handoff, refusal=(Path(args.writer_refusal[0]), args.writer_refusal[1]),
+                        snapshot_directory=args.snapshot_directory, restore_directory=args.restore_directory,
+                        restore_socket=Path(socket), restore_port=int(port), restore_role=role, drain_only=args.drain,
+                    )
+                else:
+                    prepared = verify_staged_move(paths, prior, staged, handoff)
+                    result = {key: value for key, value in prepared.items()
+                              if key not in ("stage", "stagedLaunchers", "stagedPlist")}
+                    result["status"] = "move_prepared"
         print(json.dumps(result))
         return 0
+    except psycopg.Error:
+        print(json.dumps({"status": "move_refused", "message": "PostgreSQL could not complete the move operation."}))
+        return 1
     except (AdmissionRefusal, ArchiveUnavailable, Refusal, RecoveryError, KeyError, OSError, ValueError,
             subprocess.SubprocessError, IndexError, TypeError, RecursionError) as error:
         code = error.code if isinstance(error, ArchiveUnavailable) else "move_refused"
