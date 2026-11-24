@@ -14,7 +14,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from archive_volume import BACKUPS, Archive, ArchiveUnavailable, require_archive
@@ -441,10 +441,10 @@ def installation_database(paths: MovePaths) -> tuple[dict[str, Any], dict[str, s
     return settings, binding, version
 
 
-def tool_json(arguments: list[str], home: Path) -> dict[str, Any]:
+def tool_json(arguments: list[str], home: Path, *, timeout: int = 30) -> dict[str, Any]:
     env = {key: value for key, value in os.environ.items() if not key.startswith(("PG", "ARBOL_"))}
     env["HOME"] = str(home)
-    result = subprocess.run(arguments, env=env, timeout=30, capture_output=True, check=False)
+    result = subprocess.run(arguments, env=env, timeout=timeout, capture_output=True, check=False)
     try:
         value = json.loads(result.stdout)
     except ValueError as error:
@@ -531,28 +531,26 @@ def verify_payload(paths: MovePaths, registry: Path, item: dict[str, Any], layou
     return package, record
 
 
-def verify_prior_writer_inventories(
-    paths: MovePaths, rename_record: dict[str, Any], prior_release_directory: Path,
-    marker: State, lease: ExclusiveLayoutLease,
-) -> dict[str, str]:
+def prior_backend(
+    paths: MovePaths, prepared: dict[str, Any], prior_release_directory: Path,
+) -> tuple[Path, dict[str, Any]]:
     archive = require_archive()
-    release, _ = verify_release(prior_release_directory, rename_record["priorRelease"], archive=archive)
+    release, _ = verify_release(prior_release_directory, prepared["priorRelease"], archive=archive)
     backends = [item for item in release["builds"] if item["component"] == BACKEND]
     if release.get("kind") != "current" or len(backends) != 1:
         raise RecoveryError("The prior release does not identify one installed Backend.")
     backend = backends[0]
-    package, _ = verify_payload(paths, Path(rename_record["registry"]), backend, 1)
-    runtime = paths.old / "runtime"
-    folder = lease.require(runtime)
-    if read_state(folder, layout=1) != marker:
-        raise RecoveryError("Writer inventory verification requires the unchanged layout-1 exclusive marker.")
-    request = {
-        "runtime": str(runtime), "home": str(paths.home), "build": backend["build"],
-        "admissionDirectory": list(identity(os.fstat(folder))),
-        "source": marker.source, "session": marker.session, "generation": marker.generation,
-    }
-    # The historical Backend owns these readers. They do not reacquire the
-    # parent's admission locks. The SQL reader takes its separate writer latch.
+    registry = resolve_registry(paths)
+    if str(registry) != prepared["registry"]:
+        raise RecoveryError("The active Build registry differs from the verified prior release preparation.")
+    package, _ = verify_payload(paths, registry, backend, 1)
+    return package, backend
+
+
+def run_prior_backend(
+    paths: MovePaths, package: Path, build: str, request: dict[str, Any], operation: str, *, timeout: int = 30,
+) -> dict[str, Any]:
+    values = {**request, "runtime": str(paths.old / "runtime"), "home": str(paths.home), "build": build}
     bootstrap = """
 import asyncio
 import json
@@ -565,13 +563,35 @@ request = json.loads(sys.argv[2])
 sys.path[:0] = [str(package / "src"), str(package / "runtime/site-packages")]
 from arbol_backend.exchange_context import context
 from arbol_backend.exchange_drain import inspect_database
-from arbol_backend.exchange_listing import drained_inventory
 from arbol_installation.admission import directory, read_state
 
 ctx = context(package, {})
 if (str(ctx.identity.folder) != request["runtime"] or str(ctx.identity.home) != request["home"]
         or ctx.identity.build != request["build"] or ctx.identity.fixture):
     raise ValueError("The prior Backend opened a different installation context.")
+"""
+    python = package / "runtime/python/bin/python3.14"
+    arguments = [str(python), "-I", "-B", "-c", bootstrap + operation, str(package), canonical(values).decode()]
+    return tool_json(arguments, paths.home, timeout=timeout)
+
+
+def verify_prior_writer_inventories(
+    paths: MovePaths, rename_record: dict[str, Any], prior_release_directory: Path,
+    marker: State, lease: ExclusiveLayoutLease,
+) -> dict[str, str]:
+    package, backend = prior_backend(paths, rename_record, prior_release_directory)
+    folder = lease.require(paths.old / "runtime")
+    if read_state(folder, layout=1) != marker:
+        raise RecoveryError("Writer inventory verification requires the unchanged layout-1 exclusive marker.")
+    request = {
+        "admissionDirectory": list(identity(os.fstat(folder))),
+        "source": marker.source, "session": marker.session, "generation": marker.generation,
+    }
+    # The historical readers leave the parent's locks held. The SQL reader
+    # uses the same separate PostgreSQL writer latch as ordinary freeze.
+    operation = """
+from arbol_backend.exchange_listing import drained_inventory
+
 with directory(ctx.identity.folder) as folder:
     info = os.fstat(folder)
     marker = read_state(folder)
@@ -585,11 +605,87 @@ with directory(ctx.identity.folder) as folder:
         raise ValueError("The prior admission marker changed during writer inventory verification.")
 print(json.dumps({"backend": ctx.identity.build, "generation": marker.generation, "schema": schema}))
 """
-    python = package / "runtime/python/bin/python3.14"
-    result = tool_json([str(python), "-I", "-B", "-c", bootstrap, str(package), canonical(request).decode()], paths.home)
+    result = run_prior_backend(paths, package, backend["build"], request, operation)
     if result != {"backend": backend["build"], "generation": marker.generation, "schema": rename_record["schema"]}:
         raise RecoveryError("The prior Backend did not prove the expected writer inventories and schema.")
     return {"backend": backend["build"], "sourceCommit": backend["sourceCommit"], "generation": marker.generation}
+
+
+def prior_maintenance_transition(
+    paths: MovePaths, prepared: dict[str, Any], prior_release_directory: Path, *,
+    action: Literal["drain", "freeze"], attributed_session: str | None = None,
+) -> dict[str, Any]:
+    """Invoke a prior fence transition after preflight, using a journaled session on resume."""
+    if (prepared.get("status") != "release_pair_verified" or action not in ("drain", "freeze")
+            or (action == "freeze" and attributed_session is None)
+            or (attributed_session is not None
+                and (not isinstance(attributed_session, str) or TOKEN.fullmatch(attributed_session) is None))):
+        raise RecoveryError("The prior maintenance transition lacks verified preparation or its exact session.")
+    package, backend = prior_backend(paths, prepared, prior_release_directory)
+    request = {
+        "action": action, "attributedSession": attributed_session,
+        "source": checked_source(prepared["database"]), "schema": prepared["schema"],
+        "runtimeIdentity": prepared["working"]["runtime"]["identity"],
+    }
+    operation = """
+from arbol_backend.exchange_drain import begin_maintenance, freeze
+from arbol_installation.admission import STATE
+
+runtime = ctx.identity.folder
+runtime_info = runtime.lstat()
+if [runtime_info.st_dev, runtime_info.st_ino] != request["runtimeIdentity"]:
+    raise ValueError("The prior runtime no longer matches its preparation.")
+with directory(runtime) as folder:
+    directory_info = os.fstat(folder)
+    before = read_state(folder)
+    source = request["source"]
+    attributed = request["attributedSession"]
+    fresh = attributed is None
+    if (before.source != source or (fresh and before.phase != "normal")
+            or (not fresh and (before.phase not in ("draining", "exclusive") or before.session != attributed))):
+        raise ValueError("The prior marker does not belong to the requested move transition.")
+    schema = asyncio.run(inspect_database(ctx, source, idle=False))
+    if schema != request["schema"] or read_state(folder) != before:
+        raise ValueError("The prior schema or maintenance marker changed.")
+
+    marker_writes_observed = []
+
+    def verify_marker_write(event, args):
+        if event != "os.rename" or args[1] != STATE:
+            return
+        target = args[3]
+        if target < 0 or not os.path.samestat(os.fstat(target), directory_info) or read_state(target) != before:
+            raise ValueError("The prior maintenance marker or its directory changed under admission.")
+        marker_writes_observed.append(True)
+
+    # os.replace emits os.rename before the write, while the historical
+    # transition holds its admission locks. Require our own write on drain.
+    sys.addaudithook(verify_marker_write)
+    if request["action"] == "drain":
+        session = begin_maintenance(source, runtime=runtime)
+        phase = "draining" if fresh else before.phase
+        changes_phase = fresh
+    else:
+        session = freeze(ctx, source, attributed)
+        phase = "exclusive"
+        changes_phase = before.phase == "draining"
+    after = read_state(folder)
+    current_runtime = runtime.lstat()
+    with directory(runtime) as named:
+        if (not os.path.samestat(directory_info, os.fstat(named))
+                or not os.path.samestat(runtime_info, current_runtime)):
+            raise ValueError("The prior runtime changed during the maintenance transition.")
+    if (len(marker_writes_observed) != int(changes_phase) or after.phase != phase
+            or after.session != session or after.source != before.source or after.release != before.release
+            or getattr(after, "exchange_authorization", None) != getattr(before, "exchange_authorization", None)
+            or (not fresh and session != attributed)
+            or (not changes_phase and after != before)
+            or (changes_phase and (after.generation == before.generation) != (phase == "draining"))):
+        raise ValueError("The prior Backend did not make the expected maintenance transition.")
+print(json.dumps({"status": after.phase, "session": session, "generation": after.generation,
+                  "database": after.source, "schema": schema}))
+"""
+    return run_prior_backend(paths, package, backend["build"], request, operation, timeout=60)
 
 
 def check_release(
