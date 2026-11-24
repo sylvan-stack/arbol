@@ -6,13 +6,15 @@ import asyncio
 import fcntl
 import os
 from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager, ExitStack, contextmanager
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
+from arbol_installation.admission import AdmissionRefusal, ExclusiveLayoutLease
 from arbol_installation.exchange_release import verify_authorization
+from arbol_installation.paths import INSTALLATION_LAYOUT
 
 from .database import Database, credentials
 from .exchange_admission import (
@@ -64,9 +66,9 @@ def gate(folder: int, *, idle: bool = False) -> Iterator[None]:
         yield
 
 
-def current(folder: int) -> State:
+def current(folder: int, *, layout: int = INSTALLATION_LAYOUT) -> State:
     try:
-        return read_state(folder)
+        return read_state(folder, layout=layout)
     except (OSError, ValueError, RecursionError):
         raise Refusal("maintenance", "The durable maintenance state is unreadable.") from None
 
@@ -200,9 +202,17 @@ class GuardedSelection:
     authorization: str | None
 
 
+def _reopen_directory(lease: ExclusiveLayoutLease, runtime: Path) -> int:
+    try:
+        return lease.require(runtime)
+    except (AdmissionRefusal, OSError, ValueError):
+        raise Refusal("maintenance", "Cannot verify the held installation admission locks.") from None
+
+
 def reopen(context: Context, source: Source, session: str, *, release: str, schema: dict[str, int],
            verify_release: Callable[[], str] | None = None,
-           verify_selection: Callable[[int, State], AbstractContextManager[GuardedSelection]] | None = None) -> None:
+           verify_selection: Callable[[int, State], AbstractContextManager[GuardedSelection]] | None = None,
+           lease: ExclusiveLayoutLease | None = None, layout: int = INSTALLATION_LAYOUT) -> None:
     """Reopen after verification, with a guarded path for changing releases.
 
     The selection verifier receives a borrowed admission directory descriptor
@@ -211,16 +221,26 @@ def reopen(context: Context, source: Source, session: str, *, release: str, sche
     verifies the archive, qualification, recovery and actual installed files,
     and stages successor authorization before yielding its exact selection.
     The descriptor is borrowed and must not be closed by the verifier.
+
+    A move or rollback can supply its already-held exclusive lease and the
+    marker's layout. The caller retains ownership of that lease.
     """
     if SHA256.fullmatch(release) is None:
         raise Refusal("maintenance", "Reopening requires a verified release digest.")
     if (verify_release is None) == (verify_selection is None):
         raise Refusal("maintenance", "Choose exactly one release verification path.")
+    if (type(layout) is not int or layout not in (1, INSTALLATION_LAYOUT)
+            or (layout != INSTALLATION_LAYOUT and lease is None)):
+        raise Refusal("maintenance", "Reopening the historical layout requires its held exclusive lease.")
     source = checked_source(source)
-    with operation(context.identity.folder) as folder:
-        state = current(folder)
+    runtime = context.identity.folder
+    operator = operation(runtime) if lease is None else nullcontext(_reopen_directory(lease, runtime))
+    with operator as folder:
+        state = current(folder, layout=layout)
         bound(state, source, session)
         idle = state.phase == "exclusive"
+        if lease is not None and not idle:
+            raise Refusal("maintenance", "Reopening through a held layout lease requires exclusive maintenance.")
         if verify_selection is None:
             first = idle and state.release is None and state.exchange_authorization is None
             if release != state.release and not first:
@@ -232,8 +252,9 @@ def reopen(context: Context, source: Source, session: str, *, release: str, sche
         elif not idle:
             raise Refusal("maintenance", "A guarded transition requires exclusive maintenance.")
 
-        with gate(folder, idle=idle):
-            if current(folder) != state:
+        admission = gate(folder, idle=idle) if lease is None else nullcontext()
+        with admission:
+            if current(folder, layout=layout) != state:
                 raise Refusal("maintenance", "The maintenance state changed during verification.")
 
             def finish(authorization: str | None) -> None:
@@ -250,7 +271,11 @@ def reopen(context: Context, source: Source, session: str, *, release: str, sche
                         raise Refusal("maintenance_busy", "Recovery note custody is not empty or cannot be verified.") from None
                 if asyncio.run(inspect_database(context, source, idle=idle)) != schema:
                     raise Refusal("schema_incompatible", "The installed schema does not match the verified release.")
-                write_state(folder, State("normal", uuid4().hex, state.source, None, release, authorization))
+                if lease is not None and (_reopen_directory(lease, runtime) != folder
+                                          or current(folder, layout=layout) != state):
+                    raise Refusal("maintenance", "The held maintenance state changed before reopening.")
+                write_state(folder, State("normal", uuid4().hex, state.source, None, release, authorization),
+                            layout=layout)
 
             if verify_selection is None:
                 finish(state.exchange_authorization)
@@ -262,7 +287,7 @@ def reopen(context: Context, source: Source, session: str, *, release: str, sche
                             or selection.generation != state.generation
                             or selection.incumbent_release != state.release
                             or selection.release != release or state.release is None
-                            or current(folder) != state):
+                            or current(folder, layout=layout) != state):
                         raise Refusal("maintenance", "The guarded release selection does not match this session.")
                     if selection.role == "prior":
                         if state.exchange_authorization is not None or selection.authorization is not None:

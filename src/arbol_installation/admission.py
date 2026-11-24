@@ -231,7 +231,9 @@ def staged_state(folder: int, state: State, *, layout: int = INSTALLATION_LAYOUT
 
 def write_state(folder: int, state: State, *, layout: int = INSTALLATION_LAYOUT) -> None:
     """Publish one complete transition under the gate, never overwrite in place."""
-    previous = staged_state(folder, read_state(folder)) if state.phase == "normal" else None
+    previous = None
+    if state.phase == "normal":
+        previous = staged_state(folder, read_state(folder, layout=layout), layout=layout)
     name = None
     try:
         name = staged_state(folder, state, layout=layout)
