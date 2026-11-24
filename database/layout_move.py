@@ -1126,6 +1126,7 @@ def move_route(paths: MovePaths, value: Any) -> Path:
 
 def verify_staged_move(
     paths: MovePaths, prior: tuple[Path, str], staged: tuple[Path, str], handoff: tuple[Path, str],
+    *, recorded: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Verify the approved AFL-16 input bundle before granting maintenance entry."""
     archive = require_archive()
@@ -1137,7 +1138,9 @@ def verify_staged_move(
             or manifest["stagedRelease"] != staged[1] or manifest["sourceRoot"] != str(paths.old)
             or manifest["destinationRoot"] != str(paths.new)):
         raise RecoveryError("The handoff is not for this exact pair of releases and installation paths.")
-    prepared = verify_release_pair(paths, prior, staged)
+    prepared = verify_release_pair(paths, prior, staged) if recorded is None else recorded
+    if prepared["priorRelease"] != prior[1] or prepared["stagedRelease"] != staged[1]:
+        raise RecoveryError("The saved move does not bind these release records.")
     if checked_source(manifest["database"]) != prepared["database"] or manifest["schema"] != prepared["schema"]:
         raise RecoveryError("The handoff does not identify the current database and common schema.")
     prior_record, _ = verify_release(*prior, archive=archive)
@@ -1743,7 +1746,7 @@ from arbol_backend.exchange_drain import reopen
 
 with directory(ctx.identity.folder) as folder:
     before = read_state(folder)
-    if (before.phase != "draining" or before.session != request["session"]
+    if (before.phase not in ("draining", "exclusive") or before.session != request["session"]
             or before.source != request["source"] or before.release != request["release"]):
         raise ValueError("Only the unchanged prior release can recover this drain.")
     schema = asyncio.run(inspect_database(ctx, before.source, idle=False))
@@ -2074,6 +2077,119 @@ def recover_snapshot_fallback(
         write_state(admission, State("exclusive", current.generation, replacement["database"], current.session,
                                      current.release, current.exchange_authorization), layout=1)
     return reopen_prior_release(paths, folder, replacement, prior, replacement_snapshot, lease, fallback=True)
+
+
+def intent_matches(
+    intent: dict[str, Any], prior: tuple[Path, str], staged: tuple[Path, str], handoff: tuple[Path, str],
+) -> None:
+    expected = {"priorDirectory": str(prior[0]), "priorRelease": prior[1],
+                "stagedDirectory": str(staged[0]), "stagedRelease": staged[1], "handoffSha256": handoff[1]}
+    if any(intent.get(key) != value for key, value in expected.items()):
+        raise RecoveryError("The command does not name the release pair and handoff that own the recorded move.")
+
+
+def wait_for_move_witness(archive: Archive, verification: tuple[Path, str], seconds: int) -> None:
+    path = archive.backup_path(verification[0], allow_missing=True)
+    deadline = time.monotonic() + seconds
+    while not os.path.lexists(path):
+        if time.monotonic() >= deadline:
+            raise RecoveryError("The independent verification receipt is still absent. The move remains fenced.")
+        time.sleep(0.5)
+    pinned_move_input(archive, path, verification[1])
+
+
+def execute_move(
+    paths: MovePaths, prior: tuple[Path, str], staged: tuple[Path, str], handoff: tuple[Path, str],
+    verification: tuple[Path, str], *, witness_wait: int,
+) -> dict[str, Any]:
+    archive = require_archive()
+    with rename_roots(paths) as roots:
+        _, folder = roots
+        intent = read_move_document(folder, MOVE_INTENT)
+        capture = read_move_document(folder, SNAPSHOT_RECORD)
+        intent_matches(intent, prior, staged, handoff)
+        if capture.get("handoffSha256") != handoff[1] or optional_move_document(folder, PRIOR_REOPEN_RECORD) is not None:
+            raise RecoveryError("The snapshot is outside this move or prior recovery already owns the boundary.")
+        record = optional_move_document(folder, RENAME_RECORD)
+        prepared = verify_staged_move(paths, prior, staged, handoff, recorded=record)
+        session = capture["session"]
+        runtime = paths.old / "runtime"
+        if record is not None and rename_positions(paths, roots, record)["runtime"] == "destination":
+            runtime = paths.new / "runtime"
+        with exclusive_layout_lease(runtime) as lease:
+            if record is None:
+                record_renames(paths, prepared, session, lease, prior_release_directory=prior[0],
+                               snapshot_directory=Path(capture["snapshotDirectory"]), restore_receipt=Path(capture["restoreReceipt"]))
+                record = read_rename_record(folder)
+            pins = rename_snapshot_pins(record)
+            if (record["session"] != session or any(pins.get(key) != capture.get(key) for key in pins)
+                    or rename_inventory_proof(record)["generation"] != capture.get("generation")):
+                raise RecoveryError("The recorded rename does not bind the verified capture and exact exclusive session.")
+            positions = rename_positions(paths, roots, record)
+            if "source" in positions.values():
+                if "destination" not in positions.values():
+                    record_retarget(paths, prepared, session, lease)
+                    stop_installation_services(paths, session, lease, prior[0])
+                relocate_renames(paths, session, lease)
+            runtime = paths.new / "runtime"
+            admission = lease.require(runtime)
+            try:
+                marker = read_state(admission)
+            except ValueError:
+                marker = read_state(admission, layout=1)
+            if marker.phase == "exclusive":
+                lease.convert_marker(runtime, session=session, before=1, after=INSTALLATION_LAYOUT)
+                if database_service(paths) is None:
+                    retarget_move(paths, prepared, session, lease)
+                start_move_database(paths, session, record, folder)
+                wait_for_move_witness(archive, verification, witness_wait)
+            return finish_move(paths, prepared, staged, verification, session, lease)
+
+
+def execute_recovery(
+    paths: MovePaths, mode: Literal["files", "prior", "fallback"], prior: tuple[Path, str] | None = None,
+) -> dict[str, Any]:
+    with rename_roots(paths) as roots:
+        _, folder = roots
+        if optional_move_document(folder, BOUNDARY_RECORD) is not None:
+            raise RecoveryError("The layout-2 boundary is already open. The move is past pre-reopen recovery.")
+        intent = read_move_document(folder, MOVE_INTENT)
+        record = optional_move_document(folder, RENAME_RECORD)
+        if mode != "files":
+            if prior is None or (str(prior[0]), prior[1]) != (intent["priorDirectory"], intent["priorRelease"]):
+                raise RecoveryError("Recovery requires the exact prior release of the recorded move.")
+            archive = require_archive()
+        if record is None:
+            if mode != "prior" or prior is None or optional_move_document(folder, SERVICE_RECORD) is not None:
+                raise RecoveryError("There is no recorded relocation to recover.")
+            with directory(paths.old / "runtime") as admission:
+                marker = read_state(admission, layout=1)
+            session = drain_attribution(folder, intent, marker)
+            if session is None:
+                raise RecoveryError("There is no attributed prior session to recover.")
+            prepared = {**intent, "registry": str(resolve_registry(paths))}
+            return recover_interrupted_drain(paths, prepared, prior, session)
+        session = record["session"]
+        fallback = optional_move_document(folder, FALLBACK_RECORD, limit=MAX_RETARGET_BYTES)
+        if fallback is not None and mode != "fallback":
+            raise RecoveryError("The recorded snapshot fallback already owns recovery.")
+        runtime = paths.old / "runtime"
+        if fallback is None and rename_positions(paths, roots, record)["runtime"] == "destination":
+            runtime = paths.new / "runtime"
+        with exclusive_layout_lease(runtime) as lease:
+            if mode == "files":
+                recover_move_files(paths, session, lease)
+                return {"status": "move_files_recovered", "session": session}
+            assert prior is not None
+            if fallback is None and optional_move_document(folder, PRIOR_REOPEN_RECORD) is None:
+                recover_move_files(paths, session, lease)
+            if mode == "fallback":
+                return recover_snapshot_fallback(paths, folder, record, prior, lease)
+            pins = rename_snapshot_pins(record)
+            snapshot, checksum, _ = validate_snapshot(Path(pins["snapshotDirectory"]), storage=archive)
+            if checksum != pins["snapshotSha256"] or snapshot["source"] != record["database"]:
+                raise RecoveryError("The prior snapshot no longer matches the recovery record.")
+            return reopen_prior_release(paths, folder, record, prior, snapshot, lease)
 
 
 def main() -> int:
