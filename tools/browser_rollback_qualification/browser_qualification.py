@@ -28,6 +28,7 @@ PRODUCER = D / 'delivery/browser-producer'
 AUTHORITY = D / 'qualification/authority.json'
 NODE = Path('/Users/msix/.nvm/versions/node/v24.22.1/bin/node')
 NODE_SHA = '6f32069480ec14d52b6d7b1f3c7124cfbbc46203abf5ddf5c65b127435f3f329'
+SYSTEM_GIT = Path('/usr/bin/git')
 FORESTER = Path('/Users/msix/Artifacts/forester')
 ARBOL = Path('/Users/msix/repos/sylvan-stack/arbol')
 PLAN = 'sagas/sylvan-stack/arbol-format-2-migration/browser-profile-migration/AFM-9.md'
@@ -134,19 +135,26 @@ def ancestors(path):
 
 
 @contextmanager
-def safe_file(path, maximum, mode=None):
+def safe_file(path, maximum, mode=None, *, pin_system_git=False):
     ancestors(path.parent)
     parent = path.parent.stat()
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, 'rb') as stream:
         info = os.fstat(fd)
-        require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid in (0,os.getuid())
+        # The fixed producer pin authenticates the macOS system Git original.
+        allowed_links = info.st_nlink == 1
+        if pin_system_git:
+            allowed_links = (path == SYSTEM_GIT and path.resolve(strict=True) == path
+                             and info.st_uid == 0 and info.st_mode & 0o111 and info.st_nlink > 0)
+        require(stat.S_ISREG(info.st_mode) and allowed_links and info.st_uid in (0,os.getuid())
                 and not info.st_mode & 0o022 and 0 <= info.st_size <= maximum
                 and (mode is None or stat.S_IMODE(info.st_mode) == mode), 'Unsafe file', 'state-changed')
         require(stamp(info) == stamp(path.lstat()), 'File changed', 'state-changed')
         yield stream, info
         require(stamp(info) == stamp(os.fstat(fd)) == stamp(path.lstat())
-                and os.path.samestat(parent, path.parent.stat()), 'File changed during read', 'state-changed')
+                and os.path.samestat(parent, path.parent.stat())
+                and (not pin_system_git or path.resolve(strict=True) == path),
+                'File changed during read', 'state-changed')
 
 
 def read(path, maximum, mode=None):
@@ -156,17 +164,18 @@ def read(path, maximum, mode=None):
     return data
 
 
-def reference(path, maximum, mode=None):
-    with safe_file(path, maximum, mode) as (stream, info):
+def reference(path, maximum, mode=None, *, pin_system_git=False):
+    with safe_file(path, maximum, mode, pin_system_git=pin_system_git) as (stream, info):
         digest = hashlib.file_digest(stream, 'sha256').hexdigest()
     return {'path':str(path), 'identity':identity(info), 'size':str(info.st_size), 'sha256':digest}
 
 
-def check_reference(value, path, maximum, mode=None):
+def check_reference(value, path, maximum, mode=None, *, pin_system_git=False):
     keys(value, 'path identity size sha256'); identity_shape(value['identity'])
     require(value['path'] == str(path) and matches(DECIMAL,value['size']) and int(value['size']) <= maximum
             and matches(HEX,value['sha256']), 'Invalid file reference')
-    require(reference(path,maximum,mode) == value, 'Pinned file identity or bytes changed', 'pin-mismatch')
+    require(reference(path,maximum,mode,pin_system_git=pin_system_git) == value,
+            'Pinned file identity or bytes changed', 'pin-mismatch')
 
 
 def child(argv, payload, cwd, timeout, stdout_limit=65536):
@@ -203,7 +212,7 @@ def child(argv, payload, cwd, timeout, stdout_limit=65536):
 
 
 def git(repo, *args):
-    return child(['/usr/bin/git','--no-replace-objects','-C',repo,*args],b'',repo,30,16*1024*1024)
+    return child([SYSTEM_GIT,'--no-replace-objects','-C',repo,*args],b'',repo,30,16*1024*1024)
 
 
 def published_block(marker, at=None):
@@ -294,8 +303,9 @@ def delivery():
     require(tool['files']==tree_map(BIN),'Installed tool tree drift','pin-mismatch')
     keys(tool['executables'],'python launcher')
     fixed={'node':NODE,'codesign':Path('/usr/bin/codesign'),'hdiutil':Path('/usr/bin/hdiutil'),
-           'diskutil':Path('/usr/sbin/diskutil'),'plutil':Path('/usr/bin/plutil'),'git':Path('/usr/bin/git')}
-    for name,path in fixed.items(): check_reference(producer['executables'][name],path,256*1024*1024)
+           'diskutil':Path('/usr/sbin/diskutil'),'plutil':Path('/usr/bin/plutil'),'git':SYSTEM_GIT}
+    for name,path in fixed.items():
+        check_reference(producer['executables'][name],path,256*1024*1024,pin_system_git=name=='git')
     require(producer['executables']['node']['sha256']==NODE_SHA,'Node pin differs','pin-mismatch')
     python=BIN/'.arbol-builds/runtime/3.14.8-d15291f940cf/python/bin/python3.14'
     check_reference(tool['executables']['python'],python,256*1024*1024)
