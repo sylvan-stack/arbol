@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import ctypes
 import fcntl
 import json
@@ -74,6 +75,8 @@ STOPPED_RECORD = "layout-move-stopped.json"
 MOVE_INTENT = "layout-move-intent.json"
 DRAIN_RECORD = "layout-move-drain.json"
 SNAPSHOT_RECORD = "layout-move-snapshot.json"
+RETARGET_RECORD = "layout-move-retarget.json"
+MAX_RETARGET_BYTES = 32 * 1024 * 1024
 MAX_RENAME_RECORD_BYTES = 65536
 RENAME_EXCL = 0x00000004  # Darwin sys/stdio.h
 WRITER_INVENTORY_FORMAT = 3
@@ -196,15 +199,15 @@ def rename_identity(folder: int, name: str) -> list[int] | None:
     return list(identity(info))
 
 
-def read_move_document(folder: int, name: str) -> dict[str, Any]:
+def read_move_document(folder: int, name: str, *, limit: int = MAX_RENAME_RECORD_BYTES) -> dict[str, Any]:
     with opened(name, ENTRY, folder) as descriptor:
         info = os.fstat(descriptor)
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
                 or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1
-                or info.st_size > MAX_RENAME_RECORD_BYTES):
+                or info.st_size > limit):
             raise RecoveryError("The move record is not a private owner file of the expected size.")
         with os.fdopen(os.dup(descriptor), "rb") as stream:
-            raw = stream.read(MAX_RENAME_RECORD_BYTES + 1)
+            raw = stream.read(limit + 1)
         named = os.stat(name, dir_fd=folder, follow_symlinks=False)
         if len(raw) != info.st_size or stamp(info) != stamp(os.fstat(descriptor)) or stamp(info) != stamp(named):
             raise RecoveryError("The move record changed while it was read.")
@@ -604,17 +607,17 @@ if (str(ctx.identity.folder) != request["runtime"] or str(ctx.identity.home) != 
     return tool_json(arguments, paths.home, timeout=timeout, pass_fds=pass_fds)
 
 
-def move_process_observer() -> Any:
-    """Load the process identity reader from the operator's packaged provider."""
+def move_provider_module(name: str) -> Any:
+    """Load the operator's own packaged Build provider, outside the old state."""
     source = Path(__file__).resolve().parents[1] / "driver-payload/src"
     sys.path.insert(0, str(source))
     try:
-        observer = import_module("arbol_builds.driver_process")
+        module = import_module("arbol_builds." + name)
     finally:
         sys.path.pop(0)
-    if not Path(observer.__file__).resolve().is_relative_to(source):
-        raise RecoveryError("The move operator requires its packaged process identity reader.")
-    return observer
+    if not Path(module.__file__).resolve().is_relative_to(source):
+        raise RecoveryError("The move operator requires its own packaged Build provider.")
+    return module
 
 
 def observed_process(observer: Any, pid: int) -> dict[str, Any] | None:
@@ -740,7 +743,7 @@ def stop_installation_services(
     if any(Path(name).resolve().is_relative_to(paths.old) for name in (__file__, sys.executable)):
         raise RecoveryError("Run the move operator from a verified package outside the old installation.")
     archive = require_archive()
-    observer = move_process_observer()
+    observer = move_provider_module("driver_process")
     with rename_roots(paths) as roots:
         _, new = roots
         record = read_rename_record(new)
@@ -835,7 +838,7 @@ def require_stopped_installation(
     data = paths.old / "database/data" if positions["database"] == "source" else paths.new / "postgres/data"
     if database_service(paths) is not None or postmaster_pid(data) is not None:
         raise RecoveryError("The database is still running before relocation.")
-    observer = move_process_observer()
+    observer = move_provider_module("driver_process")
     if (running_apps(observer, set(before["appImages"])) or
             (positions["runtime"] == "source" and running_backend(paths, observer, Path(before["backendImage"])) is not None)):
         raise RecoveryError("The App or Backend restarted after the recorded shutdown.")
@@ -1318,6 +1321,203 @@ def prepare_move_maintenance(
                 if recorded != result:
                     raise RecoveryError("The existing move snapshot record changed.")
         return {**result, "status": "move_snapshot_verified"}
+
+
+def file_image(path: Path) -> dict[str, Any] | None:
+    owner_directory(path.parent)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if info.st_uid != os.getuid():
+        raise RecoveryError(f"A move configuration entry has a different owner: {path.name}.")
+    if stat.S_ISLNK(info.st_mode):
+        value = {"link": os.readlink(path)}
+    elif stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and not info.st_mode & 0o022:
+        with opened(path, ENTRY) as fd, os.fdopen(os.dup(fd), "rb") as stream:
+            raw = stream.read((2**20) + 1)
+            if (len(raw) != info.st_size or len(raw) > 2**20 or stamp(info) != stamp(os.fstat(fd))):
+                raise RecoveryError(f"A move configuration file changed or is too large: {path.name}.")
+        value = {"mode": stat.S_IMODE(info.st_mode), "bytes": base64.b64encode(raw).decode("ascii")}
+    else:
+        raise RecoveryError(f"A move configuration entry is unsafe: {path.name}.")
+    if stamp(info) != stamp(path.lstat()):
+        raise RecoveryError(f"A move configuration entry changed: {path.name}.")
+    return value
+
+
+def installed_file(raw: bytes, mode: int) -> dict[str, Any]:
+    return {"mode": mode, "bytes": base64.b64encode(raw).decode("ascii")}
+
+
+def replace_move_file(path: Path, before: Any, after: Any) -> None:
+    current = file_image(path)
+    if current == after:
+        return
+    if current != before:
+        raise RecoveryError(f"A move configuration entry no longer matches either saved image: {path.name}.")
+    with opened(path.parent, DIR) as folder:
+        if not os.path.samestat(os.fstat(folder), owner_directory(path.parent)):
+            raise RecoveryError(f"A move configuration directory changed: {path.parent}.")
+        if after is None:
+            if file_image(path) != before:
+                raise RecoveryError(f"A move configuration entry changed before removal: {path.name}.")
+            os.unlink(path.name, dir_fd=folder)
+        else:
+            temporary = f".{path.name}.arbol-move-{uuid4().hex}"
+            try:
+                if "link" in after:
+                    os.symlink(after["link"], temporary, dir_fd=folder)
+                else:
+                    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder)
+                    with os.fdopen(fd, "wb") as stream:
+                        stream.write(base64.b64decode(after["bytes"], validate=True))
+                        stream.flush()
+                        os.fchmod(stream.fileno(), after["mode"])
+                        os.fsync(stream.fileno())
+                if file_image(path) != before:
+                    raise RecoveryError(f"A move configuration entry changed during replacement: {path.name}.")
+                if before is None:
+                    rename_exclusive(folder, temporary, folder, path.name)
+                else:
+                    os.replace(temporary, path.name, src_dir_fd=folder, dst_dir_fd=folder)
+            finally:
+                try:
+                    os.unlink(temporary, dir_fd=folder)
+                except FileNotFoundError:
+                    pass
+        os.fsync(folder)
+    if file_image(path) != after:
+        raise RecoveryError(f"The installed move configuration did not match its saved image: {path.name}.")
+
+
+def backup_excluded(paths: MovePaths, data: Path) -> bool:
+    result = run(["/usr/bin/tmutil", "isexcluded", str(data)], paths.home, timeout=15)
+    report = result.stdout.strip()
+    if result.returncode or report not in (f"[Excluded] {data}", f"[Included] {data}"):
+        raise RecoveryError("Time Machine could not establish the exact data folder exclusion.")
+    return report.startswith("[Excluded]")
+
+
+def verify_driver_destination(prepared: dict[str, Any]) -> None:
+    """Read the existing closed Driver deployment and exact selected authority at its destination."""
+    admission = move_provider_module("driver_admission")
+    payloads = move_provider_module("driver_payload")
+    process = move_provider_module("driver_process")
+    registry = Path(prepared["targetRegistry"])
+    owner_directory(registry)
+    staged = prepared["stage"]
+    gate = payloads.verify_gate(registry)
+    if gate.digest != staged["sealedDrivers"]["gate"]["sha256"]:
+        raise RecoveryError("The destination Driver gate differs from the approved relocation handoff.")
+    selected = staged["registry"]["stagedDefaults"]
+    if gate.provider.build != selected[BACKEND]:
+        raise RecoveryError("The destination Driver gate selects a different Backend provider.")
+    authorities = {component: admission.Authority(registry, component) for component in sorted(SEALED_DRIVERS)}
+    first = next(iter(authorities.values()))
+    deployment = admission.decode(admission.read_bytes(first.shared / "deployment.json"))
+    admission.validate("deployment", deployment)
+    if (deployment["phase"] not in ("maintaining", "complete") or deployment["newBoot"] != process.boot_uuid()
+            or deployment["gateSha256"] != gate.digest
+            or deployment["registrySha256"] != admission.sha256(admission.canonical(first.identity))):
+        raise RecoveryError("The destination lacks the exact closed Driver deployment and boot readback.")
+    deployed = {item["component"]: item for item in deployment["components"]}
+    for row in gate.document["components"]:
+        component = row["component"]
+        authority = authorities[component]
+        route = Path(row["launcher"])
+        image = file_image(route)
+        if image is None or "bytes" not in image or not image["mode"] & 0o111:
+            raise RecoveryError("A destination Driver launcher is missing or is not executable.")
+        if sha(base64.b64decode(image["bytes"], validate=True)) != row["launcherSha256"]:
+            raise RecoveryError("A destination Driver launcher differs from its gate.")
+        payload = payloads.registered(registry, component, selected[component])
+        payloads.verify_acceptance(authority, payload, digest=staged["sealedDrivers"]["acceptances"][component]["sha256"])
+        control = authority.read("control")
+        closed = deployment["phase"] == "maintaining"
+        if (deployed[component]["launcherSha256"] != row["launcherSha256"]
+                or control["epoch"] != deployed[component]["epoch"] or control["phase"] != ("exclusive" if closed else "normal")
+                or control["session"] != (deployment["session"] if closed else None)):
+            raise RecoveryError("A Driver does not belong to the verified destination cohort.")
+
+
+def record_retarget(paths: MovePaths, prepared: dict[str, Any], session: str, lease: ExclusiveLayoutLease) -> None:
+    with rename_roots(paths) as roots:
+        record = read_rename_record(roots[1])
+        positions = rename_positions(paths, roots, record)
+        marker = require_rename_fence(paths, record, positions, lease)
+        if record["session"] != session or "destination" in positions.values():
+            raise RecoveryError("Record the retarget before-images before the working directories move.")
+        data = paths.old / "database/data"
+        config = file_image(data / "postgresql.conf")
+        if config is None or config.keys() != {"mode", "bytes"}:
+            raise RecoveryError("The prior PostgreSQL configuration is missing.")
+        raw = base64.b64decode(config["bytes"], validate=True)
+        old_socket = os.fsencode(paths.old / "database/socket")
+        new_socket = os.fsencode(Places(paths.home).socket)
+        line = re.compile(rb"(?m)^([ \t]*unix_socket_directories[ \t]*=[ \t]*)'([^']+)'([^\r\n]*)$")
+        matches = list(line.finditer(raw))
+        if len(matches) != 1 or matches[0][2] != old_socket or b"'" in new_socket or b"\n" in new_socket:
+            raise RecoveryError("The database configuration does not name exactly the prior private socket.")
+        start, end = matches[0].span(2)
+        changed = raw[:start] + new_socket + raw[end:]
+        plist = Places(paths.home).plist
+        before_plist = file_image(plist)
+        if before_plist is None or "bytes" not in before_plist:
+            raise RecoveryError("The prior database launch agent is missing.")
+        routes = {str(plist): {"before": before_plist, "after": installed_file(prepared["stagedPlist"], 0o644)}}
+        for route, contents in prepared["stagedLaunchers"].items():
+            path = move_route(paths, route)
+            routes[route] = {"before": file_image(path), "after": installed_file(contents, 0o755)}
+        journal = {"format": 1, "session": session, "generation": marker.generation,
+                   "handoffSha256": prepared["handoffSha256"],
+                   "config": {"before": config, "after": installed_file(changed, config["mode"])},
+                   "routes": routes, "excluded": backup_excluded(paths, data)}
+        if len(canonical(journal)) > MAX_RETARGET_BYTES:
+            raise RecoveryError("The staged launcher and configuration inventory exceeds the move record limit.")
+        try:
+            previous = read_move_document(roots[1], RETARGET_RECORD, limit=MAX_RETARGET_BYTES)
+        except FileNotFoundError:
+            write_move_document(roots[1], RETARGET_RECORD, journal)
+        else:
+            if previous != journal:
+                raise RecoveryError("The previous installation configuration changed before relocation.")
+
+
+def retarget_move(
+    paths: MovePaths, prepared: dict[str, Any], session: str, lease: ExclusiveLayoutLease, *, reverse: bool = False,
+) -> None:
+    with rename_roots(paths) as roots:
+        record = read_rename_record(roots[1])
+        positions = rename_positions(paths, roots, record)
+        marker = require_rename_fence(paths, record, positions, lease)
+        journal = read_move_document(roots[1], RETARGET_RECORD, limit=MAX_RETARGET_BYTES)
+        if (record["session"] != session or journal["session"] != session or journal["generation"] != marker.generation
+                or journal["handoffSha256"] != prepared["handoffSha256"] or database_service(paths) is not None
+                or ("source" in positions.values() and not reverse)):
+            raise RecoveryError("Retargeting requires the matching fenced move and stopped database.")
+        if not reverse:
+            verify_driver_destination(prepared)
+        data = paths.old / "database/data" if positions["database"] == "source" else paths.new / "postgres/data"
+        if postmaster_pid(data) is not None:
+            raise RecoveryError("A database process still uses the configuration being retargeted.")
+        previous, desired = ("after", "before") if reverse else ("before", "after")
+        pg = journal["config"]
+        replace_move_file(data / "postgresql.conf", pg[previous], pg[desired])
+        plist = Places(paths.home).plist
+        expected = {str(plist), *prepared["stagedLaunchers"].keys()}
+        if journal["routes"].keys() != expected:
+            raise RecoveryError("The saved launcher inventory differs from the verified handoff.")
+        for route, pair in journal["routes"].items():
+            path = plist if route == str(plist) else move_route(paths, route)
+            replace_move_file(path, pair[previous], pair[desired])
+        excluded = journal["excluded"] if reverse else True
+        if backup_excluded(paths, data) != excluded:
+            operation = "addexclusion" if excluded else "removeexclusion"
+            result = run(["/usr/bin/tmutil", operation, str(data)], paths.home, timeout=15)
+            if result.returncode or backup_excluded(paths, data) != excluded:
+                raise RecoveryError("Time Machine did not apply the recorded data folder exclusion.")
+        require_rename_fence(paths, record, positions, lease)
 
 
 def main() -> int:
