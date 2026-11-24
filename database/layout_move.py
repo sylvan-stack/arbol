@@ -1,21 +1,26 @@
-"""Read-only preparation for the ARC-5 installation move."""
+"""Preparation and recoverable directory renames for the ARC-5 installation move."""
 
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
 import plistlib
 import stat
 import subprocess
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from archive_volume import Archive, ArchiveUnavailable, require_archive
-from layout_archive import ENTRY, WORKING, opened, stamp
+from layout_archive import DIR, ENTRY, WORKING, identity, opened, stamp
 from migrate_schema import Refusal, database_target
 from recovery_release import (
+    DIGEST,
     MUTABLE_BUILD_FILES,
     RecoveryError,
     canonical,
@@ -27,12 +32,29 @@ from recovery_release import (
 )
 
 # migrate_schema loads the installation path module from its own release.
-from arbol_installation.paths import build_payload_directory, build_registry, database_settings, installation_root
+from arbol_installation.admission import (
+    TOKEN,
+    AdmissionRefusal,
+    ExclusiveLayoutLease,
+    checked_source,
+    read_state,
+    unique_pairs,
+)
+from arbol_installation.paths import (
+    INSTALLATION_LAYOUT,
+    build_payload_directory,
+    build_registry,
+    database_settings,
+    installation_root,
+)
 
 REQUIRED = frozenset(("database", "runtime", "app", "builds", "drivers", "native-resources"))
 BACKEND = "arbol"
 SCHEMA_FIELDS = ("revision", "compatibilityVersion")
 MAX_SETTINGS_BYTES = 65536
+RENAME_RECORD = "layout-move-renames.json"
+MAX_RENAME_RECORD_BYTES = 65536
+RENAME_EXCL = 0x00000004  # Darwin sys/stdio.h
 
 
 @dataclass(frozen=True)
@@ -86,6 +108,10 @@ def check_disk(data: Path) -> None:
         raise RecoveryError("The PostgreSQL data directory must be on an internal, non-removable disk.")
 
 
+def destination_name(name: str) -> str:
+    return "postgres" if name == "database" else name
+
+
 def working_paths(paths: MovePaths, registry: Path) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, str]]]:
     old = owner_directory(paths.old, private=True)
     new = owner_directory(paths.new, private=True)
@@ -97,7 +123,7 @@ def working_paths(paths: MovePaths, registry: Path) -> tuple[dict[str, dict[str,
         if name == "builds" and registry != paths.historical_registry:
             continue
         source = paths.old / name
-        destination = paths.new / ("postgres" if name == "database" else name)
+        destination = paths.new / destination_name(name)
         if os.path.lexists(destination):
             raise RecoveryError(f"Cannot rename the working directory without overwriting: {name}.")
         if not os.path.lexists(source) and name not in REQUIRED:
@@ -112,6 +138,211 @@ def working_paths(paths: MovePaths, registry: Path) -> tuple[dict[str, dict[str,
         raise RecoveryError("The PostgreSQL data directory crosses a volume boundary.")
     check_disk(data)
     return working, absent
+
+
+@contextmanager
+def rename_roots(paths: MovePaths) -> Iterator[tuple[int, int]]:
+    with opened(paths.old, DIR) as old, opened(paths.new, DIR) as new:
+        for path, descriptor in ((paths.old, old), (paths.new, new)):
+            if not os.path.samestat(owner_directory(path, private=True), os.fstat(descriptor)):
+                raise RecoveryError("A move parent directory changed while it was opened.")
+        if os.fstat(old).st_dev != os.fstat(new).st_dev:
+            raise RecoveryError("The move parent directories are on different filesystem volumes.")
+        yield old, new
+
+
+def rename_exclusive(source: int, name: str, destination: int, target: str) -> None:
+    try:
+        rename = ctypes.CDLL(None, use_errno=True).renameatx_np
+    except AttributeError:
+        raise RecoveryError("This system does not support exclusive directory renames.") from None
+    rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+    rename.restype = ctypes.c_int
+    if rename(source, os.fsencode(name), destination, os.fsencode(target), RENAME_EXCL):
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), name, None, target)
+
+
+def rename_identity(folder: int, name: str) -> list[int] | None:
+    try:
+        info = os.stat(name, dir_fd=folder, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise RecoveryError(f"A move path is not an owner-controlled directory: {name}.")
+    return list(identity(info))
+
+
+def read_rename_record(folder: int) -> dict[str, Any]:
+    with opened(RENAME_RECORD, ENTRY, folder) as descriptor:
+        info = os.fstat(descriptor)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1
+                or info.st_size > MAX_RENAME_RECORD_BYTES):
+            raise RecoveryError("The move rename record is not a private owner file of the expected size.")
+        with os.fdopen(os.dup(descriptor), "rb") as stream:
+            raw = stream.read(MAX_RENAME_RECORD_BYTES + 1)
+        named = os.stat(RENAME_RECORD, dir_fd=folder, follow_symlinks=False)
+        if len(raw) != info.st_size or stamp(info) != stamp(os.fstat(descriptor)) or stamp(info) != stamp(named):
+            raise RecoveryError("The move rename record changed while it was read.")
+    value = json.loads(raw, object_pairs_hook=unique_pairs)
+    if not isinstance(value, dict) or canonical(value) != raw:
+        raise RecoveryError("The move rename record is not a canonical JSON object.")
+    return value
+
+
+def rename_positions(paths: MovePaths, roots: tuple[int, int], record: dict[str, Any]) -> dict[str, str]:
+    old, new = roots
+    parents = [list(identity(os.fstat(descriptor))) for descriptor in roots]
+    if (type(record.get("format")) is not int or record["format"] != 1
+            or record.get("parents") != parents
+            or not isinstance(record.get("session"), str) or TOKEN.fullmatch(record["session"]) is None
+            or any(not isinstance(record.get(field), str) or DIGEST.fullmatch(record[field]) is None
+                   for field in ("priorRelease", "stagedRelease"))):
+        raise RecoveryError("The move rename record does not bind the expected roots, session and releases.")
+    checked_source(record.get("database"))
+    for path, descriptor in ((paths.old, old), (paths.new, new)):
+        if not os.path.samestat(owner_directory(path, private=True), os.fstat(descriptor)):
+            raise RecoveryError("A recorded move parent no longer names its held directory.")
+    working, absent = record["working"], record["absentWorking"]
+    registry = record.get("registry")
+    expected = WORKING
+    required = REQUIRED
+    if registry == str(build_registry(paths.home)):
+        expected = expected - {"builds"}
+        required = required - {"builds"}
+    elif registry != str(paths.historical_registry):
+        raise RecoveryError("The move rename record has an unknown Build registry.")
+    if (not isinstance(working, dict) or not isinstance(absent, dict)
+            or working.keys() & absent.keys() or (working.keys() | absent.keys()) != expected
+            or not required <= working.keys()):
+        raise RecoveryError("The move rename record has an incomplete or conflicting directory inventory.")
+
+    positions = {}
+    seen = set()
+    source_remaining = False
+    for name in sorted(expected):
+        target = destination_name(name)
+        before = {"source": str(paths.old / name), "destination": str(paths.new / target)}
+        at_source = rename_identity(old, name)
+        at_destination = rename_identity(new, target)
+        if name in absent:
+            if absent[name] != before or at_source is not None or at_destination is not None:
+                raise RecoveryError(f"An absent move path changed: {name}.")
+            positions[name] = "absent"
+            continue
+        item = working[name]
+        recorded = item.get("identity") if isinstance(item, dict) else None
+        if (not isinstance(recorded, list) or len(recorded) != 2
+                or any(type(part) is not int or part <= 0 for part in recorded)
+                or recorded[0] != parents[0][0] or tuple(recorded) in seen
+                or item != {**before, "identity": recorded}):
+            raise RecoveryError(f"The move rename record has an invalid before-image: {name}.")
+        seen.add(tuple(recorded))
+        if at_source == recorded and at_destination is None:
+            positions[name] = "source"
+            source_remaining = True
+        elif at_source is None and at_destination == recorded and not source_remaining:
+            positions[name] = "destination"
+        else:
+            raise RecoveryError(f"Cannot determine the recorded directory's move position: {name}.")
+    database_parent, database_name = (old, "database") if positions["database"] == "source" else (new, "postgres")
+    with opened(database_name, DIR, database_parent) as database:
+        with opened("data", DIR, database) as data:
+            info = os.fstat(data)
+            if (list(identity(info)) != record.get("dataIdentity")
+                    or info.st_dev != parents[0][0] or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) != 0o700):
+                raise RecoveryError("The PostgreSQL data directory no longer matches its move before-image.")
+    return positions
+
+
+def require_rename_fence(
+    paths: MovePaths, record: dict[str, Any], positions: dict[str, str], lease: ExclusiveLayoutLease,
+) -> None:
+    runtime = (paths.new if positions["runtime"] == "destination" else paths.old) / "runtime"
+    folder = lease.require(runtime)
+    try:
+        marker = read_state(folder, layout=1)
+    except ValueError:
+        marker = read_state(folder, layout=INSTALLATION_LAYOUT)
+    if marker.phase != "exclusive" or marker.session != record["session"] or marker.source != record["database"]:
+        raise RecoveryError("The held exclusive admission marker does not bind the move's database and session.")
+
+
+def record_renames(paths: MovePaths, prepared: dict[str, Any], session: str, lease: ExclusiveLayoutLease) -> None:
+    """Persist the complete before-images before the caller requests a rename."""
+    require_archive()
+    if prepared.get("status") != "release_pair_verified":
+        raise RecoveryError("Directory renames require a verified release pair.")
+    with rename_roots(paths) as roots:
+        _, new = roots
+        data = paths.old / "database/data"
+        data_info = owner_directory(data, private=True)
+        record = {key: prepared[key] for key in ("database", "priorRelease", "stagedRelease",
+                                                  "registry", "working", "absentWorking")}
+        record.update(format=1, session=session, parents=[list(identity(os.fstat(fd))) for fd in roots],
+                      dataIdentity=list(identity(data_info)))
+        positions = rename_positions(paths, roots, record)
+        if "destination" in positions.values():
+            raise RecoveryError("A working directory moved before its before-image was written.")
+        require_rename_fence(paths, record, positions, lease)
+        temporary = f".{RENAME_RECORD}.{uuid4().hex}"
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=new)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(canonical(record))
+                stream.flush()
+                os.fsync(stream.fileno())
+            rename_exclusive(new, temporary, new, RENAME_RECORD)
+            os.fsync(new)
+        finally:
+            try:
+                os.unlink(temporary, dir_fd=new)
+            except FileNotFoundError:
+                pass
+
+
+def relocate_renames(paths: MovePaths, session: str, lease: ExclusiveLayoutLease, *, reverse: bool = False) -> None:
+    """Advance or reverse the recorded renames under the same exclusive fence."""
+    if not reverse:
+        require_archive()
+    with rename_roots(paths) as roots:
+        old, new = roots
+        record = read_rename_record(new)
+        if record["session"] != session:
+            raise RecoveryError("A different session owns the move rename record.")
+        positions = rename_positions(paths, roots, record)
+        require_rename_fence(paths, record, positions, lease)
+        # A retry may observe a rename whose first directory sync failed.
+        os.fsync(new)
+        os.fsync(old)
+        previous, desired = ("destination", "source") if reverse else ("source", "destination")
+        for name in sorted(record["working"], reverse=reverse):
+            if read_rename_record(new) != record:
+                raise RecoveryError("The move rename record changed during relocation.")
+            positions = rename_positions(paths, roots, record)
+            require_rename_fence(paths, record, positions, lease)
+            if positions[name] != previous:
+                continue
+            target = destination_name(name)
+            if reverse:
+                rename_exclusive(new, target, old, name)
+            else:
+                rename_exclusive(old, name, new, target)
+            positions = rename_positions(paths, roots, record)
+            if positions[name] != desired:
+                raise RecoveryError(f"The completed rename did not preserve its recorded identity: {name}.")
+            require_rename_fence(paths, record, positions, lease)
+            os.fsync(new)
+            os.fsync(old)
+
+
+def inspect_renames(paths: MovePaths) -> dict[str, Any]:
+    with rename_roots(paths) as roots:
+        record = read_rename_record(roots[1])
+        positions = rename_positions(paths, roots, record)
+    return {"status": "rename_positions", "session": record["session"], "positions": positions}
 
 
 def read_settings(file: Path) -> tuple[bytes, tuple[int, ...]]:
@@ -304,18 +535,23 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prior", nargs=2, metavar=("RELEASE_DIR", "SHA256"))
     parser.add_argument("--staged", nargs=2, metavar=("RELEASE_DIR", "SHA256"))
+    parser.add_argument("--rename-status", action="store_true", help="Read the recorded locations of working directories.")
     args = parser.parse_args()
     if (args.prior is None) != (args.staged is None):
         parser.error("Supply both exact release records or neither.")
+    if args.rename_status and args.prior is not None:
+        parser.error("Read rename status separately from release verification.")
     paths = MovePaths(Path.home().resolve())
     try:
-        if args.prior is None:
+        if args.rename_status:
+            result = inspect_renames(paths)
+        elif args.prior is None:
             result = inspect(paths)
         else:
             result = verify_release_pair(paths, (Path(args.prior[0]), args.prior[1]), (Path(args.staged[0]), args.staged[1]))
         print(json.dumps(result))
         return 0
-    except (ArchiveUnavailable, Refusal, RecoveryError, KeyError, OSError, ValueError,
+    except (AdmissionRefusal, ArchiveUnavailable, Refusal, RecoveryError, KeyError, OSError, ValueError,
             subprocess.SubprocessError, IndexError) as error:
         code = error.code if isinstance(error, ArchiveUnavailable) else "move_refused"
         print(json.dumps({"status": code, "message": str(error)}))
