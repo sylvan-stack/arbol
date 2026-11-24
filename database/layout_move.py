@@ -28,10 +28,11 @@ import psycopg
 
 from archive_volume import BACKUPS, Archive, ArchiveUnavailable, require_archive
 from database_server import BIN, LABEL, LAUNCHCTL, Places, postmaster_pid, run
+from exchange_format_transition import stage as stage_exchange_authorization
 from install_database_server import Installation, launch_agent
 from layout_archive import DIR, ENTRY, WORKING, ensure_unused, identity, opened, stamp
 from migrate_schema import Refusal, database_target
-from recovery import capture, restore, validate_snapshot, verify_recovery
+from recovery import capture, cluster_identity, observations, restore, source_identity, validate_snapshot, verify_recovery
 from recovery_release import (
     COMMIT,
     DIGEST,
@@ -64,6 +65,7 @@ from arbol_installation.paths import (
     database_settings,
     installation_root,
 )
+from arbol_installation.exchange_release import RECEIPT as EXCHANGE_AUTHORIZATION
 
 REQUIRED = frozenset(("database", "runtime", "app", "builds", "drivers", "native-resources"))
 BACKEND = "arbol"
@@ -76,6 +78,9 @@ MOVE_INTENT = "layout-move-intent.json"
 DRAIN_RECORD = "layout-move-drain.json"
 SNAPSHOT_RECORD = "layout-move-snapshot.json"
 RETARGET_RECORD = "layout-move-retarget.json"
+STARTED_RECORD = "layout-move-started.json"
+REOPEN_RECORD = "layout-move-reopen.json"
+BOUNDARY_RECORD = "layout-move-boundary.json"
 MAX_RETARGET_BYTES = 32 * 1024 * 1024
 MAX_RENAME_RECORD_BYTES = 65536
 RENAME_EXCL = 0x00000004  # Darwin sys/stdio.h
@@ -1472,7 +1477,8 @@ def record_retarget(paths: MovePaths, prepared: dict[str, Any], session: str, le
         journal = {"format": 1, "session": session, "generation": marker.generation,
                    "handoffSha256": prepared["handoffSha256"],
                    "config": {"before": config, "after": installed_file(changed, config["mode"])},
-                   "routes": routes, "excluded": backup_excluded(paths, data)}
+                   "routes": routes, "excluded": backup_excluded(paths, data),
+                   "exchangeAuthorization": file_image(paths.old / "runtime/writer-admission" / EXCHANGE_AUTHORIZATION)}
         if len(canonical(journal)) > MAX_RETARGET_BYTES:
             raise RecoveryError("The staged launcher and configuration inventory exceeds the move record limit.")
         try:
@@ -1518,6 +1524,193 @@ def retarget_move(
             if result.returncode or backup_excluded(paths, data) != excluded:
                 raise RecoveryError("Time Machine did not apply the recorded data folder exclusion.")
         require_rename_fence(paths, record, positions, lease)
+
+
+def move_database_ready(paths: MovePaths, data: Path, socket: Path, port: int) -> dict[str, str]:
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        service = database_service(paths)
+        pid = postmaster_pid(data)
+        if (service is not None and service.get("path") == str(Places(paths.home).plist)
+                and service.get("state") == "running" and pid is not None and service.get("pid") == str(pid)):
+            ready = run([str(BIN / "pg_isready"), "-h", str(socket), "-p", str(port), "-t", "2"], paths.home, timeout=10)
+            if ready.returncode == 0:
+                return service
+        time.sleep(0.5)
+    raise RecoveryError("The exact move database service did not become ready on its private socket.")
+
+
+def start_move_database(paths: MovePaths, session: str, record: dict[str, Any], folder: int) -> None:
+    places = Places(paths.home)
+    data = owner_directory(places.data, private=True)
+    plist = file_image(places.plist)
+    retarget = read_move_document(folder, RETARGET_RECORD, limit=MAX_RETARGET_BYTES)
+    if (plist != retarget["routes"][str(places.plist)]["after"]
+            or list(identity(data)) != record["dataIdentity"] or not backup_excluded(paths, places.data)):
+        raise RecoveryError("The database startup paths or configuration differ from the retargeted move.")
+    intent = {"format": 1, "session": session, "dataIdentity": record["dataIdentity"],
+              "plistSha256": sha(canonical(plist))}
+    active = database_service(paths)
+    try:
+        prior = read_move_document(folder, STARTED_RECORD)
+    except FileNotFoundError:
+        if active is not None or postmaster_pid(places.data) is not None:
+            raise RecoveryError("An unrecorded database process already occupies the moved installation.")
+        write_move_document(folder, STARTED_RECORD, intent)
+    else:
+        if prior != intent:
+            raise RecoveryError("The saved startup intent belongs to a different move.")
+    if active is None:
+        result = run([LAUNCHCTL, "bootstrap", f"gui/{os.getuid()}", str(places.plist)], paths.home, timeout=30)
+        if result.returncode:
+            raise RecoveryError("launchd did not start the staged database service.")
+    move_database_ready(paths, places.data, places.socket, int(record["database"]["port"]))
+
+
+def verify_move_database(
+    paths: MovePaths, record: dict[str, Any], snapshot: dict[str, Any], *, compare_data: bool,
+) -> dict[str, Any]:
+    from probe_database_server import (
+        Context as Probe,
+        Failed,
+        check_data_folder,
+        check_launch_agent,
+        check_listening,
+        check_settings,
+    )
+
+    places = Places(paths.home)
+    probe = Probe(places, restart=False)
+    try:
+        for inspect_database in (check_settings, check_data_folder, check_listening, check_launch_agent):
+            inspect_database(probe)
+    except Failed as problem:
+        raise RecoveryError("The moved database failed its read-only installed probe.") from problem
+    raw, version = read_settings(places.settings)
+    target = database_target(str(record["database"]["database"]), home=paths.home, settings=raw)
+    with target.connect() as connection, connection.transaction():
+        connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        source = source_identity(connection, target.host, target.port)
+        cluster = cluster_identity(connection, target, places.data)
+        socket = connection.execute("SHOW unix_socket_directories").fetchone()
+        data = connection.execute("SHOW data_directory").fetchone()
+        observed = observations(connection, None)
+        if (source != record["database"] or cluster != snapshot["sourceCluster"] or socket != (str(places.socket),)
+                or data != (str(places.data),) or observed["schema"] != record["schema"]
+                or (compare_data and observed != snapshot["observation"])):
+            raise RecoveryError("The moved database does not match its retained cluster, socket, data and schema.")
+    if stamp(places.settings.lstat()) != version:
+        raise RecoveryError("The database settings changed during post-move verification.")
+    return {"source": source, "cluster": cluster, "schema": observed["schema"]}
+
+
+def verify_reopen_witness(
+    archive: Archive, prepared: dict[str, Any], record: dict[str, Any], pin: tuple[Path, str],
+) -> None:
+    witness = move_object(pinned_move_input(archive, *pin))
+    accounts = {component: {"accounts": "read", "signIn": "unchanged", "keychain": "unchanged", "nativeHomes": "unchanged"}
+                for component in SEALED_DRIVERS}
+    prior = prepared["stage"]["registry"]["priorDefaults"]
+    writers = {name: build for name, build in prior.items() if name == BACKEND or name.startswith("arbol-trunk/")}
+    writers["arbol-exchanges"] = prior[BACKEND]
+    refused = {name: {"build": build, "default": "refused", "explicit": "refused", "admission": "refused"}
+               for name, build in writers.items()}
+    if witness != {"format": 1, "kind": "arbol-layout-move-verification", "session": record["session"],
+                   "handoffSha256": prepared["handoffSha256"], "release": record["stagedRelease"],
+                   "snapshotSha256": rename_snapshot_pins(record)["snapshotSha256"],
+                   "noPrompts": True, "accounts": accounts, "layout1": refused}:
+        raise RecoveryError("The accepted Driver continuity and layout-1 refusal observations do not match this move.")
+
+
+def finish_move(
+    paths: MovePaths, prepared: dict[str, Any], staged: tuple[Path, str], verification: tuple[Path, str],
+    session: str, lease: ExclusiveLayoutLease,
+) -> dict[str, Any]:
+    from arbol_backend.exchange_context import context
+    from arbol_backend.exchange_drain import GuardedSelection, reopen
+    from arbol_installation.exchange_release import authorization_from_release, verify_authorization
+
+    archive = require_archive()
+    places = Places(paths.home)
+    with rename_roots(paths) as roots:
+        _, folder = roots
+        record = read_rename_record(folder)
+        positions = rename_positions(paths, roots, record)
+        runtime = paths.new / "runtime"
+        admission = lease.require(runtime)
+        state = read_state(admission)
+        if (record["session"] != session or record["stagedRelease"] != staged[1]
+                or "source" in positions.values() or state.source != record["database"]):
+            raise RecoveryError("Reopening requires the same exact completed relocation.")
+        retarget = read_move_document(folder, RETARGET_RECORD, limit=MAX_RETARGET_BYTES)
+        started = read_move_document(folder, STARTED_RECORD)
+        if (started.get("session") != session or started.get("dataIdentity") != record["dataIdentity"]
+                or retarget["session"] != session or retarget["handoffSha256"] != prepared["handoffSha256"]
+                or file_image(places.data / "postgresql.conf") != retarget["config"]["after"]
+                or any(file_image(Path(path)) != image["after"] for path, image in retarget["routes"].items())
+                or not backup_excluded(paths, places.data)):
+            raise RecoveryError("The retargeted configuration or Time Machine exclusion changed before reopen.")
+        verify_reopen_witness(archive, prepared, record, verification)
+        verify_driver_destination(prepared)
+        pins = rename_snapshot_pins(record)
+        snapshot, snapshot_sha256, _ = validate_snapshot(Path(pins["snapshotDirectory"]), storage=archive)
+        if snapshot_sha256 != pins["snapshotSha256"]:
+            raise RecoveryError("The verified move snapshot changed before reopen.")
+        checked = verify_move_database(paths, record, snapshot, compare_data=state.phase != "normal")
+        settings, _ = read_settings(places.settings)
+        registry = Path(prepared["targetRegistry"])
+        builds = check_release(paths, registry, archive, staged, 2, json.loads(settings))
+        if any(selected_build(paths, registry, component).get("build") != about["build"]
+               for component, (_, about) in builds.items()):
+            raise RecoveryError("An ordinary selector differs from the staged release.")
+        package, _ = builds[BACKEND]
+        backend_context = context(package, {})
+        if backend_context.identity.folder != runtime or backend_context.identity.package != package:
+            raise RecoveryError("The staged Backend did not resolve the relocated runtime.")
+        release, _ = verify_release(*staged, archive=archive)
+        authorization = authorization_from_release(release, staged[1])
+        expected = {"format": 1, "session": session, "handoffSha256": prepared["handoffSha256"],
+                    "snapshotSha256": snapshot_sha256, "verificationSha256": verification[1], "release": staged[1],
+                    "database": checked, "authorizationSha256": sha(authorization)}
+        try:
+            attempt = read_move_document(folder, REOPEN_RECORD)
+        except FileNotFoundError:
+            if state.phase != "exclusive":
+                raise RecoveryError("There is no durable move reopen attempt for this normal admission marker.")
+            require_rename_fence(paths, record, positions, lease)
+            attempt = {**expected, "normalGeneration": uuid4().hex}
+            write_move_document(folder, REOPEN_RECORD, attempt)
+        else:
+            generation = attempt.get("normalGeneration")
+            if not isinstance(generation, str) or TOKEN.fullmatch(generation) is None or attempt != {**expected, "normalGeneration": generation}:
+                raise RecoveryError("The durable reopen attempt differs from the verified relocation.")
+        if state.phase == "exclusive":
+            require_rename_fence(paths, record, positions, lease)
+
+            @contextmanager
+            def selected(admission_folder: int, current: State) -> Iterator[GuardedSelection]:
+                if current != state:
+                    raise RecoveryError("The exclusive marker changed before staging Exchange authorization.")
+                commitment = stage_exchange_authorization(admission_folder, authorization, staged[1])
+                yield GuardedSelection("successor", record["database"], session, state.generation, state.release,
+                                       staged[1], commitment)
+
+            reopen(backend_context, record["database"], session, release=staged[1], schema=record["schema"],
+                   verify_selection=selected, lease=lease, generation=attempt["normalGeneration"])
+        normal = read_state(lease.require(runtime))
+        if (normal.phase != "normal" or normal.generation != attempt["normalGeneration"] or normal.release != staged[1]
+                or normal.source != record["database"] or normal.exchange_authorization != sha(authorization)):
+            raise RecoveryError("The installed normal marker does not prove the recorded reopen boundary.")
+        verify_authorization(admission, normal.exchange_authorization, staged[1])
+        boundary = {**attempt, "status": "move_reopened"}
+        try:
+            existing = read_move_document(folder, BOUNDARY_RECORD)
+        except FileNotFoundError:
+            write_move_document(folder, BOUNDARY_RECORD, boundary)
+        else:
+            if existing != boundary:
+                raise RecoveryError("An existing reopen boundary differs from the observed normal marker.")
+        return boundary
 
 
 def main() -> int:

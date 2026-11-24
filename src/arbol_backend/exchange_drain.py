@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
-from arbol_installation.admission import AdmissionRefusal, ExclusiveLayoutLease
+from arbol_installation.admission import TOKEN, AdmissionRefusal, ExclusiveLayoutLease
 from arbol_installation.exchange_release import verify_authorization
 from arbol_installation.paths import INSTALLATION_LAYOUT
 
@@ -212,7 +212,8 @@ def _reopen_directory(lease: ExclusiveLayoutLease, runtime: Path) -> int:
 def reopen(context: Context, source: Source, session: str, *, release: str, schema: dict[str, int],
            verify_release: Callable[[], str] | None = None,
            verify_selection: Callable[[int, State], AbstractContextManager[GuardedSelection]] | None = None,
-           lease: ExclusiveLayoutLease | None = None, layout: int = INSTALLATION_LAYOUT) -> None:
+           lease: ExclusiveLayoutLease | None = None, layout: int = INSTALLATION_LAYOUT,
+           generation: str | None = None) -> None:
     """Reopen after verification, with a guarded path for changing releases.
 
     The selection verifier receives a borrowed admission directory descriptor
@@ -232,6 +233,8 @@ def reopen(context: Context, source: Source, session: str, *, release: str, sche
     if (type(layout) is not int or layout not in (1, INSTALLATION_LAYOUT)
             or (layout != INSTALLATION_LAYOUT and lease is None)):
         raise Refusal("maintenance", "Reopening the historical layout requires its held exclusive lease.")
+    if generation is not None and (lease is None or not isinstance(generation, str) or TOKEN.fullmatch(generation) is None):
+        raise Refusal("maintenance", "A recorded reopen generation requires the held exclusive lease.")
     source = checked_source(source)
     runtime = context.identity.folder
     operator = operation(runtime) if lease is None else nullcontext(_reopen_directory(lease, runtime))
@@ -241,6 +244,8 @@ def reopen(context: Context, source: Source, session: str, *, release: str, sche
         idle = state.phase == "exclusive"
         if lease is not None and not idle:
             raise Refusal("maintenance", "Reopening through a held layout lease requires exclusive maintenance.")
+        if generation == state.generation:
+            raise Refusal("maintenance", "Reopening requires a fresh admission generation.")
         if verify_selection is None:
             first = idle and state.release is None and state.exchange_authorization is None
             if release != state.release and not first:
@@ -274,7 +279,7 @@ def reopen(context: Context, source: Source, session: str, *, release: str, sche
                 if lease is not None and (_reopen_directory(lease, runtime) != folder
                                           or current(folder, layout=layout) != state):
                     raise Refusal("maintenance", "The held maintenance state changed before reopening.")
-                write_state(folder, State("normal", uuid4().hex, state.source, None, release, authorization),
+                write_state(folder, State("normal", generation or uuid4().hex, state.source, None, release, authorization),
                             layout=layout)
 
             if verify_selection is None:
