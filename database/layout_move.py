@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 from importlib import import_module
 from pathlib import Path
@@ -1425,7 +1425,7 @@ def backup_excluded(paths: MovePaths, data: Path) -> bool:
     return report.startswith("[Excluded]")
 
 
-def verify_driver_destination(prepared: dict[str, Any]) -> None:
+def verify_driver_destination(prepared: dict[str, Any], *, ready: bool = False) -> None:
     """Read the existing closed Driver deployment and exact selected authority at its destination."""
     admission = move_provider_module("driver_admission")
     payloads = move_provider_module("driver_payload")
@@ -1443,11 +1443,14 @@ def verify_driver_destination(prepared: dict[str, Any]) -> None:
     first = next(iter(authorities.values()))
     deployment = admission.decode(admission.read_bytes(first.shared / "deployment.json"))
     admission.validate("deployment", deployment)
-    if (deployment["phase"] not in ("maintaining", "complete") or deployment["newBoot"] != process.boot_uuid()
+    closed = deployment["phase"] == "maintaining"
+    if (deployment["phase"] not in ("maintaining", "complete") or (ready and closed)
+            or (closed and deployment["newBoot"] != process.boot_uuid())
             or deployment["gateSha256"] != gate.digest
             or deployment["registrySha256"] != admission.sha256(admission.canonical(first.identity))):
         raise RecoveryError("The destination lacks the exact closed Driver deployment and boot readback.")
     deployed = {item["component"]: item for item in deployment["components"]}
+    selected_payloads = []
     for row in gate.document["components"]:
         component = row["component"]
         authority = authorities[component]
@@ -1459,12 +1462,22 @@ def verify_driver_destination(prepared: dict[str, Any]) -> None:
             raise RecoveryError("A destination Driver launcher differs from its gate.")
         payload = payloads.registered(registry, component, selected[component])
         payloads.verify_acceptance(authority, payload, digest=staged["sealedDrivers"]["acceptances"][component]["sha256"])
+        selected_payloads.append(payload)
         control = authority.read("control")
-        closed = deployment["phase"] == "maintaining"
         if (deployed[component]["launcherSha256"] != row["launcherSha256"]
-                or control["epoch"] != deployed[component]["epoch"] or control["phase"] != ("exclusive" if closed else "normal")
+                or (closed and control["epoch"] != deployed[component]["epoch"])
+                or control["phase"] != ("exclusive" if closed else "normal")
                 or control["session"] != (deployment["session"] if closed else None)):
             raise RecoveryError("A Driver does not belong to the verified destination cohort.")
+    if not closed:
+        state = move_provider_module("driver_state")
+        with ExitStack() as locks:
+            for authority in authorities.values():
+                locks.enter_context(authority.mutex())
+            observed = admission.decode(admission.read_bytes(first.shared / "deployment.json"))
+            if observed != deployment:
+                raise RecoveryError("The destination Driver deployment changed during readback.")
+            state._verified_complete(registry, list(authorities.values()), selected_payloads, gate, deployment)
 
 
 def record_retarget(paths: MovePaths, prepared: dict[str, Any], session: str, lease: ExclusiveLayoutLease) -> None:
@@ -1588,6 +1601,22 @@ def start_move_database(paths: MovePaths, session: str, record: dict[str, Any], 
     move_database_ready(paths, places.data, places.socket, int(record["database"]["port"]))
 
 
+def unload_retired_launch_job(paths: MovePaths, folder: int) -> None:
+    """Resume after a Driver boot boundary that reloaded the unchanged old plist."""
+    service = database_service(paths)
+    if service is None or optional_move_document(folder, STARTED_RECORD) is not None:
+        return
+    places = Places(paths.home)
+    journal = read_move_document(folder, RETARGET_RECORD, limit=MAX_RETARGET_BYTES)
+    if (service.get("path") != str(places.plist) or "pid" in service or service.get("state") == "running"
+            or postmaster_pid(places.data) is not None
+            or file_image(places.plist) != journal["routes"][str(places.plist)]["before"]):
+        raise RecoveryError("An unrecorded database service occupies the closed move.")
+    result = run([LAUNCHCTL, "bootout", f"gui/{os.getuid()}/{LABEL}"], paths.home, timeout=90)
+    if result.returncode or database_service(paths) is not None:
+        raise RecoveryError("The unloaded prior database job was reloaded across the closed move.")
+
+
 def verify_move_database(
     paths: MovePaths, record: dict[str, Any], snapshot: dict[str, Any], *, compare_data: bool, prior: bool = False,
 ) -> dict[str, Any]:
@@ -1672,7 +1701,7 @@ def finish_move(
                 or not backup_excluded(paths, places.data)):
             raise RecoveryError("The retargeted configuration or Time Machine exclusion changed before reopen.")
         verify_reopen_witness(archive, prepared, record, verification)
-        verify_driver_destination(prepared)
+        verify_driver_destination(prepared, ready=True)
         pins = rename_snapshot_pins(record)
         snapshot, snapshot_sha256, _ = validate_snapshot(Path(pins["snapshotDirectory"]), storage=archive)
         if snapshot_sha256 != pins["snapshotSha256"]:
@@ -2139,6 +2168,7 @@ def execute_move(
                 marker = read_state(admission, layout=1)
             if marker.phase == "exclusive":
                 lease.convert_marker(runtime, session=session, before=1, after=INSTALLATION_LAYOUT)
+                unload_retired_launch_job(paths, folder)
                 if database_service(paths) is None:
                     retarget_move(paths, prepared, session, lease)
                 start_move_database(paths, session, record, folder)
