@@ -25,14 +25,15 @@ from typing import Any, Literal
 from uuid import uuid4
 
 import psycopg
+from psycopg import sql
 
 from archive_volume import BACKUPS, Archive, ArchiveUnavailable, require_archive
-from database_server import BIN, LABEL, LAUNCHCTL, Places, postmaster_pid, run
+from database_server import BIN, LABEL, LAUNCHCTL, ROLE, Places, postmaster_pid, run
 from exchange_format_transition import stage as stage_exchange_authorization
-from install_database_server import Installation, launch_agent
+from install_database_server import Installation, launch_agent, scram_verifier
 from layout_archive import DIR, ENTRY, WORKING, ensure_unused, identity, opened, stamp
 from migrate_schema import Refusal, database_target
-from recovery import capture, cluster_identity, observations, restore, source_identity, validate_snapshot, verify_recovery
+from recovery import capture, check_isolated, cluster_identity, observations, restore, source_identity, validate_snapshot, verify_recovery
 from recovery_release import (
     COMMIT,
     DIGEST,
@@ -57,6 +58,7 @@ from arbol_installation.admission import (
     exclusive_layout_lease,
     read_state,
     unique_pairs,
+    write_state,
 )
 from arbol_installation.paths import (
     INSTALLATION_LAYOUT,
@@ -83,6 +85,7 @@ REOPEN_RECORD = "layout-move-reopen.json"
 BOUNDARY_RECORD = "layout-move-boundary.json"
 PRIOR_REOPEN_RECORD = "layout-move-prior-reopen.json"
 RECOVERY_BOUNDARY = "layout-move-recovery.json"
+FALLBACK_RECORD = "layout-move-fallback.json"
 MAX_RETARGET_BYTES = 32 * 1024 * 1024
 MAX_RENAME_RECORD_BYTES = 65536
 RENAME_EXCL = 0x00000004  # Darwin sys/stdio.h
@@ -1902,6 +1905,175 @@ def reopen_prior_release(
     elif previous != result:
         raise RecoveryError("The recorded prior recovery boundary differs from the normal marker.")
     return result
+
+
+def stop_prior_for_fallback(
+    paths: MovePaths, folder: int, record: dict[str, Any], snapshot: dict[str, Any],
+) -> None:
+    places = PriorPlaces(paths.home)
+    service = database_service(paths)
+    pid = postmaster_pid(places.data)
+    if service is None and pid is None:
+        return
+    previous = read_move_document(folder, SERVICE_RECORD)
+    image = file_image(places.plist)
+    if (previous.get("session") != record["session"] or service is None or pid is None
+            or service.get("pid") != str(pid) or service.get("path") != str(places.plist) or image is None
+            or sha(base64.b64decode(image["bytes"], validate=True)) != previous.get("plistSha256")):
+        raise RecoveryError("The surviving prior database process is outside the recorded installation.")
+    try:
+        verify_move_database(paths, record, snapshot, compare_data=True, prior=True)
+    except (RecoveryError, Refusal, psycopg.Error):
+        pass
+    else:
+        raise RecoveryError("The original cluster verifies. Use the same-cluster recovery route.")
+    observer = move_provider_module("driver_process")
+    current = observed_process(observer, pid)
+    if current is None or current["executable"] != str((BIN / "postgres").resolve(strict=True)):
+        raise RecoveryError("The surviving prior database process changed before retirement.")
+    result = run([LAUNCHCTL, "bootout", f"gui/{os.getuid()}/{LABEL}"], paths.home, timeout=90)
+    if result.returncode:
+        raise RecoveryError("The original database service did not retire.")
+    stop_recorded_process(observer, current, None)
+    if database_service(paths) is not None or postmaster_pid(places.data) is not None:
+        raise RecoveryError("The original PostgreSQL service is still running.")
+
+
+def record_fallback(
+    paths: MovePaths, folder: int, record: dict[str, Any], snapshot: dict[str, Any],
+    proof: dict[str, Any], intent: dict[str, Any],
+) -> dict[str, Any]:
+    places = PriorPlaces(paths.home)
+    isolated = intent["isolated"]
+    if (proof["target"]["host"], proof["target"]["port"]) != (isolated["host"], isolated["port"]):
+        raise RecoveryError("The verified restore belongs to a different isolated socket.")
+    target = database_target(str(record["database"]["database"]), socket=Path(isolated["host"]), port=isolated["port"],
+                             user=isolated["user"], home=paths.home)
+    with target.connect() as connection:
+        if (check_isolated(connection, target, snapshot) != proof["targetCluster"]
+                or source_identity(connection, target.host, target.port) != proof["target"]):
+            raise RecoveryError("The isolated cluster differs from its verified restore.")
+        with connection.transaction():
+            connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            restored = observations(connection, None)
+            data = connection.execute("SHOW data_directory").fetchone()
+            if restored != snapshot["observation"] or data is None:
+                raise RecoveryError("The isolated data or ledger differs from the verified snapshot.")
+        restored_data = Path(data[0])
+        info = owner_directory(restored_data, private=True)
+        if (any(restored_data.is_relative_to(root) or root.is_relative_to(restored_data)
+                for root in (paths.old, paths.new))
+                or info.st_dev != owner_directory(places.folder, private=True).st_dev):
+            raise RecoveryError("The restored cluster must be separate and on the installation's internal volume.")
+        check_disk(restored_data)
+        raw, _ = read_settings(places.settings)
+        installed = database_target(target.database, home=paths.home, settings=raw)
+        if installed.user != ROLE or (installed.host, installed.port) != (record["database"]["host"], record["database"]["port"]):
+            raise RecoveryError("The saved installation does not name the verified PostgreSQL role and endpoint.")
+        connection.execute(
+            sql.SQL("ALTER ROLE {} LOGIN CREATEDB NOSUPERUSER NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD {}")
+            .format(sql.Identifier(installed.user), sql.Literal(scram_verifier(installed.password)))
+        )
+    settings = {}
+    for name in ("postgresql.conf", "postgresql.auto.conf", "pg_hba.conf", "pg_ident.conf"):
+        old = file_image(places.data / name)
+        if old is None or "bytes" not in old:
+            raise RecoveryError("The exact prior PostgreSQL configuration is incomplete.")
+        settings[name] = {"isolated": file_image(restored_data / name), "prior": old}
+    result = {"format": 1, "session": record["session"], "generation": rename_inventory_proof(record)["generation"],
+              "snapshotSha256": proof["snapshotSha256"], "restoreSha256": proof["receiptSha256"],
+              "original": record["dataIdentity"], "priorCluster": snapshot["sourceCluster"],
+              "replacement": list(identity(info)), "replacementCluster": proof["targetCluster"],
+              "isolatedData": str(restored_data), "settings": settings,
+              "source": record["database"],
+              "replacementSource": {**record["database"], "databaseOid": proof["target"]["databaseOid"]}}
+    write_move_document(folder, FALLBACK_RECORD, result)
+    return result
+
+
+def seat_fallback_data(paths: MovePaths, fallback: dict[str, Any]) -> None:
+    places = PriorPlaces(paths.home)
+    replacement = Path(fallback["isolatedData"])
+    retired_name = f".arbol-move-original-{fallback['session']}"
+    with opened(places.folder, DIR) as home, opened(replacement.parent, DIR) as staging:
+        original = fallback["original"]
+        recovered = fallback["replacement"]
+        active = rename_identity(home, places.data.name)
+        retired = rename_identity(home, retired_name)
+        staged = rename_identity(staging, replacement.name)
+        if (active, retired, staged) == (recovered, original, None):
+            os.fsync(home)
+            os.fsync(staging)
+            return
+        if ((active, retired, staged) not in ((original, None, recovered), (None, original, recovered))
+                or database_service(paths) is not None):
+            raise RecoveryError("Cannot determine which fallback cluster is seated or retired.")
+        if postmaster_pid(replacement) is not None:
+            response = run([str(BIN / "pg_ctl"), "-D", str(replacement), "-m", "fast", "-w", "-t", "60", "stop"],
+                           paths.home, timeout=90)
+            if response.returncode or postmaster_pid(replacement) is not None:
+                raise RecoveryError("The verified isolated cluster did not stop before seating.")
+        ensure_unused({"original": places.data if active is not None else places.folder / retired_name,
+                       "isolated": replacement})
+        for name, pair in fallback["settings"].items():
+            if name not in ("postgresql.conf", "postgresql.auto.conf", "pg_hba.conf", "pg_ident.conf"):
+                raise RecoveryError("The saved fallback configuration contains an unknown entry.")
+            replace_move_file(replacement / name, pair["isolated"], pair["prior"])
+        if active is not None:
+            rename_exclusive(home, places.data.name, home, retired_name)
+            os.fsync(home)
+        if (rename_identity(home, retired_name) != original or rename_identity(staging, replacement.name) != recovered):
+            raise RecoveryError("The original or restored data directory changed before seating.")
+        rename_exclusive(staging, replacement.name, home, places.data.name)
+        os.fsync(home)
+        os.fsync(staging)
+        if rename_identity(home, places.data.name) != recovered:
+            raise RecoveryError("The seated cluster is outside the verified restore.")
+
+
+def recover_snapshot_fallback(
+    paths: MovePaths, folder: int, record: dict[str, Any], prior: tuple[Path, str],
+    lease: ExclusiveLayoutLease,
+) -> dict[str, Any]:
+    archive = require_archive()
+    pins = rename_snapshot_pins(record)
+    snapshot_directory, restore_receipt = Path(pins["snapshotDirectory"]), Path(pins["restoreReceipt"])
+    snapshot, _, _ = validate_snapshot(snapshot_directory, storage=archive)
+    proof = verify_recovery(snapshot_directory, restore_receipt, source=record["database"], schema=record["schema"],
+                            release_sha256=prior[1], maintenance_session=record["session"])
+    if proof["receiptSha256"] != pins["receiptSha256"] or proof["snapshotSha256"] != pins["snapshotSha256"]:
+        raise RecoveryError("The fallback restore differs from its pinned move evidence.")
+    runtime = paths.old / "runtime"
+    admission = lease.require(runtime)
+    marker = read_state(admission, layout=1)
+    fallback = optional_move_document(folder, FALLBACK_RECORD, limit=MAX_RETARGET_BYTES)
+    if (optional_move_document(folder, BOUNDARY_RECORD) is not None
+            or (marker.phase != "exclusive" and (fallback is None or marker.phase != "normal"))):
+        raise RecoveryError("Snapshot fallback requires the recorded prior exclusive fence.")
+    if fallback is None:
+        if marker.session != record["session"] or marker.source != record["database"]:
+            raise RecoveryError("A different database or session owns the prior marker.")
+        stop_prior_for_fallback(paths, folder, record, snapshot)
+        fallback = record_fallback(paths, folder, record, snapshot, proof, read_move_document(folder, MOVE_INTENT))
+    if (fallback["session"] != record["session"] or fallback["snapshotSha256"] != proof["snapshotSha256"]
+            or fallback["restoreSha256"] != proof["receiptSha256"]
+            or marker.source not in (fallback["source"], fallback["replacementSource"])
+            or (marker.phase == "exclusive" and (marker.session != fallback["session"] or marker.generation != fallback["generation"]))):
+        raise RecoveryError("The saved replacement handoff does not match the live recovery boundary.")
+    seat_fallback_data(paths, fallback)
+    replacement = {**record, "database": checked_source(fallback["replacementSource"])}
+    replacement_snapshot = {**snapshot, "sourceCluster": fallback["replacementCluster"]}
+    start_prior_database(paths, replacement, folder)
+    verify_move_database(paths, replacement, replacement_snapshot, compare_data=marker.phase != "normal", prior=True)
+    current = read_state(lease.require(runtime), layout=1)
+    if current != marker:
+        raise RecoveryError("The prior exclusive marker changed while seating its recovery cluster.")
+    if current.source != replacement["database"]:
+        if current.phase != "exclusive":
+            raise RecoveryError("Snapshot fallback cannot rebind an open admission marker.")
+        write_state(admission, State("exclusive", current.generation, replacement["database"], current.session,
+                                     current.release, current.exchange_authorization), layout=1)
+    return reopen_prior_release(paths, folder, replacement, prior, replacement_snapshot, lease, fallback=True)
 
 
 def main() -> int:
