@@ -159,6 +159,27 @@ def finish_provider(folder: Path, commit: str, tree: str) -> None:
                                    "runtime/site-packages", "src"])
 
 
+def database_operator(folder: Path, operation: str) -> None:
+    entry = folder / "bin" / f"arbol-layout-{operation}"
+    entry.write_text(
+        f"""#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+exec "$root/runtime/python/bin/python3.14" -I -B -c '
+import runpy
+import sys
+from pathlib import Path
+
+root = Path(sys.argv.pop(1))
+sys.path[:0] = [str(root / "database"), str(root / "src"), str(root / "runtime/site-packages")]
+runpy.run_path(str(root / "database/layout_{operation}.py"), run_name="__main__")
+' "$root" "$@"
+""",
+        encoding="utf-8",
+    )
+    entry.chmod(0o755)
+
+
 def package(root: Path = ROOT) -> Path:
     folder = destination(root)
     dependencies = metadata(root)
@@ -229,6 +250,8 @@ def package(root: Path = ROOT) -> Path:
         if not isinstance(name, str) or Path(name).name != name or name in ("", ".", ".."):
             raise ValueError("Each migration input must be a file in the database directory.")
         shutil.copy2(database / name, folder / "database" / name)
+    for operation in ("move", "archive"):
+        database_operator(folder, operation)
     baseline = baseline_sha256(folder)
     requirements = subprocess.check_output(
         ["uv", "export", "--frozen", "--no-dev", "--no-emit-project", "--format", "requirements-txt"],

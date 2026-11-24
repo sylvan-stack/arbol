@@ -2197,31 +2197,54 @@ def main() -> int:
     parser.add_argument("--prior", nargs=2, metavar=("RELEASE_DIR", "SHA256"))
     parser.add_argument("--staged", nargs=2, metavar=("RELEASE_DIR", "SHA256"))
     parser.add_argument("--handoff", nargs=2, metavar=("MANIFEST", "SHA256"))
-    maintenance = parser.add_mutually_exclusive_group()
-    maintenance.add_argument("--drain", action="store_true", help="Begin or read back this exact move's drain.")
-    maintenance.add_argument("--capture", action="store_true", help="Freeze and verify the move snapshot by isolated restore.")
+    operation = parser.add_mutually_exclusive_group()
+    for flag, description in (
+        ("drain", "Begin or read back this exact move's drain."),
+        ("capture", "Freeze and verify the move snapshot by isolated restore."),
+        ("move", "Relocate and reopen the verified move."),
+        ("rename-status", "Read the recorded locations of working directories."),
+        ("recover-files", "Restore the local before-images and leave the closed fence in place."),
+        ("recover", "Recover and reopen the verified prior layout with its original cluster."),
+        ("fallback", "Recover and reopen the prior layout with its verified isolated restore."),
+    ):
+        operation.add_argument(f"--{flag}", dest="mode", action="store_const", const=flag, help=description)
     parser.add_argument("--writer-refusal", nargs=2, metavar=("RECEIPT", "SHA256"))
     parser.add_argument("--snapshot-directory", type=Path)
     parser.add_argument("--restore-directory", type=Path)
     parser.add_argument("--restore-target", nargs=3, metavar=("SOCKET_DIR", "PORT", "ROLE"))
-    parser.add_argument("--rename-status", action="store_true", help="Read the recorded locations of working directories.")
+    parser.add_argument("--verification", nargs=2, metavar=("RECEIPT", "SHA256"))
+    parser.add_argument("--verification-wait", type=int, default=0, metavar="SECONDS")
     args = parser.parse_args()
-    if (args.prior is None) != (args.staged is None):
+    mode = args.mode
+    if mode in ("recover", "fallback"):
+        if args.prior is None or args.staged is not None or args.handoff is not None:
+            parser.error("Prior recovery takes only the exact --prior release.")
+    elif (args.prior is None) != (args.staged is None):
         parser.error("Supply both exact release records or neither.")
-    if args.rename_status and (args.prior is not None or args.handoff is not None):
-        parser.error("Read rename status separately from release verification.")
+    if mode in ("rename-status", "recover-files") and (args.prior is not None or args.handoff is not None):
+        parser.error("Use local rename status and file recovery separately from release verification.")
     if args.handoff is not None and args.prior is None:
         parser.error("A handoff requires the exact prior and staged release records.")
     capture_inputs = (args.writer_refusal, args.snapshot_directory, args.restore_directory, args.restore_target)
-    if args.drain or args.capture:
+    if mode in ("drain", "capture"):
         if args.handoff is None or not all(capture_inputs):
             parser.error("Drain and capture require the verified handoff, writer proof and exact snapshot and restore inputs.")
     elif any(capture_inputs):
         parser.error("Snapshot and restore inputs require drain or capture.")
+    if mode == "move":
+        if args.handoff is None or args.verification is None or not 0 <= args.verification_wait <= 3600:
+            parser.error("Move requires the handoff, pinned verification receipt and a wait of at most 3600 seconds.")
+    elif args.verification is not None or args.verification_wait:
+        parser.error("Verification inputs require --move.")
     paths = MovePaths(Path.home().resolve())
     try:
-        if args.rename_status:
+        if mode == "rename-status":
             result = inspect_renames(paths)
+        elif mode == "recover-files":
+            result = execute_recovery(paths, "files")
+        elif mode in ("recover", "fallback"):
+            prior = Path(args.prior[0]), args.prior[1]
+            result = execute_recovery(paths, "prior" if mode == "recover" else "fallback", prior)
         elif args.prior is None:
             result = inspect(paths)
         else:
@@ -2231,13 +2254,16 @@ def main() -> int:
                 result = verify_release_pair(paths, prior, staged)
             else:
                 handoff = Path(args.handoff[0]), args.handoff[1]
-                if args.drain or args.capture:
+                if mode in ("drain", "capture"):
                     socket, port, role = args.restore_target
                     result = prepare_move_maintenance(
                         paths, prior, staged, handoff, refusal=(Path(args.writer_refusal[0]), args.writer_refusal[1]),
                         snapshot_directory=args.snapshot_directory, restore_directory=args.restore_directory,
-                        restore_socket=Path(socket), restore_port=int(port), restore_role=role, drain_only=args.drain,
+                        restore_socket=Path(socket), restore_port=int(port), restore_role=role, drain_only=mode == "drain",
                     )
+                elif mode == "move":
+                    witness = Path(args.verification[0]), args.verification[1]
+                    result = execute_move(paths, prior, staged, handoff, witness, witness_wait=args.verification_wait)
                 else:
                     prepared = verify_staged_move(paths, prior, staged, handoff)
                     result = {key: value for key, value in prepared.items()
