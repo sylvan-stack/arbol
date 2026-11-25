@@ -1,9 +1,7 @@
 """PostgreSQL-owned Subscription incarnations, never inferred from a catalogue.
 
-A current Driver record identifies a reusable catalogue slot, not its lifetime.
-These storage operations do not manufacture a durable native-continuity proof.
-Explicit rebind creates a fresh lifetime; a later automatic lookup without a
-qualified producer must call uncertain(), rather than adopt an old login.
+The qualified Driver supplies the lifetime proof. The installation database
+assigns the application incarnation and binds it to that exact proof.
 """
 
 from __future__ import annotations
@@ -18,6 +16,8 @@ from .database import Database, Session
 from .model import Refused
 
 DRIVER = re.compile(r"[a-z][a-z0-9-]{0,79}\Z")
+PROOF_DRIVERS = frozenset({"claude", "codex", "mimo", "pi"})
+PROOF_TOKEN = re.compile(r"[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]\Z")
 
 
 def canonical(value: str) -> str:
@@ -43,6 +43,22 @@ class SubscriptionIdentity:
     incarnation: str
     native_id: str
     state: str
+
+
+@dataclass(frozen=True)
+class SubscriptionProof:
+    version: int
+    driver: str
+    native_id: str
+    generation: str
+    witness: str
+
+    def __post_init__(self) -> None:
+        target(self.driver, self.native_id)
+        if (type(self.version) is not int or self.version != 1 or self.driver not in PROOF_DRIVERS
+                or PROOF_TOKEN.fullmatch(self.generation) is None
+                or PROOF_TOKEN.fullmatch(self.witness) is None):
+            raise Refused("needs_rebind", "The Driver Subscription proof is unavailable.")
 
 
 class SubscriptionIdentities:
@@ -108,15 +124,53 @@ class SubscriptionIdentities:
             current = await self.current(session, installation, driver, native_id)
             if current is None:
                 return None
-            await session.execute(
-                "UPDATE public.seqoya_subscriptions SET state='needs_rebind' "
-                "WHERE installation=%s AND driver=%s AND incarnation=%s",
-                (installation, driver, current.incarnation))
-            await session.execute(
-                "UPDATE public.seqoya_browser_bindings SET state='needs_rebind' "
-                "WHERE installation=%s AND driver=%s AND subscription_incarnation=%s AND state<>'retired'",
-                (installation, driver, current.incarnation))
+            await self.mark_uncertain(session, current)
             return SubscriptionIdentity(installation, driver, current.incarnation, native_id, "needs_rebind")
+
+    @staticmethod
+    async def mark_uncertain(session: Session, current: SubscriptionIdentity) -> None:
+        values = (current.installation, current.driver, current.incarnation)
+        await session.execute(
+            "UPDATE public.seqoya_subscriptions SET state='needs_rebind' "
+            "WHERE installation=%s AND driver=%s AND incarnation=%s", values)
+        await session.execute(
+            "UPDATE public.seqoya_browser_bindings SET state='needs_rebind' "
+            "WHERE installation=%s AND driver=%s AND subscription_incarnation=%s AND state<>'retired'", values)
+
+    @staticmethod
+    async def create_lifetime(session: Session, installation: str, driver: str, native_id: str,
+                              proof: SubscriptionProof | None) -> SubscriptionIdentity:
+        incarnation = str(uuid4())
+        await session.execute(
+            "INSERT INTO public.seqoya_subscriptions (installation,driver,incarnation,native_id,state) "
+            "VALUES (%s,%s,%s,%s,'active')", (installation, driver, incarnation, native_id))
+        if proof is not None:
+            await session.execute(
+                "INSERT INTO public.seqoya_subscription_proofs (installation,driver,incarnation,version,generation,witness) "
+                "VALUES (%s,%s,%s,%s,%s,%s)",
+                (installation, driver, incarnation, proof.version, proof.generation, proof.witness))
+        return SubscriptionIdentity(installation, driver, incarnation, native_id, "active")
+
+    async def observe(self, proof: SubscriptionProof) -> SubscriptionIdentity:
+        """Retain a proved active lifetime or establish the first one for this slot."""
+        async with self.transaction() as (session, installation):
+            current = await self.current(session, installation, proof.driver, proof.native_id)
+            if current is None:
+                prior = await session.execute(
+                    "SELECT 1 FROM public.seqoya_subscriptions WHERE installation=%s AND driver=%s AND native_id=%s LIMIT 1",
+                    (installation, proof.driver, proof.native_id))
+                if not prior:
+                    return await self.create_lifetime(session, installation, proof.driver, proof.native_id, proof)
+            elif current.state == "active":
+                accepted = await session.execute(
+                    "SELECT version,generation,witness FROM public.seqoya_subscription_proofs "
+                    "WHERE installation=%s AND driver=%s AND incarnation=%s",
+                    (installation, proof.driver, current.incarnation))
+                if accepted == [(proof.version, proof.generation, proof.witness)]:
+                    return current
+                await self.mark_uncertain(session, current)
+        # The uncertainty update must commit before refusing the caller.
+        raise Refused("needs_rebind", "Explicit Subscription rebind is required.")
 
     @staticmethod
     async def retire_rows(session: Session, current: SubscriptionIdentity) -> None:
@@ -147,23 +201,22 @@ class SubscriptionIdentities:
             await self.retire_rows(session, current)
 
     async def rebind(self, driver: str, native_id: str, *, installation: str,
-                     previous: str | None, confirmed: bool) -> SubscriptionIdentity:
+                     previous: str | None, confirmed: bool,
+                     proof: SubscriptionProof | None = None) -> SubscriptionIdentity:
         """Explicit replacement only: preserve previous rows and make a fresh UUID.
 
         Confirmation belongs to the consuming user workflow, never catalogue
-        discovery. This establishes the new lifetime for this explicit action;
-        it does not prove a later Driver record is still the same lifetime.
+        discovery. The caller with a qualified producer verifies the proof
+        against that producer before requesting the replacement.
         """
         target(driver, native_id)
         if confirmed is not True:
             raise Refused("needs_rebind", "Explicit Subscription rebind is required.")
+        if proof is not None and (proof.driver, proof.native_id) != (driver, native_id):
+            raise Refused("needs_rebind", "The Driver Subscription proof describes a different selection.")
         async with self.transaction() as (session, authority):
             current = await self.current(session, authority, driver, native_id)
             self.expected(current, authority, installation, previous)
             if current is not None:
                 await self.retire_rows(session, current)
-            incarnation = str(uuid4())
-            await session.execute(
-                "INSERT INTO public.seqoya_subscriptions (installation,driver,incarnation,native_id,state) "
-                "VALUES (%s,%s,%s,%s,'active')", (authority, driver, incarnation, native_id))
-            return SubscriptionIdentity(authority, driver, incarnation, native_id, "active")
+            return await self.create_lifetime(session, authority, driver, native_id, proof)
