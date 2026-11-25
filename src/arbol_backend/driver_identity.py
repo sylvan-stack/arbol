@@ -59,7 +59,7 @@ def selection(identity: Identity, driver: str) -> DriverSelection:
     if (installed is None or installed["phase"] != "complete" or installed["gateSha256"] != gate.digest
             or installed["registrySha256"] != sha256(canonical(authority.identity))):
         raise unavailable()
-    route = identity.bin_dir / component
+    route = identity.home / "Applications/Arbol/bin" / component
     state = installation_root(identity.home) / "driver-state" / installed["session"] / driver
     row = next((item for item in installed["components"] if item["component"] == component), None)
     gate_row = next((item for item in gate.document["components"] if item["component"] == component), None)
