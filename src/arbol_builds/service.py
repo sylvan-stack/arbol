@@ -194,6 +194,9 @@ def browser_release_allocation(paths: Locations, source: dict[str, Any],
     info = run.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
         raise ValueError("Browser release run must be a private physical directory.")
+    state_root = run / "browser-state"
+    state_root.mkdir(mode=0o700, exist_ok=True)
+    browser_private_directory(state_root)
     canonical_registry = build_registry(home)
     if canonical_registry.resolve() != canonical_registry or (canonical_registry / "arbol-browser").is_symlink():
         raise ValueError("Browser production allocation needs a physical canonical registry.")
