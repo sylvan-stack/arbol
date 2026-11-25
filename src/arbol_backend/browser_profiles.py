@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import hashlib
-import re
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
+from .accounts import Accounts
+from .browser_commands import INSTANCE, REQUEST, BrowserCommands, BrowserProfile
 from .database import Database, Session
 from .model import Refused
 from .subscription_identity import DRIVER, SubscriptionIdentities, SubscriptionIdentity, canonical
-
-REQUEST = re.compile(r"create_[A-Za-z0-9_-]{22}\Z")
-INSTANCE = re.compile(r"prf_[A-Za-z0-9_-]{22}\Z")
 
 
 def needs_rebind() -> Refused:
@@ -92,3 +90,85 @@ class BrowserProfiles:
                 "(installation,driver,subscription_incarnation,creation_request,profile,state) "
                 "VALUES (%s,%s,%s,%s,%s,'preparing')", (*owner, request, profile))
             return ProfileBinding(*owner, request, profile, None, "preparing")
+
+    async def mark_needs_rebind(self, selected: SubscriptionIdentity, expected: ProfileBinding) -> None:
+        async with self.identities.transaction() as (session, installation):
+            await self.require_identity(session, installation, selected)
+            if await self.current(session, selected) == expected:
+                await session.execute(
+                    "UPDATE public.seqoya_browser_bindings SET state='needs_rebind' "
+                    "WHERE installation=%s AND driver=%s AND subscription_incarnation=%s AND creation_request=%s",
+                    (*expected.owner, expected.request))
+
+    async def activate(self, selected: SubscriptionIdentity, expected: ProfileBinding,
+                       observed: BrowserProfile) -> ProfileBinding:
+        if expected.state != "preparing" or (observed.profile, observed.request) != (expected.profile, expected.request):
+            raise needs_rebind()
+        activated = replace(expected, instance=observed.instance, state="active")
+        async with self.identities.transaction() as (session, installation):
+            await self.require_identity(session, installation, selected)
+            current = await self.current(session, selected)
+            if current == activated:
+                return activated
+            if current != expected:
+                raise needs_rebind()
+            await session.execute(
+                "UPDATE public.seqoya_browser_bindings SET state='active',profile_instance=%s "
+                "WHERE installation=%s AND driver=%s AND subscription_incarnation=%s AND creation_request=%s",
+                (observed.instance, *expected.owner, expected.request))
+        return activated
+
+    async def require_binding(self, selected: SubscriptionIdentity, binding: ProfileBinding) -> None:
+        async with self.identities.transaction() as (session, installation):
+            await self.require_identity(session, installation, selected)
+            if binding.state != "active" or await self.current(session, selected) != binding:
+                raise needs_rebind()
+
+    async def verify(self, selected: SubscriptionIdentity, binding: ProfileBinding, browser: BrowserCommands) -> ProfileBinding:
+        observed = (await browser.list()).get(binding.profile)
+        if observed is None or (observed.request, observed.instance) != (binding.request, binding.instance):
+            await self.mark_needs_rebind(selected, binding)
+            raise needs_rebind()
+        await self.require_binding(selected, binding)
+        return binding
+
+    async def active(self, selected: SubscriptionIdentity, browser: BrowserCommands) -> ProfileBinding:
+        """Read an established exact binding without creating or opening a profile."""
+        async with self.identities.transaction() as (session, installation):
+            await self.require_identity(session, installation, selected)
+            binding = await self.current(session, selected)
+            if binding is None or binding.state != "active":
+                raise needs_rebind()
+        return await self.verify(selected, binding, browser)
+
+    async def reconcile(self, selected: SubscriptionIdentity, browser: BrowserCommands) -> ProfileBinding:
+        binding = await self.reserve(selected)
+        if binding.state == "active":
+            return await self.verify(selected, binding, browser)
+        observed = (await browser.list()).get(binding.profile)
+        if observed is not None and observed.request != binding.request:
+            await self.mark_needs_rebind(selected, binding)
+            raise needs_rebind()
+        # Creating again with the same request recovers crashes, including a
+        # response lost before the preparing row learned its real instance.
+        created = await browser.create(binding.profile, binding.request)
+        if observed is not None and observed != created:
+            await self.mark_needs_rebind(selected, binding)
+            raise needs_rebind()
+        return await self.activate(selected, binding, created)
+
+    async def open(self, accounts: Accounts, browser: BrowserCommands, driver: str, subscription: str, url: str) -> None:
+        async with accounts.browser_identity_request(driver, subscription) as (selected, verify_proof):
+            binding = await self.reconcile(selected, browser)
+            await self.require_binding(selected, binding)
+            await verify_proof()
+            if binding.instance is None:
+                raise needs_rebind()
+            try:
+                await browser.open(binding.profile, binding.instance, url)
+            except Refused:
+                # A verified disappearance or replacement is rebindable.
+                # A transient command refusal leaves the active binding intact.
+                await self.verify(selected, binding, browser)
+                raise
+            await self.require_binding(selected, binding)

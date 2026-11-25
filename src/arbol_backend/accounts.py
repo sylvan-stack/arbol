@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from functools import partial
 from typing import Any
@@ -82,19 +82,22 @@ class Accounts:
         public.subscription(selected[0])
 
     @asynccontextmanager
-    async def browser_identity_request(self, driver: str, subscription: str) -> AsyncIterator[SubscriptionIdentity]:
+    async def browser_identity_request(
+        self, driver: str, subscription: str,
+    ) -> AsyncIterator[tuple[SubscriptionIdentity, Callable[[], Awaitable[None]]]]:
         """Verify a fresh proof before admitting the binding and again before returning its result."""
         authority = self.identity_authority()
         await self.browser_slot(driver, subscription)
         async with authority.database.browser_authority():
             captured = await self.driver_identity.capture(driver, subscription)
             selected = await authority.observe(captured.proof)
-            await self.driver_identity.expect(captured)
-            yield selected
-            await self.driver_identity.expect(captured)
+            verify = partial(self.driver_identity.expect, captured)
+            await verify()
+            yield selected, verify
+            await verify()
 
     async def browser_identity(self, driver: str, subscription: str) -> SubscriptionIdentity:
-        async with self.browser_identity_request(driver, subscription) as selected:
+        async with self.browser_identity_request(driver, subscription) as (selected, _):
             return selected
 
     async def rebind_browser_identity(self, driver: str, subscription: str, *, installation: str,
