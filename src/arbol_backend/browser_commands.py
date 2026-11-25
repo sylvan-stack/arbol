@@ -22,6 +22,7 @@ INSTANCE = re.compile(r"prf_[A-Za-z0-9_-]{22}\Z")
 REQUEST = re.compile(r"create_[A-Za-z0-9_-]{22}\Z")
 HOST = re.compile(r"ins_[A-Za-z0-9_-]{22}\Z")
 TAB = re.compile(r"tab_[A-Za-z0-9_-]{22}\Z")
+USAGE_CLAIM = re.compile(r"[A-Za-z0-9_-]{43}\Z")
 MANAGEMENT_FIELDS = {"format", "id", "instance", "creationRequest", "createdAt"}
 MAX_OUTPUT = 1024 * 1024
 BROWSER_SECONDS = 65.0
@@ -102,7 +103,14 @@ class BrowserCommands:
                 or ("tab" in reply and (not isinstance(reply["tab"], str) or TAB.fullmatch(reply["tab"]) is None))):
             raise unavailable()
 
-    async def execute(self, *arguments: str) -> dict[str, Any]:
+    async def capture_usage(self, provider: str, profile: str, instance: str, claim: str) -> dict[str, Any]:
+        if (SEQOYA_PROFILE.fullmatch(profile) is None or INSTANCE.fullmatch(instance) is None
+                or USAGE_CLAIM.fullmatch(claim) is None):
+            raise unavailable()
+        return await self.execute("seqoya-usage", "--profile", profile, "--profile-instance", instance,
+                                  "--provider", provider, input_data=(claim + "\n").encode("ascii"))
+
+    async def execute(self, *arguments: str, input_data: bytes | None = None) -> dict[str, Any]:
         if self.identity.fixture:
             raise unavailable()
         try:
@@ -110,7 +118,7 @@ class BrowserCommands:
                 selected = await asyncio.to_thread(installed_browser_selection, self.identity.home)
                 if selected is None:
                     raise unavailable()
-                data = await self.run(str(selected["build"]), arguments)
+                data = await self.run(str(selected["build"]), arguments, input_data=input_data)
                 if await asyncio.to_thread(installed_browser_selection, self.identity.home) != selected:
                     raise unavailable()
                 value = json.loads(data.decode("utf-8"), object_pairs_hook=pairs, parse_constant=constant, parse_float=finite)
@@ -120,15 +128,22 @@ class BrowserCommands:
         except (OSError, ValueError, RuntimeError, TimeoutError) as error:
             raise unavailable() from error
 
-    async def run(self, build: str, arguments: tuple[str, ...]) -> bytes:
+    async def run(self, build: str, arguments: tuple[str, ...], *, input_data: bytes | None = None) -> bytes:
         child = await asyncio.create_subprocess_exec(
             str(self.launcher), "-v", build, *arguments, cwd=self.identity.folder,
             env={"HOME": str(self.identity.home), "PATH": "/usr/bin:/bin"},
-            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            stdin=asyncio.subprocess.DEVNULL if input_data is None else asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
             start_new_session=True, limit=MAX_OUTPUT,
         )
         assert child.stdout is not None
         try:
+            if child.stdin is not None and input_data is not None:
+                try:
+                    child.stdin.write(input_data)
+                    await child.stdin.drain()
+                finally:
+                    child.stdin.close()
             try:
                 await child.stdout.readexactly(MAX_OUTPUT + 1)
             except asyncio.IncompleteReadError as end:

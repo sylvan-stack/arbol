@@ -5,12 +5,13 @@ from __future__ import annotations
 import re
 import secrets
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from .accounts import Accounts, BrowserReplacement
 from .bridge import Error, Params, Registry
-from .browser_commands import BrowserCommands
-from .browser_profiles import BrowserProfiles
+from .browser_commands import BROWSER_SECONDS, INSTANCE, SEQOYA_PROFILE, USAGE_CLAIM, BrowserCommands, unavailable
+from .browser_profiles import BrowserProfiles, ProfileBinding
 from .database import Database
 from .model import Refused
 
@@ -36,14 +37,66 @@ class OfferedReplacement:
     expires: float
 
 
+@dataclass
+class UsageClaim:
+    provider: str
+    binding: ProfileBinding
+    verify: Callable[[], Awaitable[None]]
+    expires: float
+    claimed: bool = False
+    admitted: bool = False
+
+
 class BrowserBridge:
     def __init__(self, accounts: Accounts, database: Database, registry: Registry) -> None:
         self.accounts = accounts
         self.browser = BrowserCommands(database.identity)
         self.profiles = BrowserProfiles(database)
         self.selections: dict[str, OfferedReplacement] = {}
+        self.usage_claims: dict[str, UsageClaim] = {}
         registry.method("seqoya.browser.open", self.open, self.open_params)
         registry.method("seqoya.browser.rebind", self.rebind, self.rebind_params)
+        registry.method("seqoya.browser.usage.claim", self.claim_usage, self.claim_params)
+
+    async def capture_usage(self, provider: tuple[str, str], binding: ProfileBinding,
+                            verify: Callable[[], Awaitable[None]]) -> Params:
+        if (provider not in DESTINATIONS or binding.driver != provider[0] or binding.state != "active"
+                or binding.instance is None or len(self.usage_claims) >= len(DESTINATIONS)):
+            raise unavailable()
+        key = "/".join(provider)
+        token = secrets.token_urlsafe(32)
+        claim = UsageClaim(key, binding, verify, time.monotonic() + BROWSER_SECONDS)
+        self.usage_claims[token] = claim
+        try:
+            result = await self.browser.capture_usage(key, binding.profile, binding.instance, token)
+            if not claim.admitted:
+                raise unavailable()
+            return result
+        finally:
+            self.usage_claims.pop(token, None)
+
+    async def claim_params(self, params: Params) -> Params:
+        token, provider, profile, instance = (params.get(key) for key in ("claim", "provider", "profile", "instance"))
+        if (params.keys() != {"claim", "provider", "profile", "instance"} or not isinstance(token, str)
+                or USAGE_CLAIM.fullmatch(token) is None or not isinstance(provider, str) or len(provider) > 64
+                or not isinstance(profile, str) or SEQOYA_PROFILE.fullmatch(profile) is None
+                or not isinstance(instance, str) or INSTANCE.fullmatch(instance) is None):
+            raise Error("invalid_input")
+        return params
+
+    async def claim_usage(self, params: Params) -> Params:
+        token = params["claim"]
+        claim = self.usage_claims.get(token)
+        if (claim is None or claim.claimed or time.monotonic() >= claim.expires
+                or (claim.provider, claim.binding.profile, claim.binding.instance)
+                != (params["provider"], params["profile"], params["instance"])):
+            raise Error("invalid_input")
+        claim.claimed = True
+        await claim.verify()
+        if self.usage_claims.get(token) is not claim or time.monotonic() >= claim.expires:
+            raise Error("invalid_input")
+        claim.admitted = True
+        return {"admitted": True}
 
     @staticmethod
     def unavailable(error: Refused) -> Params:
