@@ -304,6 +304,11 @@ def register_candidates(folders: list[Path], registry: Path, *,
 
 
 def install_command(arguments: list[str], registry: Path) -> int:
+    if len(arguments) == 2 and arguments[0] == "recover-guardians" and canonical_uuid(arguments[1]):
+        from .driver_guardian_recovery import recover_guardians
+
+        write_all(1, json_line(recover_guardians(registry, arguments[1])))
+        return 0
     if len(arguments) >= 2 and arguments[0] == "replace" and canonical_uuid(arguments[1]):
         from .driver_replacement import replace_installed
 
@@ -311,8 +316,9 @@ def install_command(arguments: list[str], registry: Path) -> int:
         write_all(1, json_line(result))
         return 0
     if len(arguments) != 7 or arguments[0] != "fresh" or not canonical_uuid(arguments[1]):
-        raise ValueError("Use arbol-builds driver-install fresh <UUID> <five stable candidate folders> or "
-                         "driver-install replace <UUID> [newer stable candidate folders ...].")
+        raise ValueError("Use arbol-builds driver-install fresh <UUID> <five stable candidate folders>, "
+                         "driver-install replace <UUID> [newer stable candidate folders ...], or "
+                         "driver-install recover-guardians <UUID>.")
     payloads = register_candidates([Path(argument) for argument in arguments[2:]], registry)
     provider = payloads["arbol"]
     builds = [payloads[component].build for component in COMPONENTS]
