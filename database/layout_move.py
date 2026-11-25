@@ -25,15 +25,23 @@ from typing import Any, Literal
 from uuid import uuid4
 
 import psycopg
-from psycopg import sql
-
 from archive_volume import BACKUPS, Archive, ArchiveUnavailable, require_archive
 from database_server import BIN, LABEL, LAUNCHCTL, ROLE, Places, postmaster_pid, run
 from exchange_format_transition import stage as stage_exchange_authorization
 from install_database_server import Installation, launch_agent, scram_verifier
 from layout_archive import DIR, ENTRY, WORKING, ensure_unused, identity, opened, stamp
 from migrate_schema import Refusal, database_target
-from recovery import capture, check_isolated, cluster_identity, observations, restore, source_identity, validate_snapshot, verify_recovery
+from psycopg import sql
+from recovery import (
+    capture,
+    check_isolated,
+    cluster_identity,
+    observations,
+    restore,
+    source_identity,
+    validate_snapshot,
+    verify_recovery,
+)
 from recovery_release import (
     COMMIT,
     DIGEST,
@@ -60,6 +68,7 @@ from arbol_installation.admission import (
     unique_pairs,
     write_state,
 )
+from arbol_installation.exchange_release import RECEIPT as EXCHANGE_AUTHORIZATION
 from arbol_installation.paths import (
     INSTALLATION_LAYOUT,
     build_payload_directory,
@@ -67,7 +76,6 @@ from arbol_installation.paths import (
     database_settings,
     installation_root,
 )
-from arbol_installation.exchange_release import RECEIPT as EXCHANGE_AUTHORIZATION
 
 REQUIRED = frozenset(("database", "runtime", "app", "builds", "drivers", "native-resources"))
 BACKEND = "arbol"
@@ -638,7 +646,7 @@ def move_provider_module(name: str) -> Any:
         module = import_module("arbol_builds." + name)
     finally:
         sys.path.pop(0)
-    if not Path(module.__file__).resolve().is_relative_to(source):
+    if module.__file__ is None or not Path(module.__file__).resolve().is_relative_to(source):
         raise RecoveryError("The move operator requires its own packaged Build provider.")
     return module
 
@@ -801,7 +809,7 @@ def stop_installation_services(
             if (service is None or service.get("state") != "running" or service.get("path") != str(places.plist)
                     or service.get("pid") != str(pg_pid) or pg is None
                     or pg["executable"] != str((BIN / "postgres").resolve(strict=True))):
-                raise RecoveryError("The prior launch agent and postmaster identities do not agree.")
+                raise RecoveryError("The prior launch agent and postmaster identities do not agree.") from None
             before = {"format": 1, "session": session, "generation": marker.generation, "postgres": pg,
                       "plistSha256": sha(prior_plist), "apps": running_apps(observer, app_images),
                       "appImages": sorted(app_images), "backendImage": str(backend_image),
@@ -1245,20 +1253,22 @@ def drain_attribution(folder: int, intent: dict[str, Any], marker: State) -> str
         receipt = read_move_document(folder, DRAIN_RECORD)
     except FileNotFoundError:
         if marker.phase != "normal":
-            raise RecoveryError("An existing closed session has no durable attribution to this move.")
+            raise RecoveryError("An existing closed session has no durable attribution to this move.") from None
         return None
+    session = receipt.get("session")
+    generation = receipt.get("generation")
     if (receipt.keys() != {"format", "intentSha256", "session", "generation"} or receipt["format"] != 1
             or receipt["intentSha256"] != sha(canonical(intent))
-            or any(not isinstance(receipt[key], str) or TOKEN.fullmatch(receipt[key]) is None
-                   for key in ("session", "generation"))):
+            or not isinstance(session, str) or TOKEN.fullmatch(session) is None
+            or not isinstance(generation, str) or TOKEN.fullmatch(generation) is None):
         raise RecoveryError("The saved drain attribution does not match this move.")
     if marker.phase == "normal":
-        if marker.generation != receipt["generation"]:
+        if marker.generation != generation:
             raise RecoveryError("The prior release reopened after the recorded drain intent.")
         return None  # The child journaled the proposal but its marker write did not take effect.
-    if marker.session != receipt["session"] or (marker.phase == "draining" and marker.generation != receipt["generation"]):
+    if marker.session != session or (marker.phase == "draining" and marker.generation != generation):
         raise RecoveryError("A different exclusive session owns the layout-1 runtime.")
-    return receipt["session"]
+    return session
 
 
 def prepare_move_maintenance(
@@ -1295,7 +1305,7 @@ def prepare_move_maintenance(
             previous = read_move_document(folder, MOVE_INTENT)
         except FileNotFoundError:
             if not drain_only or marker.phase != "normal":
-                raise RecoveryError("Start the exact move drain before freezing or capturing.")
+                raise RecoveryError("Start the exact move drain before freezing or capturing.") from None
             write_move_document(folder, MOVE_INTENT, intent)
         else:
             if previous != intent:
@@ -1368,6 +1378,7 @@ def file_image(path: Path) -> dict[str, Any] | None:
         return None
     if info.st_uid != os.getuid():
         raise RecoveryError(f"A move configuration entry has a different owner: {path.name}.")
+    value: dict[str, Any]
     if stat.S_ISLNK(info.st_mode):
         value = {"link": os.readlink(path)}
     elif stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and not info.st_mode & 0o022:
@@ -1515,7 +1526,9 @@ def record_retarget(paths: MovePaths, prepared: dict[str, Any], session: str, le
         before_plist = file_image(plist)
         if before_plist is None or "bytes" not in before_plist:
             raise RecoveryError("The prior database launch agent is missing.")
-        routes = {str(plist): {"before": before_plist, "after": installed_file(prepared["stagedPlist"], 0o644)}}
+        routes: dict[str, dict[str, dict[str, Any] | None]] = {
+            str(plist): {"before": before_plist, "after": installed_file(prepared["stagedPlist"], 0o644)},
+        }
         for route, contents in prepared["stagedLaunchers"].items():
             path = move_route(paths, route)
             routes[route] = {"before": file_image(path), "after": installed_file(contents, 0o755)}
@@ -1600,7 +1613,7 @@ def start_move_database(paths: MovePaths, session: str, record: dict[str, Any], 
         prior = read_move_document(folder, STARTED_RECORD)
     except FileNotFoundError:
         if active is not None or postmaster_pid(places.data) is not None:
-            raise RecoveryError("An unrecorded database process already occupies the moved installation.")
+            raise RecoveryError("An unrecorded database process already occupies the moved installation.") from None
         write_move_document(folder, STARTED_RECORD, intent)
     else:
         if prior != intent:
@@ -1632,7 +1645,7 @@ def verify_move_database(
     paths: MovePaths, record: dict[str, Any], snapshot: dict[str, Any], *, compare_data: bool, prior: bool = False,
 ) -> dict[str, Any]:
     from probe_database_server import (
-        Context as Probe,
+        Context,
         Failed,
         check_data_folder,
         check_launch_agent,
@@ -1641,7 +1654,7 @@ def verify_move_database(
     )
 
     places = PriorPlaces(paths.home) if prior else Places(paths.home)
-    probe = Probe(places, restart=False)
+    probe = Context(places, restart=False)
     try:
         for inspect_database in (check_settings, check_data_folder, check_listening, check_launch_agent):
             inspect_database(probe)
@@ -1737,7 +1750,7 @@ def finish_move(
             attempt = read_move_document(folder, REOPEN_RECORD)
         except FileNotFoundError:
             if state.phase != "exclusive":
-                raise RecoveryError("There is no durable move reopen attempt for this normal admission marker.")
+                raise RecoveryError("There is no durable move reopen attempt for this normal admission marker.") from None
             require_rename_fence(paths, record, positions, lease)
             attempt = {**expected, "normalGeneration": uuid4().hex}
             write_move_document(folder, REOPEN_RECORD, attempt)
@@ -2304,6 +2317,7 @@ def main() -> int:
                         restore_socket=Path(socket), restore_port=int(port), restore_role=role, drain_only=mode == "drain",
                     )
                 elif mode == "move":
+                    assert args.verification is not None
                     witness = Path(args.verification[0]), args.verification[1]
                     result = execute_move(paths, prior, staged, handoff, witness, witness_wait=args.verification_wait)
                 else:
