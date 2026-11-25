@@ -51,7 +51,7 @@
   let activeTab = 'Subscriptions';
   let readSubscriptions: (() => Promise<void>) | undefined;
   let readVigor: (() => Promise<void>) | undefined;
-  let readBrowserUsage: (() => Promise<void>) | undefined;
+  let readBrowserUsage: ((savedOnly: boolean) => Promise<void>) | undefined;
   let readUsage: ((driver: string, subscription: string, startWindow?: boolean) => Promise<void>) | undefined;
   let retryWindowStarts: (() => void) | undefined;
   let openUsagePage: ((driver: string, subscription: string) => Promise<void>) | undefined;
@@ -60,7 +60,7 @@
     if (retryStarts) retryWindowStarts?.();
     void readSubscriptions?.();
     void readVigor?.();
-    if (activeTab === 'Subscriptions') void readBrowserUsage?.();
+    if (activeTab === 'Subscriptions' || activeTab === 'Vigor') void readBrowserUsage?.(activeTab !== 'Subscriptions');
   }
 
   function openUsage(driver: string, subscription: string) {
@@ -193,24 +193,23 @@
       return { evidence: reply.evidence as UsageEvidence, issues: reply.issues as Record<string, string> };
     }
 
-    readBrowserUsage = async () => {
+    readBrowserUsage = async (savedOnly) => {
       if (!active || !subscriptions.connected || browserRequest === connection) return;
       const requestedOn = connection;
       browserRequest = requestedOn;
       try {
-        if (initialBrowserRead) {
+        if (initialBrowserRead && !savedOnly) {
           try {
             const saved = await dashboardRead(true);
             if (!isCurrent(requestedOn)) return;
             if (Array.isArray(saved.evidence.browserReports)) browserEvidence = saved.evidence;
-            if (saved.evidence.piChatGPT) initialBrowserRead = false;
             now = Date.now();
           } catch {
             // A saved read may be unavailable during a native host handoff. Try the live read.
           }
         }
         if (!isCurrent(requestedOn)) return;
-        const reply = await dashboardRead(false);
+        const reply = await dashboardRead(savedOnly || activeTab !== 'Subscriptions');
         if (!isCurrent(requestedOn)) return;
         // A verified empty catalogue can replace saved evidence. A failed read cannot.
         if (Array.isArray(reply.evidence.browserReports)) browserEvidence = reply.evidence;
