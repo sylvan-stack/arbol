@@ -885,7 +885,8 @@ def admission_fingerprint(authority: Authority, *, folder: Path | None = None) -
     return sha256(canonical({"version": 1, "markers": hashes}))
 
 
-def archive_boot_custody(authority: Authority, descriptor: int, record: Object, new_boot: str) -> None:
+def archive_boot_custody(authority: Authority, descriptor: int, record: Object, new_boot: str, *,
+                         taint_expected: bool = True) -> None:
     """Under all four closed mutexes/EX leases after verified genuine boot change.
 
     Preserve opaque old custody trees by same-filesystem rename. Empty replacement
@@ -911,6 +912,8 @@ def archive_boot_custody(authority: Authority, descriptor: int, record: Object, 
             if os.path.lexists(target):
                 refuse()
             present = os.path.lexists(source)
+            if name == "taint.json" and present != taint_expected:
+                refuse()
             row: Object = {"name": name, "present": present, "device": None, "inode": None, "sha256": None}
             if present:
                 if name in directories:
@@ -926,7 +929,7 @@ def archive_boot_custody(authority: Authority, descriptor: int, record: Object, 
                             refuse()
                 info = source.lstat()
                 row.update(device=info.st_dev, inode=info.st_ino)
-            elif name in ("writers", "handoffs", "archive", "taint.json"):
+            elif name in ("writers", "handoffs", "archive"):
                 refuse()
             rows.append(row)
         inventory = {"version": 1, "kind": "driver-boot-custody", "component": authority.component,
@@ -947,6 +950,8 @@ def archive_boot_custody(authority: Authority, descriptor: int, record: Object, 
     for name, row in zip(names, inventory["entries"], strict=True):
         if (not isinstance(row, dict) or set(row) != {"name", "present", "device", "inode", "sha256"}
                 or row["name"] != name or type(row["present"]) is not bool):
+            refuse()
+        if name == "taint.json" and row["present"] != taint_expected:
             refuse()
         source, target = authority.folder / name, destination / name
         if not row["present"]:
