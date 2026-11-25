@@ -400,20 +400,24 @@
       const requestedOn = connection;
       const account = subscriptions.listing?.drivers.find((entry) => entry.driver === driver)
         ?.subscriptions?.find((row) => row.id === subscription);
-      if (!active || !subscriptions.connected || !account || subscriptions.usageOpening) return;
+      if (!active || !subscriptions.connected || account?.state !== 'signed_in' || subscriptions.usageOpening) return;
       subscriptions = {
         ...subscriptions, usageOpening: key, usageLinkErrors: { ...subscriptions.usageLinkErrors, [key]: undefined },
       };
       try {
-        await app.call('app.openSubscriptionUsage', { driver, subscription });
+        const result = await app.call('app.openSubscriptionUsage', { driver, subscription });
+        if (result.status !== 'opened' && result.status !== 'cancelled') {
+          throw new Error('Invalid Browser opening result.');
+        }
       } catch (error) {
         const current = subscriptions.listing?.drivers.find((entry) => entry.driver === driver)
           ?.subscriptions?.find((row) => row.id === subscription);
-        if (isCurrent(requestedOn) && current?.createdAt === account?.createdAt && current?.family === account?.family) subscriptions = {
+        if (isCurrent(requestedOn) && current?.state === 'signed_in'
+          && current.createdAt === account.createdAt && current.family === account.family) subscriptions = {
           ...subscriptions,
           usageLinkErrors: {
             ...subscriptions.usageLinkErrors,
-            [key]: error instanceof Refusal ? error.message : 'Could not open vendor usage.',
+            [key]: error instanceof Refusal ? error.message : 'Could not open this usage page in Arbol Browser.',
           },
         };
       } finally {
