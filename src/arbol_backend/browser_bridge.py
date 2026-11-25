@@ -12,6 +12,7 @@ from .accounts import Accounts, BrowserReplacement
 from .bridge import Error, Params, Registry
 from .browser_commands import BROWSER_SECONDS, INSTANCE, SEQOYA_PROFILE, USAGE_CLAIM, BrowserCommands, unavailable
 from .browser_profiles import BrowserProfiles, ProfileBinding
+from .browser_usage import BrowserUsage
 from .database import Database
 from .model import Refused
 
@@ -56,7 +57,11 @@ class BrowserBridge:
         self.usage_claims: dict[str, UsageClaim] = {}
         registry.method("seqoya.browser.open", self.open, self.open_params)
         registry.method("seqoya.browser.rebind", self.rebind, self.rebind_params)
+        registry.method("seqoya.browser.usage.check", self.check_usage, self.claim_params)
         registry.method("seqoya.browser.usage.claim", self.claim_usage, self.claim_params)
+        self.usage = BrowserUsage(accounts, self.browser, self.profiles, self.capture_usage, tuple(DESTINATIONS))
+        registry.method("seqoya.browser.usage.saved", self.usage.saved)
+        registry.method("seqoya.browser.usage.refresh", self.usage.refresh)
 
     async def capture_usage(self, provider: tuple[str, str], binding: ProfileBinding,
                             verify: Callable[[], Awaitable[None]]) -> Params:
@@ -84,18 +89,27 @@ class BrowserBridge:
             raise Error("invalid_input")
         return params
 
+    async def check_usage(self, params: Params) -> Params:
+        return await self.admit_usage(params, consume=False)
+
     async def claim_usage(self, params: Params) -> Params:
+        return await self.admit_usage(params, consume=True)
+
+    async def admit_usage(self, params: Params, *, consume: bool) -> Params:
         token = params["claim"]
         claim = self.usage_claims.get(token)
         if (claim is None or claim.claimed or time.monotonic() >= claim.expires
                 or (claim.provider, claim.binding.profile, claim.binding.instance)
                 != (params["provider"], params["profile"], params["instance"])):
             raise Error("invalid_input")
-        claim.claimed = True
+        if consume:
+            claim.claimed = True
         await claim.verify()
-        if self.usage_claims.get(token) is not claim or time.monotonic() >= claim.expires:
+        if (self.usage_claims.get(token) is not claim or time.monotonic() >= claim.expires
+                or (not consume and claim.claimed)):
             raise Error("invalid_input")
-        claim.admitted = True
+        if consume:
+            claim.admitted = True
         return {"admitted": True}
 
     @staticmethod

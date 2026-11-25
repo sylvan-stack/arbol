@@ -74,7 +74,7 @@ class Accounts:
             raise Refused("database_unavailable", "Subscription browser binding requires the installation database.")
         return self.identities
 
-    async def browser_slot(self, driver: str, subscription: str) -> None:
+    async def browser_slot(self, driver: str, subscription: str) -> Params:
         """Validate a current catalogue slot without promoting it to identity.
 
         A failed list propagates before any identity write. Relabel/sign-out,
@@ -87,7 +87,7 @@ class Accounts:
         selected = [row for row in rows if public.subscription_slot(row) == subscription]
         if len(selected) != 1:
             raise Refused("needs_rebind", "The current Subscription cannot be established.")
-        public.subscription(selected[0])
+        return public.subscription(selected[0])
 
     @asynccontextmanager
     async def browser_identity_request(
