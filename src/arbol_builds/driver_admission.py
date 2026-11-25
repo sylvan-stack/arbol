@@ -563,6 +563,15 @@ class Custody:
         return not self.unknown and not self.active and not self.pending
 
 
+@dataclass(frozen=True)
+class ClosedGuardian:
+    """One state-free root nominated by the installed recovery verifier."""
+
+    lease: int
+    invocation: str
+    writer: str
+
+
 def _documents(folder: Path, *, limit: int = 100000) -> list[Path]:
     private_directory(folder)
     found: list[Path] = []
@@ -603,7 +612,8 @@ def _custody_payload(authority: Authority, digest: str, *,
 
 
 def reconcile(authority: Authority, *, control: Object | None = None, persist_unknown: bool = True,
-              boot: str | None = None, candidate: CandidateScope | None = None) -> Custody:
+              boot: str | None = None, candidate: CandidateScope | None = None,
+              closed_guardian: ClosedGuardian | None = None) -> Custody:
     """Under control mutex: inspect obligations, never infer terminal from death.
 
     Every preexisting helper is checked against its exact original admitted
@@ -614,6 +624,11 @@ def reconcile(authority: Authority, *, control: Object | None = None, persist_un
     if candidate is not None and candidate.registry != authority.registry:
         refuse()
     control = authority.read("control") if control is None else control
+    if closed_guardian is not None:
+        if (persist_unknown or candidate is not None or control != authority.read("control")
+                or not valid_token(closed_guardian.invocation) or not valid_token(closed_guardian.writer)):
+            refuse()
+        _exclusive(authority, closed_guardian.lease)
     boot = boot_uuid() if boot is None else boot
     if not canonical_uuid(boot):
         refuse()
@@ -622,6 +637,7 @@ def reconcile(authority: Authority, *, control: Object | None = None, persist_un
     contexts: dict[str, tuple[Object, str]] = {}
     active = pending = 0
     unknown = False
+    guardian_seen = False
     try:
         if (authority.folder / "archive" / "custody-pending.json").exists():
             refuse()  # Only closed exclusive archive recovery may interpret missing directories.
@@ -726,9 +742,16 @@ def reconcile(authority: Authority, *, control: Object | None = None, persist_un
                     and value["phase"] == "accepted" for value in handoffs.values()):
                 refuse()
             if writer["phase"] == "active":
+                if closed_guardian is not None and key == (closed_guardian.invocation, closed_guardian.writer):
+                    if writer["parent"] is not None or matches({key: writer[key] for key in ("pid", "startedAt")}):
+                        refuse()
+                    guardian_seen = True
+                    continue
                 active += 1
                 if not matches({key: writer[key] for key in ("pid", "startedAt")}):
                     refuse()
+        if closed_guardian is not None and (not guardian_seen or active or pending):
+            refuse()
     except (OSError, ValueError, TypeError, KeyError, RuntimeError):
         unknown = True
         if persist_unknown:
