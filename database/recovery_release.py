@@ -596,6 +596,13 @@ def capture_build(
             raise RecoveryError("The package manifest differs from the selected Build or its source.")
         check_hashes(payload, manifest["files"])
         evidence["packageManifestSha256"] = digest(manifest_file)
+        if component == "arbol" and "exchangeRuntimeEntry" in build_config:
+            if (build_config["exchangeRuntimeEntry"] != "arbol" or entry != Path("bin/arbol")
+                    or not {"bin/arbol", "bin/arbol_entry.py"} <= manifest["files"].keys()
+                    or "bin/arbol-exchanges" in manifest["files"]
+                    or os.path.lexists(folder / "bin/arbol-exchanges")):
+                raise RecoveryError("The packaged Exchange entry differs from its committed configuration.")
+            evidence["exchangeRuntimeEntry"] = "arbol"
         if "python" in manifest:
             evidence.update(python_evidence(manifest, checkout, commit, prefix, payload))
         if component == "arbol" and inventory["kind"] == "legacy":
@@ -856,7 +863,7 @@ def exchange_transition_evidence(inventory: dict[str, Any], builds: list[dict[st
                 or stat.S_IMODE(guard.st_mode) != 0o600):
             raise RecoveryError("The installed payload's use lock is not a private regular file.")
         routes = [component.replace("/", "-")]
-        if component == "arbol":
+        if component == "arbol" and build["evidence"].get("exchangeRuntimeEntry") != "arbol":
             routes.append("arbol-exchanges")
         entry_evidence = []
         for name in routes:
@@ -1027,7 +1034,12 @@ def verify_exchange_transition(folder: Path, value: dict[str, Any]) -> None:
                     or DIGEST.fullmatch(build["evidence"]["installedFilesSha256"]) is None):
                 raise RecoveryError("The archived selected Build evidence is invalid.")
             names = [item["component"].replace("/", "-")]
-            if item["component"] == "arbol":
+            exchange_entry = build["evidence"].get("exchangeRuntimeEntry")
+            if "exchangeRuntimeEntry" in build["evidence"] and (
+                exchange_entry != "arbol" or item["component"] != "arbol" or build["entry"] != "bin/arbol"
+            ):
+                raise RecoveryError("The archived Exchange entry identity is invalid.")
+            if item["component"] == "arbol" and exchange_entry != "arbol":
                 names.append("arbol-exchanges")
             entries = item["entries"]
             if not isinstance(entries, list) or len(entries) != len(names):

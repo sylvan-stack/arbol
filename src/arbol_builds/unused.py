@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from arbol_installation.admission import Admission, AdmissionRefusal, runtime_folder
-from arbol_installation.paths import build_payload_directory, installation_root
+from arbol_installation.paths import EXCHANGE_RUNTIME_COMMAND, build_payload_directory, installation_root
 
 from .config import Locations
 from .driver_admission import sync_directory
@@ -400,11 +400,15 @@ def usage_snapshot(paths: Locations, schema: SchemaState) -> Usage:
     if backend is None:
         return Usage({}, unavailable=True)
     folder = build_payload_directory(paths.registry, "arbol", backend["build"])
-    executable = executable_entry(str(folder), "bin/arbol-exchanges")
-    if executable is None:
-        return Usage({}, unavailable=True)
+    legacy = executable_entry(str(folder), "bin/arbol-exchanges")
+    if legacy is None:
+        executable = executable_entry(str(folder), backend["entry"])
+        if executable is None:
+            return Usage({}, unavailable=True)
+        command = [executable, EXCHANGE_RUNTIME_COMMAND, "list"]
+    else:
+        command = [legacy, "list"]
     try:
-        command = [executable, "list"]
         if Path(paths.bin).resolve() != (Path.home() / ".local/bin").resolve():
             command += ["--bin-dir", os.path.abspath(paths.bin)]
         answer = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True,

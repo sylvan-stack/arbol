@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, BinaryIO
 
+from arbol_installation.paths import EXCHANGE_RUNTIME_COMMAND
+
 from .bridge import BRIDGE_VERSION, constant, finite, pairs
 from .database import configured_target, current_lease, explicit_target
 from .exchange_admission import GENERATION_ENV
@@ -214,7 +216,7 @@ class Programs:
         if identity in self.running:
             raise Refused("in_progress", "This command is still running.")
         if program == "arbol-exchanges":
-            arguments = [str(self.identity.package / "bin/arbol-exchanges")]
+            arguments = [str(self.identity.package / "bin/arbol"), EXCHANGE_RUNTIME_COMMAND]
             if self.identity.fixture:
                 configured = configured_target(self.identity)
                 explicit = explicit_target(self.identity)

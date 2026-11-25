@@ -5,6 +5,7 @@ import stat
 from pathlib import Path
 
 INSTALLATION_LAYOUT = 2
+EXCHANGE_RUNTIME_COMMAND = "_exchange-runtime"
 
 
 def installation_root(home: Path | None = None) -> Path:

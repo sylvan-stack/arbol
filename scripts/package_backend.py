@@ -231,7 +231,7 @@ def package(root: Path = ROOT) -> Path:
     for name in ("backend_package.py", "check_backend.py", "python-distribution.json"):
         shutil.copy2(root / "scripts" / name, folder / "scripts" / name)
     (folder / "bin").mkdir()
-    for name in ("arbol", "arbol_entry.py", "arbol-exchanges", "exchanges_entry.py"):
+    for name in ("arbol", "arbol_entry.py"):
         shutil.copy2(root / "bin" / name, folder / "bin" / name)
     for name in ("package.json", "pyproject.toml", ".python-version", "uv.lock", "arbol-build.json"):
         shutil.copy2(root / name, folder / name)
