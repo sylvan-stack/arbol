@@ -6,6 +6,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
@@ -14,7 +15,7 @@ from .allowance_start import pending_window, start_window
 from .bridge import MAX_LINE, Error, Params, Registry, driver_id, encode
 from .database import Database
 from .dispatch import Forwarded
-from .driver_identity import DriverIdentity
+from .driver_identity import CapturedProof, DriverIdentity
 from .metadata import iso
 from .migration import message
 from .model import Refused
@@ -39,6 +40,13 @@ ACTIVITY = """
       AND e.route->>'driver' = %s
       AND coalesce(r.started->>'subscriptionId', e.route->>'subscription') = %s
 """
+
+
+@dataclass(frozen=True)
+class BrowserReplacement:
+    installation: str
+    previous: str | None
+    captured: CapturedProof
 
 
 class Accounts:
@@ -100,20 +108,33 @@ class Accounts:
         async with self.browser_identity_request(driver, subscription) as (selected, _):
             return selected
 
-    async def rebind_browser_identity(self, driver: str, subscription: str, *, installation: str,
-                                      previous: str | None, confirmed: bool) -> SubscriptionIdentity:
-        """Replace the exact confirmed selection with a fresh, proved lifetime."""
+    async def prepare_browser_rebind(self, driver: str, subscription: str) -> BrowserReplacement:
         authority = self.identity_authority()
-        if confirmed is not True:
-            raise Refused("needs_rebind", "Explicit Subscription rebind is required.")
         await self.browser_slot(driver, subscription)
         async with authority.database.browser_authority():
             captured = await self.driver_identity.capture(driver, subscription)
+            async with authority.transaction() as (session, installation):
+                current = await authority.current(session, installation, driver, subscription)
             await self.driver_identity.expect(captured)
-            selected = await authority.rebind(driver, subscription, installation=installation, previous=previous,
-                                              confirmed=confirmed, proof=captured.proof)
-            await self.driver_identity.expect(captured)
-            return selected
+            return BrowserReplacement(installation, current.incarnation if current else None, captured)
+
+    @asynccontextmanager
+    async def rebind_browser_identity(
+        self, driver: str, subscription: str, *, replacement: BrowserReplacement,
+    ) -> AsyncIterator[tuple[SubscriptionIdentity, Callable[[], Awaitable[None]]]]:
+        """Replace the exact confirmed selection with a fresh, proved lifetime."""
+        authority = self.identity_authority()
+        await self.browser_slot(driver, subscription)
+        async with authority.database.browser_authority():
+            captured = await self.driver_identity.capture(driver, subscription)
+            if captured != replacement.captured:
+                raise Refused("needs_rebind", "The selected Subscription proof changed before confirmation.")
+            verify = partial(self.driver_identity.expect, captured)
+            await verify()
+            selected = await authority.rebind(driver, subscription, installation=replacement.installation,
+                                              previous=replacement.previous, confirmed=True, proof=captured.proof)
+            yield selected, verify
+            await verify()
 
     async def retire_browser_identity(self, driver: str, subscription: str, *, installation: str,
                                       incarnation: str) -> None:

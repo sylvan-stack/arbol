@@ -16,6 +16,7 @@ from arbol_radar.tick import Ticker
 
 from .accounts import Accounts
 from .bridge import MAX_LINE, Connection, Registry
+from .browser_bridge import BrowserBridge
 from .chats import Chats
 from .controls import Controls
 from .database import Database
@@ -55,6 +56,7 @@ class Backend:
         self.accounts = Accounts(self.programs, self.chats.catalogues, self.registry,
                                  lambda: ((self.database.parameters or {}).get("password", ""),),
                                  database=self.database)
+        self.browser = BrowserBridge(self.accounts, self.database, self.registry)
         self.drafts = Drafts(self.chats, self.registry)
         self.dispatch = Dispatch(identity, self.programs, self.chats, self.drafts, self.registry, self.settings)
         self.listings = Listings(self.programs, self.database)
