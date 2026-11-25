@@ -1,4 +1,4 @@
-"""Register one immutable installed Driver cohort without granting launch authority."""
+"""Register immutable installed Driver packages without granting launch authority."""
 
 from __future__ import annotations
 
@@ -27,8 +27,8 @@ from .driver_admission import (
     sha256,
     sync_directory,
 )
-from .driver_payload import SUBTREE, Payload, _file_hash, contained, load, pin_payloads
-from .launcher import layout_fits, valid_record
+from .driver_payload import SUBTREE, Payload, _file_hash, _private_registration, contained, load, pin_payloads
+from .launcher import json_line, layout_fits, valid_record, write_all
 from .mutation import with_mutation_lock
 from .service import browser_production_high_water
 
@@ -169,10 +169,19 @@ def _publish_directory(staged: Path, destination: Path) -> None:
 
 
 def _register(folders: list[Path], registry: Path, check_candidate: CandidateCheck,
-              blocked: DeploymentBlock) -> dict[str, Payload]:
+              blocked: DeploymentBlock, installed: dict[str, Payload] | None) -> dict[str, Payload]:
     candidates = [_candidate(folder, check_candidate) for folder in folders]
+    rows = {candidate.component: candidate.row for candidate in candidates}
+    if installed is not None:
+        for candidate in candidates:
+            if int(candidate.build, 16) <= int(installed[candidate.component].build, 16):
+                raise ValueError(f"{candidate.component}@{candidate.build} is not newer than the installed Build.")
+        for component in REGISTRATION_COMPONENTS:
+            if component not in rows:
+                build = installed[component].build
+                _, rows[component] = _private_registration(registry, component, build, registry / component / build)
     receipt = canonical({"version": 1, "kind": "driver-build-registration", "scope": str(registry),
-                         "builds": [candidate.row for candidate in candidates]})
+                         "builds": [rows[component] for component in REGISTRATION_COMPONENTS]})
     registration = sha256(receipt)
     shared = private_directory(registry / ".driver-qualification", create=True)
     receipts = private_directory(shared / "registrations", create=True)
@@ -244,25 +253,32 @@ def _register(folders: list[Path], registry: Path, check_candidate: CandidateChe
         publish_bytes(complete, receipt, limit=REGISTRATION_LIMIT)
         pending.unlink()
         sync_directory(receipts)
-    return {component: payloads[component] for component in REGISTRATION_COMPONENTS}
+    return payloads
 
 
-def _with_writers(action: Callable[[], dict[str, Payload]], registry: Path, index: int) -> dict[str, Payload]:
-    if index == len(REGISTRATION_COMPONENTS):
+def _with_writers(action: Callable[[], dict[str, Payload]], registry: Path,
+                  components: tuple[str, ...]) -> dict[str, Payload]:
+    if not components:
         return action()
-    parent = registry / REGISTRATION_COMPONENTS[index]
-    return with_mutation_lock(str(parent), lambda: _with_writers(action, registry, index + 1))
+    parent = registry / components[0]
+    return with_mutation_lock(str(parent), lambda: _with_writers(action, registry, components[1:]))
 
 
-def register_candidates(folders: list[Path], registry: Path) -> dict[str, Payload]:
-    """Register the five exact candidates in the physical installed registry."""
+def register_candidates(folders: list[Path], registry: Path, *,
+                        installed: dict[str, Payload] | None = None) -> dict[str, Payload]:
+    """Register the five fresh packages or a subset of the already installed Drivers."""
     home = Path.home()
     if registry != build_registry(home):
         raise ValueError("Driver stable registration requires the installed Build registry.")
     private_directory(registry)
     ordered = sorted(folders, key=lambda folder: folder.parent.name)
-    if tuple(folder.parent.name for folder in ordered) != REGISTRATION_COMPONENTS:
-        raise ValueError("Register exactly one stable candidate for Arbol and for each of the four Drivers.")
+    components = tuple(folder.parent.name for folder in ordered)
+    if installed is None:
+        if components != REGISTRATION_COMPONENTS:
+            raise ValueError("Register exactly one stable candidate for Arbol and for each of the four Drivers.")
+    elif (not components or len(components) != len(set(components)) or not set(components).issubset(COMPONENTS)
+          or set(installed) != set(REGISTRATION_COMPONENTS)):
+        raise ValueError("Register one newer stable candidate for each selected installed Driver.")
     # The installed Build tool owns numbered candidate allocation and its locks.
     # The sealed provider and source CLI can read registration without those adapters.
     try:
@@ -277,18 +293,26 @@ def register_candidates(folders: list[Path], registry: Path) -> dict[str, Payloa
         return launcher.deployment_failure(failures, record) is not None
 
     with ExitStack() as locks:
-        for component, folder in zip(REGISTRATION_COMPONENTS, ordered, strict=True):
+        for component, folder in zip(components, ordered, strict=True):
             run = candidates.promotion_run(physical(folder), home)
             locks.enter_context(candidates.candidate_lease(run, component, home))
-        for component in REGISTRATION_COMPONENTS:
+        for component in components:
             private_directory(registry / component)
             locks.enter_context(promotion.stable_lock(home, component))
-        return _with_writers(lambda: _register(ordered, registry, promotion.check_candidate, blocked), registry, 0)
+        return _with_writers(lambda: _register(ordered, registry, promotion.check_candidate, blocked, installed),
+                             registry, components)
 
 
 def install_command(arguments: list[str], registry: Path) -> int:
+    if len(arguments) >= 2 and arguments[0] == "replace" and canonical_uuid(arguments[1]):
+        from .driver_replacement import replace_installed
+
+        result = replace_installed(registry, arguments[1], [Path(argument) for argument in arguments[2:]])
+        write_all(1, json_line(result))
+        return 0
     if len(arguments) != 7 or arguments[0] != "fresh" or not canonical_uuid(arguments[1]):
-        raise ValueError("Use arbol-builds driver-install fresh <UUID> <five stable candidate folders>.")
+        raise ValueError("Use arbol-builds driver-install fresh <UUID> <five stable candidate folders> or "
+                         "driver-install replace <UUID> [newer stable candidate folders ...].")
     payloads = register_candidates([Path(argument) for argument in arguments[2:]], registry)
     provider = payloads["arbol"]
     builds = [payloads[component].build for component in COMPONENTS]
