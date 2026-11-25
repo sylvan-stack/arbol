@@ -28,6 +28,7 @@ from .driver_admission import (
     canonical_uuid,
     decode,
     fields,
+    fresh_install,
     natural,
     physical,
     private_directory,
@@ -944,6 +945,10 @@ def retention(registry: str, component: str) -> Retention:
                 stack.enter_context(authority.mutex(seconds=0))
             gate = _retention_gate(read_bytes(shared / "gate.json"))
             refs["arbol"].add(gate["providerPayloadSha256"])
+            fresh = fresh_install(root)
+            if fresh is not None and fresh["phase"] != "complete":
+                # Replacement may still reference both selections in its recovery receipt.
+                return Retention(all_builds=True)
             deployment = shared / "deployment.json"
             if deployment.exists():
                 value = read(deployment)
