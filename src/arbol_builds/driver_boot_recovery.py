@@ -130,7 +130,8 @@ def _resume(authorities: list[Authority], leases: list[int], checkpoint: Object,
 
 def recover_boot(registry: Path, session: str, action: str) -> Object:
     home = Path(getpwuid(os.getuid()).pw_dir)
-    if registry != build_registry(home) or not canonical_uuid(session) or action not in ("check", "prepare", "resume"):
+    if (registry != build_registry(home) or not canonical_uuid(session)
+            or action not in ("check", "prepare", "resume", "cancel")):
         raise Refusal("Installed Driver boot recovery requires the canonical registry and a session UUID.")
     authorities = [Authority(registry, component) for component in COMPONENTS]
     shared = authorities[0].shared
@@ -149,21 +150,30 @@ def recover_boot(registry: Path, session: str, action: str) -> Object:
             checkpoint = _optional(checkpoint_file)
         boot_file = folder / (session + ".boot.json")
         complete_file = folder / (session + ".complete.json")
+        cancel_file = folder / (session + ".cancelled.json")
         before = current if checkpoint is None else _validate_checkpoint(checkpoint, session)
-        closed = {**before, "phase": "staging",
-                  "promotionSha256": sha256(canonical(checkpoint))} if checkpoint is not None else None
+        digest = sha256(canonical(checkpoint)) if checkpoint is not None else None
+        closed = {**before, "phase": "staging", "promotionSha256": digest} if digest is not None else None
         if before["phase"] != "complete" or current not in (before, closed):
             raise Refusal("A different Driver installation or maintenance window is active.")
-        if action == "resume" and checkpoint is None:
+        if action in ("resume", "cancel") and checkpoint is None:
             raise Refusal("No prepared Driver boot checkpoint exists for this session.")
 
         boot = boot_uuid()
         if not canonical_uuid(boot):
             raise Refusal("The current kernel boot identity is unavailable.")
-        if checkpoint is not None and action != "resume" and boot != checkpoint["oldBoot"]:
-            raise Refusal("The host has rebooted. Resume the recorded checkpoint.")
-        if checkpoint is not None and action == "resume" and boot == checkpoint["oldBoot"]:
-            raise Refusal("The recorded kernel boot is still running. Reboot before resuming.")
+        if checkpoint is not None:
+            cancellation = {"version": 1, "kind": "driver-installed-boot-cancelled", "session": session,
+                            "preparedSha256": digest, "oldBoot": checkpoint["oldBoot"]}
+            recorded_cancel = _optional(cancel_file)
+            if recorded_cancel is not None and (action != "cancel" or recorded_cancel != cancellation):
+                raise Refusal("The Driver boot checkpoint was cancelled.")
+            if action == "cancel" and recorded_cancel == cancellation and current == before:
+                return {**cancellation, "phase": "cancelled"}
+            if action != "resume" and boot != checkpoint["oldBoot"]:
+                raise Refusal("The host has rebooted. Resume the recorded checkpoint.")
+            if action == "resume" and boot == checkpoint["oldBoot"]:
+                raise Refusal("The recorded kernel boot is still running. Reboot before resuming.")
 
         packages = _bound_packages(registry, home, before, gate)
         promotion = _promotion(registry, before, packages)
@@ -203,6 +213,13 @@ def recover_boot(registry: Path, session: str, action: str) -> Object:
             affected = [row["component"] for row in rows if row["taintSha256"] is not None]
             if not affected or (checkpoint is not None and checkpoint["components"] != rows):
                 raise Refusal("The exact custody-loss set and its admission evidence must be stable.")
+            if action == "cancel":
+                assert checkpoint is not None
+                if current != closed or _optional(boot_file) is not None or _optional(complete_file) is not None:
+                    raise Refusal("Only the unchanged, closed pre-reboot window can be cancelled.")
+                _immutable(cancel_file, canonical(cancellation))
+                publish(install_file, before)
+                return {**cancellation, "phase": "cancelled"}
             if action == "check":
                 return {"phase": "ready" if current == before else "prepared", "session": session,
                         "oldBoot": boot, "affected": affected}

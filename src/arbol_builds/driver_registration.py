@@ -305,7 +305,7 @@ def register_candidates(folders: list[Path], registry: Path, *,
 
 def install_command(arguments: list[str], registry: Path) -> int:
     if (len(arguments) == 3 and arguments[0] == "recover-boot" and canonical_uuid(arguments[1])
-            and arguments[2] in ("check", "prepare", "resume")):
+            and arguments[2] in ("check", "prepare", "resume", "cancel")):
         from .driver_boot_recovery import recover_boot
 
         write_all(1, json_line(recover_boot(registry, arguments[1], arguments[2])))
@@ -325,7 +325,7 @@ def install_command(arguments: list[str], registry: Path) -> int:
         raise ValueError("Use arbol-builds driver-install fresh <UUID> <five stable candidate folders>, "
                          "driver-install replace <UUID> [newer stable candidate folders ...], "
                          "driver-install recover-guardians <UUID>, or "
-                         "driver-install recover-boot <UUID> check|prepare|resume.")
+                         "driver-install recover-boot <UUID> check|prepare|resume|cancel.")
     payloads = register_candidates([Path(argument) for argument in arguments[2:]], registry)
     provider = payloads["arbol"]
     builds = [payloads[component].build for component in COMPONENTS]
