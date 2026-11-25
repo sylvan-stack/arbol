@@ -42,3 +42,11 @@ id = "import-files-fingerprint"
 file = "005-import-files-fingerprint.sql"
 sha256 = "f31483400a6a202c5bb15f3fd1c9583d04df612df5e58596702115ea48f7d324"
 compatibility_version = 1
+
+[[migrations]]
+revision = 6
+predecessor = 5
+id = "seqoya-subscription-proofs"
+file = "006-browser-subscription-proofs.sql"
+sha256 = "3e043ff4188a73ed1171fee54500dc2a9525a2b27faa66c23a345bc42f135a29"
+compatibility_version = 1
