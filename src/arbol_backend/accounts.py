@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from functools import partial
 from typing import Any
 
@@ -13,6 +14,7 @@ from .allowance_start import pending_window, start_window
 from .bridge import MAX_LINE, Error, Params, Registry, driver_id, encode
 from .database import Database
 from .dispatch import Forwarded
+from .driver_identity import DriverIdentity
 from .metadata import iso
 from .migration import message
 from .model import Refused
@@ -46,6 +48,7 @@ class Accounts:
         self.programs, self.catalogues, self.secrets = programs, catalogues, secrets
         self.database = database
         self.identities = SubscriptionIdentities(database) if database is not None else None
+        self.driver_identity = DriverIdentity(programs.identity)
         self.total, self.capacity = total, asyncio.Semaphore(capacity)
         self.raws: dict[str, asyncio.Task[list[Any] | Error]] = {}
         self.actions: dict[tuple[str, str, str], asyncio.Task[Params | Error]] = {}
@@ -78,29 +81,36 @@ class Accounts:
             raise Refused("needs_rebind", "The current Subscription cannot be established.")
         public.subscription(selected[0])
 
-    async def browser_identity(self, driver: str, subscription: str) -> SubscriptionIdentity:
-        """No current catalogue producer proves durable incarnation continuity.
-
-        A future qualified producer must establish the same persisted lifetime
-        before a positive automatic open is possible. Never use an old database
-        row, createdAt or a matching reusable id as that proof.
-        """
+    @asynccontextmanager
+    async def browser_identity_request(self, driver: str, subscription: str) -> AsyncIterator[SubscriptionIdentity]:
+        """Verify a fresh proof before admitting the binding and again before returning its result."""
         authority = self.identity_authority()
         await self.browser_slot(driver, subscription)
-        await authority.uncertain(driver, subscription)
-        raise Refused("needs_rebind", "This Driver cannot prove the Subscription lifetime; explicit rebind is required.")
+        async with authority.database.browser_authority():
+            captured = await self.driver_identity.capture(driver, subscription)
+            selected = await authority.observe(captured.proof)
+            await self.driver_identity.expect(captured)
+            yield selected
+            await self.driver_identity.expect(captured)
+
+    async def browser_identity(self, driver: str, subscription: str) -> SubscriptionIdentity:
+        async with self.browser_identity_request(driver, subscription) as selected:
+            return selected
 
     async def rebind_browser_identity(self, driver: str, subscription: str, *, installation: str,
                                       previous: str | None, confirmed: bool) -> SubscriptionIdentity:
-        """Fresh explicit binding action; no new Driver command or implicit adoption.
-
-        The consuming trusted workflow supplies confirmation and its exact
-        selected identity. This does not authorize later automatic continuity.
-        """
+        """Replace the exact confirmed selection with a fresh, proved lifetime."""
         authority = self.identity_authority()
+        if confirmed is not True:
+            raise Refused("needs_rebind", "Explicit Subscription rebind is required.")
         await self.browser_slot(driver, subscription)
-        return await authority.rebind(driver, subscription, installation=installation,
-                                      previous=previous, confirmed=confirmed)
+        async with authority.database.browser_authority():
+            captured = await self.driver_identity.capture(driver, subscription)
+            await self.driver_identity.expect(captured)
+            selected = await authority.rebind(driver, subscription, installation=installation, previous=previous,
+                                              confirmed=confirmed, proof=captured.proof)
+            await self.driver_identity.expect(captured)
+            return selected
 
     async def retire_browser_identity(self, driver: str, subscription: str, *, installation: str,
                                       incarnation: str) -> None:
@@ -109,8 +119,9 @@ class Accounts:
         Current accounts APIs do not expose a removal command. Keep this seam
         internal until a consuming lifecycle operation supplies that signal.
         """
-        await self.identity_authority().retire(driver, subscription, installation=installation,
-                                               incarnation=incarnation)
+        authority = self.identity_authority()
+        async with authority.database.browser_authority():
+            await authority.retire(driver, subscription, installation=installation, incarnation=incarnation)
 
     def scan(self) -> list[str]:
         drivers = self.programs.find_drivers()

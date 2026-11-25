@@ -10,6 +10,7 @@ import re
 import stat
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import replace
@@ -21,10 +22,13 @@ import psycopg
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
+from arbol_installation.admission import DATABASE_WRITER_LOCK, runtime_folder
+from arbol_installation.browser_identity_restore import RestoreGate, RestoreMarker, endpoint, restore_gate
+
 if TYPE_CHECKING:
     from archive_volume import Archive, ArchiveUnavailable, require_archive
     from database_server import BIN, MAJOR, Places, environment
-    from migrate_schema import Database, Refusal, Target, database_target
+    from migrate_schema import Database, Refusal, Target, database_target, load_manifest, read_prefix
     from recovery_release import (
         DIGEST,
         RecoveryError,
@@ -48,6 +52,7 @@ else:
     BIN, MAJOR, Places, environment = _server.BIN, _server.MAJOR, _server.Places, _server.environment
     _migration = sibling("migrate_schema")
     Refusal, database_target = _migration.Refusal, _migration.database_target
+    load_manifest, read_prefix = _migration.load_manifest, _migration.read_prefix
     _release = sibling("recovery_release")
     DIGEST, RecoveryError, canonical, digest = _release.DIGEST, _release.RecoveryError, _release.canonical, _release.digest
     document, publish_directory, recovery_dir = _release.document, _release.publish_directory, _release.recovery_dir
@@ -61,6 +66,8 @@ SAMPLES = REQUIRED_CHAT | VIGOR | {"drafts"}
 SESSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 ARCHIVE = "database.dump"
 SNAPSHOT = "snapshot.json"
+BROWSER_INVALIDATION = "browser-identity-invalidation.json"
+PROOF_REVISION = 6
 
 
 def timestamp() -> str:
@@ -354,7 +361,7 @@ def check_isolated(connection: Database, target: Target, snapshot: dict[str, Any
     return cluster
 
 
-def restore(target: Target, snapshot_dir: Path, attempt_dir: Path) -> Path:
+def restore(target: Target, snapshot_dir: Path, attempt_dir: Path, *, runtime: Path | None = None) -> Path:
     storage = require_archive()
     attempt_dir = storage.backup_path(attempt_dir, allow_missing=True)
     if not target.host.startswith("/"):
@@ -363,6 +370,13 @@ def restore(target: Target, snapshot_dir: Path, attempt_dir: Path) -> Path:
     if target.database != snapshot["source"]["database"]:
         raise RecoveryError("The fresh isolated database must use the original archive's database name.")
     check_archive_name(archive, target.database)
+    target_id = endpoint(Path(target.host).resolve(strict=True), target.port, target.database)
+    with restore_gate(runtime_folder() if runtime is None else runtime, target_id, exclusive=True) as gate:
+        return restore_target(target, snapshot_dir, attempt_dir, storage, snapshot, snapshot_sha256, archive, gate)
+
+
+def restore_target(target: Target, snapshot_dir: Path, attempt_dir: Path, storage: Archive, snapshot: dict[str, Any],
+                   snapshot_sha256: str, archive: Path, gate: RestoreGate) -> Path:
     admin = replace(target, database="postgres")
     with admin.connect() as connection:
         cluster = check_isolated(connection, admin, snapshot)
@@ -372,6 +386,9 @@ def restore(target: Target, snapshot_dir: Path, attempt_dir: Path) -> Path:
         roles = snapshot.get("roles")
         if not isinstance(roles, list) or any(not isinstance(role, str) or not role for role in roles):
             raise RecoveryError("The archive role inventory is invalid.")
+        if os.path.lexists(attempt_dir):
+            raise RecoveryError("The recovery output already exists.")
+        blocked = gate.begin(cluster, snapshot_sha256)
         # Publish an incomplete record before the first mutation, so command loss is never proof.
         with publish_directory(attempt_dir, archive=storage) as staging:
             write_private(staging / "restore.json", {
@@ -379,6 +396,7 @@ def restore(target: Target, snapshot_dir: Path, attempt_dir: Path) -> Path:
                 "snapshotSha256": snapshot_sha256, "archiveSha256": snapshot["archiveSha256"],
                 "target": {"host": target.host, "port": target.port, "database": target.database},
                 "targetCluster": cluster, "startedAt": timestamp(),
+                "browserIdentityRestore": blocked.document(),
             })
         attempt_dir = recovery_dir(attempt_dir, storage)
         with connection.transaction():
@@ -407,12 +425,91 @@ def restore(target: Target, snapshot_dir: Path, attempt_dir: Path) -> Path:
               "archiveSha256": snapshot["archiveSha256"], "source": snapshot["source"],
               "sourceCluster": snapshot["sourceCluster"], "target": recovered_target, "targetCluster": cluster,
               "schema": recovered["schema"], "observation": recovered, "releaseSha256": snapshot["releaseSha256"],
-              "maintenanceSession": snapshot["maintenanceSession"], "verifiedAt": timestamp()}
+              "maintenanceSession": snapshot["maintenanceSession"], "verifiedAt": timestamp(),
+              "browserIdentityRestore": blocked.document()}
     receipt = storage.backup_path(attempt_dir / "restore.json")
     final = storage.backup_path(attempt_dir / ".verified.json", allow_missing=True)
     write_private(final, result)
     final.replace(receipt)
+    fd = os.open(receipt.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    invalidate_target(target, receipt, result, storage, gate, allow_legacy=True)
     return receipt
+
+
+def invalidate_target(target: Target, receipt: Path, result: dict[str, Any], storage: Archive,
+                      gate: RestoreGate, *, allow_legacy: bool = False) -> Path | None:
+    blocked = RestoreMarker.read(canonical(result["browserIdentityRestore"]), gate.endpoint)
+    current = gate.read()
+    if (blocked.phase != "blocked" or current is None or current.attempt != blocked.attempt
+            or current.cluster != blocked.cluster or current.snapshot != blocked.snapshot
+            or blocked.cluster != result["targetCluster"] or blocked.snapshot != result["snapshotSha256"]):
+        raise RecoveryError("The verified restore does not match the held Browser restore gate.")
+    disposition = storage.backup_path(receipt.parent / BROWSER_INVALIDATION, allow_missing=True)
+    with target.connect() as connection, connection.transaction():
+        if (check_isolated(connection, target, {"sourceCluster": result["sourceCluster"]}) != blocked.cluster
+                or source_identity(connection, target.host, target.port) != result["target"]):
+            raise RecoveryError("The verified Browser restore target changed.")
+        oid = target.identity(connection)["databaseOid"]
+        if not isinstance(oid, int):
+            raise RecoveryError("The Browser restore database OID is unavailable.")
+        if connection.execute("SELECT pg_catalog.pg_try_advisory_xact_lock(%s::bigint)",
+                              (DATABASE_WRITER_LOCK,)).fetchone() != (True,):
+            raise RecoveryError("PostgreSQL writers must be fenced before Browser restore invalidation.")
+        if allow_legacy and current == blocked and "legacyRelease" in result["schema"]:
+            return None
+        revisions = read_prefix(connection, load_manifest())
+        if len(revisions) < PROOF_REVISION:
+            if allow_legacy and current == blocked:
+                return None
+            raise RecoveryError("Apply the ordered proof migration before Browser restore invalidation.")
+        previous = connection.execute(
+            "SELECT attempt,endpoint_sha256,database_oid::bigint FROM public.seqoya_browser_identity_restore "
+            "WHERE singleton FOR UPDATE").fetchone()
+        expected = (blocked.attempt, gate.endpoint, oid)
+        replay = previous == expected
+        if previous is None or (current.phase == "invalidated" and (current.oid != oid or not replay)):
+            raise RecoveryError("The Browser restore database record differs from its authority.")
+        if not replay:
+            connection.execute("UPDATE public.seqoya_browser_bindings SET state='needs_rebind' WHERE state<>'retired'")
+            connection.execute("UPDATE public.seqoya_subscriptions SET state='needs_rebind' WHERE state<>'retired'")
+            connection.execute(
+                "UPDATE public.seqoya_browser_identity_restore SET attempt=%s,endpoint_sha256=%s,database_oid=%s, "
+                "completed_at=statement_timestamp() WHERE singleton", expected)
+    accepted = replace(blocked, phase="invalidated", oid=oid)
+    if os.path.lexists(disposition):
+        existing, _ = read_private(disposition, storage=storage)
+        if existing != accepted.document():
+            raise RecoveryError("The preserved Browser invalidation disposition changed.")
+    else:
+        with tempfile.TemporaryDirectory(prefix=".browser-invalidation-", dir=disposition.parent) as staging:
+            staged = Path(staging) / BROWSER_INVALIDATION
+            write_private(staged, accepted.document())
+            staged.replace(disposition)
+        fd = os.open(disposition.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    if current.phase == "blocked":
+        gate.complete(blocked, oid)
+    return disposition
+
+
+def invalidate_browser_identity(target: Target, receipt: Path, runtime: Path) -> Path:
+    storage = require_archive()
+    receipt = storage.backup_path(receipt)
+    result, _ = read_private(receipt, storage=storage)
+    verified = verify_recovery(Path(result["snapshotDirectory"]), receipt, source=result["source"], schema=result["schema"],
+                               release_sha256=result["releaseSha256"], maintenance_session=result["maintenanceSession"])
+    target_id = endpoint(Path(target.host).resolve(strict=True), target.port, target.database)
+    with restore_gate(runtime, target_id, exclusive=True) as gate:
+        disposition = invalidate_target(target, receipt, verified, storage, gate)
+        assert disposition is not None
+        return disposition
 
 
 def verify_recovery(
@@ -457,14 +554,20 @@ def main(argv: list[str] | None = None, *, exclusive: Exclusive | None = None) -
     isolated = sub.add_parser("restore")
     isolated.add_argument("--snapshot", type=Path, required=True)
     isolated.add_argument("--output", type=Path, required=True)
+    isolated.add_argument("--runtime", type=Path)
+    invalidate = sub.add_parser("invalidate-browser-identity")
+    invalidate.add_argument("--restore", type=Path, required=True)
+    invalidate.add_argument("--runtime", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         require_archive()
-        if args.command == "restore" and args.socket is None:
+        if args.command in ("restore", "invalidate-browser-identity") and args.socket is None:
             raise RecoveryError("Restore requires an explicit isolated private socket.")
         target = database_target(args.database, socket=args.socket, port=args.port, user=args.user)
         if args.command == "restore":
-            result = restore(target, args.snapshot, args.output)
+            result = restore(target, args.snapshot, args.output, runtime=args.runtime)
+        elif args.command == "invalidate-browser-identity":
+            result = invalidate_browser_identity(target, args.restore, args.runtime)
         else:
             if args.legacy_release and exclusive is None:
                 raise RecoveryError("Legacy capture requires the cutover adapter that verifies both writer sets are fenced.")

@@ -6,7 +6,7 @@
   "schemaCompatibility": [
     {
       "compatibilityVersion": 1,
-      "minRevision": 4
+      "minRevision": 6
     }
   ],
   "build": [

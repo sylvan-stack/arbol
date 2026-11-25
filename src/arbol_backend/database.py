@@ -10,7 +10,7 @@ import signal
 import tempfile
 import tomllib
 from collections.abc import AsyncIterator, Callable, Sequence
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +23,7 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.rows import tuple_row
 
 from arbol_installation.admission import AdmissionRefusal
+from arbol_installation.browser_identity_restore import RestoreGate, RestoreMarker, endpoint, restore_gate
 from arbol_installation.paths import database_settings, postgres_folder
 
 from .exchange_admission import Admission, Lease, Source, register_database_writer
@@ -305,6 +306,45 @@ class Database:
                 yield
             finally:
                 CURRENT_ADMISSION.reset(token)
+
+    def browser_endpoint(self) -> str:
+        target = explicit_target(self.identity) or configured_target(self.identity)
+        host = target["host"]
+        socket = Path(host) if host.startswith("/") else postgres_folder(self.identity.home) / "socket"
+        return endpoint(socket.resolve(strict=True), int(target["port"]), target["dbname"])
+
+    async def verify_browser_epoch(self, gate: RestoreGate, marker: RestoreMarker | None) -> None:
+        try:
+            if gate.read() != marker or self.browser_endpoint() != gate.endpoint:
+                raise ValueError("The Browser authority changed during the request.")
+        except (OSError, ValueError, RuntimeError) as error:
+            raise Refused("needs_rebind", "The Browser restore authority is unavailable.") from error
+        if marker is None:
+            return
+        if marker.phase != "invalidated":
+            raise Refused("needs_rebind", "The restored database is not ready for Browser binding.")
+        async with self.session(snapshot=True) as session:
+            rows = await session.execute(
+                "SELECT attempt,endpoint_sha256,database_oid::bigint, "
+                "(SELECT oid::bigint FROM pg_catalog.pg_database WHERE datname=pg_catalog.current_database()) "
+                "FROM public.seqoya_browser_identity_restore WHERE singleton AND completed_at IS NOT NULL")
+        if rows != [(marker.attempt, marker.endpoint, marker.oid, marker.oid)]:
+            raise Refused("needs_rebind", "The database does not match the Browser restore authority.")
+
+    @asynccontextmanager
+    async def browser_authority(self) -> AsyncIterator[None]:
+        """Hold the target restore epoch and normal writer admission across a Browser request."""
+        with ExitStack() as held:
+            try:
+                target = self.browser_endpoint()
+                gate = held.enter_context(restore_gate(self.identity.folder, target))
+                marker = gate.read()
+            except (OSError, ValueError, RuntimeError) as error:
+                raise Refused("needs_rebind", "The Browser restore authority is unavailable.") from error
+            async with self.permit():
+                await self.verify_browser_epoch(gate, marker)
+                yield
+                await self.verify_browser_epoch(gate, marker)
 
     async def renew(self) -> None:
         async with self.credentials_lock:
