@@ -3,7 +3,7 @@
   import InlineRename from '../patterns/InlineRename.svelte';
   import SubscriptionAllowance from './SubscriptionAllowance.svelte';
   import {
-    formatSubscriptionCardTime, sortAllowanceWindows, subscriptionKey, subscriptionName, subscriptionProviderOrder, subscriptionVendor,
+    formatSubscriptionCardTime, sortAllowanceWindows, subscriptionKey, subscriptionName, subscriptionUsageProvider,
     type OpenSubscriptionUsage, type RenameSubscription, type SubscriptionRecord, type SubscriptionView,
   } from './seqoya-subscriptions';
 
@@ -24,8 +24,8 @@
   const resets = $derived(metrics?.limitResets);
   const deepseek = $derived(subscription.family === 'deepseek');
   const payAsYouGo = $derived(driver === 'pi' && (deepseek || subscription.family === 'minimax'));
-  const provider = $derived(subscription.id === subscription.family && subscriptionProviderOrder.has(key)
-    ? subscriptionVendor(driver, subscription.family) : undefined);
+  const provider = $derived(subscriptionUsageProvider(driver, subscription));
+  const opening = $derived(view.usageOpening === key);
   const request = $derived(view.usageRequests?.[key]);
 
   function startEdit() {
@@ -86,13 +86,13 @@
   {/if}
   {#if provider && onOpenUsage}
     <div class="row usage-actions">
-      <Button label={'Open in ' + provider} tone="ghost" busy={view.usageOpening === key}
-        disabled={!view.connected || (!!view.usageOpening && view.usageOpening !== key)}
+      <Button label={opening ? 'Preparing Browser…' : 'Open in ' + provider} tone="ghost" busy={opening}
+        disabled={!view.connected || view.usageOpening !== undefined}
         onclick={() => onOpenUsage?.(driver, subscription.id)} />
     </div>
   {/if}
   {#if request?.error}<p class="small warning" role="status">{request.error}</p>{/if}
-  {#if view.usageLinkErrors?.[key]}<p class="small warning" role="status">{view.usageLinkErrors[key]}</p>{/if}
+  {#if provider && view.usageLinkErrors?.[key]}<p class="small warning" role="status">{view.usageLinkErrors[key]}</p>{/if}
 
   {#if resets?.count !== undefined && resets.count > 0}
     <div class="reset-section stack">

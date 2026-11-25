@@ -202,6 +202,12 @@ export function subscriptionVendor(driver: string, family: string): string {
   return driver === 'codex' && family === 'chatgpt' ? 'Codex' : (vendors.get(family) ?? family);
 }
 
+export function subscriptionUsageProvider(driver: string, account: SubscriptionRecord): string | undefined {
+  if (account.state !== 'signed_in' || account.id !== account.family
+    || !subscriptionProviderOrder.has(subscriptionKey(driver, account.id))) return undefined;
+  return subscriptionVendor(driver, account.family);
+}
+
 /** Local calendar days (rather than 24-hour offsets) keep Tomorrow correct across DST. */
 export function formatSubscriptionTime(value: string): string {
   const date = new Date(value);
