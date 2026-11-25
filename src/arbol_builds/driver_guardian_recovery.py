@@ -17,11 +17,14 @@ from .driver_admission import (
     Object,
     Refusal,
     _documents,
+    _exclusive,
     canonical,
     canonical_uuid,
+    decode,
     deployment_mutex,
     fields,
     fresh_install,
+    normal_context,
     private_directory,
     publish,
     read,
@@ -30,15 +33,20 @@ from .driver_admission import (
     sha256,
     sync_directory,
     valid_hash,
+    valid_token,
+    validate,
 )
-from .driver_payload import pin_payloads, verify_acceptance, verify_gate
-from .driver_process import boot_uuid
+from .driver_payload import Payload, pin_payloads, verify_acceptance, verify_gate
+from .driver_process import boot_uuid, matches
 from .driver_replacement import RECEIPT_LIMIT, _bound_packages, _normal, _promotion, _promotion_path
 from .driver_state import _immutable, _use_current
 from .launcher import open_use_guard
 
 # This sealed launcher publishes a pending handoff before spawning and never writes Driver state.
 AUDITED_PROVIDER = "3dc4ae75852506d0943d1b5906e018732c640fd99ff8d04fac3c0fb65279c3f8"
+# This sealed Claude entry waits for a durable accepted transfer before entering the CLI.
+AUDITED_CLAUDE = "1572a8a2cf8e6fb10894e0ed63adc9a9bcd37f55a38160cf182d13a7ca13ce57"
+CLAUDE = "arbol-claude-driver"
 TREES = ("writers", "handoffs", "normal-admissions")
 ENTRIES = (*TREES, "taint.json")
 
@@ -121,6 +129,109 @@ def _prove(authority: Authority, lease: int, row: Object, boot: str) -> Object:
             "entries": {name: _fingerprint(authority.folder / name) for name in ENTRIES}}
 
 
+def _prior_marker(authority: Authority, marker: Object) -> None:
+    """Account for a previous-epoch marker through its retained terminal custody."""
+    invocation = marker["invocation"]
+    if not valid_token(invocation) or not valid_hash(marker["payloadSha256"]):
+        raise Refusal("An earlier Claude admission marker cannot be verified.")
+    key = {name: marker[name] for name in ("component", "epoch", "invocation", "payloadSha256")}
+    found = 0
+    for archive in sorted(private_directory(authority.folder / "archive").glob("custody-*")):
+        root = private_directory(private_directory(archive) / "writers") / invocation
+        if not os.path.lexists(root):
+            continue
+        writers = [read(path) for path in _documents(root)]
+        for writer in writers:
+            validate("writer", writer)
+        if (len(writers) != 2 or any(writer["phase"] != "terminal" or writer["boot"] != marker["boot"]
+                                   or any(writer[name] != value for name, value in key.items()) for writer in writers)):
+            raise Refusal("An earlier Claude admission lacks its two terminal writers.")
+        handoffs = [read(path) for path in _documents(archive / "handoffs") if not path.name.endswith(".context.json")]
+        related = [handoff for handoff in handoffs if handoff.get("invocation") == invocation]
+        if len(related) != 1:
+            raise Refusal("An earlier Claude admission lacks one archived transfer.")
+        handoff = related[0]
+        validate("handoff", handoff)
+        by_writer = {writer["writer"]: writer for writer in writers}
+        parent, child = by_writer.get(handoff["parent"]), by_writer.get(handoff["child"])
+        if (parent is None or child is None or parent["parent"] is not None or child["parent"] != parent["writer"]
+                or handoff["phase"] != "accepted" or handoff["role"] != "main" or not valid_hash(child["contextSha256"])
+                or handoff["contextSha256"] != child["contextSha256"]
+                or any(handoff[name] != value for name, value in key.items())):
+            raise Refusal("An earlier Claude admission differs from its archived transfer.")
+        found += 1
+    if found != 1:
+        raise Refusal("An earlier Claude admission lacks one terminal custody archive.")
+
+
+def _prove_pending_claude(authority: Authority, lease: int, row: Object, payload: Payload, boot: str) -> Object:
+    _exclusive(authority, lease)
+    component, epoch, digest = authority.component, row["epoch"], row["payloadSha256"]
+    if (component != CLAUDE or payload.digest != AUDITED_CLAUDE or digest != AUDITED_CLAUDE
+            or os.path.lexists(authority.folder / "archive" / "custody-pending.json")
+            or next(private_directory(authority.folder / "sessions").iterdir(), None) is not None):
+        raise Refusal("Claude does not match the audited pending recovery conditions.")
+    roots = list(private_directory(authority.folder / "writers").iterdir())
+    if len(roots) != 1 or not valid_token(roots[0].name):
+        raise Refusal("Claude does not have one interrupted guardian invocation.")
+    invocation = roots[0].name
+    writers = _documents(roots[0])
+    if len(writers) != 1:
+        raise Refusal("The Claude child already registered or the writer inventory changed.")
+    guardian = read(writers[0])
+    validate("writer", guardian)
+    owner = {name: guardian[name] for name in ("pid", "startedAt")}
+    common = {"component": component, "epoch": epoch, "invocation": invocation, "payloadSha256": digest}
+    if (guardian != {"version": 1, **common, **owner, "writer": guardian["writer"], "parent": None,
+                     "boot": boot, "phase": "active", "contextSha256": None}
+            or writers[0].name != guardian["writer"] + ".json" or matches(owner)):
+        raise Refusal("Claude lacks the exact exited state-free guardian.")
+    if authority.read("taint") != {"version": 1, **common, "boot": boot, "reason": "custody-loss"}:
+        raise Refusal("The Claude custody-loss marker is unrelated to this handoff.")
+
+    folder = authority.folder / "handoffs"
+    documents = _documents(folder)
+    originals = [path for path in documents if not path.name.endswith(".context.json")]
+    if len(documents) != 2 or len(originals) != 1:
+        raise Refusal("Claude does not have one pending main handoff and context.")
+    handoff = read(originals[0])
+    validate("handoff", handoff)
+    context_file = folder / (handoff["handoff"] + ".context.json")
+    raw = read_bytes(context_file)
+    context = decode(raw)
+    normal_context(context)
+    binding = {**common, "role": "main", "entry": payload.descriptor["entry"], "nonce": handoff["nonce"],
+               "acceptanceSha256": authority.read("qualification")["acceptanceSha256"]}
+    if (originals[0].name != handoff["handoff"] + ".json" or context_file not in documents
+            or handoff != {"version": 1, **binding, "handoff": handoff["handoff"], "parent": guardian["writer"],
+                           "child": context["writer"], "phase": "pending", "contextSha256": sha256(raw)}
+            or context != {"version": 1, "kind": "driver-admission-context", **binding, "boot": boot,
+                           "registry": str(authority.registry), "registrySha256": sha256(canonical(authority.identity)),
+                           "writer": handoff["child"], "parent": {"writer": guardian["writer"], **owner},
+                           "process": context["process"], "handoff": handoff["handoff"]}
+            or context["writer"] == guardian["writer"] or matches(context["process"])):
+        raise Refusal("Claude lacks a verified pending transfer to an exited, unregistered child.")
+
+    expected = {"version": 1, "kind": "driver-normal-admission", **common, "boot": boot,
+                "build": row["build"], "checkpoint": None}
+    markers = authority.folder / "normal-admissions"
+    if read(markers / (invocation + ".json")) != expected:
+        raise Refusal("The interrupted Claude invocation lacks its exact launch marker.")
+    for path in _documents(markers):
+        if path.name == invocation + ".json":
+            continue
+        marker = read(path)
+        fields(marker, "version kind component epoch invocation payloadSha256 boot build checkpoint")
+        if (marker["kind"] != expected["kind"] or marker["component"] != component or marker["epoch"] == epoch
+                or not valid_token(marker["invocation"]) or path.name != marker["invocation"] + ".json"
+                or marker["checkpoint"] is not None):
+            raise Refusal("An additional or unaccounted-for Claude admission remains.")
+        _prior_marker(authority, marker)
+    return {"component": component, "epoch": epoch, "invocation": invocation, "writer": guardian["writer"],
+            "case": "pending-before-child-registration",
+            "entries": {name: _fingerprint(authority.folder / name) for name in ENTRIES}}
+
+
 def _archive(authority: Authority, row: Object, session: str, *, verify_only: bool) -> None:
     archive = private_directory(authority.folder / "archive")
     destination = private_directory(archive / ("guardian-recovery-" + session), create=not verify_only)
@@ -145,12 +256,13 @@ def _archive(authority: Authority, row: Object, session: str, *, verify_only: bo
             raise Refusal(f"{authority.component} has a new custody taint.")
 
 
-def recover_guardians(registry: Path, session: str) -> Object:
+def recover_guardians(registry: Path, session: str, *, pending_claude: bool = False) -> Object:
     home = Path(getpwuid(os.getuid()).pw_dir)
     if registry != build_registry(home) or not canonical_uuid(session):
         raise Refusal("Guardian recovery requires the canonical stable registry and a session UUID.")
     authorities = [Authority(registry, name) for name in COMPONENTS]
     shared = authorities[0].shared
+    kind = "driver-claude-pending-recovery" if pending_claude else "driver-guardian-recovery"
     with deployment_mutex(registry), ExitStack() as locks:
         current = fresh_install(registry)
         gate = verify_gate(registry)
@@ -170,7 +282,7 @@ def recover_guardians(registry: Path, session: str) -> Object:
         if proof is not None:
             fields(proof, "version kind session boot providerPayloadSha256 installed components")
             recorded = proof["installed"]
-            if (not isinstance(recorded, dict) or proof["kind"] != "driver-guardian-recovery"
+            if (not isinstance(recorded, dict) or proof["kind"] != kind
                     or proof["session"] != session or proof["providerPayloadSha256"] != gate.provider.digest
                     or not canonical_uuid(proof["boot"])):
                 raise Refusal("The recorded guardian recovery identity changed.")
@@ -204,10 +316,13 @@ def recover_guardians(registry: Path, session: str) -> Object:
         if _bound_packages(registry, home, before, gate) != packages:
             raise Refusal("The installed Driver packages changed under the recovery locks.")
 
+        selected = [(authority, lease, row)
+                    for authority, lease, row in zip(authorities, leases, before["components"], strict=True)
+                    if not pending_claude or authority.component == CLAUDE]
         if current == before and not os.path.lexists(complete):
-            rows = [_prove(authority, lease, row, boot)
-                    for authority, lease, row in zip(authorities, leases, before["components"], strict=True)]
-            prepared = {"version": 1, "kind": "driver-guardian-recovery", "session": session, "boot": boot,
+            rows = [_prove_pending_claude(authority, lease, row, packages[CLAUDE], boot) if pending_claude
+                    else _prove(authority, lease, row, boot) for authority, lease, row in selected]
+            prepared = {"version": 1, "kind": kind, "session": session, "boot": boot,
                         "providerPayloadSha256": gate.provider.digest, "installed": before, "components": rows}
             private_directory(receipts, create=True)
             _immutable(journal, canonical(prepared), limit=RECEIPT_LIMIT)
@@ -217,7 +332,7 @@ def recover_guardians(registry: Path, session: str) -> Object:
             current = fresh_install(registry)
         if proof is None:
             raise Refusal("The closed guardian recovery proof is missing.")
-        finished = {"version": 1, "kind": "driver-guardian-recovery-complete", "session": session,
+        finished = {"version": 1, "kind": kind + "-complete", "session": session,
                     "proofSha256": sha256(canonical(proof))}
         verify_only = current == before
         if verify_only and read(complete) != finished:
@@ -225,7 +340,7 @@ def recover_guardians(registry: Path, session: str) -> Object:
         staged = {**before, "phase": "staging", "promotionSha256": finished["proofSha256"]}
         if not verify_only and (current != staged or proof["boot"] != boot):
             raise Refusal("The closed guardian recovery fence or Mac boot changed.")
-        for authority, install_row, recovered in zip(authorities, before["components"], proof["components"], strict=True):
+        for (authority, _, install_row), recovered in zip(selected, proof["components"], strict=True):
             if (recovered["component"] != authority.component or recovered["epoch"] != install_row["epoch"]
                     or set(recovered["entries"]) != set(ENTRIES)
                     or not all(valid_hash(value) for value in recovered["entries"].values())):
