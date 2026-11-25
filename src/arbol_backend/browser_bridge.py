@@ -46,6 +46,14 @@ class BrowserBridge:
         registry.method("seqoya.browser.rebind", self.rebind, self.rebind_params)
 
     @staticmethod
+    def unavailable(error: Refused) -> Params:
+        if error.code == "maintenance":
+            return {"status": "maintenance"}
+        if isinstance(error, Error) and error.source == "driver":
+            return {"status": "catalogue_unavailable"}
+        return {"status": "unavailable"}
+
+    @staticmethod
     def target(params: Params) -> tuple[str, str]:
         driver, subscription = params.get("driver"), params.get("subscription")
         if not isinstance(driver, str) or not isinstance(subscription, str) or (driver, subscription) not in DESTINATIONS:
@@ -72,11 +80,11 @@ class BrowserBridge:
             await self.profiles.open(self.accounts, self.browser, *target, DESTINATIONS[target])
         except Refused as error:
             if error.code != "needs_rebind":
-                return {"status": "unavailable"}
+                return self.unavailable(error)
             try:
                 replacement = await self.accounts.prepare_browser_rebind(*target)
-            except Refused:
-                return {"status": "unavailable"}
+            except Refused as refused:
+                return self.unavailable(refused)
             now = time.monotonic()
             self.selections = {token: offer for token, offer in self.selections.items() if offer.expires > now}
             if len(self.selections) >= MAX_SELECTIONS:
@@ -103,5 +111,7 @@ class BrowserBridge:
                 await self.browser.open(binding.profile, binding.instance, DESTINATIONS[target])
                 await self.profiles.require_binding(selected, binding)
         except Refused as error:
-            return {"status": "selection_expired" if error.code == "needs_rebind" else "unavailable"}
+            if error.code == "needs_rebind":
+                return {"status": "selection_expired"}
+            return self.unavailable(error)
         return {"status": "opened"}

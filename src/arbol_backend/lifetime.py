@@ -8,21 +8,22 @@ import os
 import socket
 import stat
 from pathlib import Path
+from typing import Literal
 
 from .model import Refused
 
 
 class Lifetime:
-    def __init__(self, folder: Path) -> None:
-        self.folder = folder
-        self.path = folder / "backend.sock"
+    def __init__(self, folder: Path, name: Literal["backend", "seqoya"] = "backend") -> None:
+        self.path = folder / (name + ".sock")
+        self.lock_path = folder / (name + ".lock")
         self.lock = -1
         self.socket: socket.socket | None = None
         self.socket_identity: tuple[int, int] | None = None
 
     def acquire(self) -> socket.socket:
         try:
-            self.lock = os.open(self.folder / "backend.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            self.lock = os.open(self.lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
             info = os.fstat(self.lock)
             if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
                 raise Refused("invalid_input", "The backend lock must be an owned regular file.")
@@ -42,7 +43,7 @@ class Lifetime:
             os.write(self.lock, json.dumps({"pid": os.getpid()}).encode() + b"\n")
             if os.path.lexists(self.path):
                 if not stat.S_ISSOCK(self.path.lstat().st_mode):
-                    raise Refused("invalid_input", "Only a stale socket may be removed at backend.sock.")
+                    raise Refused("invalid_input", f"Only a stale socket may be removed at {self.path.name}.")
                 self.path.unlink()
             previous = os.umask(0o077)
             try:

@@ -8,6 +8,7 @@ import os
 import signal
 import stat
 from collections.abc import Coroutine
+from functools import partial
 from typing import Any
 
 from arbol_installation.build_output import sweep_periodically
@@ -56,7 +57,8 @@ class Backend:
         self.accounts = Accounts(self.programs, self.chats.catalogues, self.registry,
                                  lambda: ((self.database.parameters or {}).get("password", ""),),
                                  database=self.database)
-        self.browser = BrowserBridge(self.accounts, self.database, self.registry)
+        self.browser_registry = Registry()
+        self.browser = BrowserBridge(self.accounts, self.database, self.browser_registry)
         self.drafts = Drafts(self.chats, self.registry)
         self.dispatch = Dispatch(identity, self.programs, self.chats, self.drafts, self.registry, self.settings)
         self.listings = Listings(self.programs, self.database)
@@ -85,10 +87,10 @@ class Backend:
         task.add_done_callback(self.tasks.discard)
         return task
 
-    async def connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    async def connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, registry: Registry) -> None:
         self.windows.add(writer)
         try:
-            await Connection(reader, writer, self.registry).run(self.hello)
+            await Connection(reader, writer, registry).run(self.hello)
         finally:
             self.windows.discard(writer)
 
@@ -136,9 +138,10 @@ class Backend:
         loop = asyncio.get_running_loop()
         private_directory(self.identity.folder)
         lifetime = Lifetime(self.identity.folder)
+        browser_lifetime = Lifetime(self.identity.folder, "seqoya")
         listening = lifetime.acquire()
         self.installation.maintenance = self.database.observe_maintenance()
-        server: asyncio.Server | None = None
+        servers: list[asyncio.Server] = []
         stdin_registered = False
         try:
             for name in (signal.SIGTERM, signal.SIGINT):
@@ -158,13 +161,20 @@ class Backend:
             except OSError:
                 pass
 
-            def connected(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            def connected(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, registry: Registry) -> None:
                 if self.stopped.is_set():
                     writer.close()
                     return
-                self.task(self.connection(reader, writer))
+                self.task(self.connection(reader, writer, registry))
 
-            server = await asyncio.start_unix_server(connected, sock=listening, cleanup_socket=False, limit=MAX_LINE - 1)
+            servers.append(await asyncio.start_unix_server(
+                partial(connected, registry=self.registry), sock=listening, cleanup_socket=False, limit=MAX_LINE - 1,
+            ))
+            if not self.identity.fixture:
+                servers.append(await asyncio.start_unix_server(
+                    partial(connected, registry=self.browser_registry), sock=browser_lifetime.acquire(),
+                    cleanup_socket=False, limit=MAX_LINE - 1,
+                ))
             print(
                 json.dumps(
                     backend_ready(self.identity, os.getpid(), self.identity.build),
@@ -190,7 +200,7 @@ class Backend:
                 loop.remove_reader(0)
             for name in (signal.SIGTERM, signal.SIGINT):
                 loop.remove_signal_handler(name)
-            if server is not None:
+            for server in servers:
                 server.close()
                 server.close_clients()
             for writer in list(self.windows):
@@ -199,8 +209,9 @@ class Backend:
                 task.cancel()
             if self.tasks:
                 await asyncio.gather(*self.tasks, return_exceptions=True)
-            if server is not None:
+            for server in servers:
                 await server.wait_closed()
+            browser_lifetime.close()
             await self.recovery.close()
             await self.measurements.close()
             await self.stuck.close()
