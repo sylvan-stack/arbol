@@ -11,10 +11,37 @@ import json
 import os
 import re
 import signal
+import stat
 import subprocess
 from pathlib import Path
 
 from prepare import HERE, read, reconstruct, require, run_path, sha, strict, verify_prepared, write_new
+
+
+def seal_schema_lock(destination, gate):
+    # uv creates this empty target lock with mode 0666, even under a private umask.
+    lock = destination / '.arbol-builds/schema/.lock'
+    gate.ancestors(lock.parent)
+    parent = os.open(lock.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        original_parent = os.fstat(parent)
+        require(os.path.samestat(original_parent, lock.parent.lstat()), 'Schema directory changed')
+        fd = os.open(lock.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        with os.fdopen(fd, 'rb') as stream:
+            original = os.fstat(stream.fileno())
+            named = os.stat(lock.name, dir_fd=parent, follow_symlinks=False)
+            require(stat.S_ISREG(original.st_mode) and original.st_uid == os.getuid()
+                    and original.st_nlink == 1 and original.st_size == 0
+                    and gate.stamp(original) == gate.stamp(named), 'Unexpected schema installer lock')
+            os.fchmod(stream.fileno(), 0o600)
+            sealed = os.fstat(stream.fileno())
+            named = os.stat(lock.name, dir_fd=parent, follow_symlinks=False)
+            require(os.path.samestat(original, sealed) and sealed.st_uid == original.st_uid
+                    and sealed.st_nlink == 1 and sealed.st_size == 0
+                    and stat.S_IMODE(sealed.st_mode) == 0o600 and gate.stamp(sealed) == gate.stamp(named)
+                    and os.path.samestat(original_parent, lock.parent.lstat()), 'Schema installer lock changed')
+    finally:
+        os.close(parent)
 
 
 def main():
@@ -109,6 +136,7 @@ def main():
     require(set(installed)=={name.removeprefix('src/') for name in modules},'Installed module set differs')
     for name,data in modules.items():
         require(gate.read(installed[name.removeprefix('src/')],64*1024*1024)==data,'Installed module differs: '+name)
+    seal_schema_lock(destination, gate)
     observed={'schema':1,'kind':'afm9-browser-private-tool','sourceGit':grant['sourceGit'],'sourceFiles':grant['sourceFiles'],
               'files':gate.tree_map(destination),
               'executables':{'python':gate.reference(actual_python,256*1024*1024),
