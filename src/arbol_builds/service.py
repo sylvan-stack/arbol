@@ -670,7 +670,8 @@ def build_component(component: str, paths: Locations, stop: Stop, *, browser_rel
     return build_allocated(component, paths, stop, repo, config, version, source, folder, build)
 
 
-def release_artifact(folder: str, build: str, source: dict[str, Any], release: dict[str, Any]) -> dict[str, Any]:
+def release_artifact(folder: str, build: str, source: dict[str, Any], release: dict[str, Any],
+                     *, stage_entry: bool = False) -> dict[str, Any]:
     out = Path(folder).parents[2] / f"release-{build}"
     receipt = out / "signed-release.json"
     with receipt.open("rb") as stream:
@@ -688,6 +689,22 @@ def release_artifact(folder: str, build: str, source: dict[str, Any], release: d
     with image.open("rb") as stream:
         if hashlib.file_digest(stream, "sha256").hexdigest() != data["imageSha256"]:
             raise ValueError("Browser production image digest differs.")
+    if stage_entry:
+        launcher_path = "Contents/Resources/browser/native/stable-launch"
+        launcher = out / "ArbolBrowser.app" / launcher_path
+        launcher_digest = data.get("launcherDigest")
+        if (not isinstance(launcher_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", launcher_digest)
+                or not isinstance(data.get("files"), dict) or data["files"].get(launcher_path) != launcher_digest
+                or launcher.resolve(strict=True) != launcher):
+            raise ValueError("Browser signed launcher is absent from the release inventory.")
+        with launcher.open("rb") as stream:
+            signed_launcher = stream.read(67108865)
+        if (not signed_launcher or len(signed_launcher) > 67108864
+                or hashlib.sha256(signed_launcher).hexdigest() != launcher_digest):
+            raise ValueError("Browser candidate launcher differs from the signed release inventory.")
+        launcher_directory = Path(folder) / "bin"
+        launcher_directory.mkdir(mode=0o700)
+        atomic_write(str(launcher_directory / "arbol-browser"), signed_launcher, 0o755, durable=True)
     return {"image": str(image), "imageSha256": data["imageSha256"], "payloadDigest": data["payloadDigest"],
             "receipt": str(receipt), "receiptSha256": hashlib.sha256(contents).hexdigest()}
 
@@ -717,14 +734,20 @@ def build_allocated(component: str, paths: Locations, stop: Stop, repo: str, con
         # The Trunks share the one launcher arbol-trunk, which the build of any Trunk writes (RCT-0).
         write_launcher(paths.bin, paths.registry, TRUNKS if trunk(component) else component)
         stage = "build"
+        production_only = release is not None and not config["checks"]
         for index, text in enumerate(config["build"], 1):
+            if production_only and text == "npm run package:host":
+                # The isolated host has its own admission for separately requested checks.
+                continue
             name = f"build-{index}"
             if not command(text, repo, folder, build, log, stop):
                 raise RuntimeError("Build stopped by the caller." if stop.requested
                                    else "Build command failed; see build.log.")
         if release is not None:
             name = "production-release"
-            record["productionRelease"].update(release_artifact(folder, build, source, release))
+            record["productionRelease"].update(
+                release_artifact(folder, build, source, release, stage_entry=production_only)
+            )
             save_record(folder, record)
         stage, name = "entry", config["entry"]
         if executable_entry(folder, config["entry"]) is None:
