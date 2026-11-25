@@ -9,13 +9,12 @@ import argparse
 import importlib.util
 import json
 import os
-from pathlib import Path
 import re
 import signal
 import subprocess
-import sys
+from pathlib import Path
 
-from prepare import HERE, FILES, read, reconstruct, require, run_path, sha, strict, verify_prepared, write_new
+from prepare import HERE, read, reconstruct, require, run_path, sha, strict, verify_prepared, write_new
 
 
 def main():
@@ -30,7 +29,8 @@ def main():
     verify_prepared(run,tree)
     # Import only this reviewed gate module, not any reconstructed product package.
     spec=importlib.util.spec_from_file_location('afm9_delivery_gate',HERE/'browser_qualification.py')
-    gate=importlib.util.module_from_spec(spec); spec.loader.exec_module(gate)
+    gate=importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
     grant,review=gate.source_admission()
     require(grant['sourceGit']==manifest['overlay']['commit'] and grant['sourceFiles']==manifest['overlay']['files'],
             'Published source declaration differs from this exact overlay')
@@ -48,7 +48,9 @@ def main():
     destination=gate.BIN
     gate.ancestors(destination.parent)
     require(not os.path.lexists(destination),'Private bin already exists; never overwrite or retry this attempt')
-    bootstrap=grant['bootstrap']; python=Path(bootstrap['python']['path']); uv=Path(bootstrap['uv']['path'])
+    bootstrap=grant['bootstrap']
+    python=Path(bootstrap['python']['path'])
+    uv=Path(bootstrap['uv']['path'])
     require(uv.name=='uv','Expected pinned uv executable')
     for name,path in (('python',python),('uv',uv)):
         gate.check_reference(bootstrap[name],path,256*1024*1024)
@@ -60,7 +62,8 @@ def main():
     verify_prepared(run,tree)
     require(gate.source_admission()==(grant,review),'Source acceptance changed during preflight')
     destination.mkdir(mode=0o700)
-    cache=run/'installation-cache'; cache.mkdir(mode=0o700)
+    cache=run/'installation-cache'
+    cache.mkdir(mode=0o700)
     environment={'PATH':str(uv.parent)+':/usr/bin:/bin','HOME':'/Users/msix','LANG':'C.UTF-8',
                  'ARBOL_PYTHON_ARCHIVE_CACHE':str(cache/'python'),'UV_CACHE_DIR':str(cache/'uv'),
                  'UV_PYTHON_DOWNLOADS':'never','PYTHONDONTWRITEBYTECODE':'1'}
@@ -74,13 +77,19 @@ def main():
         except BaseException:
             # The historical installer traps TERM and cleans its own compile
             # groups. Give that handler time before ending remaining members.
-            try: os.kill(process.pid,signal.SIGTERM)
-            except ProcessLookupError: pass
+            try:
+                os.kill(process.pid,signal.SIGTERM)
+            except ProcessLookupError:
+                pass
             cooperative=True
-            try: process.wait(timeout=15)
-            except subprocess.TimeoutExpired: cooperative=False
-            try: os.killpg(process.pid,signal.SIGKILL)
-            except ProcessLookupError: pass
+            try:
+                process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                cooperative=False
+            try:
+                os.killpg(process.pid,signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             process.wait()
             write_new(run/'installation-interrupted.json',gate.encode({
                 'schema':1,'status':'incomplete','installerPid':process.pid,
@@ -98,7 +107,8 @@ def main():
     installed={str(p.relative_to(destination/'.arbol-builds')):p for package in ('arbol_builds','arbol_agents','arbol_installation')
                for p in (destination/'.arbol-builds'/package).rglob('*.py')}
     require(set(installed)=={name.removeprefix('src/') for name in modules},'Installed module set differs')
-    for name,data in modules.items(): require(gate.read(installed[name.removeprefix('src/')],64*1024*1024)==data,'Installed module differs: '+name)
+    for name,data in modules.items():
+        require(gate.read(installed[name.removeprefix('src/')],64*1024*1024)==data,'Installed module differs: '+name)
     observed={'schema':1,'kind':'afm9-browser-private-tool','sourceGit':grant['sourceGit'],'sourceFiles':grant['sourceFiles'],
               'files':gate.tree_map(destination),
               'executables':{'python':gate.reference(actual_python,256*1024*1024),

@@ -6,11 +6,11 @@ import hashlib
 import io
 import json
 import os
-from pathlib import Path, PurePosixPath
 import re
 import stat
 import subprocess
 import tarfile
+from pathlib import Path, PurePosixPath
 
 HERE = Path(__file__).absolute().parent
 CANONICAL = Path('/Users/msix/repos/sylvan-stack/arbol')
@@ -123,17 +123,21 @@ def apply_patch(tree, raw, allowed):
             a, an, b, bn = (int(v) if v is not None else 1 for v in match.groups())
             start = a - 1 if an else a
             require(cursor <= start <= len(original), 'Overlapping/out-of-range hunk')
-            output.extend(original[cursor:start]); cursor = start
+            output.extend(original[cursor:start])
+            cursor = start
             require(len(output) == (b - 1 if bn else b), 'Hunk offset refused')
             pos += 1
             removed = added = 0
             while pos < len(lines) and lines[pos][:1] in (' ', '-', '+') and not lines[pos].startswith('--- a/'):
-                line = lines[pos]; mark, text = line[0], line[1:]
+                line = lines[pos]
+                mark, text = line[0], line[1:]
                 if mark in (' ', '-'):
                     require(cursor < len(original) and original[cursor] == text, 'Hunk old bytes differ')
-                    cursor += 1; removed += 1
+                    cursor += 1
+                    removed += 1
                 if mark in (' ', '+'):
-                    output.append(text); added += 1
+                    output.append(text)
+                    added += 1
                 pos += 1
             require((removed, added) == (an, bn), 'Hunk counts differ')
             count += 1
@@ -167,11 +171,14 @@ def reconstruct():
     pins = strict(inputs['baseline.json'])
     require(set(pins) == {'schema','historical','migration','received','captures','modules','installer','commonFiles','additive'}
             and type(pins['schema']) is int and pins['schema'] == 1, 'Unknown baseline schema')
-    historical = pins['historical']; repo = Path(historical['repository']); commit = historical['commit']
+    historical = pins['historical']
+    repo = Path(historical['repository'])
+    commit = historical['commit']
     require(git(repo, 'rev-parse', commit + '^{tree}').decode().strip() == historical['tree'], 'Historical tree mismatch')
     captured = []
     for entry in pins['captures']:
-        root = Path(entry['root']); data = read(root / 'capture.json')
+        root = Path(entry['root'])
+        data = read(root / 'capture.json')
         require(sha(data) == entry['sha256'], 'Capture pin mismatch')
         declaration = strict(data)
         require(declaration['files'] == entry['files'], 'Capture member map mismatch')
@@ -181,9 +188,12 @@ def reconstruct():
     base, selector = captured
     historical_files = {}
     for row in git(repo, 'ls-tree', '-r', '-z', commit).split(b'\0'):
-        if not row: continue
-        metadata, name = row.split(b'\t'); mode, kind, oid = metadata.decode().split()
-        name = name.decode('utf-8', 'strict'); relative(name)
+        if not row:
+            continue
+        metadata, name = row.split(b'\t')
+        mode, kind, oid = metadata.decode().split()
+        name = name.decode('utf-8', 'strict')
+        relative(name)
         require(kind == 'blob' and mode in ('100644','100755'), 'Unsupported historical tree entry')
         historical_files[name] = (mode, oid)
     tree, seen, total = {}, set(), 0
@@ -192,9 +202,11 @@ def reconstruct():
             require(len(seen) < 20000, 'Too many source entries')
             name = member.name.rstrip('/') if member.isdir() else member.name
             relative(name)
-            require(name not in seen, 'Duplicate archive entry'); seen.add(name)
+            require(name not in seen, 'Duplicate archive entry')
+            seen.add(name)
             require(member.isdir() or member.isfile(), 'Unsupported archive entry type')
-            if member.isdir(): continue
+            if member.isdir():
+                continue
             total += member.size
             require(0 <= member.size <= LIMIT and total <= 512*1024*1024, 'Source archive exceeds bound')
             data = archive.extractfile(member).read(member.size + 1)
@@ -233,7 +245,7 @@ def reconstruct():
     changed = sorted(name for name in after if after[name] != before.get(name))
     require(set(changed) == set(pins['commonFiles']) | {pins['additive']}, 'Unexpected overlay changes')
     # Reopen every external input after reconstruction, including the received37.
-    for entry, members in zip(pins['captures'], captured):
+    for entry, members in zip(pins['captures'], captured, strict=False):
         root = Path(entry['root'])
         require(sha(read(root / 'capture.json')) == entry['sha256'], 'Capture changed')
         require(all(read(root / name) == data for name, data in members.items()), 'Captured bytes changed')
@@ -277,7 +289,9 @@ def write_new(path, data, mode=0o600):
         require(os.path.samestat(os.fstat(parent), path.parent.lstat()), 'Output parent changed')
         fd = os.open(path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode, dir_fd=parent)
         with os.fdopen(fd, 'wb') as stream:
-            stream.write(data); stream.flush(); os.fsync(stream.fileno())
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
         os.fsync(parent)
         require(os.path.samestat(os.fstat(parent), path.parent.lstat()), 'Output parent changed')
     finally:
@@ -285,7 +299,8 @@ def write_new(path, data, mode=0o600):
 
 
 def verify_prepared(path, tree):
-    source = path / 'source'; physical(source)
+    source = path / 'source'
+    physical(source)
     seen = set()
     for parent, dirs, files in os.walk(source, followlinks=False):
         physical(Path(parent))
@@ -293,7 +308,8 @@ def verify_prepared(path, tree):
         for name in dirs:
             require(not (Path(parent)/name).is_symlink(), 'Linked prepared directory')
         for name in files:
-            file = Path(parent)/name; relative_name = str(file.relative_to(source))
+            file = Path(parent)/name
+            relative_name = str(file.relative_to(source))
             require(relative_name in tree, 'Extra prepared file')
             mode, data = tree[relative_name]
             require(read(file) == data and stat.S_IMODE(file.stat().st_mode) == (0o755 if mode == '100755' else 0o644), 'Prepared bytes or mode differ')
@@ -308,7 +324,8 @@ def main():
     path = run_path(args.out, False)
     tree, manifest = reconstruct()
     path.mkdir(mode=0o700)
-    source = path/'source'; source.mkdir(mode=0o700)
+    source = path/'source'
+    source.mkdir(mode=0o700)
     held = {path:os.open(path,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW),
             source:os.open(source,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)}
     def recheck():
@@ -318,7 +335,8 @@ def main():
         for name, (mode, data) in sorted(tree.items()):
             destination = source/name
             for directory in reversed((destination.parent, *destination.parent.parents)):
-                if directory == source or not directory.is_relative_to(source): continue
+                if directory == source or not directory.is_relative_to(source):
+                    continue
                 if directory not in held:
                     recheck()
                     os.mkdir(directory.name,0o700,dir_fd=held[directory.parent])
@@ -328,11 +346,15 @@ def main():
             fd=os.open(destination.name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,
                        0o755 if mode=='100755' else 0o644,dir_fd=held[destination.parent])
             with os.fdopen(fd,'wb') as stream:
-                stream.write(data); stream.flush(); os.fsync(stream.fileno())
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
             recheck()
-        for fd in held.values(): os.fsync(fd)
+        for fd in held.values():
+            os.fsync(fd)
     finally:
-        for fd in held.values(): os.close(fd)
+        for fd in held.values():
+            os.close(fd)
     verify_prepared(path, tree)
     # Materialization can take time. Recheck every original input immediately
     # before claiming a completed attempt, with its first-read identity intact.
