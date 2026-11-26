@@ -302,6 +302,7 @@ def _main_records(authority: Authority, row: Object, payload: Payload, boot: str
                     or child["contextSha256"] != context_digest or _process(child) != child_identity))):
             raise Refusal("The original guardian and child identities do not match the handoff.")
 
+        case: str | None
         if handoff["phase"] == "pending":
             # In the audited launcher the durable accepted publication precedes GO.
             # Registration alone cannot start the Driver. Preserve its original active record.
@@ -399,6 +400,7 @@ def recover_guardians(registry: Path, session: str, *, pending_claude: bool = Fa
         raise Refusal("The requested guardian recovery mode is unavailable.")
     authorities = [Authority(registry, name) for name in COMPONENTS]
     shared = authorities[0].shared
+    target: str | None
     if main_driver is not None:
         kind = "driver-" + main_driver + "-interrupted-main-recovery"
         target = "arbol-" + main_driver + "-driver"
