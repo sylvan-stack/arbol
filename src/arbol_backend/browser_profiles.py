@@ -125,7 +125,7 @@ class BrowserProfiles:
                 raise needs_rebind()
 
     async def verify(self, selected: SubscriptionIdentity, binding: ProfileBinding, browser: BrowserCommands) -> ProfileBinding:
-        observed = (await browser.list()).get(binding.profile)
+        observed = (await browser.list(binding.profile)).get(binding.profile)
         if observed is None or (observed.request, observed.instance) != (binding.request, binding.instance):
             await self.mark_needs_rebind(selected, binding)
             raise needs_rebind()
@@ -145,7 +145,7 @@ class BrowserProfiles:
         binding = await self.reserve(selected)
         if binding.state == "active":
             return await self.verify(selected, binding, browser)
-        observed = (await browser.list()).get(binding.profile)
+        observed = (await browser.list(binding.profile)).get(binding.profile)
         if observed is not None and observed.request != binding.request:
             await self.mark_needs_rebind(selected, binding)
             raise needs_rebind()
