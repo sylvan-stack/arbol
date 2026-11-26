@@ -102,10 +102,14 @@ class DriverIdentity:
     async def capture(self, driver: str, native_id: str) -> CapturedProof:
         return await self.request(driver, native_id, None)
 
+    async def capture_expected(self, proof: SubscriptionProof) -> CapturedProof:
+        return await self.request(proof.driver, proof.native_id, None, expected_proof=proof)
+
     async def expect(self, captured: CapturedProof) -> None:
         await self.request(captured.proof.driver, captured.proof.native_id, captured)
 
-    async def request(self, driver: str, native_id: str, expected: CapturedProof | None) -> CapturedProof:
+    async def request(self, driver: str, native_id: str, expected: CapturedProof | None, *,
+                      expected_proof: SubscriptionProof | None = None) -> CapturedProof:
         target(driver, native_id)
         try:
             async with asyncio.timeout(PROOF_SECONDS):
@@ -114,10 +118,12 @@ class DriverIdentity:
                 if expected is not None:
                     if selected != expected.selection:
                         raise unavailable()
-                    arguments.extend(("--expect", f"{expected.proof.generation}.{expected.proof.witness}"))
+                    expected_proof = expected.proof
+                if expected_proof is not None:
+                    arguments.extend(("--expect", f"{expected_proof.generation}.{expected_proof.witness}"))
                 data = await self.execute(selected.command, arguments)
                 proof = decode_proof(data, driver, native_id)
-                if expected is not None and proof != expected.proof:
+                if expected_proof is not None and proof != expected_proof:
                     raise Refused("needs_rebind", "The verified Driver Subscription lifetime changed.")
                 if await asyncio.to_thread(selection, self.identity, driver) != selected:
                     raise unavailable()

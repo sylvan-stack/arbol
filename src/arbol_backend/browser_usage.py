@@ -208,7 +208,7 @@ class BrowserUsage:
         driver, subscription = provider
         key = "/".join(provider)
         pending = None
-        async with self.accounts.browser_identity_request(*provider) as (selected, verify_proof):
+        async with self.accounts.browser_identity_request(*provider) as (selected, verify_proof, _):
             binding = await self.profiles.active(selected, self.browser)
 
             async def current_account() -> Params:

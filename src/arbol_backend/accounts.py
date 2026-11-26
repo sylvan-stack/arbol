@@ -20,7 +20,7 @@ from .metadata import iso
 from .migration import message
 from .model import Refused
 from .process import Programs
-from .subscription_identity import SubscriptionIdentities, SubscriptionIdentity
+from .subscription_identity import SubscriptionIdentities, SubscriptionIdentity, SubscriptionProof
 from .validation import Catalogues
 
 TOTAL = 25.0
@@ -92,21 +92,32 @@ class Accounts:
     @asynccontextmanager
     async def browser_identity_request(
         self, driver: str, subscription: str, *, confirm_before_lookup: bool = True,
-    ) -> AsyncIterator[tuple[SubscriptionIdentity, Callable[[], Awaitable[None]]]]:
+        expected_proof: SubscriptionProof | None = None,
+    ) -> AsyncIterator[tuple[SubscriptionIdentity, Callable[[], Awaitable[None]], bool]]:
         """Verify a fresh proof before admitting the binding and again before returning its result."""
         authority = self.identity_authority()
         await self.browser_slot(driver, subscription)
         async with authority.database.browser_authority():
-            captured = await self.driver_identity.capture(driver, subscription)
+            captured = None
+            if expected_proof is not None and (expected_proof.driver, expected_proof.native_id) == (driver, subscription):
+                try:
+                    captured = await self.driver_identity.capture_expected(expected_proof)
+                except Refused as error:
+                    if error.code not in {"browser_unavailable", "needs_rebind"}:
+                        raise
+                    # See a changed lifetime through the normal observation path.
+            matched_expected = captured is not None
+            if captured is None:
+                captured = await self.driver_identity.capture(driver, subscription)
             selected = await authority.observe(captured.proof)
             verify = partial(self.driver_identity.expect, captured)
             if confirm_before_lookup:
                 await verify()
-            yield selected, verify
+            yield selected, verify, matched_expected
             await verify()
 
     async def browser_identity(self, driver: str, subscription: str) -> SubscriptionIdentity:
-        async with self.browser_identity_request(driver, subscription) as (selected, _):
+        async with self.browser_identity_request(driver, subscription) as (selected, _, _):
             return selected
 
     async def prepare_browser_rebind(self, driver: str, subscription: str) -> BrowserReplacement:

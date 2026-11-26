@@ -151,6 +151,17 @@ class SubscriptionIdentities:
                 (installation, driver, incarnation, proof.version, proof.generation, proof.witness))
         return SubscriptionIdentity(installation, driver, incarnation, native_id, "active")
 
+    @staticmethod
+    async def proof_row(session: Session, identity: SubscriptionIdentity) -> tuple[int, str, str] | None:
+        rows = await session.execute(
+            "SELECT version,generation,witness FROM public.seqoya_subscription_proofs "
+            "WHERE installation=%s AND driver=%s AND incarnation=%s",
+            (identity.installation, identity.driver, identity.incarnation))
+        if len(rows) != 1 or len(rows[0]) != 3:
+            return None
+        version, generation, witness = rows[0]
+        return version, generation, witness
+
     async def observe(self, proof: SubscriptionProof) -> SubscriptionIdentity:
         """Retain a proved active lifetime or establish the first one for this slot."""
         async with self.transaction() as (session, installation):
@@ -162,11 +173,7 @@ class SubscriptionIdentities:
                 if not prior:
                     return await self.create_lifetime(session, installation, proof.driver, proof.native_id, proof)
             elif current.state == "active":
-                accepted = await session.execute(
-                    "SELECT version,generation,witness FROM public.seqoya_subscription_proofs "
-                    "WHERE installation=%s AND driver=%s AND incarnation=%s",
-                    (installation, proof.driver, current.incarnation))
-                if accepted == [(proof.version, proof.generation, proof.witness)]:
+                if await self.proof_row(session, current) == (proof.version, proof.generation, proof.witness):
                     return current
                 await self.mark_uncertain(session, current)
         # The uncertainty update must commit before refusing the caller.

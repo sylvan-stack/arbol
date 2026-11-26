@@ -11,7 +11,7 @@ from .accounts import Accounts
 from .browser_commands import INSTANCE, REQUEST, BrowserCommands, BrowserProfile, UnsupportedBoundOpen
 from .database import Database, Session
 from .model import Refused
-from .subscription_identity import DRIVER, SubscriptionIdentities, SubscriptionIdentity, canonical
+from .subscription_identity import DRIVER, SubscriptionIdentities, SubscriptionIdentity, SubscriptionProof, canonical
 
 
 def needs_rebind() -> Refused:
@@ -161,14 +161,24 @@ class BrowserProfiles:
             raise needs_rebind()
         return await self.activate(selected, binding, created)
 
-    async def saved_binding(self, driver: str, subscription: str) -> ProfileBinding | None:
-        """Use the stored binding only to start Browser before live proof is ready."""
+    async def saved_binding(self, driver: str, subscription: str) -> tuple[ProfileBinding, SubscriptionProof | None] | None:
+        """Read the same binding and its expected lifetime in one transaction."""
         async with self.identities.transaction() as (session, installation):
             selected = await self.identities.current(session, installation, driver, subscription)
             if selected is None or selected.state != "active":
                 return None
             binding = await self.current(session, selected)
-            return binding if binding is not None and binding.state == "active" else None
+            if binding is None or binding.state != "active":
+                return None
+            row = await self.identities.proof_row(session, selected)
+            proof = None
+            if row is not None:
+                version, generation, witness = row
+                try:
+                    proof = SubscriptionProof(version, driver, subscription, generation, witness)
+                except Refused:
+                    pass  # Legacy or invalid proof goes through the normal observation.
+            return binding, proof
 
     async def open(self, accounts: Accounts, browser: BrowserCommands, driver: str, subscription: str, url: str) -> None:
         async with self.identities.database.browser_authority():
@@ -176,7 +186,8 @@ class BrowserProfiles:
 
     async def open_bound(self, accounts: Accounts, browser: BrowserCommands,
                          driver: str, subscription: str, url: str) -> None:
-        prepared = await self.saved_binding(driver, subscription)
+        saved = await self.saved_binding(driver, subscription)
+        prepared, expected_proof = saved if saved is not None else (None, None)
         approval = asyncio.Event()
         pending = None
         if prepared is not None and prepared.instance is not None:
@@ -185,14 +196,15 @@ class BrowserProfiles:
             ))
         try:
             async with accounts.browser_identity_request(
-                driver, subscription, confirm_before_lookup=False,
-            ) as (selected, verify_proof):
+                driver, subscription, confirm_before_lookup=False, expected_proof=expected_proof,
+            ) as (selected, verify_proof, matched_expected):
                 binding = await self.lookup(selected)
                 if binding is None or binding.state != "active":
                     await verify_proof()
                     binding = await self.reconcile(selected, browser)
                 await self.require_binding(selected, binding)
-                await verify_proof()
+                if not matched_expected or binding != prepared:
+                    await verify_proof()
                 if binding.instance is None:
                     raise needs_rebind()
                 try:
