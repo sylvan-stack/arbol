@@ -132,18 +132,20 @@ class BrowserProfiles:
         await self.require_binding(selected, binding)
         return binding
 
-    async def active(self, selected: SubscriptionIdentity, browser: BrowserCommands) -> ProfileBinding:
-        """Read an established exact binding without creating or opening a profile."""
+    async def lookup(self, selected: SubscriptionIdentity) -> ProfileBinding | None:
         async with self.identities.transaction() as (session, installation):
             await self.require_identity(session, installation, selected)
-            binding = await self.current(session, selected)
-            if binding is None or binding.state != "active":
-                raise needs_rebind()
+            return await self.current(session, selected)
+
+    async def active(self, selected: SubscriptionIdentity, browser: BrowserCommands) -> ProfileBinding:
+        """Read an established exact binding without creating or opening a profile."""
+        binding = await self.lookup(selected)
+        if binding is None or binding.state != "active":
+            raise needs_rebind()
         return await self.verify(selected, binding, browser)
 
-    async def reconcile(self, selected: SubscriptionIdentity, browser: BrowserCommands,
-                        *, reserved: ProfileBinding | None = None) -> ProfileBinding:
-        binding = reserved if reserved is not None else await self.reserve(selected)
+    async def reconcile(self, selected: SubscriptionIdentity, browser: BrowserCommands) -> ProfileBinding:
+        binding = await self.reserve(selected)
         if binding.state == "active":
             return await self.verify(selected, binding, browser)
         observed = (await browser.list(binding.profile)).get(binding.profile)
@@ -159,10 +161,13 @@ class BrowserProfiles:
         return await self.activate(selected, binding, created)
 
     async def open(self, accounts: Accounts, browser: BrowserCommands, driver: str, subscription: str, url: str) -> None:
-        async with accounts.browser_identity_request(driver, subscription) as (selected, verify_proof):
-            binding = await self.reserve(selected)
-            if binding.state != "active":
-                binding = await self.reconcile(selected, browser, reserved=binding)
+        async with accounts.browser_identity_request(
+            driver, subscription, confirm_before_lookup=False,
+        ) as (selected, verify_proof):
+            binding = await self.lookup(selected)
+            if binding is None or binding.state != "active":
+                await verify_proof()
+                binding = await self.reconcile(selected, browser)
             await self.require_binding(selected, binding)
             await verify_proof()
             if binding.instance is None:

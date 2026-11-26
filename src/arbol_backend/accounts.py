@@ -91,7 +91,7 @@ class Accounts:
 
     @asynccontextmanager
     async def browser_identity_request(
-        self, driver: str, subscription: str,
+        self, driver: str, subscription: str, *, confirm_before_lookup: bool = True,
     ) -> AsyncIterator[tuple[SubscriptionIdentity, Callable[[], Awaitable[None]]]]:
         """Verify a fresh proof before admitting the binding and again before returning its result."""
         authority = self.identity_authority()
@@ -100,7 +100,8 @@ class Accounts:
             captured = await self.driver_identity.capture(driver, subscription)
             selected = await authority.observe(captured.proof)
             verify = partial(self.driver_identity.expect, captured)
-            await verify()
+            if confirm_before_lookup:
+                await verify()
             yield selected, verify
             await verify()
 

@@ -28,7 +28,7 @@ PROOF_SECONDS = 20.0
 
 
 def unavailable() -> Refused:
-    return Refused("needs_rebind", "The qualified Driver could not prove the selected Subscription lifetime.")
+    return Refused("browser_unavailable", "The qualified Driver could not verify the Subscription lifetime.")
 
 
 @dataclass(frozen=True)
@@ -117,8 +117,9 @@ class DriverIdentity:
                     arguments.extend(("--expect", f"{expected.proof.generation}.{expected.proof.witness}"))
                 data = await self.execute(selected.command, arguments)
                 proof = decode_proof(data, driver, native_id)
-                if (expected is not None and proof != expected.proof
-                        or await asyncio.to_thread(selection, self.identity, driver) != selected):
+                if expected is not None and proof != expected.proof:
+                    raise Refused("needs_rebind", "The verified Driver Subscription lifetime changed.")
+                if await asyncio.to_thread(selection, self.identity, driver) != selected:
                     raise unavailable()
                 return CapturedProof(proof, selected)
         except (OSError, TimeoutError, ValueError, RuntimeError) as error:
