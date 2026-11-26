@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import defaultdict
 from contextlib import suppress
 from dataclasses import dataclass
 
@@ -98,37 +99,58 @@ def decode_proof(data: bytes, driver: str, native_id: str) -> SubscriptionProof:
 class DriverIdentity:
     def __init__(self, identity: Identity) -> None:
         self.identity = identity
+        self.proof_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
     async def capture(self, driver: str, native_id: str) -> CapturedProof:
         return await self.request(driver, native_id, None)
 
-    async def capture_expected(self, proof: SubscriptionProof) -> CapturedProof:
-        return await self.request(proof.driver, proof.native_id, None, expected_proof=proof)
+    async def capture_expected(self, proof: SubscriptionProof, *, retry_transient: bool = False) -> CapturedProof:
+        return await self.request(proof.driver, proof.native_id, None, expected_proof=proof,
+                                  retry_transient=retry_transient)
 
-    async def expect(self, captured: CapturedProof) -> None:
-        await self.request(captured.proof.driver, captured.proof.native_id, captured)
+    async def expect(self, captured: CapturedProof, *, retry_transient: bool = False) -> None:
+        await self.request(captured.proof.driver, captured.proof.native_id, captured,
+                           retry_transient=retry_transient)
 
     async def request(self, driver: str, native_id: str, expected: CapturedProof | None, *,
-                      expected_proof: SubscriptionProof | None = None) -> CapturedProof:
+                      expected_proof: SubscriptionProof | None = None,
+                      retry_transient: bool = False) -> CapturedProof:
         target(driver, native_id)
+        if driver not in PROOF_DRIVERS:
+            raise unavailable()
         try:
-            async with asyncio.timeout(PROOF_SECONDS):
-                selected = await asyncio.to_thread(selection, self.identity, driver)
-                arguments = ["subscriptions", "identity", native_id]
-                if expected is not None:
-                    if selected != expected.selection:
-                        raise unavailable()
-                    expected_proof = expected.proof
-                if expected_proof is not None:
-                    arguments.extend(("--expect", f"{expected_proof.generation}.{expected_proof.witness}"))
-                data = await self.execute(selected.command, arguments)
-                proof = decode_proof(data, driver, native_id)
-                if expected_proof is not None and proof != expected_proof:
-                    raise Refused("needs_rebind", "The verified Driver Subscription lifetime changed.")
-                if await asyncio.to_thread(selection, self.identity, driver) != selected:
+            # Foreground and resident refresh share this instance. Include the
+            # queue and any exact retry in the original proof budget.
+            async with asyncio.timeout(PROOF_SECONDS), self.proof_locks[driver]:
+                try:
+                    return await self.read_proof(driver, native_id, expected, expected_proof)
+                except Refused as error:
+                    if (not retry_transient or expected is None and expected_proof is None
+                            or error.code != "browser_unavailable"):
+                        raise
+                    return await self.read_proof(driver, native_id, expected, expected_proof)
+        except TimeoutError as error:
+            raise unavailable() from error
+
+    async def read_proof(self, driver: str, native_id: str, expected: CapturedProof | None,
+                         expected_proof: SubscriptionProof | None) -> CapturedProof:
+        try:
+            selected = await asyncio.to_thread(selection, self.identity, driver)
+            arguments = ["subscriptions", "identity", native_id]
+            if expected is not None:
+                if selected != expected.selection:
                     raise unavailable()
-                return CapturedProof(proof, selected)
-        except (OSError, TimeoutError, ValueError, RuntimeError) as error:
+                expected_proof = expected.proof
+            if expected_proof is not None:
+                arguments.extend(("--expect", f"{expected_proof.generation}.{expected_proof.witness}"))
+            data = await self.execute(selected.command, arguments)
+            proof = decode_proof(data, driver, native_id)
+            if expected_proof is not None and proof != expected_proof:
+                raise Refused("needs_rebind", "The verified Driver Subscription lifetime changed.")
+            if await asyncio.to_thread(selection, self.identity, driver) != selected:
+                raise unavailable()
+            return CapturedProof(proof, selected)
+        except (OSError, ValueError, RuntimeError) as error:
             raise unavailable() from error
 
     async def execute(self, command: tuple[str, ...], arguments: list[str]) -> bytes:

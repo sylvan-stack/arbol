@@ -101,7 +101,8 @@ class Accounts:
             captured = None
             if expected_proof is not None and (expected_proof.driver, expected_proof.native_id) == (driver, subscription):
                 try:
-                    captured = await self.driver_identity.capture_expected(expected_proof)
+                    captured = await self.driver_identity.capture_expected(
+                        expected_proof, retry_transient=not confirm_before_lookup)
                 except Refused as error:
                     if error.code not in {"browser_unavailable", "needs_rebind"}:
                         raise
@@ -114,7 +115,8 @@ class Accounts:
             if confirm_before_lookup:
                 await verify()
             yield selected, verify, matched_expected
-            await verify()
+            await self.driver_identity.expect(
+                captured, retry_transient=matched_expected and not confirm_before_lookup)
 
     async def browser_identity(self, driver: str, subscription: str) -> SubscriptionIdentity:
         async with self.browser_identity_request(driver, subscription) as (selected, _, _):
