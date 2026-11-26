@@ -304,6 +304,13 @@ def register_candidates(folders: list[Path], registry: Path, *,
 
 
 def install_command(arguments: list[str], registry: Path) -> int:
+    if (len(arguments) == 4 and arguments[0] == "recover-interrupted-main" and canonical_uuid(arguments[1])
+            and arguments[2] in ("claude", "codex") and arguments[3] in ("check", "apply")):
+        from .driver_guardian_recovery import recover_guardians
+
+        result = recover_guardians(registry, arguments[1], main_driver=arguments[2], check_only=arguments[3] == "check")
+        write_all(1, json_line(result))
+        return 0
     if (len(arguments) == 3 and arguments[0] == "recover-boot" and canonical_uuid(arguments[1])
             and arguments[2] in ("check", "prepare", "resume", "cancel")):
         from .driver_boot_recovery import recover_boot
@@ -327,6 +334,7 @@ def install_command(arguments: list[str], registry: Path) -> int:
         raise ValueError("Use arbol-builds driver-install fresh <UUID> <five stable candidate folders>, "
                          "driver-install replace <UUID> [newer stable candidate folders ...], "
                          "driver-install recover-guardians <UUID>, driver-install recover-pending-claude <UUID>, or "
+                         "driver-install recover-interrupted-main <UUID> <claude|codex> <check|apply>, or "
                          "driver-install recover-boot <UUID> check|prepare|resume|cancel.")
     payloads = register_candidates([Path(argument) for argument in arguments[2:]], registry)
     provider = payloads["arbol"]

@@ -29,6 +29,8 @@ from .driver_admission import (
     publish,
     read,
     read_bytes,
+    read_handoff,
+    read_writer,
     reconcile,
     sha256,
     sync_directory,
@@ -37,7 +39,7 @@ from .driver_admission import (
     validate,
 )
 from .driver_payload import Payload, pin_payloads, verify_acceptance, verify_gate
-from .driver_process import boot_uuid, matches
+from .driver_process import boot_uuid, identity_record, matches
 from .driver_replacement import RECEIPT_LIMIT, _bound_packages, _normal, _promotion, _promotion_path
 from .driver_state import _immutable, _use_current
 from .launcher import open_use_guard
@@ -47,6 +49,10 @@ AUDITED_PROVIDER = "3dc4ae75852506d0943d1b5906e018732c640fd99ff8d04fac3c0fb65279
 # This sealed Claude entry waits for a durable accepted transfer before entering the CLI.
 AUDITED_CLAUDE = "1572a8a2cf8e6fb10894e0ed63adc9a9bcd37f55a38160cf182d13a7ca13ce57"
 CLAUDE = "arbol-claude-driver"
+AUDITED_MAIN_PRODUCERS = {
+    "claude": "fab8a36e022c4caf437cf4b2f39c15c300260bf89502a2ffdae852252c42f0ca",
+    "codex": "e582bf34a3705aa75956dfe8e38908cce87570ecca74fee3f899ad5f4ceb94d6",
+}
 TREES = ("writers", "handoffs", "normal-admissions")
 ENTRIES = (*TREES, "taint.json")
 
@@ -232,6 +238,133 @@ def _prove_pending_claude(authority: Authority, lease: int, row: Object, payload
             "entries": {name: _fingerprint(authority.folder / name) for name in ENTRIES}}
 
 
+def _process(writer: Object) -> Object:
+    return identity_record({key: writer[key] for key in ("pid", "startedAt")})
+
+
+def _main_records(authority: Authority, row: Object, payload: Payload, boot: str) -> tuple[dict[str, Object], dict[str, Object]]:
+    """Read the complete current-epoch ledger for the audited main-only recovery."""
+    handoffs: dict[str, Object] = {}
+    contexts: dict[str, tuple[Object, str]] = {}
+    acceptance = authority.read("qualification")["acceptanceSha256"]
+    stamps = {"component": authority.component, "epoch": row["epoch"], "payloadSha256": payload.digest}
+    for path in _documents(authority.folder / "handoffs"):
+        if path.name.endswith(".context.json"):
+            raw = read_bytes(path)
+            context = decode(raw)
+            normal_context(context)
+            if path.name != context["handoff"] + ".context.json":
+                raise Refusal("A main handoff context has an inconsistent name.")
+            contexts[context["handoff"]] = (context, sha256(raw))
+        else:
+            handoff = read_handoff(authority, path.stem)
+            if (handoff["invocation"] in handoffs or handoff["role"] != "main"
+                    or handoff["entry"] != payload.descriptor["entry"] or handoff["acceptanceSha256"] != acceptance
+                    or any(handoff[key] != value for key, value in stamps.items())):
+                raise Refusal("The ledger contains an unaudited or duplicate main handoff.")
+            handoffs[handoff["invocation"]] = handoff
+    if {item["handoff"] for item in handoffs.values()} != contexts.keys():
+        raise Refusal("The main handoff context inventory is incomplete.")
+
+    markers: dict[str, Object] = {}
+    interrupted: dict[str, Object] = {}
+    roots = list(private_directory(authority.folder / "writers").iterdir())
+    if not roots or len(roots) > 100000 or {path.name for path in roots} != handoffs.keys():
+        raise Refusal("The writer roots do not match the audited main handoffs.")
+    registry_digest = sha256(canonical(authority.identity))
+    for path in sorted(roots):
+        invocation = path.name
+        handoff = handoffs[invocation]
+        context, context_digest = contexts[handoff["handoff"]]
+        if not valid_token(invocation) or handoff["contextSha256"] != context_digest:
+            raise Refusal("The writer invocation or its handoff context changed.")
+        writers = {file.stem: read_writer(authority, invocation, file.stem)
+                   for file in _documents(path, limit=2)}
+        parent, child = writers.get(handoff["parent"]), writers.get(handoff["child"])
+        if (parent is None or parent["parent"] is not None or parent["contextSha256"] is not None
+                or handoff["parent"] == handoff["child"]
+                or writers.keys() - {handoff["parent"], handoff["child"]}
+                or any(writer["boot"] != boot or any(writer[key] != value for key, value in stamps.items())
+                       for writer in writers.values())):
+            raise Refusal("The main handoff does not own its precise writer inventory.")
+        parent_identity = _process(parent)
+        expected_context = {
+            "version": 1, "kind": "driver-admission-context", **stamps, "boot": boot,
+            "role": "main", "registry": str(authority.registry), "registrySha256": registry_digest,
+            "invocation": invocation, "writer": handoff["child"],
+            "parent": {"writer": parent["writer"], **parent_identity}, "process": context["process"],
+            "handoff": handoff["handoff"], "nonce": handoff["nonce"], "entry": handoff["entry"],
+            "acceptanceSha256": acceptance,
+        }
+        child_identity = identity_record(context["process"])
+        if (context != expected_context or child_identity == parent_identity
+                or (child is not None and (child["parent"] != parent["writer"]
+                    or child["contextSha256"] != context_digest or _process(child) != child_identity))):
+            raise Refusal("The original guardian and child identities do not match the handoff.")
+
+        if handoff["phase"] == "pending":
+            # In the audited launcher the durable accepted publication precedes GO.
+            # Registration alone cannot start the Driver. Preserve its original active record.
+            if parent["phase"] != "active" or (child is not None and child["phase"] != "active"):
+                raise Refusal("A pending main handoff contains a terminal writer.")
+            case = "pending-before-go"
+        else:
+            if child is None or child["phase"] != "terminal":
+                raise Refusal("An accepted main child lacks a verified terminal record.")
+            case = "terminal-child" if parent["phase"] == "active" else None
+        if case is not None:
+            if matches(parent_identity) or matches(child_identity):
+                raise Refusal("An interrupted main handoff still has a live original process.")
+            interrupted[invocation] = {"invocation": invocation, "writer": parent["writer"], "case": case}
+        markers[invocation + ".json"] = {
+            "version": 1, "kind": "driver-normal-admission", **stamps, "boot": boot,
+            "invocation": invocation, "build": row["build"], "checkpoint": None,
+        }
+    return markers, interrupted
+
+
+def _prove_interrupted_main(authority: Authority, lease: int, row: Object, payload: Payload,
+                            boot: str, driver: str) -> Object:
+    _exclusive(authority, lease)
+    if (authority.component != "arbol-" + driver + "-driver"
+            or payload.digest != AUDITED_MAIN_PRODUCERS[driver] or row["payloadSha256"] != payload.digest
+            or os.path.lexists(authority.folder / "archive" / "custody-pending.json")
+            or next(private_directory(authority.folder / "sessions").iterdir(), None) is not None):
+        raise Refusal("The selected Driver is outside the audited main handoff recovery.")
+    markers, interrupted = _main_records(authority, row, payload, boot)
+    if not interrupted:
+        raise Refusal("The selected Driver has no provable interrupted main handoff.")
+    taint = authority.read("taint")
+    if (taint["reason"] != "custody-loss" or taint["component"] != authority.component
+            or taint["epoch"] != row["epoch"] or taint["boot"] != boot):
+        raise Refusal("The custody-loss record does not match the installed Driver.")
+    if taint["payloadSha256"] is None:
+        if taint["invocation"] + ".json" in markers:
+            raise Refusal("A generic custody-loss record conflicts with a launch marker.")
+    elif taint["payloadSha256"] != payload.digest or taint["invocation"] not in interrupted:
+        raise Refusal("The custody-loss record is unrelated to the interrupted main handoffs.")
+
+    for path in _documents(authority.folder / "normal-admissions"):
+        marker = read(path)
+        expected = markers.pop(path.name, None)
+        if expected is not None:
+            if marker != expected:
+                raise Refusal("A current main admission marker changed.")
+            continue
+        fields(marker, "version kind component epoch invocation payloadSha256 boot build checkpoint")
+        if (marker["kind"] != "driver-normal-admission" or marker["component"] != authority.component
+                or marker["epoch"] == row["epoch"] or not valid_token(marker["invocation"])
+                or path.name != marker["invocation"] + ".json" or marker["checkpoint"] is not None):
+            raise Refusal("An extra main admission marker cannot be explained by retained custody.")
+        _prior_marker(authority, marker)
+    if markers:
+        raise Refusal("The current main admission marker inventory is incomplete.")
+
+    return {"component": authority.component, "epoch": row["epoch"], "case": "interrupted-main",
+            "interruptions": list(interrupted.values()),
+            "entries": {name: _fingerprint(authority.folder / name) for name in ENTRIES}}
+
+
 def _archive(authority: Authority, row: Object, session: str, *, verify_only: bool) -> None:
     archive = private_directory(authority.folder / "archive")
     destination = private_directory(archive / ("guardian-recovery-" + session), create=not verify_only)
@@ -256,13 +389,22 @@ def _archive(authority: Authority, row: Object, session: str, *, verify_only: bo
             raise Refusal(f"{authority.component} has a new custody taint.")
 
 
-def recover_guardians(registry: Path, session: str, *, pending_claude: bool = False) -> Object:
+def recover_guardians(registry: Path, session: str, *, pending_claude: bool = False,
+                      main_driver: str | None = None, check_only: bool = False) -> Object:
     home = Path(getpwuid(os.getuid()).pw_dir)
     if registry != build_registry(home) or not canonical_uuid(session):
         raise Refusal("Guardian recovery requires the canonical stable registry and a session UUID.")
+    if ((main_driver is not None and (pending_claude or main_driver not in AUDITED_MAIN_PRODUCERS))
+            or (check_only and main_driver is None)):
+        raise Refusal("The requested guardian recovery mode is unavailable.")
     authorities = [Authority(registry, name) for name in COMPONENTS]
     shared = authorities[0].shared
-    kind = "driver-claude-pending-recovery" if pending_claude else "driver-guardian-recovery"
+    if main_driver is not None:
+        kind = "driver-" + main_driver + "-interrupted-main-recovery"
+        target = "arbol-" + main_driver + "-driver"
+    else:
+        kind = "driver-claude-pending-recovery" if pending_claude else "driver-guardian-recovery"
+        target = CLAUDE if pending_claude else None
     with deployment_mutex(registry), ExitStack() as locks:
         current = fresh_install(registry)
         gate = verify_gate(registry)
@@ -318,10 +460,24 @@ def recover_guardians(registry: Path, session: str, *, pending_claude: bool = Fa
 
         selected = [(authority, lease, row)
                     for authority, lease, row in zip(authorities, leases, before["components"], strict=True)
-                    if not pending_claude or authority.component == CLAUDE]
+                    if target is None or authority.component == target]
+        if check_only and (proof is not None or os.path.lexists(complete)):
+            raise Refusal("Use the recorded session to resume the interrupted main handoff recovery.")
         if current == before and not os.path.lexists(complete):
-            rows = [_prove_pending_claude(authority, lease, row, packages[CLAUDE], boot) if pending_claude
-                    else _prove(authority, lease, row, boot) for authority, lease, row in selected]
+            rows = []
+            for authority, lease, row in selected:
+                if main_driver is not None:
+                    recovered = _prove_interrupted_main(authority, lease, row, packages[authority.component],
+                                                       boot, main_driver)
+                elif pending_claude:
+                    recovered = _prove_pending_claude(authority, lease, row, packages[CLAUDE], boot)
+                else:
+                    recovered = _prove(authority, lease, row, boot)
+                rows.append(recovered)
+            if check_only:
+                return {"version": 1, "kind": kind + "-checked", "boot": boot,
+                        "components": [{"component": row["component"],
+                                        "cases": [entry["case"] for entry in row["interruptions"]]} for row in rows]}
             prepared = {"version": 1, "kind": kind, "session": session, "boot": boot,
                         "providerPayloadSha256": gate.provider.digest, "installed": before, "components": rows}
             private_directory(receipts, create=True)
