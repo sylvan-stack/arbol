@@ -74,10 +74,10 @@ class BrowserCommands:
             raise unavailable()
         profiles: dict[str, BrowserProfile] = {}
         for item in reply["profiles"]:
-            profile = record(item, listing=True)
-            if profile.profile in profiles:
+            observed = record(item, listing=True)
+            if observed.profile in profiles:
                 raise unavailable()
-            profiles[profile.profile] = profile
+            profiles[observed.profile] = observed
         return profiles
 
     async def create(self, profile: str, request: str) -> BrowserProfile:
