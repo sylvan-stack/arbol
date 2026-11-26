@@ -27,6 +27,10 @@ MAX_OUTPUT = 1024 * 1024
 BROWSER_SECONDS = 65.0
 
 
+class UnsupportedScopedListing(Exception):
+    pass
+
+
 def unavailable() -> Refused:
     return Refused("browser_unavailable", "The selected signed Browser could not verify this profile operation.")
 
@@ -60,8 +64,11 @@ class BrowserCommands:
         self.identity = identity
         self.launcher = identity.home / "Applications/Arbol Browser/bin/arbol-browser"
 
-    async def list(self) -> dict[str, BrowserProfile]:
-        reply = await self.execute("profiles", "list")
+    async def list(self, profile: str | None = None) -> dict[str, BrowserProfile]:
+        if profile is not None and PROFILE.fullmatch(profile) is None:
+            raise unavailable()
+        arguments = ("profiles", "list") if profile is None else ("profiles", "list", profile)
+        reply = await self.execute(*arguments)
         if reply.keys() != {"profiles"} or not isinstance(reply["profiles"], list) or len(reply["profiles"]) > 4096:
             raise unavailable()
         profiles: dict[str, BrowserProfile] = {}
@@ -110,7 +117,12 @@ class BrowserCommands:
                 selected = await asyncio.to_thread(installed_browser_selection, self.identity.home)
                 if selected is None:
                     raise unavailable()
-                data = await self.run(str(selected["build"]), arguments)
+                try:
+                    data = await self.run(str(selected["build"]), arguments)
+                except UnsupportedScopedListing:
+                    # Older signed Builds reject the scoped syntax. Keep this
+                    # fallback on the same selected Build and within the same budget.
+                    data = await self.run(str(selected["build"]), ("profiles", "list"))
                 if await asyncio.to_thread(installed_browser_selection, self.identity.home) != selected:
                     raise unavailable()
                 value = json.loads(data.decode("utf-8"), object_pairs_hook=pairs, parse_constant=constant, parse_float=finite)
@@ -132,8 +144,13 @@ class BrowserCommands:
             try:
                 await child.stdout.readexactly(MAX_OUTPUT + 1)
             except asyncio.IncompleteReadError as end:
-                if await child.wait() == 0:
+                status = await child.wait()
+                if status == 0:
                     return end.partial
+                if status == 2 and len(arguments) == 3 and arguments[:2] == ("profiles", "list"):
+                    failure = json.loads(end.partial.decode("utf-8"), object_pairs_hook=pairs, parse_constant=constant)
+                    if isinstance(failure, dict) and isinstance(failure.get("error"), dict) and failure["error"].get("code") == "invalid_input":
+                        raise UnsupportedScopedListing() from None
             raise unavailable()
         finally:
             if child.returncode is None:
