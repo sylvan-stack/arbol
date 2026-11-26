@@ -172,6 +172,7 @@ export interface SubscriptionView {
   error?: string;
   usageRequests?: Record<string, { pending?: boolean; error?: string }>;
   usageOpening?: string;
+  usageOpened?: Pick<SubscriptionRecord, 'createdAt' | 'family'> & { key: string };
   usageLinkErrors?: Record<string, string | undefined>;
   evidenceError?: string;
   nameNotices?: Record<string, string | undefined>;

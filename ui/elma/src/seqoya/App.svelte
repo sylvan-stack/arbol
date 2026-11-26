@@ -401,18 +401,22 @@
         ?.subscriptions?.find((row) => row.id === subscription);
       if (!active || !subscriptions.connected || account?.state !== 'signed_in' || subscriptions.usageOpening) return;
       subscriptions = {
-        ...subscriptions, usageOpening: key, usageLinkErrors: { ...subscriptions.usageLinkErrors, [key]: undefined },
+        ...subscriptions, usageOpening: key, usageOpened: undefined,
+        usageLinkErrors: { ...subscriptions.usageLinkErrors, [key]: undefined },
       };
+      const sameAccount = () => isCurrent(requestedOn) && subscriptions.listing?.drivers
+        .find(entry => entry.driver === driver)?.subscriptions?.some(row => row.id === subscription
+          && row.createdAt === account.createdAt && row.family === account.family && row.state === 'signed_in');
       try {
         const result = await app.call('app.openSubscriptionUsage', { driver, subscription });
         if (result.status !== 'opened' && result.status !== 'cancelled') {
           throw new Error('Invalid Browser opening result.');
         }
+        if (result.status === 'opened' && sameAccount()) subscriptions = {
+          ...subscriptions, usageOpened: { key, createdAt: account.createdAt, family: account.family },
+        };
       } catch (error) {
-        const current = subscriptions.listing?.drivers.find((entry) => entry.driver === driver)
-          ?.subscriptions?.find((row) => row.id === subscription);
-        if (isCurrent(requestedOn) && current?.state === 'signed_in'
-          && current.createdAt === account.createdAt && current.family === account.family) subscriptions = {
+        if (sameAccount()) subscriptions = {
           ...subscriptions,
           usageLinkErrors: {
             ...subscriptions.usageLinkErrors,

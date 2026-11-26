@@ -86,12 +86,16 @@
   {/if}
   {#if provider && onOpenUsage}
     <div class="row usage-actions">
-      <Button label={opening ? 'Preparing Browser…' : 'Open in ' + provider} tone="ghost" busy={opening}
+      <Button label={opening ? 'Verifying and opening…' : 'Open in ' + provider} tone="ghost" busy={opening}
         disabled={!view.connected || view.usageOpening !== undefined}
         onclick={() => onOpenUsage?.(driver, subscription.id)} />
     </div>
   {/if}
   {#if request?.error}<p class="small warning" role="status">{request.error}</p>{/if}
+  {#if provider && view.usageOpened?.key === key && view.usageOpened.createdAt === subscription.createdAt
+    && view.usageOpened.family === subscription.family && subscription.state === 'signed_in'}
+    <p class="small muted" role="status">Opened in Arbol Browser.</p>
+  {/if}
   {#if provider && view.usageLinkErrors?.[key]}<p class="small warning" role="status">{view.usageLinkErrors[key]}</p>{/if}
 
   {#if resets?.count !== undefined && resets.count > 0}
