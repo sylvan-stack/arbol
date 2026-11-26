@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import secrets
 from dataclasses import dataclass, replace
@@ -160,29 +161,66 @@ class BrowserProfiles:
             raise needs_rebind()
         return await self.activate(selected, binding, created)
 
+    async def saved_binding(self, driver: str, subscription: str) -> ProfileBinding | None:
+        """Use the stored binding only to start Browser before live proof is ready."""
+        async with self.identities.transaction() as (session, installation):
+            selected = await self.identities.current(session, installation, driver, subscription)
+            if selected is None or selected.state != "active":
+                return None
+            binding = await self.current(session, selected)
+            return binding if binding is not None and binding.state == "active" else None
+
     async def open(self, accounts: Accounts, browser: BrowserCommands, driver: str, subscription: str, url: str) -> None:
-        async with accounts.browser_identity_request(
-            driver, subscription, confirm_before_lookup=False,
-        ) as (selected, verify_proof):
-            binding = await self.lookup(selected)
-            if binding is None or binding.state != "active":
-                await verify_proof()
-                binding = await self.reconcile(selected, browser)
-            await self.require_binding(selected, binding)
-            await verify_proof()
-            if binding.instance is None:
-                raise needs_rebind()
-            try:
-                try:
-                    await browser.open(binding.profile, binding.instance, url, creation_request=binding.request)
-                except UnsupportedBoundOpen:
-                    await self.verify(selected, binding, browser)
+        async with self.identities.database.browser_authority():
+            await self.open_bound(accounts, browser, driver, subscription, url)
+
+    async def open_bound(self, accounts: Accounts, browser: BrowserCommands,
+                         driver: str, subscription: str, url: str) -> None:
+        prepared = await self.saved_binding(driver, subscription)
+        approval = asyncio.Event()
+        pending = None
+        if prepared is not None and prepared.instance is not None:
+            pending = asyncio.create_task(browser.open(
+                prepared.profile, prepared.instance, url, creation_request=prepared.request, approval=approval,
+            ))
+        try:
+            async with accounts.browser_identity_request(
+                driver, subscription, confirm_before_lookup=False,
+            ) as (selected, verify_proof):
+                binding = await self.lookup(selected)
+                if binding is None or binding.state != "active":
                     await verify_proof()
-                    await browser.open(binding.profile, binding.instance, url)
-            except Refused as error:
-                # A verified disappearance or replacement is rebindable.
-                # A transient command refusal leaves the active binding intact.
-                if error.code != "needs_rebind":
-                    await self.verify(selected, binding, browser)
-                raise
-            await self.require_binding(selected, binding)
+                    binding = await self.reconcile(selected, browser)
+                await self.require_binding(selected, binding)
+                await verify_proof()
+                if binding.instance is None:
+                    raise needs_rebind()
+                try:
+                    opened = False
+                    if pending is not None and binding == prepared:
+                        approval.set()
+                        try:
+                            await pending
+                            opened = True
+                        except UnsupportedBoundOpen:
+                            pass  # Signed predecessors support the ordinary verified open.
+                    if not opened:
+                        if pending is not None and not pending.done():
+                            pending.cancel()
+                            await asyncio.gather(pending, return_exceptions=True)
+                        try:
+                            await browser.open(binding.profile, binding.instance, url, creation_request=binding.request)
+                        except UnsupportedBoundOpen:
+                            await self.verify(selected, binding, browser)
+                            await verify_proof()
+                            await browser.open(binding.profile, binding.instance, url)
+                except Refused as error:
+                    # A transient command refusal leaves the active binding intact.
+                    if error.code != "needs_rebind":
+                        await self.verify(selected, binding, browser)
+                    raise
+                await self.require_binding(selected, binding)
+        finally:
+            if pending is not None:
+                pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)

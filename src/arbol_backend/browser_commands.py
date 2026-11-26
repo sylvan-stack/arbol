@@ -95,7 +95,10 @@ class BrowserCommands:
             raise unavailable()
         return created
 
-    async def open(self, profile: str, instance: str, url: str, *, creation_request: str | None = None) -> None:
+    async def open(self, profile: str, instance: str, url: str, *, creation_request: str | None = None,
+                   approval: asyncio.Event | None = None) -> None:
+        if approval is not None and creation_request is None:
+            raise unavailable()
         if creation_request is not None and REQUEST.fullmatch(creation_request) is None:
             raise unavailable()
         if (SEQOYA_PROFILE.fullmatch(profile) is None or INSTANCE.fullmatch(instance) is None
@@ -110,7 +113,11 @@ class BrowserCommands:
         arguments: tuple[str, ...] = ("open", "--profile", profile, "--profile-instance", instance, "--url", url)
         if creation_request is not None:
             arguments += ("--creation-request", creation_request)
-        reply = await self.execute(*arguments)
+        if approval is not None:
+            arguments += ("--await-approval",)
+            reply = await self.execute(*arguments, approval=approval)
+        else:
+            reply = await self.execute(*arguments)
         required = {"profile", "instance", "process", "alreadyRunning"}
         if (not required <= reply.keys() <= required | {"tab"} or reply["profile"] != profile
                 or not isinstance(reply["instance"], str) or HOST.fullmatch(reply["instance"]) is None
@@ -126,7 +133,8 @@ class BrowserCommands:
         return await self.execute("seqoya-usage", "--profile", profile, "--profile-instance", instance,
                                   "--provider", provider, input_data=(claim + "\n").encode("ascii"))
 
-    async def execute(self, *arguments: str, input_data: bytes | None = None) -> dict[str, Any]:
+    async def execute(self, *arguments: str, input_data: bytes | None = None,
+                      approval: asyncio.Event | None = None) -> dict[str, Any]:
         if self.identity.fixture:
             raise unavailable()
         try:
@@ -135,7 +143,10 @@ class BrowserCommands:
                 if selected is None:
                     raise unavailable()
                 try:
-                    data = await self.run(str(selected["build"]), arguments, input_data=input_data)
+                    if approval is None:
+                        data = await self.run(str(selected["build"]), arguments, input_data=input_data)
+                    else:
+                        data = await self.run(str(selected["build"]), arguments, approval=approval)
                 except UnsupportedScopedListing:
                     # Older signed Builds reject the scoped syntax. Keep this
                     # fallback on the same selected Build and within the same budget.
@@ -149,15 +160,31 @@ class BrowserCommands:
         except (OSError, ValueError, RuntimeError, TimeoutError) as error:
             raise unavailable() from error
 
-    async def run(self, build: str, arguments: tuple[str, ...], *, input_data: bytes | None = None) -> bytes:
+    @staticmethod
+    async def send_approval(writer: asyncio.StreamWriter, approval: asyncio.Event) -> None:
+        try:
+            await approval.wait()
+            writer.write(b"1")
+            await writer.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # The signed command's own response determines the outcome.
+        finally:
+            writer.close()
+
+    async def run(self, build: str, arguments: tuple[str, ...], *, input_data: bytes | None = None,
+                  approval: asyncio.Event | None = None) -> bytes:
         child = await asyncio.create_subprocess_exec(
             str(self.launcher), "-v", build, *arguments, cwd=self.identity.folder,
             env={"HOME": str(self.identity.home), "PATH": "/usr/bin:/bin"},
-            stdin=asyncio.subprocess.DEVNULL if input_data is None else asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.PIPE if input_data is not None or approval is not None else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
             start_new_session=True, limit=MAX_OUTPUT,
         )
         assert child.stdout is not None
+        feeder = None
+        if approval is not None:
+            assert child.stdin is not None
+            feeder = asyncio.create_task(self.send_approval(child.stdin, approval))
         try:
             if child.stdin is not None and input_data is not None:
                 try:
@@ -184,3 +211,6 @@ class BrowserCommands:
             if child.returncode is None:
                 with suppress(ProcessLookupError):
                     child.terminate()
+            if feeder is not None:
+                feeder.cancel()
+                await asyncio.gather(feeder, return_exceptions=True)
