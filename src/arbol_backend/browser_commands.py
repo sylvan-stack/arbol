@@ -32,6 +32,10 @@ class UnsupportedScopedListing(Exception):
     pass
 
 
+class UnsupportedBoundOpen(Exception):
+    pass
+
+
 def unavailable() -> Refused:
     return Refused("browser_unavailable", "The selected signed Browser could not verify this profile operation.")
 
@@ -91,7 +95,9 @@ class BrowserCommands:
             raise unavailable()
         return created
 
-    async def open(self, profile: str, instance: str, url: str) -> None:
+    async def open(self, profile: str, instance: str, url: str, *, creation_request: str | None = None) -> None:
+        if creation_request is not None and REQUEST.fullmatch(creation_request) is None:
+            raise unavailable()
         if (SEQOYA_PROFILE.fullmatch(profile) is None or INSTANCE.fullmatch(instance) is None
                 or len(url) > 8192 or any(ord(c) <= 32 or c in "\\\x7f" for c in url)):
             raise unavailable()
@@ -101,7 +107,10 @@ class BrowserCommands:
                 raise unavailable()
         except ValueError as error:
             raise unavailable() from error
-        reply = await self.execute("open", "--profile", profile, "--profile-instance", instance, "--url", url)
+        arguments: tuple[str, ...] = ("open", "--profile", profile, "--profile-instance", instance, "--url", url)
+        if creation_request is not None:
+            arguments += ("--creation-request", creation_request)
+        reply = await self.execute(*arguments)
         required = {"profile", "instance", "process", "alreadyRunning"}
         if (not required <= reply.keys() <= required | {"tab"} or reply["profile"] != profile
                 or not isinstance(reply["instance"], str) or HOST.fullmatch(reply["instance"]) is None
@@ -162,9 +171,13 @@ class BrowserCommands:
                 status = await child.wait()
                 if status == 0:
                     return end.partial
-                if status == 2 and len(arguments) == 3 and arguments[:2] == ("profiles", "list"):
+                scoped_list = len(arguments) == 3 and arguments[:2] == ("profiles", "list")
+                bound_open = arguments[:1] == ("open",) and "--creation-request" in arguments
+                if status == 2 and (scoped_list or bound_open):
                     failure = json.loads(end.partial.decode("utf-8"), object_pairs_hook=pairs, parse_constant=constant)
                     if isinstance(failure, dict) and isinstance(failure.get("error"), dict) and failure["error"].get("code") == "invalid_input":
+                        if bound_open:
+                            raise UnsupportedBoundOpen() from None
                         raise UnsupportedScopedListing() from None
             raise unavailable()
         finally:

@@ -7,7 +7,7 @@ import secrets
 from dataclasses import dataclass, replace
 
 from .accounts import Accounts
-from .browser_commands import INSTANCE, REQUEST, BrowserCommands, BrowserProfile
+from .browser_commands import INSTANCE, REQUEST, BrowserCommands, BrowserProfile, UnsupportedBoundOpen
 from .database import Database, Session
 from .model import Refused
 from .subscription_identity import DRIVER, SubscriptionIdentities, SubscriptionIdentity, canonical
@@ -141,8 +141,9 @@ class BrowserProfiles:
                 raise needs_rebind()
         return await self.verify(selected, binding, browser)
 
-    async def reconcile(self, selected: SubscriptionIdentity, browser: BrowserCommands) -> ProfileBinding:
-        binding = await self.reserve(selected)
+    async def reconcile(self, selected: SubscriptionIdentity, browser: BrowserCommands,
+                        *, reserved: ProfileBinding | None = None) -> ProfileBinding:
+        binding = reserved if reserved is not None else await self.reserve(selected)
         if binding.state == "active":
             return await self.verify(selected, binding, browser)
         observed = (await browser.list(binding.profile)).get(binding.profile)
@@ -159,16 +160,24 @@ class BrowserProfiles:
 
     async def open(self, accounts: Accounts, browser: BrowserCommands, driver: str, subscription: str, url: str) -> None:
         async with accounts.browser_identity_request(driver, subscription) as (selected, verify_proof):
-            binding = await self.reconcile(selected, browser)
+            binding = await self.reserve(selected)
+            if binding.state != "active":
+                binding = await self.reconcile(selected, browser, reserved=binding)
             await self.require_binding(selected, binding)
             await verify_proof()
             if binding.instance is None:
                 raise needs_rebind()
             try:
-                await browser.open(binding.profile, binding.instance, url)
-            except Refused:
+                try:
+                    await browser.open(binding.profile, binding.instance, url, creation_request=binding.request)
+                except UnsupportedBoundOpen:
+                    await self.verify(selected, binding, browser)
+                    await verify_proof()
+                    await browser.open(binding.profile, binding.instance, url)
+            except Refused as error:
                 # A verified disappearance or replacement is rebindable.
                 # A transient command refusal leaves the active binding intact.
-                await self.verify(selected, binding, browser)
+                if error.code != "needs_rebind":
+                    await self.verify(selected, binding, browser)
                 raise
             await self.require_binding(selected, binding)
