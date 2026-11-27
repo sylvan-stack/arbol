@@ -28,6 +28,7 @@
       ? window.source + ' · Read ' + formatSubscriptionCardTime(window.observedAt) : '',
   ].filter(Boolean).join('\n') : '');
   const estimateTip = $derived([window?.model, window?.estimateBasis,
+    window?.savedEstimateAt ? 'Last successful estimate from ' + formatSubscriptionCardTime(window.savedEstimateAt) : '',
     window?.terminal && window.expiresAt ? 'Allowance expires ' + formatSubscriptionCardTime(window.expiresAt) : '',
   ].filter(Boolean).join(' · ') || undefined);
 
@@ -43,8 +44,8 @@
     return [days ? days + ' d' : '', hours ? hours + ' h' : '',
       minutes % 60 ? minutes % 60 + ' min' : ''].filter(Boolean).join(' ');
   }
-  function amount(value?: number, rate = false) {
-    if (value === undefined) return 'Unavailable';
+  function amount(value?: number, rate = false, empty = 'Unavailable') {
+    if (value === undefined) return empty;
     const rounded = Number(value.toPrecision(3));
     const tokens = rounded >= 1e6 ? significant.format(rounded / 1e6) + 'M'
       : rounded >= 1e3 ? significant.format(rounded / 1e3) + 'k' : significant.format(rounded);
@@ -101,13 +102,17 @@
       </button>
     </Tooltip>
   </div>
+  {#if window.savedEstimateAt}
+    <p class="small muted">Last token estimate · <time datetime={window.savedEstimateAt}>{formatSubscriptionCardTime(window.savedEstimateAt)}</time></p>
+  {/if}
   <dl class="metrics">
     <dt>Total tokens per window</dt><dd title={estimateTip}>{formatAllowanceTokenTotal(allowanceTokenTotal(window))}</dd>
-    {#if window.next !== 'awaitingRenewal'}
-      <dt>Output-token equivalents used</dt><dd title={estimateTip}>{amount(window.outputTokensUsed)}</dd>
-      <dt>Output-token equivalents remaining</dt><dd title={estimateTip}>{amount(window.outputTokensRemaining)}</dd>
+    {#if window.next !== 'awaitingRenewal' || window.savedEstimateAt}
+      <dt>Output-token equivalents used</dt><dd title={estimateTip}>{amount(window.outputTokensUsed, false, 'Awaiting first estimate')}</dd>
+      <dt>Output-token equivalents remaining</dt><dd title={estimateTip}>{amount(window.outputTokensRemaining, false, 'Awaiting first estimate')}</dd>
       <dt>Remaining equivalents per hour</dt>
-      <dd title={estimateTip}>{window.pendingStart ? 'After first use' : amount(window.outputTokensPerHour, true)}</dd>
+      <dd title={estimateTip}>{window.pendingStart && window.outputTokensPerHour === undefined
+        ? 'After first use' : amount(window.outputTokensPerHour, true, 'Awaiting first estimate')}</dd>
     {/if}
   </dl>
 </section>

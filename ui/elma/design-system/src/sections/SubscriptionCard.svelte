@@ -6,7 +6,8 @@
   import {
     defaultSubscriptionUserScore, formatSubscriptionCardTime, isSubscriptionUserScore, sortAllowanceWindows,
     subscriptionKey, subscriptionName, subscriptionProviderOrder, subscriptionVendor,
-    type OpenSubscriptionUsage, type RenameSubscription, type SubscriptionAvailability, type SubscriptionRecord, type SubscriptionView,
+    type EstimatedTokenCost, type OpenSubscriptionUsage, type RenameSubscription,
+    type SubscriptionAvailability, type SubscriptionPrice, type SubscriptionRecord, type SubscriptionView,
   } from './seqoya-subscriptions';
 
   let { driver, subscription, view, availability, onOpenUsage, onRename }: {
@@ -31,10 +32,29 @@
   const key = $derived(subscriptionKey(driver, subscription.id));
   const name = $derived(subscriptionName(driver, subscription));
   const metrics = $derived(subscription.metrics);
+  const price = $derived(metrics?.price);
+  const tokenCost = $derived(metrics?.estimatedTokenCost);
+  const defaultModel = $derived(subscription.modelLabels?.[0]);
   const resets = $derived(metrics?.limitResets);
   const payAsYouGo = $derived(driver === 'pi' && ['deepseek', 'minimax'].includes(subscription.family));
   const provider = $derived(subscriptionProviderOrder.has(subscriptionKey(driver, subscription.family))
     ? subscriptionVendor(driver, subscription.family) : undefined);
+
+  const request = $derived(view.usageRequests?.[key]);
+
+  function formatPrice(value: SubscriptionPrice): string {
+    const amount = new Intl.NumberFormat(undefined, {
+      style: 'currency', currency: value.currency, minimumFractionDigits: 0,
+    }).format(value.amount);
+    const period = value.months === 1 ? 'month' : value.months === 12 ? 'year' : value.months + ' months';
+    return amount + ' / ' + period;
+  }
+
+  function formatCost(cost: EstimatedTokenCost): string {
+    return new Intl.NumberFormat(undefined, {
+      style: 'currency', currency: cost.currency, maximumSignificantDigits: 3,
+    }).format(cost.perMillion);
+  }
 
   async function editUserScore(event: MouseEvent) {
     if (!event.altKey && event.detail !== 0) return;
@@ -140,53 +160,78 @@
       && view.usageOpened.family === subscription.family && subscription.state === 'signed_in'}
       <p class="small muted" role="status">Opened in Arbol Browser.</p>
     {/if}
+    {#if subscription.family === 'deepseek' && subscription.lastUsage?.extra?.apiAvailable === false}
+      <p class="small warning">The balance is insufficient for API calls.</p>
+    {/if}
+    {#if request?.error}<p class="small warning" role="status">{request.error}</p>{/if}
     {#if view.usageLinkErrors?.[key]}<p class="small warning" role="status">{view.usageLinkErrors[key]}</p>{/if}
 
-    {#if !payAsYouGo && !metrics?.balance && (view.saveUserScore || subscription.userScore !== undefined)}
-      <dl class="metrics user-score">
-        <dt>User score</dt>
-        <dd>
-          {#if scoreDraft !== undefined && !availability}
-            <form class="score-editor" onsubmit={saveUserScore}>
-              <input type="text" inputmode="decimal" aria-label={'User score for ' + name}
-                aria-invalid={scoreInvalid} aria-describedby={scoreError ? scoreErrorId : undefined}
-                bind:this={scoreInput} bind:value={scoreDraft}
-                oninput={() => { scoreError = ''; scoreInvalid = false; }}
-                onkeydown={(event) => {
-                  if (event.key === 'Escape' && !event.isComposing) {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    void closeUserScore();
-                  }
-                }} />
-              <button type="submit">Save</button>
-              <button type="button" onclick={closeUserScore}>Cancel</button>
-              {#if scoreError}<span class="small warning" id={scoreErrorId} role="alert">{scoreError}</span>{/if}
-            </form>
-          {:else if view.saveUserScore && !availability}
-            <button type="button" class="score-value" bind:this={scoreButton} title="Option-click to edit"
-              aria-label={'Edit user score for ' + name + ', current score ' + userScore}
-              onclick={editUserScore}>{userScore}</button>
+    <div class="subscription-footer stack">
+      <dl class="metrics">
+        <dt>Subscription price</dt>
+        <dd title={price?.label}>
+          {#if payAsYouGo}
+            Pay as you go
+          {:else if price}
+            {formatPrice(price)} <span class="small muted">· {price.source === 'list' ? 'list price' : 'paid'}</span>
           {:else}
-            {userScore}
+            Price or period unknown
           {/if}
         </dd>
+        <dt>Estimated token cost</dt>
+        <dd title={tokenCost?.basis}>
+          {tokenCost ? '≈ ' + formatCost(tokenCost) + ' / 1M tokens' : metrics?.tokenCostUnavailableReason ?? 'Pricing evidence missing'}
+        </dd>
+        <dt>Performance</dt>
+        <dd title={defaultModel?.model}>{defaultModel?.performance ?? 'Not rated'}</dd>
       </dl>
-    {/if}
 
-    {#if resets?.count !== undefined && resets.count > 0}
-      <div class="reset-section stack">
-        <dl class="metrics"><dt>Available limit resets</dt><dd>{resets.count}</dd></dl>
-        {#if resets.entries.some(reset => !reset.expired)}
-          <ul class="reset-grants">
-            {#each resets.entries.filter(reset => !reset.expired) as reset}
-              <li>{reset.label}{#if reset.expiresAt === 0} · Never expires
-                {:else if reset.expiresAt} · Expires <time datetime={reset.expiresAt}>{formatSubscriptionCardTime(reset.expiresAt)}</time>{/if}</li>
-            {/each}
-          </ul>
-        {/if}
-      </div>
-    {/if}
+      {#if !payAsYouGo && !metrics?.balance && (view.saveUserScore || subscription.userScore !== undefined)}
+        <dl class="metrics user-score">
+          <dt>User score</dt>
+          <dd>
+            {#if scoreDraft !== undefined && !availability}
+              <form class="score-editor" onsubmit={saveUserScore}>
+                <input type="text" inputmode="decimal" aria-label={'User score for ' + name}
+                  aria-invalid={scoreInvalid} aria-describedby={scoreError ? scoreErrorId : undefined}
+                  bind:this={scoreInput} bind:value={scoreDraft}
+                  oninput={() => { scoreError = ''; scoreInvalid = false; }}
+                  onkeydown={(event) => {
+                    if (event.key === 'Escape' && !event.isComposing) {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      void closeUserScore();
+                    }
+                  }} />
+                <button type="submit">Save</button>
+                <button type="button" onclick={closeUserScore}>Cancel</button>
+                {#if scoreError}<span class="small warning" id={scoreErrorId} role="alert">{scoreError}</span>{/if}
+              </form>
+            {:else if view.saveUserScore && !availability}
+              <button type="button" class="score-value" bind:this={scoreButton} title="Option-click to edit"
+                aria-label={'Edit user score for ' + name + ', current score ' + userScore}
+                onclick={editUserScore}>{userScore}</button>
+            {:else}
+              {userScore}
+            {/if}
+          </dd>
+        </dl>
+      {/if}
+
+      {#if resets?.count !== undefined && resets.count > 0}
+        <div class="reset-section stack">
+          <dl class="metrics"><dt>Available limit resets</dt><dd>{resets.count}</dd></dl>
+          {#if resets.entries.some(reset => !reset.expired)}
+            <ul class="reset-grants">
+              {#each resets.entries.filter(reset => !reset.expired) as reset}
+                <li>{reset.label}{#if reset.expiresAt === 0} · Never expires
+                  {:else if reset.expiresAt} · Expires <time datetime={reset.expiresAt}>{formatSubscriptionCardTime(reset.expiresAt)}</time>{/if}</li>
+              {/each}
+            </ul>
+          {/if}
+        </div>
+      {/if}
+    </div>
   {/if}
 </li>
 
@@ -199,7 +244,8 @@
   .edit-name:disabled { color: var(--disabled); }
   @media (hover: none) { .edit-name { opacity: 1; } }
   .usage-actions { flex-wrap: wrap; }
-  .reset-section { margin-top: auto; gap: 8px; border-top: 1px solid var(--border); padding-top: 12px; }
+  .subscription-footer { margin-top: auto; border-top: 1px solid var(--border); padding-top: 12px; }
+  .reset-section { gap: 8px; border-top: 1px solid var(--border); padding-top: 12px; }
   .metrics { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 16px; margin: 0; }
   .metrics dt { color: var(--muted); }
   .metrics dd { margin: 0; text-align: end; font-variant-numeric: tabular-nums; }

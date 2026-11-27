@@ -60,6 +60,7 @@ export interface SubscriptionWindow {
   outputTokensUsed?: number;
   outputTokensRemaining?: number;
   outputTokensPerHour?: number;
+  savedEstimateAt?: string;
   model?: string;
   estimateBasis?: string;
   source?: string;
@@ -234,8 +235,8 @@ export function subscriptionKey(driver: string, subscription: string): string {
 
 export const subscriptionProviderSlots = [
   ['claude', 'anthropic'], ['codex', 'chatgpt'],
-  ['pi', 'chatgpt'], ['pi', 'kimi-coding'], ['pi', 'zai'], ['mimo', 'xiaomi'],
-  ['pi', 'deepseek'], ['pi', 'minimax'],
+  ['pi', 'chatgpt'], ['pi', 'minimax'], ['pi', 'kimi-coding'], ['pi', 'deepseek'],
+  ['pi', 'zai'], ['mimo', 'xiaomi'],
 ] as const;
 
 export const subscriptionProviderOrder = new Map(
