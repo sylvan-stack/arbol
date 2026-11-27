@@ -115,10 +115,23 @@ class BrowserProfiles:
                 "VALUES (%s,%s,%s,%s,%s,'preparing')", (*owner, request, profile))
             return ProfileBinding(*owner, request, profile, None, "preparing")
 
-    async def adopt_existing(self, selected: SubscriptionIdentity, previous: BrowserProfile | None,
+    @staticmethod
+    def existing_binding(selected: SubscriptionIdentity, target: BrowserProfile) -> ProfileBinding:
+        return ProfileBinding(selected.installation, selected.driver, selected.incarnation,
+                              target.request, target.profile, target.instance, "active", "existing")
+
+    @staticmethod
+    async def insert_existing(session: Session, binding: ProfileBinding) -> None:
+        await session.execute(
+            "INSERT INTO public.seqoya_browser_bindings "
+            "(installation,driver,subscription_incarnation,creation_request,profile,profile_instance,state,profile_origin) "
+            "VALUES (%s,%s,%s,%s,%s,%s,'active','existing')",
+            (*binding.owner, binding.request, binding.profile, binding.instance))
+
+    async def adopt_existing(self, selected: SubscriptionIdentity, previous: BrowserProfile,
                              target: BrowserProfile, browser: BrowserCommands,
                              verify: Callable[[], Awaitable[None]]) -> ProfileBinding:
-        """Attach an existing profile, replacing only the exact confirmed predecessor if present."""
+        """Retire the exact dedicated association and select the owner's existing profile."""
         if (not existing_profile(target.profile) or target == previous
                 or (await browser.list(target.profile)).get(target.profile) != target):
             raise needs_rebind()
@@ -126,27 +139,45 @@ class BrowserProfiles:
         async with self.identities.transaction() as (session, installation):
             await self.require_identity(session, installation, selected)
             current = await self.current(session, selected)
-            owner = (installation, selected.driver, selected.incarnation)
-            adopted = ProfileBinding(*owner, target.request, target.profile, target.instance, "active", "existing")
+            adopted = self.existing_binding(selected, target)
             if current == adopted:
                 return adopted
-            if previous is None:
-                if current is not None:
-                    raise needs_rebind()
-            else:
-                if current != ProfileBinding(*owner, previous.request, previous.profile, previous.instance, "active"):
-                    raise needs_rebind()
-                await session.execute(
-                    "UPDATE public.seqoya_browser_bindings SET state='retired' "
-                    "WHERE installation=%s AND driver=%s AND subscription_incarnation=%s AND creation_request=%s",
-                    (*owner, previous.request))
+            if current != ProfileBinding(*adopted.owner, previous.request, previous.profile, previous.instance, "active"):
+                raise needs_rebind()
             await session.execute(
-                "INSERT INTO public.seqoya_browser_bindings "
-                "(installation,driver,subscription_incarnation,creation_request,profile,profile_instance,state,profile_origin) "
-                "VALUES (%s,%s,%s,%s,%s,%s,'active','existing')",
-                (*owner, target.request, target.profile, target.instance))
+                "UPDATE public.seqoya_browser_bindings SET state='retired' "
+                "WHERE installation=%s AND driver=%s AND subscription_incarnation=%s AND creation_request=%s",
+                (*adopted.owner, previous.request))
+            await self.insert_existing(session, adopted)
             await verify()
             return adopted
+
+    async def attach_existing(self, proof: SubscriptionProof, target: BrowserProfile, browser: BrowserCommands,
+                              verify: Callable[[], Awaitable[None]]) -> ProfileBinding:
+        """Attach a confirmed profile without replacing another existing association."""
+        if not existing_profile(target.profile) or (await browser.list(target.profile)).get(target.profile) != target:
+            raise needs_rebind()
+        await verify()
+        async with self.identities.transaction() as (session, installation):
+            selected = await self.identities.current(session, installation, proof.driver, proof.native_id)
+            if selected is not None:
+                existing = await self.current(session, selected)
+                stored = await self.identities.proof_row(session, selected)
+                if selected.state != "active" or stored != (proof.version, proof.generation, proof.witness):
+                    if existing is not None:
+                        raise needs_rebind()
+                    await self.identities.retire_rows(session, selected)
+                    selected = None
+                elif existing is not None:
+                    if existing != self.existing_binding(selected, target):
+                        raise needs_rebind()
+                    return existing
+            if selected is None:
+                selected = await self.identities.create_lifetime(session, installation, proof.driver, proof.native_id, proof)
+            binding = self.existing_binding(selected, target)
+            await self.insert_existing(session, binding)
+            await verify()
+            return binding
 
     async def mark_needs_rebind(self, selected: SubscriptionIdentity, expected: ProfileBinding) -> None:
         async with self.identities.transaction() as (session, installation):
