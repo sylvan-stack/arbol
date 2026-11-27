@@ -22,7 +22,7 @@ from arbol_installation.paths import build_registry, installation_root
 
 from .bridge import constant, finite, pairs
 from .model import Identity, Refused
-from .process import standalone_codex_route
+from .process import standalone_driver_route
 from .subscription_identity import PROOF_DRIVERS, SubscriptionProof, target
 
 MAX_PROOF_BYTES = 4096
@@ -60,7 +60,7 @@ def selection(identity: Identity, driver: str) -> DriverSelection | StandaloneDr
     if driver not in PROOF_DRIVERS:
         raise unavailable()
     component = f"arbol-{driver}-driver"
-    standalone = standalone_codex_route(identity) if driver == "codex" else None
+    standalone = standalone_driver_route(identity, driver)
     if standalone is not None:
         launcher = driver_route_bytes(standalone)
         if launcher is None:
