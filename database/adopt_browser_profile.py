@@ -68,11 +68,30 @@ async def adopt(provider: tuple[str, str], previous: BrowserProfile | None, targ
     try:
         profiles, browser = backend.browser.profiles, backend.browser.browser
         if previous is None:
-            async with backend.accounts.browser_identity_request(*provider) as (selected, verify, _):
+            async with backend.database.browser_authority():
                 account = await backend.accounts.browser_slot(*provider)
                 if account.get("family") != provider[1] or account.get("state") != "signed_in":
                     raise needs_rebind()
-                binding = await profiles.adopt_existing(selected, None, target, browser, verify)
+                captured = await backend.accounts.driver_identity.capture(*provider)
+                verify = partial(backend.accounts.driver_identity.expect, captured)
+                await verify()
+                authority = profiles.identities
+                async with authority.transaction() as (session, installation):
+                    current = await authority.current(session, installation, *provider)
+                    old_proof = await authority.proof_row(session, current) if current else None
+                    proof = captured.proof
+                    existing = current is not None and current.state == "active" and old_proof == (
+                        proof.version, proof.generation, proof.witness)
+                    if not existing and current is not None and await profiles.current(session, current) is not None:
+                        raise needs_rebind()
+                if existing:
+                    assert current is not None
+                    confirmed = current
+                else:
+                    confirmed = await authority.rebind(*provider, installation=installation,
+                                                       previous=current.incarnation if current else None,
+                                                       confirmed=True, proof=captured.proof)
+                binding = await profiles.adopt_existing(confirmed, None, target, browser, verify)
             print(json.dumps({"profile": binding.profile, "state": binding.state, "origin": binding.origin}))
             return
         async with backend.database.browser_authority():
