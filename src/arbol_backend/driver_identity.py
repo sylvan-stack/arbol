@@ -22,6 +22,7 @@ from arbol_installation.paths import build_registry, installation_root
 
 from .bridge import constant, finite, pairs
 from .model import Identity, Refused
+from .process import standalone_codex_route
 from .subscription_identity import PROOF_DRIVERS, SubscriptionProof, target
 
 MAX_PROOF_BYTES = 4096
@@ -44,15 +45,27 @@ class DriverSelection:
 
 
 @dataclass(frozen=True)
+class StandaloneDriverSelection:
+    command: tuple[str, ...]
+    route_sha256: str
+
+
+@dataclass(frozen=True)
 class CapturedProof:
     proof: SubscriptionProof
-    selection: DriverSelection
+    selection: DriverSelection | StandaloneDriverSelection
 
 
-def selection(identity: Identity, driver: str) -> DriverSelection:
+def selection(identity: Identity, driver: str) -> DriverSelection | StandaloneDriverSelection:
     if driver not in PROOF_DRIVERS:
         raise unavailable()
     component = f"arbol-{driver}-driver"
+    standalone = standalone_codex_route(identity) if driver == "codex" else None
+    if standalone is not None:
+        launcher = driver_route_bytes(standalone)
+        if launcher is None:
+            raise unavailable()
+        return StandaloneDriverSelection((str(standalone),), sha256(launcher[0]))
     registry = build_registry(identity.home).resolve(strict=True)
     authority = Authority(registry, component)
     gate = verify_gate(registry)

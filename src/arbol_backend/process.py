@@ -35,6 +35,13 @@ START_SECONDS = 12.0
 READY_MAX = 4096
 
 
+def standalone_codex_route(identity: Identity) -> Path | None:
+    if identity.fixture:
+        return None
+    route = identity.home / "Applications/Arbol Codex Driver/bin/arbol-codex-driver"
+    return route if route.is_file() else None
+
+
 def lock_pid(folder: Path) -> int | None:
     try:
         fd = os.open(folder / "backend.lock", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -184,6 +191,8 @@ class Programs:
                         for path in self.identity.bin_dir.glob("arbol-*-driver")
                         if path.is_file() and os.access(path, os.X_OK)
                         and re.fullmatch(r"arbol-[a-z][a-z0-9-]*-driver", path.name)}
+        if standalone_codex_route(self.identity) is not None:
+            self.drivers.add("codex")
         return self.drivers
 
     def reap(self) -> None:
@@ -224,7 +233,8 @@ class Programs:
                     raise Refused("invalid_input", "The isolated backend and Exchange runtime must use the same database.")
                 arguments += ["--runtime-dir", str(self.identity.folder), "--bin-dir", str(self.identity.bin_dir)]
         else:
-            arguments = [str(self.identity.bin_dir / program)]
+            standalone = standalone_codex_route(self.identity) if program == "arbol-codex-driver" else None
+            arguments = [str(standalone or self.identity.bin_dir / program)]
         arguments += args
         env = {key: value for key, value in os.environ.items()
                if not key.startswith("PG") and key not in
