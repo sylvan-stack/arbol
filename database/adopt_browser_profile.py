@@ -65,9 +65,11 @@ async def adopt(previous: BrowserProfile, target: BrowserProfile) -> None:
             await backend.accounts.browser_slot("codex", "chatgpt")
             profiles, browser = backend.browser.profiles, backend.browser.browser
             saved = await profiles.saved_binding("codex", "chatgpt")
-            if saved is None or saved[1] is None:
+            if saved is None:
                 raise needs_rebind()
             before, proof = saved
+            if proof is None:
+                raise needs_rebind()
             captured = await backend.accounts.driver_identity.capture_expected(proof)
             verify = partial(backend.accounts.driver_identity.expect, captured)
             async with profiles.identities.transaction() as (session, installation):

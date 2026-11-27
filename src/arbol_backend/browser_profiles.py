@@ -10,7 +10,13 @@ from dataclasses import dataclass, replace
 
 from .accounts import Accounts
 from .browser_commands import (
-    INSTANCE, PROFILE, REQUEST, SEQOYA_PROFILE, BrowserCommands, BrowserProfile, UnsupportedBoundOpen,
+    INSTANCE,
+    PROFILE,
+    REQUEST,
+    SEQOYA_PROFILE,
+    BrowserCommands,
+    BrowserProfile,
+    UnsupportedBoundOpen,
 )
 from .database import Database, Session
 from .model import Refused
