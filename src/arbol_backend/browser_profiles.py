@@ -115,10 +115,10 @@ class BrowserProfiles:
                 "VALUES (%s,%s,%s,%s,%s,'preparing')", (*owner, request, profile))
             return ProfileBinding(*owner, request, profile, None, "preparing")
 
-    async def adopt_existing(self, selected: SubscriptionIdentity, previous: BrowserProfile,
+    async def adopt_existing(self, selected: SubscriptionIdentity, previous: BrowserProfile | None,
                              target: BrowserProfile, browser: BrowserCommands,
                              verify: Callable[[], Awaitable[None]]) -> ProfileBinding:
-        """Retire the exact dedicated association and select the owner's existing profile."""
+        """Attach an existing profile, replacing only the exact confirmed predecessor if present."""
         if (not existing_profile(target.profile) or target == previous
                 or (await browser.list(target.profile)).get(target.profile) != target):
             raise needs_rebind()
@@ -130,12 +130,16 @@ class BrowserProfiles:
             adopted = ProfileBinding(*owner, target.request, target.profile, target.instance, "active", "existing")
             if current == adopted:
                 return adopted
-            if current != ProfileBinding(*owner, previous.request, previous.profile, previous.instance, "active"):
-                raise needs_rebind()
-            await session.execute(
-                "UPDATE public.seqoya_browser_bindings SET state='retired' "
-                "WHERE installation=%s AND driver=%s AND subscription_incarnation=%s AND creation_request=%s",
-                (*owner, previous.request))
+            if previous is None:
+                if current is not None:
+                    raise needs_rebind()
+            else:
+                if current != ProfileBinding(*owner, previous.request, previous.profile, previous.instance, "active"):
+                    raise needs_rebind()
+                await session.execute(
+                    "UPDATE public.seqoya_browser_bindings SET state='retired' "
+                    "WHERE installation=%s AND driver=%s AND subscription_incarnation=%s AND creation_request=%s",
+                    (*owner, previous.request))
             await session.execute(
                 "INSERT INTO public.seqoya_browser_bindings "
                 "(installation,driver,subscription_incarnation,creation_request,profile,profile_instance,state,profile_origin) "

@@ -1,4 +1,4 @@
-"""Move the confirmed Codex subscription onto an existing exact Browser profile."""
+"""Attach a confirmed Subscription to an existing exact Browser profile."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ def fingerprint(info: os.stat_result) -> tuple[int, ...]:
             info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
-def request(path: Path) -> tuple[BrowserProfile, BrowserProfile]:
+def request(path: Path) -> tuple[tuple[str, str], BrowserProfile | None, BrowserProfile]:
     path = path.absolute()
     with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
         pinned = os.fstat(stream.fileno())
@@ -46,25 +46,38 @@ def request(path: Path) -> tuple[BrowserProfile, BrowserProfile]:
                 or fingerprint(path.lstat()) != fingerprint(pinned) or len(raw) != pinned.st_size):
             raise ValueError("The adoption request changed.")
     value = json.loads(raw, object_pairs_hook=pairs, parse_constant=constant)
-    if (not isinstance(value, dict) or set(value) != {"format", "previous", "target"}
-            or type(value["format"]) is not int or value["format"] != 1):
+    if not isinstance(value, dict) or type(value.get("format")) is not int:
         raise ValueError("The adoption request has an unknown format.")
-    previous, target = profile(value["previous"]), profile(value["target"])
-    if not SEQOYA_PROFILE.fullmatch(previous.profile) or not existing_profile(target.profile):
-        raise ValueError("Select a dedicated predecessor and an existing non-default target.")
-    return previous, target
+    if value["format"] == 1 and set(value) == {"format", "previous", "target"}:
+        previous, target = profile(value["previous"]), profile(value["target"])
+        if SEQOYA_PROFILE.fullmatch(previous.profile) and existing_profile(target.profile):
+            return ("codex", "chatgpt"), previous, target
+    if value["format"] == 2 and set(value) == {"format", "driver", "subscription", "target"}:
+        provider = (value["driver"], value["subscription"])
+        target = profile(value["target"])
+        if provider in (("pi", "chatgpt"), ("pi", "minimax")) and existing_profile(target.profile):
+            return provider, None, target
+    raise ValueError("Select a confirmed Subscription and an existing non-default profile.")
 
 
-async def adopt(previous: BrowserProfile, target: BrowserProfile) -> None:
+async def adopt(provider: tuple[str, str], previous: BrowserProfile | None, target: BrowserProfile) -> None:
     package = Path(__file__).resolve().parents[1]
     if package.parent != Path.home() / ".local/lib/sylvan-stack/arbol/stable/arbol":
         raise ValueError("Run the adoption from the installed Backend package.")
     backend = Backend(identity(package, {}))
     try:
+        profiles, browser = backend.browser.profiles, backend.browser.browser
+        if previous is None:
+            async with backend.accounts.browser_identity_request(*provider) as (selected, verify, _):
+                account = await backend.accounts.browser_slot(*provider)
+                if account.get("family") != provider[1] or account.get("state") != "signed_in":
+                    raise needs_rebind()
+                binding = await profiles.adopt_existing(selected, None, target, browser, verify)
+            print(json.dumps({"profile": binding.profile, "state": binding.state, "origin": binding.origin}))
+            return
         async with backend.database.browser_authority():
-            await backend.accounts.browser_slot("codex", "chatgpt")
-            profiles, browser = backend.browser.profiles, backend.browser.browser
-            saved = await profiles.saved_binding("codex", "chatgpt")
+            await backend.accounts.browser_slot(*provider)
+            saved = await profiles.saved_binding(*provider)
             if saved is None:
                 raise needs_rebind()
             before, proof = saved
@@ -73,7 +86,7 @@ async def adopt(previous: BrowserProfile, target: BrowserProfile) -> None:
             captured = await backend.accounts.driver_identity.capture_expected(proof)
             verify = partial(backend.accounts.driver_identity.expect, captured)
             async with profiles.identities.transaction() as (session, installation):
-                selected = await profiles.identities.current(session, installation, "codex", "chatgpt")
+                selected = await profiles.identities.current(session, installation, *provider)
                 if selected is None or before.incarnation != selected.incarnation:
                     raise needs_rebind()
             binding = await profiles.adopt_existing(selected, previous, target, browser, verify)
