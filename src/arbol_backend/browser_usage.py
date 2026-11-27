@@ -59,7 +59,7 @@ def report(provider: Provider, value: Any) -> tuple[Params, list[str]]:
     optional = {
         ("codex", "chatgpt"): {"plan", "resetCredits"}, ("pi", "chatgpt"): {"plan", "piCapPercent"},
         ("claude", "anthropic"): {"plan", "resetCredits"}, ("pi", "deepseek"): {"deepseekBalance"},
-        ("mimo", "xiaomi"): {"plan", "mimoCredits"}, ("pi", "minimax"): {"minimax"},
+        ("mimo", "xiaomi"): {"plan", "mimoCredits"}, ("pi", "minimax"): {"minimax", "minimaxApi"},
     }
     required = {"observedAt", "windows"}
     if not isinstance(value, dict) or not required <= value.keys() <= required | optional.get(provider, set()):
@@ -136,7 +136,22 @@ def report(provider: Provider, value: Any) -> tuple[Params, list[str]]:
         windows.append({"label": "Token Plan", "windowMinutes": 43200, "kind": "other", "resource": "credits",
                         "resetsAt": instant(credits["resetAt"]).isoformat(),
                         "usedPercent": (int(total) - int(remaining)) * 100 / int(total)})
-    if subscription == "minimax":
+    if provider == ("pi", "minimax") and "minimaxApi" in value:
+        api = value["minimaxApi"]
+        if ("minimax" in value or windows or not isinstance(api, dict)
+                or api.keys() not in ({"balance"}, {"balance", "paymentAt", "paid"})):
+            raise ValueError
+        balance = amount(api["balance"])
+        details = {"balance": balance, "observedAt": observed.isoformat()}
+        if "paymentAt" in api:
+            stamp, paid = api["paymentAt"], amount(api["paid"])
+            if not isinstance(stamp, str) or not re.fullmatch(r"20\d\d-\d\d-\d\d \d\d:\d\d:\d\d", stamp):
+                raise ValueError
+            if datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC) > observed or float(paid) <= 0:
+                raise ValueError
+            details.update(paymentAt=stamp, startingBalance=paid)
+        extra["apiBalance"] = details
+    elif subscription == "minimax":
         minimax = value.get("minimax")
         if (not isinstance(minimax, dict) or not {"activePlan", "credits", "llmTokens", "period"} <= minimax.keys()
                 <= {"activePlan", "credits", "llmTokens", "period", "cacheHitPercent"}
