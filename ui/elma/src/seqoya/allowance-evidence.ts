@@ -1,9 +1,12 @@
 import {
   formatSubscriptionCardTime, formatSubscriptionTime, subscriptionKey, type AllowanceView, type SubscriptionListing,
-  type SubscriptionMetrics, type SubscriptionRecord, type SubscriptionWindow,
+  type EstimatedTokenCost, type SubscriptionMetrics, type SubscriptionPrice, type SubscriptionRecord, type SubscriptionWindow,
 } from '../../design-system/src/sections/seqoya-subscriptions';
 import type { VigorRollup } from '../../design-system/src/sections/seqoya-vigor';
+import { formatVigorNumber, formatVigorTokens } from '../../design-system/src/sections/seqoya-vigor-format';
+import type { VigorEstimatedTokenCost } from '../../design-system/src/sections/seqoya-vigor-priority';
 import { deepSeekBalance } from './vigor-estimates';
+import { allowanceHistoryKey, rememberEstimate, restoreEstimates, type AllowanceHistory } from './allowance-history';
 
 interface QuotaReading {
   remainingPercent: number;
@@ -39,6 +42,18 @@ interface WindowEstimate {
   };
 }
 
+interface MembershipPayment {
+  subscription: string;
+  createdAt: string;
+  checkedAt: string;
+  confirmedAt: string;
+  validUntil: string;
+  amount: number;
+  months: number;
+  currency: EstimatedTokenCost['currency'];
+  weeklyCredits?: number;
+}
+
 /** Bounded usage evidence returned by Seqoya's native app channel. */
 export interface UsageEvidence {
   windowEstimates?: WindowEstimate[];
@@ -53,6 +68,9 @@ export interface UsageEvidence {
     weekly?: QuotaReading;
     resetExpiries?: string[];
   };
+  claudeMax5x?: { subscription: string; createdAt: string; confirmedAt: string };
+  kimiBilling?: MembershipPayment;
+  zaiBilling?: MembershipPayment;
   piChatGPT?: ManualReading & {
     plan: 'plus' | 'pro';
     allowed: boolean;
@@ -103,17 +121,45 @@ interface BrowserReport {
   checkedAt?: string | null;
   report: Omit<DriverReport, 'windows' | 'extra'> & {
     windows: BrowserWindow[];
-    extra?: NonNullable<DriverReport['extra']> & { apiBalance?: ApiBalanceReading };
+    extra?: NonNullable<DriverReport['extra']> & {
+      apiBalance?: ApiBalanceReading;
+      connectedApp?: { allowed: boolean; capPercent: number };
+    };
   };
   approximateWindows: string[];
 }
 const browserSource = 'Arbol Browser dashboard';
 const day = 86_400_000;
+const weekMinutes = 10_080;
+const weeksPerMonth = 52 / 12;
+// Monthly USD list prices and Max weekly quota multiplier, checked 21 November 2026.
+// https://claude.com/pricing?currency=USD
+const claudeProPrice = { label: 'Claude Pro', usd: 20 };
+const claudeMax5xPrice = { label: 'Claude Max 5×', usd: 100 };
+const claudeMax5xMultiplier = 5;
+// https://help.openai.com/en/articles/6950777-what-is-chatgpt-plus
+// https://help.openai.com/en/articles/9793128-about-chatgpt-pro-tiers
+const codexPlusPrice = { label: 'ChatGPT Plus', usd: 20 };
+const codexPro200Price = { label: 'ChatGPT Pro 200', usd: 200 };
+// https://zcode.z.ai/en · https://docs.z.ai/devpack/overview.md#usage-credit-allowance
+const zaiMonthlyPlans = [
+  { label: 'z.ai GLM Coding Lite', weeklyCredits: 10_000, usd: 18 },
+  { label: 'z.ai GLM Coding Pro', weeklyCredits: 60_000, usd: 80 },
+  { label: 'z.ai GLM Coding Max', weeklyCredits: 140_000, usd: 168 },
+];
 const integer = new Intl.NumberFormat();
 // Xiaomi Token Plan rate for mimo-v2.6-pro. Checked 12 November 2026.
 // https://mimo.mi.com/docs/en-US/quick-start/faq/token-plan/Usage%26Quota
 const mimoCreditsPerOutputToken = 600;
 const planNames = { lite: 'Lite', standard: 'Standard', pro: 'Pro', max: 'Max' };
+// Published individual USD monthly list prices and matching credit grants, checked 21 November 2026.
+// https://mimo.mi.com/docs/tokenplan/subscription
+const mimoMonthlyPlans = new Map([
+  ['lite', { credits: '4100000000', usd: 6 }],
+  ['standard', { credits: '11000000000', usd: 16 }],
+  ['pro', { credits: '38000000000', usd: 50 }],
+  ['max', { credits: '82000000000', usd: 100 }],
+]);
 
 function sameCreation(expected: string | undefined, current: string | undefined): boolean {
   const created = Date.parse(expected ?? '');
@@ -189,8 +235,9 @@ function mimoQuota(account: SubscriptionRecord, saved: Result | undefined, readi
     };
   }
   if (manual && preferDashboard(manual.resetsAt, manual.observedAt, report, directWindow, now)) {
-    const duration = radarWindow?.resetsAt && Date.parse(radarWindow.resetsAt) === Date.parse(manual.resetsAt)
-      ? radarWindow.windowMinutes ?? undefined : manual.browser && manual.plan === 'pro' ? 43_200 : undefined;
+    const matchedDuration = radarWindow?.resetsAt && Date.parse(radarWindow.resetsAt) === Date.parse(manual.resetsAt)
+      ? radarWindow.windowMinutes : undefined;
+    const duration = matchedDuration ?? (manual.browser && manual.plan === 'pro' ? 43_200 : undefined);
     const credits = { total: manual.totalCredits, remaining: manual.remainingCredits };
     if (validCredits(credits)) {
       quota = {
@@ -255,10 +302,10 @@ function chatGPTQuota(account: SubscriptionRecord, reading: UsageEvidence['piCha
   } };
 }
 
-function codexCapacity(account: SubscriptionRecord, sample: UsageEvidence['codex'], now: number): AllowanceView {
+function codexCapacity(account: SubscriptionRecord, sample: UsageEvidence['codex'], now: number): AllowanceView & { capacity?: Capacity } {
   const usage = account.lastUsage;
   const checkedAt = 'checkedAt' in account && typeof account.checkedAt === 'string' ? account.checkedAt : undefined;
-  const weekly = usage?.windows.find((window) => window.kind === 'weekly' && window.windowMinutes === 10_080);
+  const weekly = usage?.windows.find((window) => window.kind === 'weekly' && window.windowMinutes === weekMinutes);
   if (!sample || !usage || !weekly || sample.subscription !== account.id || !sameCreation(sample.createdAt, account.createdAt)
     || (sample.reference !== 'plan' && (!checkedAt || Date.parse(sample.checkedAt) !== Date.parse(checkedAt)))
     || sample.plan !== usage.plan || !recentObservation(sample.observedAt, now)
@@ -274,11 +321,14 @@ function codexCapacity(account: SubscriptionRecord, sample: UsageEvidence['codex
   const total = weightedTokens / (sample.points / 100) / solOutput;
   const reset = Date.parse(weekly.resetsAt);
   const priorWindow = Math.abs(reset - Date.parse(sample.resetsAt)) > 1_000;
-  const calculation = `(${integer.format(sample.uncachedInputTokens)} × ${astraInput} + ${integer.format(sample.cachedInputTokens)} × ${astraCache} + ${integer.format(sample.outputTokens)} × ${astraOutput}) ÷ ${sample.points}% ÷ ${solOutput}.`;
+  const describeCalibration = (tokens: (value: number) => string, percent: (value: number) => string) =>
+    `(${tokens(sample.uncachedInputTokens)} × ${astraInput} + ${tokens(sample.cachedInputTokens)} × ${astraCache} + ${tokens(sample.outputTokens)} × ${astraOutput}) ÷ ${percent(sample.points)}% ÷ ${solOutput}.`;
+  const calculation = describeCalibration(integer.format, String);
+  const source = `${sample.reference === 'plan' ? `Plan reference (ChatGPT ${sample.plan === 'pro' ? 'Pro' : 'Plus'}). ` : ''}${priorWindow ? 'Previous-window calibration' : 'Weekly calibration'} ending ${formatSubscriptionTime(sample.observedAt)}. Uses local Astra tokens and assumes paid-credit weights approximate included usage. Other shared-plan activity can affect the estimate.`;
   return { capacity: {
     model: 'GPT-6.1 Sol', total,
     remaining: reset > now && weekly.usedPercent != null ? total * (1 - weekly.usedPercent / 100) : undefined,
-    source: `${sample.reference === 'plan' ? `Plan reference (ChatGPT ${sample.plan === 'pro' ? 'Pro' : 'Plus'}). ` : ''}${priorWindow ? 'Previous-window calibration' : 'Weekly calibration'} ending ${formatSubscriptionTime(sample.observedAt)}. Uses local Astra tokens and assumes paid-credit weights approximate included usage. Other shared-plan activity can affect the estimate.`,
+    source, compactSource: `${source} ${describeCalibration(formatVigorTokens, formatVigorNumber)}`,
     calculation: weekly.usedPercent != null && reset > now
       ? `${calculation} Remaining = estimated total × (100% − ${weekly.usedPercent}%).` : calculation,
   } };
@@ -313,7 +363,48 @@ function allowance(
   return { issues };
 }
 
-type Capacity = NonNullable<AllowanceView['capacity']>;
+type Capacity = NonNullable<AllowanceView['capacity']> & { compactSource?: string };
+
+function planTokenCost(billing: SubscriptionPrice, capacity: Capacity, window: string, weekly: boolean): VigorEstimatedTokenCost {
+  const { label, amount, currency, months } = billing;
+  const period = weekly ? 'weekly' : 'monthly';
+  const monthlyAmount = amount / months;
+  function describeBasis(tokens: string, format: (value: number) => string, units: string, source: string) {
+    const denominator = weekly ? `${tokens} ${capacity.model} output-token equivalents × 52/12 weeks per month`
+      : `${tokens} ${capacity.model} output-token equivalents per month`;
+    const price = billing.source === 'list' ? `monthly list price of ${format(amount)} ${currency}`
+      : `${format(amount)} ${currency} paid for ${months} ${months === 1 ? 'month' : 'months'} (${format(monthlyAmount)} ${currency} monthly equivalent)`;
+    return `${label} ${price} ÷ (${denominator}) × ${units}. Assumes full use of the ${period} allowance. ${source}`;
+  }
+  return {
+    window,
+    windowsPerMonth: weekly ? weeksPerMonth : 1,
+    perMillion: monthlyAmount / (capacity.total * (weekly ? weeksPerMonth : 1)) * 1_000_000,
+    currency,
+    basis: describeBasis(integer.format(Math.round(capacity.total)), String, '1 million', capacity.source),
+    compactBasis: describeBasis(formatVigorTokens(capacity.total), formatVigorNumber, '1M', capacity.compactSource ?? capacity.source),
+  };
+}
+
+function codexMonthlyPrice(report: DriverReport | undefined, browser: BrowserReport['report'] | undefined, now: number) {
+  const browserPlan = browser && recentObservation(browser.fetchedAt, now) ? browser.plan : undefined;
+  if (report?.plan === 'plus' && !browserPlan) return codexPlusPrice;
+  if (report?.plan === 'pro' && browserPlan === 'pro-200') return codexPro200Price;
+  return undefined;
+}
+
+function mimoMonthlyPrice(quota: Quota | undefined, minutes: number | undefined) {
+  const plan = mimoMonthlyPlans.get(quota?.plan?.trim().toLowerCase() ?? '');
+  if (!plan || quota?.credits?.total !== plan.credits
+    || minutes === undefined || minutes < 28 * 1440 || minutes > 32 * 1440) return undefined;
+  return { label: `Xiaomi Token Plan ${quota?.plan}`, usd: plan.usd };
+}
+
+function currentPayment(account: SubscriptionRecord, billing: MembershipPayment | undefined, now: number) {
+  return billing?.subscription === account.id && sameCreation(billing.createdAt, account.createdAt)
+    && Date.parse(billing.checkedAt) === Date.parse(account.checkedAt ?? '')
+    && Date.parse(billing.confirmedAt) <= now && now < Date.parse(billing.validUntil) ? billing : undefined;
+}
 
 type WindowReading = Omit<SubscriptionWindow, 'remainingMinutes' | 'outputTokensPerHour'>;
 type Rollover = 'startsOnUse' | 'weekly' | 'wait';
@@ -348,6 +439,7 @@ function asWindow(
   const outputTokensRemaining = capacity && left !== undefined ? capacity.total * left / 100 : reading.outputTokensRemaining;
   return {
     ...reading, remainingMinutes, outputTokensUsed, outputTokensRemaining,
+    outputTokensTotal: capacity?.total ?? reading.outputTokensTotal,
     model: capacity?.model ?? reading.model, estimateBasis: capacity?.source ?? reading.estimateBasis,
     outputTokensPerHour: outputTokensRemaining !== undefined && remainingMinutes !== undefined && remainingMinutes > 0
       ? outputTokensRemaining / remainingMinutes * 60 : undefined,
@@ -417,17 +509,27 @@ function piPlusReference(sample: WindowEstimate, account: SubscriptionRecord, ev
     && Date.parse(sample.observedAt) <= Date.parse(historical.observedAt) && recentObservation(sample.observedAt, now);
 }
 
+function zaiOutputTokens(credits: number) {
+  return credits * 10_000 / 24;
+}
+
 function zaiCapacity(credits: number, source: string): Capacity {
   // https://docs.z.ai/devpack/overview.md#usage-instruction
   const calculation = `${integer.format(credits)} credits × 10,000 ÷ 24 at the published Standard output rate.`;
-  return { model: 'GLM-5.3', total: credits * 10_000 / 24, source: `${source} ${calculation}`, calculation };
+  return {
+    model: 'GLM-5.3', total: zaiOutputTokens(credits), source: `${source} ${calculation}`, calculation,
+    compactSource: `${source} ${integer.format(credits)} credits × 10K ÷ 24 at the published Standard output rate.`,
+  };
 }
 
 function windowCapacity(
   driver: string, account: SubscriptionRecord, label: string, evidence: UsageEvidence | undefined, now: number,
-  resource?: string,
+  { resource, claudeMax5x = false, planOverride }: {
+    resource?: string; claudeMax5x?: boolean; planOverride?: 'max';
+  } = {},
 ): Capacity | undefined {
   const checkedAt = 'checkedAt' in account && typeof account.checkedAt === 'string' ? Date.parse(account.checkedAt) : NaN;
+  const referencePlan = claudeMax5x ? 'pro' : planOverride ?? publicAccountPlan(account);
   const samples = evidence?.windowEstimates?.filter((sample) => {
     const reference = references[sample.basis];
     if (sample.basis === 'kimiCalls') return false; // Normalized quota units are not calls.
@@ -444,9 +546,9 @@ function windowCapacity(
     }
     const bindingMatches = sample.reference === 'plan'
       ? sample.basis === 'claudeLocal' && sameCreation(sample.createdAt, account.createdAt)
-        && sample.plan !== undefined && sample.plan === publicAccountPlan(account)
+        && sample.plan !== undefined && sample.plan === referencePlan
         && recentObservation(sample.observedAt, now)
-      : checkedAt === Date.parse(sample.checkedAt) || piPlusReference(sample, account, evidence, now);
+      : !claudeMax5x && !planOverride && (checkedAt === Date.parse(sample.checkedAt) || piPlusReference(sample, account, evidence, now));
     return reference && reference.driver === driver && reference.family === account.family && sample.subscription === account.id
       && bindingMatches && sample.window === label && Date.parse(sample.observedAt) <= now
       && (sample.basis !== 'zaiCredits' || resource === 'credits');
@@ -459,8 +561,12 @@ function windowCapacity(
     return zaiCapacity(amount, `Verified Coding Plan credit cap. Sampled ${formatSubscriptionCardTime(observedAt)}.`);
   }
   if (!scale) return undefined;
-  const total = amount / (scale / 100);
-  const calculation = `${number(amount)} observed output equivalents ÷ ${scale}% of the window.`;
+  const total = amount / (scale / 100) * (claudeMax5x ? claudeMax5xMultiplier : 1);
+  const describeCalibration = (tokens: string, percent: string) => {
+    const measured = `${tokens} observed output equivalents ÷ ${percent}% of the window`;
+    return claudeMax5x ? `(${measured}) × ${claudeMax5xMultiplier}.` : `${measured}.`;
+  };
+  const calculation = describeCalibration(number(amount), String(scale));
   let source = 'Local output from the observed workload, scaled by the provider’s reported used share. Other account usage can affect the estimate.';
   if (basis === 'kimiLocal' && calibration) {
     source = 'Local K3.1 Pro output between ' + formatSubscriptionCardTime(calibration.startedAt)
@@ -472,19 +578,25 @@ function windowCapacity(
     source = 'Local Codex usage matched to the ChatGPT Plus window, using published Standard credit weights.';
     if (piPlusReference(samples[0], account, evidence, now)) source = `Plan reference (ChatGPT Plus). ${source}`;
   }
-  if (reference === 'plan') {
+  if (claudeMax5x) {
+    source = `Claude Pro workload calibration scaled by Anthropic’s published Max 5× allowance. Assumes a similar workload. ${source}`;
+  } else if (reference === 'plan') {
     source = `Plan reference (Claude ${plan}). ${source} Capacity assumes a similar workload on the same reported plan.`;
   }
-  return { model, total, source: `${source} Sampled ${formatSubscriptionCardTime(observedAt)}. ${calculation}`, calculation };
+  const provenance = `${source} Sampled ${formatSubscriptionCardTime(observedAt)}.`;
+  return {
+    model, total, source: `${provenance} ${calculation}`, calculation,
+    compactSource: `${provenance} ${describeCalibration(formatVigorTokens(amount), formatVigorNumber(scale))}`,
+  };
 }
 
-function matchingClaudeDashboard(
+function matchingClaudeReading(
   driver: string, account: SubscriptionRecord, reading: UsageEvidence['claudeDashboard'], now: number,
 ): UsageEvidence['claudeDashboard'] {
   if (driver !== 'claude' || account.family !== 'anthropic' || account.state !== 'signed_in' || !reading) return undefined;
   return reading.subscription === account.id && sameCreation(reading.createdAt, account.createdAt)
     && Date.parse(reading.checkedAt) === Date.parse(account.checkedAt ?? '')
-    && reading.plan === publicAccountPlan(account) && Date.parse(reading.observedAt) <= now
+    && Date.parse(reading.observedAt) <= now
     ? reading : undefined;
 }
 
@@ -498,7 +610,9 @@ function matchingBrowserReport(
     && Date.parse(entry.report.fetchedAt) <= now);
 }
 
-function apiBalance(account: SubscriptionRecord, report: BrowserReport['report'] | undefined, now: number): SubscriptionMetrics['balance'] {
+function apiBalance(
+  account: SubscriptionRecord, report: BrowserReport['report'] | undefined, now: number,
+): Pick<SubscriptionMetrics, 'balance' | 'estimatedTokenCost'> | undefined {
   if (account.state !== 'signed_in') return undefined;
   const reading = report?.extra?.apiBalance;
   const cash = Number(reading?.balance);
@@ -506,15 +620,21 @@ function apiBalance(account: SubscriptionRecord, report: BrowserReport['report']
   const deepseek = account.family === 'deepseek';
   const fallback = deepseek ? deepSeekBalance(report?.extra?.balances?.length ? { ...account, lastUsage: report } : account) : undefined;
   if (!reading || !Number.isFinite(cash) || cash < 0 || !(observed <= now)) {
-    return fallback && {
-      availableTokens: fallback.tokens,
-      estimateBasis: `DeepSeek Flash at ${fallback.rate} ${fallback.currency} per million output tokens. Based on the current reported balance.`,
+    if (!fallback) return undefined;
+    const rateBasis = `DeepSeek Flash at ${fallback.rate} ${fallback.currency} per million output tokens.`;
+    return {
+      balance: {
+        availableTokens: fallback.tokens,
+        estimateBasis: `${rateBasis} Based on the current reported balance.`,
+      },
+      estimatedTokenCost: { perMillion: fallback.rate, currency: fallback.currency, basis: rateBasis },
     };
   }
   const model = deepseek ? 'DeepSeek Flash peak rate' : 'MiniMax-M3 Standard, up to 512k input';
   // https://api-docs.deepseek.com/quick_start/pricing/
   // https://platform.minimax.io/docs/pricing/overview?tab=api-enterprise
   const rate = 1.2;
+  const rateBasis = `${model} at ${rate} USD per million output tokens.`;
   const equivalents = (dollars: number) => dollars / rate * 1_000_000;
   const paymentDate = reading.paymentAt?.match(/^20\d{2}-\d{2}-\d{2}(?= )/)?.[0];
   const starting = Number(reading.startingBalance);
@@ -523,22 +643,26 @@ function apiBalance(account: SubscriptionRecord, report: BrowserReport['report']
     : reading.includesCarry ? `The ${starting} USD starting balance includes the payment and the previous cash reading.`
     : `The ${starting} USD starting balance is estimated from the last payment.`;
   return {
-    paymentDate, availableTokens: equivalents(cash),
-    usedTokens: used === undefined ? undefined : equivalents(used),
-    usedPercent: used === undefined ? undefined : 100 * used / starting,
-    estimateBasis: `${model} at ${rate} USD per million output tokens. ${basis} Cash balance read ${formatSubscriptionCardTime(reading.observedAt)}.`,
+    balance: {
+      paymentDate, availableTokens: equivalents(cash),
+      usedTokens: used === undefined ? undefined : equivalents(used),
+      usedPercent: used === undefined ? undefined : 100 * used / starting,
+      estimateBasis: `${rateBasis} ${basis} Cash balance read ${formatSubscriptionCardTime(reading.observedAt)}.`,
+    },
+    estimatedTokenCost: { perMillion: rate, currency: 'USD', basis: rateBasis },
   };
 }
 
 function subscriptionMetrics(
-  driver: string, account: SubscriptionRecord, view: AllowanceView | undefined, evidence: UsageEvidence | undefined, now: number,
+  driver: string, account: SubscriptionRecord, view: AllowanceView | undefined, evidence: UsageEvidence | undefined,
+  now: number, history?: AllowanceHistory,
 ): SubscriptionMetrics {
   const report = account.lastUsage;
   const driverWindows = report?.windows ?? [];
   const browser = matchingBrowserReport(driver, account, evidence, now);
   const browserReport = browser?.report;
   if (driver === 'pi' && (account.family === 'deepseek' || account.family === 'minimax')) {
-    return { windows: [], balance: apiBalance(account, browserReport, now) };
+    return { windows: [], ...apiBalance(account, browserReport, now) };
   }
   const rawWindows = new Map(driverWindows.map((window) => [window.label, { window, report, browser: false, approximate: false }]));
   if (browserReport) {
@@ -556,12 +680,46 @@ function subscriptionMetrics(
     }
   }
   const piChatGPT = driver === 'pi' && account.family === 'chatgpt';
-  const dashboard = matchingClaudeDashboard(driver, account, evidence?.claudeDashboard, now);
+  const codex = driver === 'codex' && account.family === 'chatgpt';
+  const claude = driver === 'claude' && account.family === 'anthropic';
+  const claudePlan = claude ? publicAccountPlan(account) : undefined;
+  const claudeReading = matchingClaudeReading(driver, account, evidence?.claudeDashboard, now);
+  const claudePlanChanged = !!claudeReading && claudeReading.plan !== claudePlan && recentObservation(claudeReading.observedAt, now)
+    && Date.parse(claudeReading.observedAt) >= Date.parse(claudeReading.checkedAt);
+  const maxConfirmation = evidence?.claudeMax5x;
+  const confirmedAt = Date.parse(maxConfirmation?.confirmedAt ?? '');
+  const confirmedMax = claude && account.state === 'signed_in' && maxConfirmation?.subscription === account.id
+    && sameCreation(maxConfirmation.createdAt, account.createdAt) && confirmedAt <= now;
+  const dashboardMax = claudeReading?.plan === 'max' && (claudePlan === 'max' || claudePlanChanged)
+    && recentObservation(claudeReading.observedAt, now);
+  const confirmedSincePlanCheck = Date.parse(account.checkedAt ?? '') <= confirmedAt
+    && (!claudeReading || Date.parse(claudeReading.observedAt) <= confirmedAt);
+  const claudeMax5x = confirmedMax && (dashboardMax || confirmedSincePlanCheck);
+  const dashboard = claudeReading?.plan === (claudeMax5x ? 'max' : claudePlan) ? claudeReading : undefined;
+  function capacityForWindow(label: string, resource?: string) {
+    const planOverride = claudeMax5x && claudePlan !== 'max' ? 'max' : undefined;
+    const current = claudePlanChanged && !claudeMax5x
+      ? undefined : windowCapacity(driver, account, label, evidence, now, { resource, planOverride });
+    return current ?? (claudeMax5x ? windowCapacity(driver, account, label, evidence, now, { claudeMax5x: true }) : undefined);
+  }
+  const piReading = evidence?.piChatGPT;
+  const boundPiReport = piChatGPT && browserReport && recentObservation(browserReport.fetchedAt, now)
+    ? browserReport : undefined;
+  const manualPi = piChatGPT && matches(piReading, account, now) && recentObservation(piReading.observedAt, now)
+    ? piReading : undefined;
+  const piPlan = boundPiReport?.plan ?? manualPi?.plan;
+  const piAccess = boundPiReport?.extra?.connectedApp ?? manualPi;
+  const piHasAllowance = piAccess?.allowed && piAccess.capPercent > 0;
+  const weeklyPrice = codex ? codexMonthlyPrice(report, browserReport, now)
+    : claudeMax5x ? claudeMax5xPrice
+    : claudePlan === 'pro' && !claudePlanChanged ? claudeProPrice
+    : piPlan === 'plus'
+      ? { ...codexPlusPrice, label: 'ChatGPT Plus shared plan' } : undefined;
   const claudeWindows = new Map<string, { minutes: number; captured: QuotaReading }>();
   if (dashboard) {
     const candidates = [
       { label: 'Five hours', minutes: 300, captured: dashboard.fiveHour },
-      { label: 'Seven days', minutes: 10_080, captured: dashboard.weekly },
+      { label: 'Seven days', minutes: weekMinutes, captured: dashboard.weekly },
     ];
     for (const { label, minutes, captured } of candidates) {
       if (captured && preferDashboard(captured.resetsAt, dashboard.observedAt, report,
@@ -571,12 +729,22 @@ function subscriptionMetrics(
     }
   }
   const kimi = driver === 'pi' && account.family === 'kimi-coding';
+  const zai = driver === 'pi' && account.family === 'zai';
   const mimo = driver === 'mimo' && account.family === 'xiaomi';
   const passedBoundaries = new Set<number>();
+  const capacities = new Map<SubscriptionWindow, Capacity>();
+  const historyKey = history && allowanceHistoryKey(driver, account);
+  const saved = historyKey ? Object.assign(Object.create(null) as NonNullable<AllowanceHistory[string]>, history?.[historyKey]) : undefined;
   function project(reading: WindowReading, capacity?: Capacity) {
     const end = endTime(reading);
     if (end <= now) passedBoundaries.add(end);
-    return asWindow(reading, now, capacity, rolloverFor(driver, account.family, reading.windowMinutes));
+    const window = asWindow(reading, now, capacity, rolloverFor(driver, account.family, reading.windowMinutes));
+    if (capacity && Number.isFinite(capacity.total) && capacity.total > 0) capacities.set(window, capacity);
+    const observed = Date.parse(reading.observedAt ?? '');
+    if (saved && capacity && observed <= now && observed < end) {
+      rememberEstimate(saved, asWindow(reading, observed, capacity));
+    }
+    return window;
   }
   const windows = [...rawWindows.values()].filter(({ window }) => !claudeWindows.has(window.label)
     && !(piChatGPT && view?.quota?.windows.some((entry) => entry.windowMinutes === window.windowMinutes))).map((entry) => {
@@ -589,13 +757,13 @@ function subscriptionMetrics(
     );
     const pendingStart = rolloverFor(driver, account.family, window.windowMinutes) === 'startsOnUse'
       && used === 0 && !window.resetsAt;
-    const observedCap = driver === 'pi' && account.family === 'zai' && browserReport
+    const observedCap = zai && browserReport
       && recentObservation(browserReport.fetchedAt, now) ? browserReport.windows.find(row => row.resource === 'credits'
         && row.windowMinutes === window.windowMinutes)?.creditsTotal : undefined;
-    const capacity = driver === 'codex' && account.family === 'chatgpt' && window.windowMinutes === 10_080 ? view?.capacity
+    const capacity = codex && window.windowMinutes === weekMinutes ? view?.capacity
       : typeof observedCap === 'number' && Number.isSafeInteger(observedCap) && observedCap > 0
         ? zaiCapacity(observedCap, 'Coding Plan credit cap from the confirmed z.ai dashboard.')
-        : windowCapacity(driver, account, window.label, evidence, now, window.resource);
+        : capacityForWindow(window.label, window.resource);
     return project({
       label: window.label, resetsAt: window.resetsAt, windowMinutes: window.windowMinutes,
       expiresAt: terminal ? window.resetsAt : undefined, terminal, pendingStart,
@@ -611,7 +779,7 @@ function subscriptionMetrics(
         label, windowMinutes: minutes, resetsAt: captured.resetsAt, source: browserSource,
         approximateReset: captured.approximateReset,
         observedAt: dashboard.observedAt, remainingPercent: captured.remainingPercent, usedPercent: 100 - captured.remainingPercent,
-      }, windowCapacity(driver, account, label, evidence, now)));
+      }, capacityForWindow(label)));
     }
   }
   const quota = view?.quota;
@@ -633,18 +801,32 @@ function subscriptionMetrics(
   }
 
   windows.sort((left, right) => (endTime(left) - endTime(right)) || 0);
-  const issues = windows.length === 0 ? view?.issues ?? [] : [];
-  if (account.state === 'signed_in') {
-    for (const window of windows) {
-      if (window.next !== 'awaitingRenewal' && window.remainingPercent !== undefined && window.outputTokensRemaining === undefined) {
-        issues.push(`No matching token calibration for ${window.label.toLowerCase()}.`);
-      }
-    }
-  }
-  const piReading = evidence?.piChatGPT;
-  if (driver === 'pi' && account.family === 'chatgpt' && matches(piReading, account, now)) {
-    if (!piReading.allowed) issues.push('Pi’s access to the shared plan was disabled at the reading.');
-    else if (piReading.capPercent < 100) issues.push('Pi has a separate app cap. These figures describe the shared plan.');
+  const pricingWindow = windows.find(window => window.next !== 'awaitingRenewal' && capacities.has(window) && (
+    kimi ? window.label === 'Monthly, Kimi Code'
+      : mimo ? window.label === quota?.windows[0]?.label : window.windowMinutes === weekMinutes
+  ));
+  const pricingCapacity = pricingWindow && capacities.get(pricingWindow);
+  const zaiPlan = zai ? zaiMonthlyPlans.find(plan => zaiOutputTokens(plan.weeklyCredits) === pricingCapacity?.total) : undefined;
+  const zaiPayment = zai ? currentPayment(account, evidence?.zaiBilling, now) : undefined;
+  const payment = kimi ? currentPayment(account, evidence?.kimiBilling, now)
+    : zaiPayment && (!pricingCapacity || zaiPayment.weeklyCredits === zaiPlan?.weeklyCredits) ? zaiPayment : undefined;
+  const listPrice = mimo ? mimoMonthlyPrice(quota, quota?.windows[0]?.windowMinutes) : zai ? zaiPlan : weeklyPrice;
+  const price: SubscriptionPrice | undefined = account.state !== 'signed_in' ? undefined
+    : payment ? { label: kimi ? 'Kimi Code membership' : zaiPlan?.label ?? 'z.ai GLM Coding Plan',
+        amount: payment.amount, currency: payment.currency, months: payment.months, source: 'payment' }
+    : listPrice && { label: listPrice.label, amount: listPrice.usd, currency: 'USD', months: 1, source: 'list' };
+  const rate = pricingWindow && pricingCapacity && price && (!piChatGPT || piHasAllowance)
+    ? planTokenCost(price, pricingCapacity, pricingWindow.label, !mimo && !kimi) : undefined;
+  const tokenCostUnavailableReason = rate || account.state !== 'signed_in' ? undefined
+    : piAccess && !piHasAllowance ? 'Pi access disabled'
+    : !pricingCapacity ? 'Token allowance uncalibrated'
+    : zai || mimo ? 'Priced tier unverified' : kimi ? 'Membership price unknown' : 'Monthly price unknown';
+  if (history && historyKey && saved && Object.keys(saved).length) history[historyKey] = saved;
+  const displayWindows = saved ? restoreEstimates(windows, saved, now) : windows;
+  const issues = displayWindows.length === 0 ? view?.issues ?? [] : [];
+  if (piAccess) {
+    if (!piAccess.allowed) issues.push('Pi’s access to the shared plan was disabled at the reading.');
+    else if (piAccess.capPercent < 100) issues.push('Pi has a separate app cap. These figures describe the shared plan.');
   }
   let limitResets = resetInventory(account, now);
   if (browserReport?.extra?.rateLimitResetCredits && (!limitResets?.observedAt
@@ -657,7 +839,7 @@ function subscriptionMetrics(
       .map((expiresAt) => ({ label: 'Full reset', expiresAt }));
     limitResets = { count: entries.length, entries, observedAt: dashboard.observedAt };
   }
-  return { windows, issues, passedBoundaries: [...passedBoundaries], limitResets };
+  return { windows: displayWindows, price, estimatedTokenCost: rate, tokenCostUnavailableReason, issues, passedBoundaries: [...passedBoundaries], limitResets };
 }
 
 function endTime(window: SubscriptionWindow) {
@@ -669,7 +851,7 @@ function endTime(window: SubscriptionWindow) {
 
 export function withAllowances(
   listing: SubscriptionListing | undefined, rollup: VigorRollup | undefined, evidence: UsageEvidence | undefined, now: number,
-  browserIssues?: Record<string, string>,
+  browserIssues?: Record<string, string>, history?: AllowanceHistory,
 ): SubscriptionListing | undefined {
   if (!listing) return undefined;
   const saved = new Map(rollup?.subscriptions.map((entry) => [subscriptionKey(entry.driver, entry.subscription), entry.result]));
@@ -677,7 +859,7 @@ export function withAllowances(
     ...driver, subscriptions: driver.subscriptions?.map((account) => {
       const key = subscriptionKey(driver.driver, account.id);
       const view = allowance(driver.driver, account, saved.get(key), evidence, now);
-      const metrics = subscriptionMetrics(driver.driver, account, view, evidence, now);
+      const metrics = subscriptionMetrics(driver.driver, account, view, evidence, now, history);
       const browserIssue = browserIssues?.[key];
       if (browserIssue && account.state === 'signed_in') metrics.issues = [...(metrics.issues ?? []), browserIssue];
       return { ...account, allowance: view, metrics };

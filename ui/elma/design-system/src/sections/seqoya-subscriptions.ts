@@ -1,7 +1,7 @@
 interface ModelLabel {
   model?: string;
   performance: 'Top' | 'High' | 'Medium' | 'Low';
-  cost: 'Expensive' | 'Moderate' | 'Cheap';
+  cost?: 'Expensive' | 'Moderate' | 'Cheap';
 }
 
 export type SubscriptionModelLabels = readonly [
@@ -22,6 +22,7 @@ export interface SubscriptionRecord {
   allowance?: AllowanceView;
   metrics?: SubscriptionMetrics;
   modelLabels?: SubscriptionModelLabels;
+  userScore?: number;
   problem?: { message: string };
   activity?: SubscriptionActivity;
   activityError?: string;
@@ -55,6 +56,7 @@ export interface SubscriptionWindow {
   remainingMinutes?: number;
   usedPercent?: number;
   remainingPercent?: number;
+  outputTokensTotal?: number;
   outputTokensUsed?: number;
   outputTokensRemaining?: number;
   outputTokensPerHour?: number;
@@ -69,6 +71,9 @@ export interface SubscriptionWindow {
 
 export interface SubscriptionMetrics {
   issues?: string[];
+  price?: SubscriptionPrice;
+  estimatedTokenCost?: EstimatedTokenCost;
+  tokenCostUnavailableReason?: string;
   windows: SubscriptionWindow[];
   balance?: SubscriptionBalance;
   passedBoundaries?: number[];
@@ -77,6 +82,22 @@ export interface SubscriptionMetrics {
     observedAt?: string;
     entries: { label: string; expiresAt?: string | 0; expired?: boolean }[];
   };
+}
+
+export interface EstimatedTokenCost {
+  perMillion: number;
+  currency: 'USD' | 'CNY' | 'EUR';
+  basis: string;
+  window?: string;
+  windowsPerMonth?: number;
+}
+
+export interface SubscriptionPrice {
+  label: string;
+  amount: number;
+  currency: EstimatedTokenCost['currency'];
+  months: number;
+  source: 'payment' | 'list';
 }
 
 export interface SubscriptionBalance {
@@ -91,7 +112,35 @@ export type RenameSubscription = (
   driver: string, account: SubscriptionRecord, name: string,
 ) => Promise<void>;
 
+export const defaultSubscriptionUserScore = 0.5;
+
+export function isSubscriptionUserScore(value: unknown): value is number {
+  return typeof value === 'number' && value >= 0 && value <= 1;
+}
+
 export type AllowanceWindowType = '5h' | 'week' | 'month' | 'other';
+
+const tokenMillions = new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+export function allowanceTokenTotal(window: SubscriptionWindow): number | undefined {
+  if (window.next === 'awaitingRenewal') return undefined;
+  const { outputTokensTotal, outputTokensUsed, outputTokensRemaining } = window;
+  if (validTokenCount(outputTokensTotal)) return outputTokensTotal;
+  if (!validTokenCount(outputTokensUsed) || !validTokenCount(outputTokensRemaining)) return undefined;
+  const total = outputTokensUsed + outputTokensRemaining;
+  return validTokenCount(total) ? total : undefined;
+}
+
+function validTokenCount(value: number | undefined): value is number {
+  return value !== undefined && Number.isFinite(value) && value >= 0;
+}
+
+export function formatAllowanceTokenTotal(tokens: number | undefined): string {
+  if (tokens === undefined) return 'Unavailable';
+  const millions = tokens / 1_000_000;
+  if (millions > 0 && millions < 0.01) return '< ' + tokenMillions.format(0.01) + 'M';
+  return '≈ ' + tokenMillions.format(millions) + 'M';
+}
 
 export function allowanceWindowType(window: SubscriptionWindow): AllowanceWindowType {
   if (window.windowMinutes === 300) return '5h';
@@ -167,6 +216,7 @@ export interface SubscriptionListing {
 
 export interface SubscriptionView {
   connected: boolean;
+  saveUserScore?: (driver: string, account: SubscriptionRecord, score: number) => void;
   loading?: boolean;
   listing?: SubscriptionListing;
   error?: string;
@@ -206,12 +256,6 @@ const vendors = new Map([
 
 export function subscriptionVendor(driver: string, family: string): string {
   return driver === 'codex' && family === 'chatgpt' ? 'Codex' : (vendors.get(family) ?? family);
-}
-
-export function subscriptionUsageProvider(driver: string, account: SubscriptionRecord): string | undefined {
-  if (account.state !== 'signed_in' || account.id !== account.family
-    || !subscriptionProviderOrder.has(subscriptionKey(driver, account.id))) return undefined;
-  return subscriptionVendor(driver, account.family);
 }
 
 /** Local calendar days (rather than 24-hour offsets) keep Tomorrow correct across DST. */

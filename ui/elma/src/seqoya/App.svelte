@@ -5,12 +5,17 @@
     canRefreshSubscriptionUsage, subscriptionKey, type RenameSubscription, type SubscriptionActivity, type SubscriptionListing, type SubscriptionRecord, type SubscriptionView,
   } from '../../design-system/src/sections/seqoya-subscriptions';
   import type { VigorRollup, VigorView } from '../../design-system/src/sections/seqoya-vigor';
+  import type { VigorPriorityView } from '../../design-system/src/sections/seqoya-vigor-priority';
   import { AppChannel } from '../app-channel';
   import { Bridge, Refusal } from '../bridge';
   import { readSeqoyaAppearance, saveSeqoyaAppearance } from '../preferences';
   import { mergeUsageEvidence, withAllowances, type UsageEvidence } from './allowance-evidence';
+  import { readAllowanceHistory, saveAllowanceHistory } from './allowance-history';
   import { withModelLabels } from './subscription-model-labels';
-  import { rankVigor, retainAccounts, retainVigor } from './vigor-estimates';
+  import { readUserScores, saveUserScore, withUserScores } from './subscription-user-scores';
+  import { retainAccounts, retainVigor } from './vigor-estimates';
+  import { readQuotaDashChoices, saveQuotaDashChoice } from './quota-dash';
+  import { readMonthlyEtcForecasts, readVigorSettings, saveMonthlyEtcForecast, saveVigorSettings } from './vigor-settings';
 
   let connectionStatus = $state('Connecting to Arbol…');
   let ready = $state(false);
@@ -23,18 +28,50 @@
   let browserEvidence = $state<UsageEvidence>();
   let browserIssues = $state<Record<string, string>>({});
   let browserError = $state<string>();
+  let browserRequest = $state<number>();
   let initialBrowserRead = $state(true);
   const combinedEvidence = $derived(mergeUsageEvidence(evidence, browserEvidence));
+  const waitingForPi = $derived(initialBrowserRead && subscriptions.connected && subscriptions.listing?.drivers.some(
+    ({ driver, subscriptions: accounts }) => driver === 'pi' && accounts?.some(
+      account => account.family === 'chatgpt' && account.state === 'signed_in',
+    ),
+  ));
   let now = $state(Date.now());
+  let allowanceHistory = $state.raw(readAllowanceHistory());
+  let userScores = $state.raw(readUserScores());
+  let quotaDashChoices = $state.raw(readQuotaDashChoices());
+  let vigorSettings = $state.raw(readVigorSettings());
+  let monthlyEtcForecasts = $state.raw(readMonthlyEtcForecasts());
+  const projection = $derived.by(() => {
+    const history = { ...allowanceHistory };
+    const listing = withAllowances(vigorAccounts ?? subscriptions.listing, vigor.rollup, combinedEvidence, now, browserIssues, history);
+    return { listing, history };
+  });
+  const subscriptionsWithScores = $derived(withUserScores(projection.listing, userScores));
+  $effect(() => {
+    if (JSON.stringify(projection.history) === JSON.stringify(allowanceHistory)) return;
+    allowanceHistory = projection.history;
+    saveAllowanceHistory(allowanceHistory);
+  });
   const subscriptionView = $derived<SubscriptionView>({
     ...subscriptions,
-    listing: withAllowances(subscriptions.listing && retainAccounts(subscriptions.listing, vigorAccounts),
-      vigor.rollup, combinedEvidence, now, browserIssues),
+    listing: subscriptionsWithScores,
+    saveUserScore: (driver, account, score) => { userScores = saveUserScore(driver, account.id, score); },
     evidenceError: browserError ?? evidenceError ?? vigor.error,
   });
-  const vigorView = $derived<VigorView>({
+  const vigorView = $derived<VigorPriorityView>({
     ...vigor,
-    entries: rankVigor(vigor.rollup, withAllowances(vigorAccounts, vigor.rollup, combinedEvidence, now)),
+    loading: subscriptions.connected && (subscriptions.loading || vigor.loading),
+    priority: {
+      listing: subscriptionsWithScores,
+      now,
+      choices: quotaDashChoices,
+      setChoice: (key, choice) => { quotaDashChoices = saveQuotaDashChoice(key, choice); },
+      settings: vigorSettings,
+      monthlyForecasts: monthlyEtcForecasts,
+      setMonthlyForecast: (key, forecast) => { monthlyEtcForecasts = saveMonthlyEtcForecast(key, forecast); },
+      setSettings: settings => { vigorSettings = saveVigorSettings(settings); },
+    },
     accountIssues: [
       ...(subscriptions.error ? [subscriptions.error] : []),
       ...(evidenceError ? [evidenceError] : []),
@@ -82,12 +119,12 @@
     let connection = 0;
     let evidenceRevision = 0;
     let listRequest: Promise<void> | undefined;
-    let browserRequest: number | undefined;
     const isCurrent = (requestedOn: number) => active && requestedOn === connection;
     const bridge = new Bridge({
       onhello: () => {
         connection++;
         listRequest = undefined;
+        browserRequest = undefined;
         subscriptions = { connected: true, listing: subscriptions.listing };
         vigor = { ...vigor, loading: false };
         if (!ready) {
@@ -102,6 +139,7 @@
         if (state === 'Reconnecting…' || state === 'This window cannot work with this Bridge version.') {
           connection++;
           listRequest = undefined;
+          browserRequest = undefined;
           subscriptions = { connected: false, listing: subscriptions.listing };
         }
       },
@@ -138,14 +176,15 @@
     }
 
     async function loadListing(requestedOn: number) {
-      subscriptions = { ...subscriptions, loading: true, error: undefined };
+      subscriptions = { ...subscriptions, loading: true };
       try {
         const listing = await bridge.call<SubscriptionListing>('accounts.list');
         if (!isCurrent(requestedOn)) return;
         if (!Array.isArray(listing?.drivers)) throw new Error('Invalid account list.');
-        vigorAccounts = retainAccounts(listing, vigorAccounts);
-        subscriptions = { ...subscriptions, loading: false, listing };
-        const withLocalActivity = await withActivity(withModelLabels(listing));
+        const annotated = withModelLabels(listing);
+        vigorAccounts = retainAccounts(annotated, vigorAccounts);
+        subscriptions = { ...subscriptions, loading: false, listing: annotated, error: undefined };
+        const withLocalActivity = await withActivity(annotated);
         if (isCurrent(requestedOn)) {
           vigorAccounts = retainAccounts(withLocalActivity, vigorAccounts);
           subscriptions = { ...subscriptions, listing: withLocalActivity };
@@ -215,7 +254,10 @@
         if (isCurrent(requestedOn)) browserError = error instanceof Refusal ? error.message
           : 'The App did not return readable Arbol Browser usage.';
       } finally {
-        if (isCurrent(requestedOn)) initialBrowserRead = false;
+        if (isCurrent(requestedOn)) {
+          initialBrowserRead = false;
+          queueMicrotask(refreshWindows);
+        }
         if (browserRequest === requestedOn) browserRequest = undefined;
       }
     };
@@ -224,7 +266,7 @@
       if (!active || vigor.loading || !subscriptions.connected) return;
       const requestedOn = connection;
       const requestedEvidenceRevision = evidenceRevision;
-      vigor = { ...vigor, loading: true, error: undefined };
+      vigor = { ...vigor, loading: true };
       try {
         const reply = await app.call('app.readVigor');
         if (!isCurrent(requestedOn)) return;
@@ -234,8 +276,9 @@
           throw new Error('Invalid Vigor rollup.');
         }
         if (requestedEvidenceRevision === evidenceRevision) {
-          evidence = reply.usageEvidence as UsageEvidence | undefined;
           evidenceError = typeof reply.usageEvidenceError === 'string' ? reply.usageEvidenceError : undefined;
+          const saved = reply.usageEvidence as UsageEvidence | undefined;
+          evidence = evidenceError ? { ...evidence, ...saved } : saved;
         }
         now = Date.now();
         vigor = { rollup: retainVigor(reply as unknown as VigorRollup, vigor.rollup) };
@@ -283,6 +326,7 @@
     }
 
     function refreshWindows() {
+      if (waitingForPi) return;
       refreshPassedWindows();
       if (!active || !subscriptions.connected || !['Subscriptions', 'Vigor'].includes(activeTab) || !readUsage) return;
       for (const { driver, subscriptions: accounts, error } of subscriptionView.listing?.drivers ?? []) {

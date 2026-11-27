@@ -1,9 +1,11 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import Button from '../components/Button.svelte';
   import InlineRename from '../patterns/InlineRename.svelte';
   import SubscriptionAllowance from './SubscriptionAllowance.svelte';
   import {
-    formatSubscriptionCardTime, sortAllowanceWindows, subscriptionKey, subscriptionName, subscriptionUsageProvider,
+    defaultSubscriptionUserScore, formatSubscriptionCardTime, isSubscriptionUserScore, sortAllowanceWindows,
+    subscriptionKey, subscriptionName, subscriptionProviderOrder, subscriptionVendor,
     type OpenSubscriptionUsage, type RenameSubscription, type SubscriptionAvailability, type SubscriptionRecord, type SubscriptionView,
   } from './seqoya-subscriptions';
 
@@ -19,15 +21,55 @@
   let editing = $state<SubscriptionRecord>();
   let saving = $state(false);
   let problem = $state('');
+  let scoreDraft = $state<string>();
+  let scoreError = $state('');
+  let scoreInvalid = $state(false);
+  let scoreInput = $state<HTMLInputElement>();
+  let scoreButton = $state<HTMLButtonElement>();
+  const scoreErrorId = $props.id();
+  const userScore = $derived(subscription.userScore ?? defaultSubscriptionUserScore);
   const key = $derived(subscriptionKey(driver, subscription.id));
   const name = $derived(subscriptionName(driver, subscription));
   const metrics = $derived(subscription.metrics);
   const resets = $derived(metrics?.limitResets);
-  const deepseek = $derived(subscription.family === 'deepseek');
-  const payAsYouGo = $derived(driver === 'pi' && (deepseek || subscription.family === 'minimax'));
-  const provider = $derived(subscriptionUsageProvider(driver, subscription));
-  const opening = $derived(view.usageOpening === key);
-  const request = $derived(view.usageRequests?.[key]);
+  const payAsYouGo = $derived(driver === 'pi' && ['deepseek', 'minimax'].includes(subscription.family));
+  const provider = $derived(subscriptionProviderOrder.has(subscriptionKey(driver, subscription.family))
+    ? subscriptionVendor(driver, subscription.family) : undefined);
+
+  async function editUserScore(event: MouseEvent) {
+    if (!event.altKey && event.detail !== 0) return;
+    scoreDraft = String(userScore);
+    await tick();
+    scoreInput?.focus();
+    scoreInput?.select();
+  }
+
+  async function closeUserScore() {
+    scoreDraft = undefined;
+    scoreError = '';
+    scoreInvalid = false;
+    await tick();
+    scoreButton?.focus();
+  }
+
+  function saveUserScore(event: SubmitEvent) {
+    event.preventDefault();
+    if (availability) return;
+    const text = scoreDraft?.trim() ?? '';
+    const score = /^[+-]?(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:e[+-]?\d+)?$/i.test(text) ? Number(text.replace(',', '.')) : NaN;
+    if (!isSubscriptionUserScore(score)) {
+      scoreInvalid = true;
+      scoreError = 'Enter a number from 0 to 1.';
+      scoreInput?.focus();
+      return;
+    }
+    try {
+      view.saveUserScore?.(driver, subscription, score);
+      void closeUserScore();
+    } catch {
+      scoreError = 'Could not save the score. Your edit is still here.';
+    }
+  }
 
   function startEdit() {
     editing = subscription;
@@ -77,7 +119,8 @@
       {:else}
         <p class="small muted">No saved API balance.</p>
       {/if}
-    {:else}
+    {/if}
+    {#if !payAsYouGo || metrics?.windows.length}
       {#each sortAllowanceWindows(metrics?.windows ?? []) as window}
         <SubscriptionAllowance {window} />
       {:else}
@@ -86,22 +129,50 @@
     {/if}
 
     {#each metrics?.issues ?? [] as issue}<p class="small warning">{issue}</p>{/each}
-    {#if deepseek && subscription.lastUsage?.extra?.apiAvailable === false}
-      <p class="small warning">The balance is insufficient for API calls.</p>
-    {/if}
     {#if provider && onOpenUsage && !availability}
       <div class="row usage-actions">
-        <Button label={opening ? 'Verifying and opening…' : 'Open in ' + provider} tone="ghost" busy={opening}
-          disabled={!view.connected || view.usageOpening !== undefined}
+        <Button label={view.usageOpening === key ? 'Verifying and opening…' : 'Open in ' + provider} tone="ghost" busy={view.usageOpening === key}
+          disabled={!view.connected || (!!view.usageOpening && view.usageOpening !== key)}
           onclick={() => onOpenUsage?.(driver, subscription.id)} />
       </div>
     {/if}
-    {#if request?.error}<p class="small warning" role="status">{request.error}</p>{/if}
     {#if provider && view.usageOpened?.key === key && view.usageOpened.createdAt === subscription.createdAt
       && view.usageOpened.family === subscription.family && subscription.state === 'signed_in'}
       <p class="small muted" role="status">Opened in Arbol Browser.</p>
     {/if}
-    {#if provider && view.usageLinkErrors?.[key]}<p class="small warning" role="status">{view.usageLinkErrors[key]}</p>{/if}
+    {#if view.usageLinkErrors?.[key]}<p class="small warning" role="status">{view.usageLinkErrors[key]}</p>{/if}
+
+    {#if !payAsYouGo && !metrics?.balance && (view.saveUserScore || subscription.userScore !== undefined)}
+      <dl class="metrics user-score">
+        <dt>User score</dt>
+        <dd>
+          {#if scoreDraft !== undefined && !availability}
+            <form class="score-editor" onsubmit={saveUserScore}>
+              <input type="text" inputmode="decimal" aria-label={'User score for ' + name}
+                aria-invalid={scoreInvalid} aria-describedby={scoreError ? scoreErrorId : undefined}
+                bind:this={scoreInput} bind:value={scoreDraft}
+                oninput={() => { scoreError = ''; scoreInvalid = false; }}
+                onkeydown={(event) => {
+                  if (event.key === 'Escape' && !event.isComposing) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    void closeUserScore();
+                  }
+                }} />
+              <button type="submit">Save</button>
+              <button type="button" onclick={closeUserScore}>Cancel</button>
+              {#if scoreError}<span class="small warning" id={scoreErrorId} role="alert">{scoreError}</span>{/if}
+            </form>
+          {:else if view.saveUserScore && !availability}
+            <button type="button" class="score-value" bind:this={scoreButton} title="Option-click to edit"
+              aria-label={'Edit user score for ' + name + ', current score ' + userScore}
+              onclick={editUserScore}>{userScore}</button>
+          {:else}
+            {userScore}
+          {/if}
+        </dd>
+      </dl>
+    {/if}
 
     {#if resets?.count !== undefined && resets.count > 0}
       <div class="reset-section stack">
@@ -132,5 +203,18 @@
   .metrics { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 16px; margin: 0; }
   .metrics dt { color: var(--muted); }
   .metrics dd { margin: 0; text-align: end; font-variant-numeric: tabular-nums; }
+  .user-score { grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); align-items: baseline; }
+  .score-value, .score-editor button {
+    border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 2px 7px;
+    background: transparent; color: var(--text); font: inherit; cursor: pointer;
+  }
+  .score-value { border-color: transparent; text-decoration: underline dotted var(--muted); }
+  .score-value:hover { border-color: var(--border); }
+  .score-editor { display: flex; justify-content: end; flex-wrap: wrap; gap: 4px; }
+  .score-editor input {
+    width: 6ch; max-width: 100%; padding: 2px 5px; border: 1px solid var(--border);
+    border-radius: var(--radius-sm); background: var(--inset); color: var(--text); font: inherit;
+  }
+  .score-editor [role="alert"] { flex-basis: 100%; }
   .reset-grants { margin: 0; padding-left: 20px; }
 </style>

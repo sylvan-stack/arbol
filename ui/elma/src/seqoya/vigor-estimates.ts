@@ -2,12 +2,10 @@ import {
   subscriptionKey, type SubscriptionListing, type SubscriptionRecord,
 } from '../../design-system/src/sections/seqoya-subscriptions';
 import {
-  displayedVigor, type VigorEntry, type VigorRollup,
+  calculateVigor, rankVigorEntries, type VigorEntry, type VigorRollup,
 } from '../../design-system/src/sections/seqoya-vigor';
 
-const provisional = 0.05;
 const tokensPerRate = 1_000_000;
-const capacityCeiling = 0.5;
 // Peak output price per million tokens for deepseek-flash, checked 2026-11-12.
 // https://api-docs.deepseek.com/quick_start/pricing/
 // https://api-docs.deepseek.com/zh-cn/quick_start/pricing/
@@ -17,8 +15,6 @@ const inactiveStates = new Map([
   ['needs_attention', 'This account needs attention before it can be used.'],
   ['signing_in', 'Sign-in is still in progress.'],
 ]);
-
-type Estimate = NonNullable<VigorEntry['estimate']>;
 
 export function deepSeekBalance(account: SubscriptionRecord) {
   const usage = account.lastUsage;
@@ -36,58 +32,26 @@ export function deepSeekBalance(account: SubscriptionRecord) {
   return largest;
 }
 
-function deepSeekEstimate(account: SubscriptionRecord, entry: VigorEntry): Estimate | undefined {
-  if (entry.result?.nextChange) return undefined;
-  const balance = deepSeekBalance(account);
-  if (!balance) return undefined;
-  const { amount, currency, tokens, rate } = balance;
-  return {
-    score: capacityCeiling * tokens / (tokens + tokensPerRate),
-    exhausted: tokens === 0,
-    reason: 'Saved balance ' + amount + ' ' + currency + '.',
-    budget: { amount, tokens, currency, rate, referenceTokens: tokensPerRate, ceiling: capacityCeiling },
-  };
-}
-
-function scoreEntry(entry: VigorEntry, account: SubscriptionRecord | undefined): VigorEntry {
-  const inactive = account && inactiveStates.get(account.state);
-  if (inactive) return { ...entry, unavailable: account?.problem?.message || inactive };
-  if (entry.result?.vigor != null) return entry;
-  if (entry.result?.exhausted || account?.lastUsage?.extra?.apiAvailable === false) {
-    return { ...entry, estimate: { score: 0, exhausted: true, reason: 'The reported allowance is exhausted.' } };
-  }
-  if (account?.state !== 'signed_in') {
-    return { ...entry, estimate: { score: provisional, reason: 'Provisional score. Sign-in status could not be confirmed.' } };
-  }
-  const estimate = deepSeekEstimate(account, entry) ?? {
-    score: provisional,
-    reason: 'Provisional score while usable allowance data is missing.',
-  };
-  return { ...entry, estimate };
-}
-
-export function rankVigor(rollup?: VigorRollup, listing?: SubscriptionListing): VigorEntry[] | undefined {
+export function rankVigor(rollup: VigorRollup | undefined, listing: SubscriptionListing | undefined, now: number): VigorEntry[] | undefined {
   if (!rollup && !listing) return undefined;
-  const entries = new Map((rollup?.subscriptions ?? []).map((entry) => [
-    subscriptionKey(entry.driver, entry.subscription), entry,
+  const saved = new Map((rollup?.subscriptions ?? []).map(entry => [
+    subscriptionKey(entry.driver, entry.subscription), entry.result,
   ]));
-  const accounts = new Map<string, SubscriptionRecord>();
-  for (const { driver, subscriptions } of listing?.drivers ?? []) {
-    for (const account of subscriptions ?? []) {
-      const key = subscriptionKey(driver, account.id);
-      accounts.set(key, account);
-      if (!entries.has(key)) {
-        entries.set(key, {
-          driver, subscription: account.id, label: account.label, family: account.family, result: null,
-        });
-      }
-    }
-  }
-  return [...entries].map(([key, entry]) => {
-    const account = accounts.get(key);
-    return scoreEntry({ ...entry, activity: account?.activity, activityError: account?.activityError, allowance: account?.allowance }, account);
-  })
-    .sort((left, right) => (displayedVigor(right) ?? -1) - (displayedVigor(left) ?? -1));
+  if (!listing) return rollup?.subscriptions.map(entry => ({
+    ...entry, plan: calculateVigor(entry.driver, undefined, now, 'Waiting for subscription metrics.'),
+  }));
+  const entries = listing.drivers.flatMap(({ driver, subscriptions }) => (subscriptions ?? []).map(account => {
+    const { id: subscription, label, family, activity, activityError, allowance } = account;
+    const inactive = inactiveStates.get(account.state);
+    const unavailable = inactive && (account.problem?.message || inactive);
+    const reason = account.state === 'signed_in' ? undefined : unavailable ?? 'Sign-in status is unavailable.';
+    return {
+      driver, subscription, label, family, activity, activityError, allowance, unavailable,
+      result: saved.get(subscriptionKey(driver, subscription)) ?? null,
+      plan: calculateVigor(driver, account, now, reason),
+    };
+  }));
+  return rankVigorEntries(entries);
 }
 
 export function retainAccounts(next: SubscriptionListing, previous?: SubscriptionListing): SubscriptionListing {

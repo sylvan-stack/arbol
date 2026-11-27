@@ -1,7 +1,7 @@
 <script lang="ts">
   import Tooltip from '../components/Tooltip.svelte';
   import {
-    allowanceWindowLabel, allowanceWindowType, formatSubscriptionCardTime,
+    allowanceTokenTotal, allowanceWindowLabel, allowanceWindowType, formatAllowanceTokenTotal, formatSubscriptionCardTime,
     type SubscriptionBalance, type SubscriptionWindow,
   } from './seqoya-subscriptions';
 
@@ -101,14 +101,15 @@
       </button>
     </Tooltip>
   </div>
-  {#if window.next !== 'awaitingRenewal'}
-    <dl class="metrics">
+  <dl class="metrics">
+    <dt>Total tokens per window</dt><dd title={estimateTip}>{formatAllowanceTokenTotal(allowanceTokenTotal(window))}</dd>
+    {#if window.next !== 'awaitingRenewal'}
       <dt>Output-token equivalents used</dt><dd title={estimateTip}>{amount(window.outputTokensUsed)}</dd>
       <dt>Output-token equivalents remaining</dt><dd title={estimateTip}>{amount(window.outputTokensRemaining)}</dd>
       <dt>Remaining equivalents per hour</dt>
       <dd title={estimateTip}>{window.pendingStart ? 'After first use' : amount(window.outputTokensPerHour, true)}</dd>
-    </dl>
-  {/if}
+    {/if}
+  </dl>
 </section>
 {/if}
 

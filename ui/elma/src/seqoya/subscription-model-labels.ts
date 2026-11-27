@@ -10,9 +10,11 @@ const modelLabelsByDriverAndFamily = new Map<string, SubscriptionModelLabels>([
     { model: 'GPT-6.1-Sol', performance: 'Top', cost: 'Expensive' },
     { model: 'GPT-6-Astra', performance: 'Top', cost: 'Expensive' },
   ]],
-  [subscriptionKey('pi', 'kimi-coding'), [{ performance: 'High', cost: 'Moderate' }]],
-  [subscriptionKey('pi', 'zai'), [{ performance: 'Medium', cost: 'Moderate' }]],
+  [subscriptionKey('pi', 'chatgpt'), [{ model: 'GPT-6.1 Sol', performance: 'Top' }]],
+  [subscriptionKey('pi', 'kimi-coding'), [{ performance: 'Medium', cost: 'Moderate' }]],
+  [subscriptionKey('pi', 'zai'), [{ performance: 'Low', cost: 'Moderate' }]],
   [subscriptionKey('pi', 'deepseek'), [{ performance: 'Medium', cost: 'Cheap' }]],
+  [subscriptionKey('pi', 'minimax'), [{ performance: 'High' }]],
   [subscriptionKey('mimo', 'xiaomi'), [{ performance: 'Low', cost: 'Cheap' }]],
 ]);
 
