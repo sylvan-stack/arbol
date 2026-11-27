@@ -142,15 +142,15 @@ def report(provider: Provider, value: Any) -> tuple[Params, list[str]]:
                 or api.keys() not in ({"balance"}, {"balance", "paymentAt", "paid"})):
             raise ValueError
         balance = amount(api["balance"])
-        details = {"balance": balance, "observedAt": observed.isoformat()}
+        api_details = {"balance": balance, "observedAt": observed.isoformat()}
         if "paymentAt" in api:
             stamp, paid = api["paymentAt"], amount(api["paid"])
             if not isinstance(stamp, str) or not re.fullmatch(r"20\d\d-\d\d-\d\d \d\d:\d\d:\d\d", stamp):
                 raise ValueError
             if datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC) > observed or float(paid) <= 0:
                 raise ValueError
-            details.update(paymentAt=stamp, startingBalance=paid)
-        extra["apiBalance"] = details
+            api_details.update(paymentAt=stamp, startingBalance=paid)
+        extra["apiBalance"] = api_details
     elif subscription == "minimax":
         minimax = value.get("minimax")
         if (not isinstance(minimax, dict) or not {"activePlan", "credits", "llmTokens", "period"} <= minimax.keys()
