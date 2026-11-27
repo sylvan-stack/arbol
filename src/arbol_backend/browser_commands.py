@@ -101,7 +101,7 @@ class BrowserCommands:
             raise unavailable()
         if creation_request is not None and REQUEST.fullmatch(creation_request) is None:
             raise unavailable()
-        if (SEQOYA_PROFILE.fullmatch(profile) is None or INSTANCE.fullmatch(instance) is None
+        if (PROFILE.fullmatch(profile) is None or INSTANCE.fullmatch(instance) is None
                 or len(url) > 8192 or any(ord(c) <= 32 or c in "\\\x7f" for c in url)):
             raise unavailable()
         try:
@@ -127,7 +127,7 @@ class BrowserCommands:
             raise unavailable()
 
     async def capture_usage(self, provider: str, profile: str, instance: str, claim: str) -> dict[str, Any]:
-        if (SEQOYA_PROFILE.fullmatch(profile) is None or INSTANCE.fullmatch(instance) is None
+        if (PROFILE.fullmatch(profile) is None or INSTANCE.fullmatch(instance) is None
                 or USAGE_CLAIM.fullmatch(claim) is None):
             raise unavailable()
         return await self.execute("seqoya-usage", "--profile", profile, "--profile-instance", instance,

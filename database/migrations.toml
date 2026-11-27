@@ -50,3 +50,11 @@ id = "seqoya-subscription-proofs"
 file = "006-browser-subscription-proofs.sql"
 sha256 = "3e043ff4188a73ed1171fee54500dc2a9525a2b27faa66c23a345bc42f135a29"
 compatibility_version = 1
+
+[[migrations]]
+revision = 7
+predecessor = 6
+id = "seqoya-existing-browser-profiles"
+file = "007-existing-browser-profiles.sql"
+sha256 = "9ebb6833a6902d659b2e80d2b8fd211d55a22b01fbe7eb95d4f947307cfaa338"
+compatibility_version = 1

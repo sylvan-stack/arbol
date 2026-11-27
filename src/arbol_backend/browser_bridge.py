@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from .accounts import Accounts, BrowserReplacement
 from .bridge import Error, Params, Registry
-from .browser_commands import BROWSER_SECONDS, INSTANCE, SEQOYA_PROFILE, USAGE_CLAIM, BrowserCommands, unavailable
+from .browser_commands import BROWSER_SECONDS, INSTANCE, PROFILE, USAGE_CLAIM, BrowserCommands, unavailable
 from .browser_profiles import BrowserProfiles, ProfileBinding
 from .browser_usage import BrowserUsage
 from .database import Database
@@ -84,7 +84,7 @@ class BrowserBridge:
         token, provider, profile, instance = (params.get(key) for key in ("claim", "provider", "profile", "instance"))
         if (params.keys() != {"claim", "provider", "profile", "instance"} or not isinstance(token, str)
                 or USAGE_CLAIM.fullmatch(token) is None or not isinstance(provider, str) or len(provider) > 64
-                or not isinstance(profile, str) or SEQOYA_PROFILE.fullmatch(profile) is None
+                or not isinstance(profile, str) or PROFILE.fullmatch(profile) is None
                 or not isinstance(instance, str) or INSTANCE.fullmatch(instance) is None):
             raise Error("invalid_input")
         return params

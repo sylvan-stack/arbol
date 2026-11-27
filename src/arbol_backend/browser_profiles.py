@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import secrets
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 
 from .accounts import Accounts
-from .browser_commands import INSTANCE, REQUEST, BrowserCommands, BrowserProfile, UnsupportedBoundOpen
+from .browser_commands import (
+    INSTANCE, PROFILE, REQUEST, SEQOYA_PROFILE, BrowserCommands, BrowserProfile, UnsupportedBoundOpen,
+)
 from .database import Database, Session
 from .model import Refused
 from .subscription_identity import DRIVER, SubscriptionIdentities, SubscriptionIdentity, SubscriptionProof, canonical
@@ -30,6 +33,10 @@ def profile_id(installation: str, driver: str, incarnation: str, request: str) -
     return "seqoya-" + digest.hexdigest()[:32]
 
 
+def existing_profile(profile: str) -> bool:
+    return profile != "default" and PROFILE.fullmatch(profile) is not None and SEQOYA_PROFILE.fullmatch(profile) is None
+
+
 @dataclass(frozen=True)
 class ProfileBinding:
     installation: str
@@ -39,6 +46,7 @@ class ProfileBinding:
     profile: str
     instance: str | None
     state: str
+    origin: str = "generated"
 
     @property
     def owner(self) -> tuple[str, str, str]:
@@ -60,19 +68,28 @@ class BrowserProfiles:
     async def current(session: Session, selected: SubscriptionIdentity) -> ProfileBinding | None:
         owner = (selected.installation, selected.driver, selected.incarnation)
         rows = await session.execute(
-            "SELECT creation_request,profile,profile_instance,state FROM public.seqoya_browser_bindings "
+            "SELECT creation_request,profile,profile_instance,state,"
+            "COALESCE(to_jsonb(binding)->>'profile_origin','generated') FROM public.seqoya_browser_bindings AS binding "
             "WHERE installation=%s AND driver=%s AND subscription_incarnation=%s AND state<>'retired' FOR UPDATE", owner)
         if not rows:
             return None
         if len(rows) != 1:
             raise needs_rebind()
-        request, profile, instance, state = rows[0]
-        if (not isinstance(request, str) or profile != profile_id(*owner, request)
+        request, profile, instance, state, origin = rows[0]
+        if (not isinstance(request, str) or REQUEST.fullmatch(request) is None or not isinstance(profile, str)
                 or state not in ("preparing", "active", "needs_rebind")
                 or (instance is not None and (not isinstance(instance, str) or INSTANCE.fullmatch(instance) is None))
                 or (state == "active" and instance is None) or (state == "preparing" and instance is not None)):
             raise needs_rebind()
-        return ProfileBinding(*owner, request, profile, instance, state)
+        if origin == "generated":
+            if profile != profile_id(*owner, request):
+                raise needs_rebind()
+        elif origin == "existing":
+            if not existing_profile(profile) or state == "preparing" or instance is None:
+                raise needs_rebind()
+        else:
+            raise needs_rebind()
+        return ProfileBinding(*owner, request, profile, instance, state, origin)
 
     async def reserve(self, selected: SubscriptionIdentity) -> ProfileBinding:
         """Commit a single preparing record before a caller asks Browser to create it."""
@@ -91,6 +108,35 @@ class BrowserProfiles:
                 "(installation,driver,subscription_incarnation,creation_request,profile,state) "
                 "VALUES (%s,%s,%s,%s,%s,'preparing')", (*owner, request, profile))
             return ProfileBinding(*owner, request, profile, None, "preparing")
+
+    async def adopt_existing(self, selected: SubscriptionIdentity, previous: BrowserProfile,
+                             target: BrowserProfile, browser: BrowserCommands,
+                             verify: Callable[[], Awaitable[None]]) -> ProfileBinding:
+        """Retire the exact dedicated association and select the owner's existing profile."""
+        if (not existing_profile(target.profile) or target == previous
+                or (await browser.list(target.profile)).get(target.profile) != target):
+            raise needs_rebind()
+        await verify()
+        async with self.identities.transaction() as (session, installation):
+            await self.require_identity(session, installation, selected)
+            current = await self.current(session, selected)
+            owner = (installation, selected.driver, selected.incarnation)
+            adopted = ProfileBinding(*owner, target.request, target.profile, target.instance, "active", "existing")
+            if current == adopted:
+                return adopted
+            if current != ProfileBinding(*owner, previous.request, previous.profile, previous.instance, "active"):
+                raise needs_rebind()
+            await session.execute(
+                "UPDATE public.seqoya_browser_bindings SET state='retired' "
+                "WHERE installation=%s AND driver=%s AND subscription_incarnation=%s AND creation_request=%s",
+                (*owner, previous.request))
+            await session.execute(
+                "INSERT INTO public.seqoya_browser_bindings "
+                "(installation,driver,subscription_incarnation,creation_request,profile,profile_instance,state,profile_origin) "
+                "VALUES (%s,%s,%s,%s,%s,%s,'active','existing')",
+                (*owner, target.request, target.profile, target.instance))
+            await verify()
+            return adopted
 
     async def mark_needs_rebind(self, selected: SubscriptionIdentity, expected: ProfileBinding) -> None:
         async with self.identities.transaction() as (session, installation):

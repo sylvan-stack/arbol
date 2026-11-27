@@ -247,6 +247,7 @@ def package(root: Path = ROOT) -> Path:
     for name in ("migrations.toml", "migrate_schema.py", "database_server.py", "install_database_server.py",
                  "probe_database_server.py", "archive_volume.py", "recovery.py", "recovery_release.py",
                  "exchange_format_transition.py", "layout_move.py", "layout_archive.py",
+                 "adopt_browser_profile.py",
                  *(migration["file"] for migration in migrations)):
         if not isinstance(name, str) or Path(name).name != name or name in ("", ".", ".."):
             raise ValueError("Each migration input must be a file in the database directory.")
