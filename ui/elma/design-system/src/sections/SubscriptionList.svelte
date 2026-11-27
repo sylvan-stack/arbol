@@ -4,8 +4,8 @@
   import Notice from '../patterns/Notice.svelte';
   import PageHeader from '../patterns/PageHeader.svelte';
   import SubscriptionCard from './SubscriptionCard.svelte';
-  import { subscriptionKey, subscriptionProviderOrder, subscriptionVendor,
-    type OpenSubscriptionUsage, type RenameSubscription, type SubscriptionView,
+  import { subscriptionKey, subscriptionProviderOrder, subscriptionProviderSlots, subscriptionVendor,
+    type OpenSubscriptionUsage, type RenameSubscription, type SubscriptionAvailability, type SubscriptionRecord, type SubscriptionView,
   } from './seqoya-subscriptions';
 
   let {
@@ -19,14 +19,29 @@
     onRenameSubscription?: RenameSubscription;
   } = $props();
   const failures = $derived(view.listing?.drivers.filter(entry => entry.error) ?? []);
-  const rows = $derived((view.listing?.drivers ?? []).flatMap(({ driver, subscriptions }) =>
-    (subscriptions ?? []).map(subscription => ({
-      driver, subscription, vendor: subscriptionVendor(driver, subscription.family),
-      rank: subscriptionProviderOrder.get(subscriptionKey(driver, subscription.family)) ?? subscriptionProviderOrder.size,
-    })),
-  ).sort((a, b) => a.rank - b.rank || a.vendor.localeCompare(b.vendor) || a.subscription.label.localeCompare(b.subscription.label)
+  const rows = $derived((view.listing?.drivers ?? []).flatMap(({ driver, subscriptions, error }) => {
+    const stale = !view.connected || !!view.error || !!error;
+    const accounts = (subscriptions ?? []).map(subscription =>
+      row(driver, subscription, stale ? 'stale' : undefined));
+    if (error && subscriptions === undefined) {
+      for (const [slotDriver, family] of subscriptionProviderSlots) {
+        if (slotDriver === driver) {
+          accounts.push(row(driver, { id: family, family, label: '', auth: 'unknown', state: 'unknown' }, 'unverified'));
+        }
+      }
+    }
+    return accounts;
+  }).sort((a, b) => a.rank - b.rank || a.vendor.localeCompare(b.vendor) || a.subscription.label.localeCompare(b.subscription.label)
     || a.driver.localeCompare(b.driver) || a.subscription.id.localeCompare(b.subscription.id)));
-  const count = $derived(view.listing && (!failures.length || rows.length) ? rows.length : undefined);
+  const unavailable = $derived(rows.filter(row => row.availability !== undefined).length);
+  const count = $derived(view.listing && (!failures.length || rows.length) ? rows.length - unavailable : undefined);
+
+  function row(driver: string, subscription: SubscriptionRecord, availability?: SubscriptionAvailability) {
+    return {
+      driver, subscription, availability, vendor: subscriptionVendor(driver, subscription.family),
+      rank: subscriptionProviderOrder.get(subscriptionKey(driver, subscription.family)) ?? subscriptionProviderOrder.size,
+    };
+  }
 </script>
 
 <section class="stack" aria-label="Subscriptions">
@@ -34,7 +49,7 @@
     {#if !embedded}
       <PageHeader title="Subscriptions" description="Accounts reported by the installation’s drivers." {count} />
     {:else if count !== undefined}
-      <p class="small muted">{count} {count === 1 ? 'subscription' : 'subscriptions'}</p>
+      <p class="small muted">{count} {count === 1 ? 'subscription' : 'subscriptions'}{unavailable ? ` · ${unavailable} unavailable` : ''}</p>
     {/if}
     <div class="subscription-actions">
       <Button label="Refresh" onclick={onRefresh} busy={view.loading} disabled={!view.connected || !onRefresh}
@@ -54,8 +69,8 @@
   {/each}
   {#if rows.length}
     <ul class="accounts" aria-label="Subscription accounts">
-      {#each rows as { driver, subscription } (subscriptionKey(driver, subscription.id))}
-        <SubscriptionCard {driver} {subscription} {view} {onOpenUsage} onRename={onRenameSubscription} />
+      {#each rows as { driver, subscription, availability } (subscriptionKey(driver, subscription.id))}
+        <SubscriptionCard {driver} {subscription} {view} {availability} {onOpenUsage} onRename={onRenameSubscription} />
       {/each}
     </ul>
   {:else if view.listing && !failures.length}

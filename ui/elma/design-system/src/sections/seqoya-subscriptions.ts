@@ -182,12 +182,17 @@ export function subscriptionKey(driver: string, subscription: string): string {
   return JSON.stringify([driver, subscription]);
 }
 
-export const subscriptionProviderOrder = new Map([
-  subscriptionKey('claude', 'anthropic'), subscriptionKey('codex', 'chatgpt'),
-  subscriptionKey('pi', 'chatgpt'), subscriptionKey('pi', 'kimi-coding'),
-  subscriptionKey('pi', 'zai'), subscriptionKey('mimo', 'xiaomi'),
-  subscriptionKey('pi', 'deepseek'), subscriptionKey('pi', 'minimax'),
-].map((key, index) => [key, index]));
+export const subscriptionProviderSlots = [
+  ['claude', 'anthropic'], ['codex', 'chatgpt'],
+  ['pi', 'chatgpt'], ['pi', 'kimi-coding'], ['pi', 'zai'], ['mimo', 'xiaomi'],
+  ['pi', 'deepseek'], ['pi', 'minimax'],
+] as const;
+
+export const subscriptionProviderOrder = new Map(
+  subscriptionProviderSlots.map(([driver, family], index) => [subscriptionKey(driver, family), index]),
+);
+
+export type SubscriptionAvailability = 'stale' | 'unverified';
 
 const vendors = new Map([
   ['anthropic', 'Claude Code'],

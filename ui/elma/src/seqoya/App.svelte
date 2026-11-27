@@ -25,16 +25,11 @@
   let browserError = $state<string>();
   let initialBrowserRead = $state(true);
   const combinedEvidence = $derived(mergeUsageEvidence(evidence, browserEvidence));
-  const waitingForPi = $derived(initialBrowserRead && subscriptions.connected && subscriptions.listing?.drivers.some(
-    ({ driver, subscriptions: accounts }) => driver === 'pi' && accounts?.some(
-      account => account.family === 'chatgpt' && account.state === 'signed_in',
-    ),
-  ));
   let now = $state(Date.now());
   const subscriptionView = $derived<SubscriptionView>({
     ...subscriptions,
-    loading: subscriptions.loading || waitingForPi,
-    listing: waitingForPi ? undefined : withAllowances(subscriptions.listing, vigor.rollup, combinedEvidence, now, browserIssues),
+    listing: withAllowances(subscriptions.listing && retainAccounts(subscriptions.listing, vigorAccounts),
+      vigor.rollup, combinedEvidence, now, browserIssues),
     evidenceError: browserError ?? evidenceError ?? vigor.error,
   });
   const vigorView = $derived<VigorView>({
@@ -261,7 +256,8 @@
 
     function refreshPassedWindows() {
       if (!active || !subscriptions.connected || !['Subscriptions', 'Vigor'].includes(activeTab) || !readUsage) return;
-      for (const { driver, subscriptions: accounts } of subscriptionView.listing?.drivers ?? []) {
+      for (const { driver, subscriptions: accounts, error } of subscriptionView.listing?.drivers ?? []) {
+        if (error) continue;
         for (const account of accounts ?? []) {
           if (!canRefreshSubscriptionUsage(driver, account)) continue;
           const key = subscriptionKey(driver, account.id);
@@ -289,7 +285,8 @@
     function refreshWindows() {
       refreshPassedWindows();
       if (!active || !subscriptions.connected || !['Subscriptions', 'Vigor'].includes(activeTab) || !readUsage) return;
-      for (const { driver, subscriptions: accounts } of subscriptionView.listing?.drivers ?? []) {
+      for (const { driver, subscriptions: accounts, error } of subscriptionView.listing?.drivers ?? []) {
+        if (error) continue;
         for (const account of accounts ?? []) {
           if (!canStartWindow(driver, account)) continue;
           const key = subscriptionKey(driver, account.id);
