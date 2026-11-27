@@ -6,12 +6,12 @@ import argparse
 import fcntl
 import json
 import os
-from pathlib import Path
-from pwd import getpwuid
 import re
 import shlex
 import shutil
 import tempfile
+from pathlib import Path
+from pwd import getpwuid
 
 from arbol_builds.driver_admission import private_directory
 from arbol_builds.driver_payload import load
@@ -60,7 +60,12 @@ def install(candidate: Path) -> tuple[str, Path]:
         command = shlex.join([*installed.prefix, "--standalone-accounts"])
         with tempfile.TemporaryDirectory(dir=route.parent) as scratch:
             launcher = Path(scratch) / component
-            launcher.write_text(f'#!/bin/sh\n{MARKER}\nexec {command} "$@"\n')
+            environment = ""
+            if component == "arbol-pi-driver":
+                native = route.parent.parent / "Native Pi"
+                native_path = f"{native / 'node_modules/.bin'}:{native / 'node-bin'}"
+                environment = f'export PATH={shlex.quote(native_path)}:"$PATH"\n'
+            launcher.write_text(f'#!/bin/sh\n{MARKER}\n{environment}exec {command} "$@"\n')
             launcher.chmod(0o755)
             os.replace(launcher, route)
     return build, route
