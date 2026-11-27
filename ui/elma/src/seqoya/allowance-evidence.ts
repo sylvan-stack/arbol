@@ -132,10 +132,11 @@ const browserSource = 'Arbol Browser dashboard';
 const day = 86_400_000;
 const weekMinutes = 10_080;
 const weeksPerMonth = 52 / 12;
-// Monthly USD list prices and Max weekly quota multiplier, checked 21 November 2026.
+// Monthly USD list prices checked 28 November 2026.
 // https://claude.com/pricing?currency=USD
 const claudeProPrice = { label: 'Claude Pro', usd: 20 };
-const claudeMax5xPrice = { label: 'Claude Max 5×', usd: 100 };
+const claudeMaxPrice = { label: 'Claude Max', usd: 100 };
+const claudeMax5xPrice = { ...claudeMaxPrice, label: 'Claude Max 5×' };
 const claudeMax5xMultiplier = 5;
 // https://help.openai.com/en/articles/6950777-what-is-chatgpt-plus
 // https://help.openai.com/en/articles/9793128-about-chatgpt-pro-tiers
@@ -684,16 +685,20 @@ function subscriptionMetrics(
   const claude = driver === 'claude' && account.family === 'anthropic';
   const claudePlan = claude ? publicAccountPlan(account) : undefined;
   const claudeReading = matchingClaudeReading(driver, account, evidence?.claudeDashboard, now);
-  const claudePlanChanged = !!claudeReading && claudeReading.plan !== claudePlan && recentObservation(claudeReading.observedAt, now)
-    && Date.parse(claudeReading.observedAt) >= Date.parse(claudeReading.checkedAt);
+  const boundClaudePlan = claude && browserReport && recentObservation(browserReport.fetchedAt, now)
+    ? browserReport.plan : undefined;
+  const legacyClaudePlan = claudeReading && recentObservation(claudeReading.observedAt, now)
+    && Date.parse(claudeReading.observedAt) >= Date.parse(claudeReading.checkedAt) ? claudeReading.plan : undefined;
+  const verifiedClaudePlan = boundClaudePlan ?? legacyClaudePlan;
+  const claudePlanChanged = verifiedClaudePlan !== undefined && verifiedClaudePlan !== claudePlan;
   const maxConfirmation = evidence?.claudeMax5x;
   const confirmedAt = Date.parse(maxConfirmation?.confirmedAt ?? '');
   const confirmedMax = claude && account.state === 'signed_in' && maxConfirmation?.subscription === account.id
     && sameCreation(maxConfirmation.createdAt, account.createdAt) && confirmedAt <= now;
-  const dashboardMax = claudeReading?.plan === 'max' && (claudePlan === 'max' || claudePlanChanged)
-    && recentObservation(claudeReading.observedAt, now);
+  const dashboardMax = verifiedClaudePlan === 'max';
   const confirmedSincePlanCheck = Date.parse(account.checkedAt ?? '') <= confirmedAt
-    && (!claudeReading || Date.parse(claudeReading.observedAt) <= confirmedAt);
+    && (!claudeReading || Date.parse(claudeReading.observedAt) <= confirmedAt)
+    && (!boundClaudePlan || verifiedClaudePlan === 'max');
   const claudeMax5x = confirmedMax && (dashboardMax || confirmedSincePlanCheck);
   const dashboard = claudeReading?.plan === (claudeMax5x ? 'max' : claudePlan) ? claudeReading : undefined;
   function capacityForWindow(label: string, resource?: string) {
@@ -712,7 +717,8 @@ function subscriptionMetrics(
   const piHasAllowance = piAccess?.allowed && piAccess.capPercent > 0;
   const weeklyPrice = codex ? codexMonthlyPrice(report, browserReport, now)
     : claudeMax5x ? claudeMax5xPrice
-    : claudePlan === 'pro' && !claudePlanChanged ? claudeProPrice
+    : verifiedClaudePlan === 'max' ? claudeMaxPrice
+    : verifiedClaudePlan === 'pro' ? claudeProPrice
     : piPlan === 'plus'
       ? { ...codexPlusPrice, label: 'ChatGPT Plus shared plan' } : undefined;
   const claudeWindows = new Map<string, { minutes: number; captured: QuotaReading }>();

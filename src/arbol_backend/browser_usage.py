@@ -274,6 +274,16 @@ class BrowserUsage:
         async with self.lock:
             return await self.collect(refresh=True)
 
+    async def saved_receipt(
+        self, provider: Provider, receipts: dict[str, Params], deadline: float,
+    ) -> tuple[Params | None, str | None]:
+        try:
+            async with asyncio.timeout_at(deadline):
+                return await self.one(provider, receipts, refresh=False)
+        except (OSError, ValueError, Refused, TimeoutError) as error:
+            code = error.code if isinstance(error, Refused) else "dashboard_unavailable"
+            return None, ISSUES.get(code, ISSUES["dashboard_unavailable"])
+
     async def collect(self, *, refresh: bool) -> Params:
         try:
             receipts = cache_read(self.path)
@@ -281,28 +291,43 @@ class BrowserUsage:
                 raise ValueError
         except (OSError, ValueError, Refused):
             raise unavailable() from None
-        evidence, issues = [], {}
-        cutoff = asyncio.get_running_loop().time() + (104 if refresh else 10)
-        providers = self.providers[self.cursor:] + self.providers[:self.cursor] if refresh else self.providers
-        attempted = 0
-        for provider in providers:
-            key = "/".join(provider)
-            if not refresh and key not in receipts:
-                continue
-            attempted += 1
-            try:
-                async with asyncio.timeout_at(cutoff):
-                    entry, failure = await self.one(provider, receipts, refresh=refresh)
-                if entry:
-                    evidence.append(entry)
-                if failure:
-                    issues[key] = failure
-            except TimeoutError:
-                issues[key] = ISSUES["dashboard_unavailable"]
-                break
-            except (OSError, ValueError, Refused) as error:
-                code = error.code if isinstance(error, Refused) else "dashboard_unavailable"
-                issues[key] = ISSUES.get(code, ISSUES["dashboard_unavailable"])
+
+        now = asyncio.get_running_loop().time
+        deadline = now() + (104 if refresh else 10)
+        evidence: dict[str, Params] = {}
+        issues: dict[str, str] = {}
         if refresh:
+            # Leave room to verify saved readings for accounts the live pass
+            # did not reach. A slow dashboard must not blank another card.
+            cutoff = deadline - 14
+            providers = self.providers[self.cursor:] + self.providers[:self.cursor]
+            attempted = 0
+            for provider in providers:
+                if now() >= cutoff:
+                    break
+                key = "/".join(provider)
+                attempted += 1
+                try:
+                    async with asyncio.timeout_at(cutoff):
+                        entry, failure = await self.one(provider, receipts, refresh=True)
+                    if entry:
+                        evidence[key] = entry
+                    if failure:
+                        issues[key] = failure
+                except TimeoutError:
+                    issues[key] = ISSUES["dashboard_unavailable"]
+                    break
+                except (OSError, ValueError, Refused) as error:
+                    code = error.code if isinstance(error, Refused) else "dashboard_unavailable"
+                    issues[key] = ISSUES.get(code, ISSUES["dashboard_unavailable"])
             self.cursor = (self.cursor + max(1, attempted)) % len(self.providers)
-        return {"evidence": {"browserReports": evidence}, "issues": issues}
+
+        missing = [(key, provider) for provider in self.providers
+                   if (key := "/".join(provider)) in receipts and key not in evidence]
+        saved = await asyncio.gather(*(self.saved_receipt(provider, receipts, deadline) for _, provider in missing))
+        for (key, _), (entry, failure) in zip(missing, saved, strict=True):
+            if entry:
+                evidence[key] = entry
+            if failure:
+                issues.setdefault(key, failure)
+        return {"evidence": {"browserReports": list(evidence.values())}, "issues": issues}
