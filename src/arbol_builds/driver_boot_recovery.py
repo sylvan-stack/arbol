@@ -175,7 +175,7 @@ def recover_boot(registry: Path, session: str, action: str) -> Object:
             if action == "resume" and boot == checkpoint["oldBoot"]:
                 raise Refusal("The recorded kernel boot is still running. Reboot before resuming.")
 
-        packages = _bound_packages(registry, home, before, gate)
+        packages = _bound_packages(registry, home, before, gate, allow_standalone_codex=True)
         promotion = _promotion(registry, before, packages)
         raw_promotion = canonical(promotion)
         if (sha256(raw_promotion) != before["promotionSha256"]
@@ -203,7 +203,8 @@ def recover_boot(registry: Path, session: str, action: str) -> Object:
             package = packages[authority.component]
             if verify_acceptance(authority, package) != _acceptance(registry, promotion, gate.provider, package):
                 raise Refusal(f"{authority.component} acceptance changed.")
-        if _bound_packages(registry, home, before, gate) != packages or fresh_install(registry) != current:
+        if (_bound_packages(registry, home, before, gate, allow_standalone_codex=True) != packages
+                or fresh_install(registry) != current):
             raise Refusal("The exact Driver installation changed under its guards.")
 
         install_file = shared / "fresh-install.json"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 from contextlib import ExitStack
 from pathlib import Path
 from pwd import getpwuid
@@ -17,6 +18,7 @@ from .driver_admission import (
     archive_terminal,
     canonical,
     canonical_uuid,
+    decode,
     deployment_mutex,
     fields,
     fresh_install,
@@ -33,13 +35,39 @@ from .driver_initial_install import _alias, _promotion_build, _verify_state
 from .driver_payload import Gate, Payload, pin_payloads, registered, verify_acceptance, verify_gate
 from .driver_registration import register_candidates
 from .driver_state import _immutable, _use_current
-from .launcher import open_use_guard
+from .launcher import BUILD_PATTERN, open_use_guard
 from .service import driver_route_bytes
 
 RECEIPT_LIMIT = 64 * 1024
 
 
-def _bound_packages(registry: Path, home: Path, install: Object, gate: Gate) -> dict[str, Payload]:
+def _verify_standalone_codex(home: Path, launcher: Path, state: Path) -> None:
+    component = "arbol-codex-driver"
+    raw = driver_route_bytes(launcher)
+    if raw is None:
+        raise Refusal("The standalone Codex launcher is missing.")
+    header = ("#!/bin/sh\nunset ARBOL_DRIVER_ADMISSION_FD ARBOL_DRIVER_ADMISSION_CONTEXT "
+              "ARBOL_DRIVER_MAINTENANCE_FD ARBOL_DRIVER_MAINTENANCE_CONTEXT\n")
+    source = raw[0].decode("utf-8")
+    shell = shlex.split(source.removeprefix(header))
+    if len(shell) != 5 or shell[0] != "exec":
+        raise Refusal("The standalone Codex launcher has an unexpected format.")
+    executable = Path(shell[1])
+    payload = executable.parent.parent
+    build = payload.parent.name
+    if (not BUILD_PATTERN.fullmatch(build)
+            or executable != home / ".local/lib/sylvan-stack" / component / build / "driver-payload/bin" / component
+            or source != header + f'exec {shlex.quote(str(executable))} --state-dir {shlex.quote(str(state))} "$@"\n'
+            or driver_route_bytes(executable) is None):
+        raise Refusal("The standalone Codex launcher differs from its installed package or state directory.")
+    manifest = decode(read_bytes(payload / "package-manifest.json", limit=RECEIPT_LIMIT),
+                      limit=RECEIPT_LIMIT, exact=False)
+    if manifest.get("component") != component or manifest.get("build") != build:
+        raise Refusal("The standalone Codex package does not match its launcher.")
+
+
+def _bound_packages(registry: Path, home: Path, install: Object, gate: Gate, *,
+                    allow_standalone_codex: bool = False) -> dict[str, Payload]:
     state_root = installation_root(home) / "driver-state" / install["session"]
     _verify_state(state_root, install["components"], empty=False)
     packages = {"arbol": gate.provider}
@@ -52,7 +80,14 @@ def _bound_packages(registry: Path, home: Path, install: Object, gate: Gate) -> 
                 or any(row[key] != gate_row[key] for key in ("component", "launcher", "launcherSha256"))
                 or raw is None or sha256(raw[0]) != row["launcherSha256"]):
             raise Refusal(f"{component} differs from its recorded launcher or state directory.")
-        _alias(home / ".local/bin" / component, launcher, complete=True)
+        alias = home / ".local/bin" / component
+        alias_target = launcher
+        if allow_standalone_codex and component == "arbol-codex-driver":
+            standalone = home / "Applications/Arbol Codex Driver/bin" / component
+            if alias.is_symlink() and os.readlink(alias) == str(standalone):
+                _verify_standalone_codex(home, standalone, state)
+                alias_target = standalone
+        _alias(alias, alias_target, complete=True)
         payload = registered(registry, component, row["build"])
         if payload.digest != row["payloadSha256"]:
             raise Refusal(f"{component} differs from its recorded installed package.")

@@ -436,7 +436,8 @@ def recover_guardians(registry: Path, session: str, *, pending_claude: bool = Fa
         if before["phase"] != "complete":
             raise Refusal("Another Driver installation operation is staged.")
 
-        packages = _bound_packages(registry, home, before, gate)
+        allow_standalone_codex = main_driver == "claude"
+        packages = _bound_packages(registry, home, before, gate, allow_standalone_codex=allow_standalone_codex)
         promotion = _promotion(registry, before, packages)
         if canonical(promotion) != read_bytes(_promotion_path(shared, before), limit=RECEIPT_LIMIT):
             raise Refusal("The installed Driver promotion record changed.")
@@ -457,7 +458,7 @@ def recover_guardians(registry: Path, session: str, *, pending_claude: bool = Fa
                     or verify_acceptance(authority, packages[authority.component])["evidenceSha256"]
                     != before["promotionSha256"]):
                 raise Refusal(f"{authority.component} no longer has the audited control and acceptance.")
-        if _bound_packages(registry, home, before, gate) != packages:
+        if _bound_packages(registry, home, before, gate, allow_standalone_codex=allow_standalone_codex) != packages:
             raise Refusal("The installed Driver packages changed under the recovery locks.")
 
         selected = [(authority, lease, row)
