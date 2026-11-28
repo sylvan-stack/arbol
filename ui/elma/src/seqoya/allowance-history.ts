@@ -39,6 +39,7 @@ function tokenAmount(value: number | undefined): value is number {
 }
 
 export function rememberEstimate(saved: SavedWindows, window: SubscriptionWindow) {
+  if (window.calibrationDetail) return;
   const { label, windowMinutes, observedAt, model, estimateBasis, outputTokensUsed,
     outputTokensRemaining, outputTokensPerHour } = window;
   if (window.next || window.pendingStart || !observedAt || !tokenAmount(outputTokensUsed)
@@ -60,6 +61,7 @@ export function restoreEstimates(windows: SubscriptionWindow[], saved: SavedWind
   const windowEstimates = new Map(estimates.map(estimate => [estimate.label, estimate]));
   return [
     ...windows.map(window => {
+      if (window.calibrationDetail) return window;
       const estimate = windowEstimates.get(window.label);
       if (!estimate) return window;
       const missingRate = !window.pendingStart && window.outputTokensPerHour === undefined

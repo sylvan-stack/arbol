@@ -105,6 +105,7 @@
   {#if window.savedEstimateAt}
     <p class="small muted">Last token estimate · <time datetime={window.savedEstimateAt}>{formatSubscriptionCardTime(window.savedEstimateAt)}</time></p>
   {/if}
+  {#if window.calibrationDetail}<p class="small muted">{window.calibrationDetail}</p>{/if}
   <dl class="metrics">
     <dt>Total tokens per window</dt><dd title={estimateTip}>{formatAllowanceTokenTotal(allowanceTokenTotal(window))}</dd>
     {#if window.next !== 'awaitingRenewal' || window.savedEstimateAt}

@@ -115,6 +115,9 @@
     const attemptedStarts = new Map<string, string>();
     retryWindowStarts = () => attemptedStarts.clear();
     const expiryClock = setInterval(() => { now = Date.now(); refreshWindows(); }, 30_000);
+    const calibrationClock = setInterval(() => {
+      if (!document.hidden && (activeTab === 'Subscriptions' || activeTab === 'Vigor')) void readVigor?.();
+    }, 300_000);
     let active = true;
     let connection = 0;
     let evidenceRevision = 0;
@@ -277,7 +280,10 @@
         }
         if (requestedEvidenceRevision === evidenceRevision) {
           evidenceError = typeof reply.usageEvidenceError === 'string' ? reply.usageEvidenceError : undefined;
-          const saved = reply.usageEvidence as UsageEvidence | undefined;
+          const saved = {
+            ...reply.usageEvidence as UsageEvidence | undefined,
+            codexWeeklyCalibration: reply.codexWeeklyCalibration as UsageEvidence['codexWeeklyCalibration'],
+          };
           evidence = evidenceError ? { ...evidence, ...saved } : saved;
         }
         now = Date.now();
@@ -481,6 +487,7 @@
       openUsagePage = undefined;
       renameSubscription = undefined;
       clearInterval(expiryClock);
+      clearInterval(calibrationClock);
       bridge.close();
       app.close();
     };

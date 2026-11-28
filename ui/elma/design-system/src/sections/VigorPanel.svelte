@@ -319,6 +319,7 @@
                         <dt>Total tokens per window</dt>
                         <dd>{formatAllowanceTokenTotal(row.totalTokens)}</dd>
                       </dl>
+                      {#if row.calibrationDetail}<p class="small muted">{row.calibrationDetail}</p>{/if}
                       {@render breakdown(row.current, row.weekly === true)}
                       {#if row.next}
                         <strong>Next available · {timestamp.format(windowEnd)}</strong>

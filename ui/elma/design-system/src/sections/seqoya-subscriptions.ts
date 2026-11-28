@@ -60,6 +60,7 @@ export interface SubscriptionWindow {
   outputTokensUsed?: number;
   outputTokensRemaining?: number;
   outputTokensPerHour?: number;
+  calibrationDetail?: string;
   savedEstimateAt?: string;
   model?: string;
   estimateBasis?: string;

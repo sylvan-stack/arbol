@@ -123,6 +123,7 @@ interface PriorityRow {
   windowEnd?: number;
   windowLabel?: string;
   totalTokens?: number;
+  calibrationDetail?: string;
   weekly?: boolean;
   expires?: boolean;
   approximate?: boolean;
@@ -293,6 +294,7 @@ function priorityRow(
     next = calculate(settings, nextDash, windowHours, windowHours, full, rate, userScore);
   }
   return { ...base, windowEnd, windowLabel: window.label, totalTokens: allowanceTokenTotal(window),
+    calibrationDetail: window.calibrationDetail,
     approximate: window.approximateReset, weekly, expires,
     dash, reason, matches, resetReady, current, next };
 }

@@ -54,8 +54,25 @@ interface MembershipPayment {
   weeklyCredits?: number;
 }
 
+interface CodexWeeklyCalibration {
+  plan: string;
+  resetsAt: number;
+  observedAt: number;
+  usedPercent: number;
+  points: number;
+  sample?: {
+    startedAt: number;
+    observedAt: number;
+    points: number;
+    outputTokens: number;
+    inputTokens: number;
+    cachedInputTokens: number;
+  };
+}
+
 /** Bounded usage evidence returned by Seqoya's native app channel. */
 export interface UsageEvidence {
+  codexWeeklyCalibration?: CodexWeeklyCalibration[];
   windowEstimates?: WindowEstimate[];
   browserReports?: BrowserReport[];
   claudeDashboard?: {
@@ -333,6 +350,38 @@ function codexCapacity(account: SubscriptionRecord, sample: UsageEvidence['codex
     calculation: weekly.usedPercent != null && reset > now
       ? `${calculation} Remaining = estimated total × (100% − ${weekly.usedPercent}%).` : calculation,
   } };
+}
+
+function continuousCodex(account: SubscriptionRecord, evidence: UsageEvidence | undefined, now: number) {
+  const report = account.lastUsage;
+  const weekly = report?.windows.find(window => window.kind === 'weekly' && window.windowMinutes === weekMinutes);
+  const reset = Date.parse(weekly?.resetsAt ?? '');
+  const created = Date.parse(account.createdAt ?? '');
+  if (!weekly || reset <= now || !Number.isFinite(reset) || !Number.isFinite(created)
+    || account.state !== 'signed_in' || !Array.isArray(evidence?.codexWeeklyCalibration)) return undefined;
+  const matching = evidence.codexWeeklyCalibration.filter(row => row && row.plan === report?.plan
+    && Math.abs(row.resetsAt * 1_000 - reset) <= 8_000 && row.observedAt * 1_000 >= created
+    && row.observedAt * 1_000 <= now && row.observedAt * 1_000 < reset
+    && row.usedPercent >= 0 && row.usedPercent <= 100 && row.points >= 0 && row.points <= 100);
+  if (matching.length !== 1) return undefined;
+  const [reading] = matching;
+  const sample = reading.sample;
+  if (!sample || !(sample.points >= 20 && sample.points <= 100)
+    || !(sample.startedAt * 1_000 >= created && sample.startedAt < sample.observedAt && sample.observedAt <= reading.observedAt)
+    || !Number.isSafeInteger(sample.outputTokens) || sample.outputTokens <= 0
+    || !Number.isSafeInteger(sample.inputTokens) || !Number.isSafeInteger(sample.cachedInputTokens)
+    || sample.cachedInputTokens < 0 || sample.cachedInputTokens > sample.inputTokens) {
+    return { weekly, reading, detail: `Collecting GPT-6.2 Sol calibration · ${formatVigorNumber(reading.points)} of 20 percentage points.` };
+  }
+  const total = sample.outputTokens * 100 / sample.points;
+  const lower = sample.outputTokens * 100 / Math.min(100, sample.points + 1);
+  const upper = sample.outputTokens * 100 / (sample.points - 1);
+  const operands = `${formatVigorTokens(sample.outputTokens)} output tokens ÷ ${formatVigorNumber(sample.points)}% of the weekly quota`;
+  const observed = formatSubscriptionCardTime(new Date(sample.observedAt * 1_000).toISOString());
+  const cache = sample.inputTokens > 0 ? ` · ${formatVigorNumber(sample.cachedInputTokens * 100 / sample.inputTokens)}% cached input` : '';
+  const detail = `GPT-6.2 Sol calibration · ${operands} · rounding range ${formatVigorTokens(lower)}–${formatVigorTokens(upper)}${cache} · ${observed}.`;
+  const capacity: Capacity = { model: 'GPT-6.2 Sol', total, source: detail, calculation: operands, compactSource: detail };
+  return { weekly, reading, detail, capacity };
 }
 
 function allowance(
@@ -682,6 +731,16 @@ function subscriptionMetrics(
   }
   const piChatGPT = driver === 'pi' && account.family === 'chatgpt';
   const codex = driver === 'codex' && account.family === 'chatgpt';
+  const continuous = codex ? continuousCodex(account, evidence, now) : undefined;
+  if (continuous && report) {
+    // Calibrate and display the same exact driver window. A recent browser countdown may be rounded.
+    const observedAt = new Date(continuous.reading.observedAt * 1_000).toISOString();
+    const useLog = Date.parse(observedAt) >= Date.parse(report.fetchedAt)
+      || continuous.weekly.usedPercent == null;
+    const window = useLog ? { ...continuous.weekly, usedPercent: continuous.reading.usedPercent } : continuous.weekly;
+    rawWindows.set(window.label, { window, report: { ...report, fetchedAt: useLog ? observedAt : report.fetchedAt },
+      browser: false, approximate: false });
+  }
   const claude = driver === 'claude' && account.family === 'anthropic';
   const claudePlan = claude ? publicAccountPlan(account) : undefined;
   const claudeReading = matchingClaudeReading(driver, account, evidence?.claudeDashboard, now);
@@ -766,14 +825,16 @@ function subscriptionMetrics(
     const observedCap = zai && browserReport
       && recentObservation(browserReport.fetchedAt, now) ? browserReport.windows.find(row => row.resource === 'credits'
         && row.windowMinutes === window.windowMinutes)?.creditsTotal : undefined;
-    const capacity = codex && window.windowMinutes === weekMinutes ? view?.capacity
+    const calibration = continuous && window.label === continuous.weekly.label ? continuous : undefined;
+    const capacity = codex && window.windowMinutes === weekMinutes ? (calibration ? calibration.capacity : view?.capacity)
       : typeof observedCap === 'number' && Number.isSafeInteger(observedCap) && observedCap > 0
         ? zaiCapacity(observedCap, 'Coding Plan credit cap from the confirmed z.ai dashboard.')
         : capacityForWindow(window.label, window.resource);
     return project({
       label: window.label, resetsAt: window.resetsAt, windowMinutes: window.windowMinutes,
       expiresAt: terminal ? window.resetsAt : undefined, terminal, pendingStart,
-      source: entry.browser ? browserSource : undefined,
+      source: entry.browser ? browserSource : calibration ? 'Codex local quota evidence' : undefined,
+      calibrationDetail: calibration?.detail,
       approximateReset: entry.approximate,
       observedAt: entry.report?.fetchedAt, usedPercent: used, remainingPercent: used === undefined ? undefined : 100 - used,
     }, capacity);
@@ -860,12 +921,16 @@ export function withAllowances(
   browserIssues?: Record<string, string>, history?: AllowanceHistory,
 ): SubscriptionListing | undefined {
   if (!listing) return undefined;
+  const signedInCodex = listing.drivers.filter(entry => entry.driver === 'codex')
+    .flatMap(entry => entry.subscriptions ?? []).filter(account => account.family === 'chatgpt' && account.state === 'signed_in');
+  // Local logs carry a plan and weekly reset, but no Subscription identity.
+  const eligibleEvidence = signedInCodex.length === 1 ? evidence : { ...evidence, codexWeeklyCalibration: undefined };
   const saved = new Map(rollup?.subscriptions.map((entry) => [subscriptionKey(entry.driver, entry.subscription), entry.result]));
   return { drivers: listing.drivers.map((driver) => ({
     ...driver, subscriptions: driver.subscriptions?.map((account) => {
       const key = subscriptionKey(driver.driver, account.id);
       const view = allowance(driver.driver, account, saved.get(key), evidence, now);
-      const metrics = subscriptionMetrics(driver.driver, account, view, evidence, now, history);
+      const metrics = subscriptionMetrics(driver.driver, account, view, eligibleEvidence, now, history);
       const browserIssue = browserIssues?.[key];
       if (browserIssue && account.state === 'signed_in') metrics.issues = [...(metrics.issues ?? []), browserIssue];
       return { ...account, allowance: view, metrics };
