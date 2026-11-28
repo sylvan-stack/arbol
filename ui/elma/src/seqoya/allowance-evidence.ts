@@ -923,14 +923,22 @@ export function withAllowances(
   if (!listing) return undefined;
   const signedInCodex = listing.drivers.filter(entry => entry.driver === 'codex')
     .flatMap(entry => entry.subscriptions ?? []).filter(account => account.family === 'chatgpt' && account.state === 'signed_in');
-  // Local logs carry a plan and weekly reset, but no Subscription identity.
-  const eligibleEvidence = signedInCodex.length === 1 ? evidence : { ...evidence, codexWeeklyCalibration: undefined };
+  // Each local reading carries the plan and weekly reset of the Subscription that paid for that response, but no
+  // Subscription identity. Withhold calibration only from Subscriptions another signed-in one cannot be told apart from.
+  const fingerprints = signedInCodex.map(account => {
+    const weekly = account.lastUsage?.windows.find(window => window.kind === 'weekly' && window.windowMinutes === weekMinutes);
+    return { account, plan: account.lastUsage?.plan, reset: Date.parse(weekly?.resetsAt ?? '') };
+  });
+  const ambiguous = new Set(fingerprints.filter(own => fingerprints.some(other => other.account !== own.account
+    && other.plan === own.plan && Math.abs(other.reset - own.reset) <= 8_000)).map(entry => entry.account));
+  const withoutCalibration = { ...evidence, codexWeeklyCalibration: undefined };
   const saved = new Map(rollup?.subscriptions.map((entry) => [subscriptionKey(entry.driver, entry.subscription), entry.result]));
   return { drivers: listing.drivers.map((driver) => ({
     ...driver, subscriptions: driver.subscriptions?.map((account) => {
       const key = subscriptionKey(driver.driver, account.id);
       const view = allowance(driver.driver, account, saved.get(key), evidence, now);
-      const metrics = subscriptionMetrics(driver.driver, account, view, eligibleEvidence, now, history);
+      const metrics = subscriptionMetrics(driver.driver, account, view,
+        ambiguous.has(account) ? withoutCalibration : evidence, now, history);
       const browserIssue = browserIssues?.[key];
       if (browserIssue && account.state === 'signed_in') metrics.issues = [...(metrics.issues ?? []), browserIssue];
       return { ...account, allowance: view, metrics };
